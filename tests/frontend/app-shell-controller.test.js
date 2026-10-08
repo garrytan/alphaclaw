@@ -138,7 +138,10 @@ import * as api from "../../lib/public/js/lib/api.js";
 import { invalidateCache } from "../../lib/public/js/lib/api-cache.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
-import { useAppShellController } from "../../lib/public/js/hooks/use-app-shell-controller.js";
+import {
+  kFailedOutcomeRetireAfterRunningMs,
+  useAppShellController,
+} from "../../lib/public/js/hooks/use-app-shell-controller.js";
 
 const harness = preactHooks.__harness;
 
@@ -481,16 +484,161 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(api.restartGatewayAsync).toHaveBeenCalledTimes(1);
   });
 
-  it("a lost response without an observable operation remains unknown and never replays on refresh", async () => {
+  it("a lost response with the server unreachable stays an unknown outcome (no Try again) and never replays on refresh", async () => {
     let controller = await settle();
     api.restartGatewayAsync.mockClear();
     api.restartGatewayAsync.mockRejectedValue(new Error("response lost"));
+    api.fetchRestartStatus.mockRejectedValue(new Error("unreachable"));
     expect(await controller.actions.handleGatewayRestart()).toBeNull();
     controller = await settle();
-    expect(controller.state.restartOperation.error.message).toContain("result unknown");
+    expect(controller.state.restartOperation.phase).toBe("failed");
+    expect(controller.state.restartOperation.error.code).toBe("response_lost");
     await gatewayShellStore.get().actions.refresh();
     await settle();
+    expect(controller.state.restartOperation.error.code).toBe("response_lost");
     expect(api.restartGatewayAsync).toHaveBeenCalledTimes(1);
+
+    // The record polls while the outcome is unknown; once the server answers
+    // with the booked failure, that record (with its code) replaces it.
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false, restartInProgress: false, reasons: [],
+      lastOperation: { operationId: "op-lost", status: "failed", code: "launch_failed", errorSummary: "spawn ENOENT", startedAt: 1000 },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    controller = await settle();
+    expect(controller.state.restartOperation).toEqual(
+      expect.objectContaining({ operationId: "op-lost", phase: "failed" }),
+    );
+    expect(controller.state.restartOperation.error).toEqual(
+      expect.objectContaining({ code: "launch_failed", message: "spawn ENOENT" }),
+    );
+    expect(api.restartGatewayAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("a lost response reconciled against an empty record clears the unknown outcome (nothing ran)", async () => {
+    let controller = await settle();
+    api.restartGatewayAsync.mockRejectedValue(new Error("response lost"));
+    expect(await controller.actions.handleGatewayRestart()).toBeNull();
+    controller = await settle();
+    expect(controller.state.restartOperation).toBeNull();
+  });
+
+  it("step events keep their server fields (at, detail object, budgetMs) for the status line", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-d" });
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    const stopping = { name: "stopping", label: "Stopping", status: "running", at: 1700000000000, detail: { phase: "asking", activeWork: 2 } };
+    restartHandlers.onMessage({ event: "step", data: stopping });
+    const waiting = { name: "waiting_ready", label: "Waiting", status: "running", at: 1700000005000, budgetMs: 300000, detail: { phase: "lock_wait" } };
+    restartHandlers.onMessage({ event: "step", data: waiting });
+    state = renderController({});
+    expect(state.state.restartOperation.steps).toEqual([stopping, waiting]);
+  });
+
+  it("the SSE error event's code/hint/budgetMs/how land on the failed outcome", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-e" });
+    let state = await settle();
+    await state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    restartHandlers.onMessage({
+      event: "error",
+      data: { code: "ready_timeout", error: "gateway did not become ready", hint: "Check logs", budgetMs: 300000, how: "graceful" },
+    });
+    state = renderController({});
+    expect(state.state.restartOperation.phase).toBe("failed");
+    expect(state.state.restartOperation.error).toEqual({
+      message: "gateway did not become ready",
+      hint: "Check logs",
+      code: "ready_timeout",
+      budgetMs: 300000,
+      how: "graceful",
+    });
+  });
+
+  it("Try again (a new restart) retires the failed outcome for good — the record never resurrects it", async () => {
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false, restartInProgress: false, reasons: [],
+      lastOperation: { operationId: "op-f", status: "failed", code: "stop_failed", errorSummary: "stuck", startedAt: 1000 },
+    });
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-g" });
+    let state = await settle();
+    expect(state.state.restartOperation).toEqual(expect.objectContaining({ operationId: "op-f", phase: "failed" }));
+
+    await gatewayShellStore.get().actions.restart();
+    state = await settle();
+    expect(state.state.restartOperation).toEqual(expect.objectContaining({ operationId: "op-g", phase: "running" }));
+    expect(api.restartGatewayAsync).toHaveBeenCalledTimes(1);
+    restartHandlers.onMessage({ event: "error", data: { code: "stop_failed", error: "still stuck" } });
+    state = await settle();
+    expect(state.state.restartOperation).toEqual(expect.objectContaining({ operationId: "op-g", phase: "failed" }));
+
+    // The next attempt is refused by the server: nothing runs, the card
+    // clears, and NEITHER old failure comes back on the next refresh.
+    api.restartGatewayAsync.mockRejectedValue(
+      Object.assign(new Error("Another operation is in progress"), { code: "operation_in_progress", status: 409, notStarted: true }),
+    );
+    await gatewayShellStore.get().actions.restart();
+    state = await settle();
+    expect(state.state.restartOperation).toBeNull();
+    expect(gatewayShellStore.get().restartNotice).toEqual({ message: "Another operation is in progress" });
+    await gatewayShellStore.get().actions.refresh();
+    state = await settle();
+    expect(state.state.restartOperation).toBeNull();
+  });
+
+  it("a failed outcome retires once the gateway is observed Running for 60s, and not before", async () => {
+    let streamHandlers = null;
+    api.subscribeStatusEvents.mockImplementation((handlers) => {
+      streamHandlers = handlers;
+      return () => {};
+    });
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false, restartInProgress: false, reasons: [],
+      lastOperation: { operationId: "op-h", status: "failed", code: "stop_failed", errorSummary: "stuck", startedAt: 1000 },
+    });
+    let state = await settle();
+    expect(state.state.restartOperation?.phase).toBe("failed");
+
+    const frame = (gatewayState) => ({ status: { gateway: gatewayState, state: { state: gatewayState, label: gatewayState } } });
+    streamHandlers.onOpen();
+    streamHandlers.onMessage(frame("running"));
+    state = await settle();
+    await vi.advanceTimersByTimeAsync(kFailedOutcomeRetireAfterRunningMs / 2);
+    state = await settle();
+    expect(state.state.restartOperation?.phase).toBe("failed");
+
+    // A dip out of Running resets the clock.
+    streamHandlers.onMessage(frame("down"));
+    state = await settle();
+    streamHandlers.onMessage(frame("running"));
+    state = await settle();
+    await vi.advanceTimersByTimeAsync(kFailedOutcomeRetireAfterRunningMs / 2);
+    state = await settle();
+    expect(state.state.restartOperation?.phase).toBe("failed");
+
+    await vi.advanceTimersByTimeAsync(kFailedOutcomeRetireAfterRunningMs / 2 + 100);
+    state = await settle();
+    expect(state.state.restartOperation).toBeNull();
+    // Retired is acknowledged: the same record does not come back.
+    await gatewayShellStore.get().actions.refresh();
+    state = await settle();
+    expect(state.state.restartOperation).toBeNull();
   });
 
   it("SSE drop mid-operation resolves from the server: still-running re-attaches, a terminal record lands the outcome", async () => {
@@ -546,13 +694,18 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation.downtimeMs).toBe(2500);
   });
 
-  it("reload mid-restart: mount sees the persisted activeOperation and attaches to it", async () => {
+  it("reload mid-restart: mount sees the persisted activeOperation and attaches to it with the record's timer and phases", async () => {
     api.subscribeGatewayRestartEvents.mockImplementation(() => vi.fn());
     api.fetchRestartStatus.mockResolvedValue({
       restartRequired: false,
       restartInProgress: true,
       reasons: [],
-      activeOperation: { operationId: "op-9", status: "running" },
+      activeOperation: {
+        operationId: "op-9",
+        status: "running",
+        startedAt: 1700000000000,
+        phaseAt: { launching: 1700000004000, stopping: 1700000001000 },
+      },
     });
 
     const state = await settle();
@@ -566,11 +719,16 @@ describe("frontend/app-shell controller (shared status feed)", () => {
         operationId: "op-9",
         phase: "running",
         resumed: true,
+        startedAt: 1700000000000,
+        steps: [
+          { name: "stopping", status: "running", at: 1700000001000 },
+          { name: "launching", status: "running", at: 1700000004000 },
+        ],
       }),
     );
   });
 
-  it("a queued-then-refused restart (SSE error with a policy code) clears the card and toasts — never a failed restart", async () => {
+  it("a queued-then-refused restart (SSE error with a policy code) clears the card into an info notice — never a failed restart", async () => {
     let handlers = null;
     api.subscribeGatewayRestartEvents.mockImplementation((options) => {
       handlers = options && typeof options.onMessage === "function" ? options : null;
@@ -595,7 +753,15 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     state = renderController({});
     expect(state.state.restartOperation).toBeNull();
     expect(gatewayShellStore.get().restartOperation).toBeNull();
-    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("still starting"), "error");
+    // The hint is the operator-facing line; the record's message is the fallback.
+    expect(gatewayShellStore.get().restartNotice).toEqual({
+      message: "Boot normally finishes within a minute; the card shows Retry if it fails.",
+    });
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Can't restart right now"), "error");
+    // The notice clears on its own.
+    await vi.advanceTimersByTimeAsync(10000);
+    state = renderController({});
+    expect(gatewayShellStore.get().restartNotice).toBeNull();
   });
 
   it("SSE drop → resolve from the server: a terminal record carrying a policy code clears the card and toasts the fallback copy", async () => {
@@ -648,7 +814,7 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toBeNull();
   });
 
-  it("an unacknowledged failed lastOperation survives the reload; dismissing acknowledges it for good", async () => {
+  it("an unacknowledged failed lastOperation survives the reload with its failure fields; dismissing acknowledges it for good", async () => {
     api.fetchRestartStatus.mockResolvedValue({
       restartRequired: false,
       restartInProgress: false,
@@ -656,6 +822,11 @@ describe("frontend/app-shell controller (shared status feed)", () => {
       lastOperation: {
         operationId: "op-8",
         status: "failed",
+        code: "ready_timeout",
+        hint: "Check the gateway logs.",
+        how: "sigterm",
+        budgetMs: 120000,
+        phaseAt: { stopping: 1000, launching: 3000, waiting_ready: 4000 },
         errorSummary: "gateway exited with code 1",
         startedAt: 1000,
         durationMs: 9000,
@@ -664,9 +835,18 @@ describe("frontend/app-shell controller (shared status feed)", () => {
 
     let state = await settle();
     expect(state.state.restartOperation.phase).toBe("failed");
-    expect(state.state.restartOperation.error.message).toBe(
-      "gateway exited with code 1",
-    );
+    expect(state.state.restartOperation.error).toEqual({
+      message: "gateway exited with code 1",
+      hint: "Check the gateway logs.",
+      code: "ready_timeout",
+      budgetMs: 120000,
+      how: "sigterm",
+    });
+    expect(state.state.restartOperation.steps.map((step) => step.name)).toEqual([
+      "stopping",
+      "launching",
+      "waiting_ready",
+    ]);
 
     // Dismiss acknowledges op-8; the next server refresh reports the SAME
     // lastOperation but it must not resurface.

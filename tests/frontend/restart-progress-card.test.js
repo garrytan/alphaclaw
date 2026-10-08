@@ -43,8 +43,12 @@ vi.mock("preact/hooks", () => {
 import * as preactHooks from "preact/hooks";
 import {
   RestartProgressCard,
-  buildRestartStepModels,
-  getCurrentStepName,
+  describeRestartFailure,
+  describeRestartPhase,
+  describeRestartSuccess,
+  humanDuration,
+  kOptimisticStepName,
+  restartStartedAtMs,
 } from "../../lib/public/js/components/restart-progress-card.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 
@@ -102,30 +106,30 @@ const collectText = (node, out = []) => {
 
 const treeText = (tree) => collectText(tree).join(" ").replace(/\s+/g, " ");
 
-const findButtonByText = (tree, text) =>
-  findAllByType(tree, "button").find((vnode) =>
-    collectText(vnode).join(" ").includes(text),
-  );
+const findButton = (tree, label) =>
+  findAllByType(tree, ActionButton).find((vnode) => vnode.props.idleLabel === label);
 
 const renderCard = (props = {}) => {
   harness.beginRender();
   return expandTree(RestartProgressCard({ nowMs: kNow, ...props }));
 };
 
-const flushMicrotasks = async () => {
-  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+const runEffects = () => {
+  for (const effect of harness.effects) effect();
 };
+
+const step = (name, status, extra = {}) => ({ name, label: name, status, ...extra });
 
 const kRunningOperation = {
   operationId: "op-1",
   startedAt: kNow - 12000,
   phase: "running",
   steps: [
-    { name: "preparing_plugins", label: "Checking plugins", status: "running" },
-    { name: "preparing_plugins", label: "Checking plugins", status: "done" },
-    { name: "stopping", label: "Stopping gateway", status: "running" },
-    { name: "stopping", label: "Stopping gateway", status: "done" },
-    { name: "launching", label: "Starting gateway", status: "running" },
+    step("preparing_plugins", "running", { at: kNow - 12000 }),
+    step("preparing_plugins", "done", { at: kNow - 11000 }),
+    step("stopping", "running", { at: kNow - 11000, detail: { phase: "asking", activeWork: 2 } }),
+    step("stopping", "done", { at: kNow - 8000, detail: { how: "graceful" } }),
+    step("launching", "running", { at: kNow - 8000 }),
   ],
   error: null,
 };
@@ -135,264 +139,193 @@ describe("frontend/restart-progress-card", () => {
     harness.reset();
   });
 
-  it("collapses the raw step event stream to one row per step", () => {
-    const models = buildRestartStepModels(kRunningOperation.steps);
-    expect(models.map((step) => [step.name, step.status])).toEqual([
-      ["preparing_plugins", "done"],
-      ["stopping", "done"],
-      ["launching", "running"],
-    ]);
-    expect(getCurrentStepName(models)).toBe("launching");
+  // Every phase line in the server ↔ UI contract, in emission order.
+  it.each([
+    [[step(kOptimisticStepName, "running")], "contacting AlphaClaw…"],
+    [[step("preparing_plugins", "running")], "checking plugins (gateway still running)"],
+    [[step("preparing_plugins", "skipped")], null],
+    [[step("preparing_plugins", "warning")], "checking plugins (plugin check had warnings)"],
+    [[step("stopping", "running", { detail: { phase: "asking" } })], "asking OpenClaw to finish its current work"],
+    [[step("stopping", "running", { detail: { phase: "asking", activeWork: 3 } })], "asking OpenClaw to finish its current work (3 tasks)"],
+    [[step("stopping", "running", { detail: { phase: "asking", activeWork: 1 } })], "asking OpenClaw to finish its current work (1 task)"],
+    [[step("stopping", "running", { detail: { phase: "terminating" } })], "stopping OpenClaw"],
+    [[step("stopping", "running")], "stopping OpenClaw"],
+    [[step("stopping", "running", { detail: { phase: "forcing", graceSeconds: 10 } })], "OpenClaw didn't stop in 10s, forcing it (active work may be interrupted)"],
+    [[step("stopping", "running", { detail: { phase: "terminating" } }), step("stopping", "done", { detail: { how: "sigterm" } })], "stopping OpenClaw"],
+    [[step("launching", "running")], "starting OpenClaw"],
+    [[step("waiting_ready", "running")], "checking readiness"],
+    [[step("waiting_ready", "running", { detail: { phase: "lock_wait" } })], "waiting for OpenClaw's state lock (another OpenClaw process is finishing)"],
+    [[step("waiting_for_lock", "running")], "waiting for the current operation to finish"],
+    [[step("ready", "done")], "OpenClaw is ready"],
+    [[{ name: "custom_step", label: "Doing a thing", status: "running" }], "doing a thing"],
+  ])("describeRestartPhase(%j) → %j", (steps, expected) => {
+    expect(describeRestartPhase(steps)).toBe(expected);
   });
 
-  it("renders the step sequence as an ordered list with aria-current on the running step", () => {
+  it("the latest step with copy wins; terminal statuses keep the previous line", () => {
+    expect(describeRestartPhase(kRunningOperation.steps)).toBe("starting OpenClaw");
+    expect(describeRestartPhase(kRunningOperation.steps.slice(0, 4))).toBe(
+      "asking OpenClaw to finish its current work (2 tasks)",
+    );
+    expect(describeRestartPhase([])).toBeNull();
+    expect(describeRestartPhase(null)).toBeNull();
+  });
+
+  it("elapsed time anchors to the earliest server step stamp, falling back to startedAt", () => {
+    expect(restartStartedAtMs(kRunningOperation)).toBe(kNow - 12000);
+    expect(restartStartedAtMs({ startedAt: kNow - 3000, steps: [step("stopping", "running")] })).toBe(kNow - 3000);
+    expect(restartStartedAtMs(null)).toBe(0);
+  });
+
+  it("renders ONE running line: pulsing dot, phase copy, elapsed, aria-live=polite, no step list", () => {
     const tree = renderCard({ operation: kRunningOperation });
     const text = treeText(tree);
-    expect(text).toContain("Restarting gateway");
-    expect(text).toContain("Checking plugins");
-    expect(text).toContain("Stopping gateway");
-    expect(text).toContain("Starting gateway");
-    expect(text).toContain("elapsed");
-
-    const orderedLists = findAllByType(tree, "ol");
-    expect(orderedLists.length).toBe(1);
-    const rows = findAllByType(tree, "li");
-    expect(rows.length).toBe(3);
-    const currentRows = rows.filter(
-      (row) => row.props["aria-current"] === "step",
-    );
-    expect(currentRows.length).toBe(1);
-    expect(collectText(currentRows[0]).join(" ")).toContain("Starting gateway");
-    // Completed rows are green, the running row pulses.
-    const dotClasses = rows.map((row) =>
-      String(
-        findAllByType(row, "span").find((s) =>
-          String(s.props.class || "").includes("rounded-full"),
-        )?.props.class || "",
-      ),
-    );
-    expect(dotClasses[0]).toContain("bg-green-500/90");
-    expect(dotClasses[1]).toContain("bg-green-500/90");
-    expect(dotClasses[2]).toContain("bg-cyan-400/90");
+    expect(text).toContain("Restarting: starting OpenClaw · 12s");
+    expect(text).not.toContain("Checking plugins");
+    expect(text).not.toContain("elapsed");
+    expect(findAllByType(tree, "ol")).toEqual([]);
+    expect(findAllByType(tree, "li")).toEqual([]);
+    expect(findAllByType(tree, ActionButton)).toEqual([]);
+    const line = findAllByType(tree, "p")[0];
+    expect(line.props["aria-live"]).toBe("polite");
+    expect(line.props.tabindex).toBe("-1");
+    const dot = findAllByType(tree, "span").find((s) => String(s.props.class || "").includes("ac-gateway-dot"));
+    expect(String(dot.props.class)).toContain("ac-gateway-dot--pulse");
+    expect(String(dot.props.class)).toContain("ac-gateway-dot--cyan");
   });
 
-  it("renders the success line with measured downtime and marks all steps done", () => {
-    const tree = renderCard({
+  it("forcing and lock_wait phases render their full sentences with the live elapsed timer", () => {
+    const forcing = renderCard({
+      nowMs: kNow + 30000,
       operation: {
         ...kRunningOperation,
-        phase: "succeeded",
-        durationMs: 20000,
-        downtimeMs: 4200,
-      },
-      onDismiss: vi.fn(),
-    });
-    const text = treeText(tree);
-    expect(text).toContain("Gateway is running — ready in 4s");
-    const statusRegion = collectNodes(tree).find(
-      (vnode) => vnode.props?.role === "status",
-    );
-    expect(statusRegion).toBeTruthy();
-    // All steps display as completed.
-    const rows = findAllByType(tree, "li");
-    for (const row of rows) {
-      const dot = findAllByType(row, "span").find((s) =>
-        String(s.props.class || "").includes("rounded-full"),
-      );
-      expect(String(dot.props.class || "")).toContain("bg-green-500/90");
-      expect(row.props["aria-current"]).toBeFalsy();
-    }
-    const dismiss = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Dismiss",
-    );
-    expect(dismiss).toBeTruthy();
-  });
-
-  it("falls back to durationMs for the success line when downtime is absent", () => {
-    const tree = renderCard({
-      operation: {
-        ...kRunningOperation,
-        phase: "succeeded",
-        durationMs: 20000,
-        downtimeMs: null,
+        steps: [
+          step("stopping", "running", { at: kNow - 12000, detail: { phase: "asking" } }),
+          step("stopping", "running", { at: kNow, detail: { phase: "forcing", graceSeconds: 12 } }),
+        ],
       },
     });
-    expect(treeText(tree)).toContain("Gateway is running — ready in 20s");
-  });
-
-  it("renders the failure block with role=alert, hint, and the server's primary action", () => {
-    const onPrimaryAction = vi.fn();
-    const primaryAction = {
-      id: "retry",
-      label: "Retry",
-      kind: "primary",
-      description: "Try starting the gateway again.",
-    };
-    const tree = renderCard({
-      operation: {
-        ...kRunningOperation,
-        phase: "failed",
-        error: {
-          message: "gateway did not become ready within 120s",
-          hint: "Retry, run Repair, or check the gateway logs.",
-          code: "restart_failed",
-        },
-      },
-      primaryAction,
-      onPrimaryAction,
-      onDismiss: vi.fn(),
-    });
-    const text = treeText(tree);
-    expect(text).toContain("Gateway restart failed");
-    expect(text).toContain("gateway did not become ready within 120s");
-    expect(text).toContain("Retry, run Repair, or check the gateway logs.");
-
-    const alertRegion = collectNodes(tree).find(
-      (vnode) => vnode.props?.role === "alert",
+    expect(treeText(forcing)).toContain(
+      "Restarting: OpenClaw didn't stop in 12s, forcing it (active work may be interrupted) · 42s",
     );
-    expect(alertRegion).toBeTruthy();
-
-    const retryButton = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Retry",
-    );
-    expect(retryButton).toBeTruthy();
-    retryButton.props.onClick();
-    expect(onPrimaryAction).toHaveBeenCalledWith(primaryAction);
-  });
-
-  it("a terminal failure stops in-flight steps: current step renders failed, other in-flight steps interrupted, nothing keeps pulsing", () => {
-    // The server never emits terminal step statuses on failure, and
-    // "launching" never receives one at all — a waiting_ready timeout leaves
-    // BOTH "Starting gateway" and "Waiting for health check" latched as
-    // "running". The failed card must not keep them pulsing as if in
-    // progress.
-    const tree = renderCard({
+    const lockWait = renderCard({
+      nowMs: kNow + 70000,
       operation: {
         ...kRunningOperation,
         steps: [
           ...kRunningOperation.steps,
-          {
-            name: "waiting_ready",
-            label: "Waiting for health check",
-            status: "running",
-          },
+          step("waiting_ready", "running", { at: kNow, detail: { phase: "lock_wait" } }),
         ],
-        phase: "failed",
-        error: {
-          message: "gateway did not become ready within 120s",
-          hint: null,
-          code: "restart_failed",
-        },
       },
     });
-    const rows = findAllByType(tree, "li");
-    expect(rows.length).toBe(4);
-    const dotClassFor = (row) =>
-      String(
-        findAllByType(row, "span").find((s) =>
-          String(s.props.class || "").includes("rounded-full"),
-        )?.props.class || "",
-      );
-    for (const row of rows) {
-      expect(dotClassFor(row)).not.toContain("animate-pulse");
-      expect(row.props["aria-current"]).toBeFalsy();
-    }
-    // Completed steps stay green; the step that was current is failed (red);
-    // the other in-flight step renders as interrupted (gray, no motion).
-    expect(dotClassFor(rows[0])).toContain("bg-green-500/90");
-    expect(dotClassFor(rows[1])).toContain("bg-green-500/90");
-    expect(dotClassFor(rows[2])).toContain("bg-gray-500/60");
-    expect(dotClassFor(rows[3])).toContain("bg-red-500/90");
+    expect(treeText(lockWait)).toContain(
+      "Restarting: waiting for OpenClaw's state lock (another OpenClaw process is finishing) · 1m 22s",
+    );
   });
 
-  it("evidence disclosure: loading → collapsed 2-line summary → show more → full tail", async () => {
-    const evidenceLines = Array.from(
-      { length: 20 },
-      (_, i) => `stderr line ${i + 1}`,
-    );
-    let resolveEvidence;
-    const onLoadEvidence = vi.fn(
-      () =>
-        new Promise((resolve) => {
-          resolveEvidence = resolve;
+  it("the optimistic placeholder renders as contacting AlphaClaw; no steps at all renders a generic line", () => {
+    expect(
+      treeText(
+        renderCard({
+          operation: { operationId: null, startedAt: kNow - 1000, phase: "running", steps: [step(kOptimisticStepName, "running")] },
         }),
-    );
-    const failedOperation = {
-      ...kRunningOperation,
-      phase: "failed",
-      error: { message: "boom", hint: null, code: null },
-    };
-
-    let tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    const toggle = findButtonByText(tree, "Show evidence");
-    expect(toggle).toBeTruthy();
-    expect(toggle.props["aria-expanded"]).toBe("false");
-
-    toggle.props.onclick();
-    tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    expect(onLoadEvidence).toHaveBeenCalledWith("op-1");
-    expect(treeText(tree)).toContain("Loading evidence…");
-    expect(findButtonByText(tree, "Hide evidence").props["aria-expanded"]).toBe(
-      "true",
-    );
-
-    resolveEvidence(evidenceLines.join("\n"));
-    await flushMicrotasks();
-    tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    const text = treeText(tree);
-    // Collapsed: last two lines only.
-    expect(text).toContain("stderr line 19");
-    expect(text).toContain("stderr line 20");
-    expect(text).not.toContain("stderr line 5");
-
-    const showMore = findButtonByText(tree, "Show more");
-    expect(showMore).toBeTruthy();
-    showMore.props.onclick();
-    tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    const fullText = treeText(tree);
-    expect(fullText).toContain("stderr line 5");
-    expect(fullText).toContain("stderr line 20");
-    expect(findButtonByText(tree, "Show less")).toBeTruthy();
+      ),
+    ).toContain("Restarting: contacting AlphaClaw… · 1s");
+    expect(
+      treeText(renderCard({ operation: { operationId: "op-x", startedAt: kNow, phase: "running", steps: [] } })),
+    ).toContain("Restarting: preparing · 0s");
   });
 
-  it("evidence disclosure renders 'Evidence expired' when the server no longer has it", async () => {
-    const onLoadEvidence = vi.fn(async () => null);
-    const failedOperation = {
-      ...kRunningOperation,
-      phase: "failed",
-      error: { message: "boom", hint: null, code: null },
-    };
-    let tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    findButtonByText(tree, "Show evidence").props.onclick();
-    await flushMicrotasks();
-    tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    expect(treeText(tree)).toContain("Evidence expired");
+  it("focus moves to the line when a restart starts (effect targets the line ref)", () => {
+    const focus = vi.fn();
+    renderCard({ operation: kRunningOperation });
+    // The ref slot is the first hook; emulate the mounted element.
+    harness.slots[0].current = { focus };
+    runEffects();
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
   });
 
-  it("evidence disclosure renders a distinct error line when the fetch fails — never 'Evidence expired'", async () => {
-    const onLoadEvidence = vi.fn(async () => {
-      throw new Error("network down");
+  it("success: 'Running: restarted in Ns (down for Ms)' as a status line with no buttons", () => {
+    const tree = renderCard({
+      operation: { ...kRunningOperation, phase: "succeeded", durationMs: 20000, downtimeMs: 4200 },
     });
-    const failedOperation = {
-      ...kRunningOperation,
-      phase: "failed",
-      error: { message: "boom", hint: null, code: null },
-    };
-    let tree = renderCard({ operation: failedOperation, onLoadEvidence });
-    findButtonByText(tree, "Show evidence").props.onclick();
-    await flushMicrotasks();
-    tree = renderCard({ operation: failedOperation, onLoadEvidence });
+    expect(treeText(tree)).toContain("Running: restarted in 20s (down for 4s)");
+    const status = collectNodes(tree).find((vnode) => vnode.props?.role === "status");
+    expect(status).toBeTruthy();
+    expect(findAllByType(tree, ActionButton)).toEqual([]);
+    expect(treeText(tree)).not.toContain("Dismiss");
+    expect(describeRestartSuccess({ durationMs: 20000, downtimeMs: null })).toBe("Running: restarted in 20s");
+    expect(describeRestartSuccess({})).toBe("Running: gateway restarted");
+  });
+
+  it("humanDuration renders whole minutes as 'N min' and everything else in seconds", () => {
+    expect(humanDuration(300000)).toBe("5 min");
+    expect(humanDuration(90000)).toBe("90 s");
+    expect(humanDuration(60000)).toBe("1 min");
+    expect(humanDuration(400)).toBe("1 s");
+  });
+
+  // One sentence per failure code.
+  it.each([
+    [{ code: "stop_refused", message: "x" }, "Couldn't safely identify the running gateway. Restart the container, or open View logs.", false],
+    [{ code: "stop_failed", message: "x" }, "Couldn't stop the old gateway, so your changes are not live yet.", true],
+    [{ code: "launch_failed", message: "spawn ENOENT." }, "The old gateway stopped, but OpenClaw didn't start: spawn ENOENT.", true],
+    [{ code: "ready_timeout", budgetMs: 300000 }, "OpenClaw started but wasn't ready within 5 min.", true],
+    [{ code: "ready_timeout", budgetMs: 90000 }, "OpenClaw started but wasn't ready within 90 s.", true],
+    [{ code: "ready_timeout" }, "OpenClaw started but wasn't ready in time.", true],
+    [{ code: "aborted" }, "Restart was cancelled (AlphaClaw is shutting down or another operation took over).", true],
+    [{ code: "response_lost", message: "fetch failed" }, "Couldn't confirm whether the restart started — the connection dropped. Checking with AlphaClaw…", false],
+    [{ code: "weird", message: "gateway exited with code 1" }, "Restart failed: gateway exited with code 1.", true],
+    [{ message: "gateway exited with code 1" }, "Restart failed: gateway exited with code 1.", true],
+    [{}, "Restart failed.", true],
+  ])("describeRestartFailure(%j)", (error, message, canRetry) => {
+    expect(describeRestartFailure(error)).toEqual({ message, canRetry });
+  });
+
+  it("failure: role=alert line with ✕, the sentence, Try again (→ onRetry) and View logs (→ onViewLogs)", () => {
+    const onRetry = vi.fn();
+    const onViewLogs = vi.fn();
+    const tree = renderCard({
+      operation: {
+        ...kRunningOperation,
+        phase: "failed",
+        error: { message: "gateway did not become ready within 120s", hint: "Retry", code: "ready_timeout", budgetMs: 120000 },
+      },
+      onRetry,
+      onViewLogs,
+    });
     const text = treeText(tree);
-    expect(text).toContain("Couldn't load evidence — network down");
-    expect(text).not.toContain("Evidence expired");
+    expect(text).toContain("✕");
+    expect(text).toContain("OpenClaw started but wasn't ready within 2 min.");
+    expect(text).not.toContain("Gateway restart failed");
+    expect(text).not.toContain("Show evidence");
+    expect(text).not.toContain("Dismiss");
+    const alert = collectNodes(tree).find((vnode) => vnode.props?.role === "alert");
+    expect(alert).toBeTruthy();
+    expect(alert.props.tabindex).toBe("-1");
+    findButton(tree, "Try again").props.onClick();
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    findButton(tree, "View logs").props.onClick();
+    expect(onViewLogs).toHaveBeenCalledTimes(1);
+    expect(findButton(tree, "Try again").props.tone).toBe("primary");
+    expect(findButton(tree, "View logs").props.tone).toBe("secondary");
+  });
+
+  it("stop_refused and an unknown (lost-response) outcome offer View logs only — never Try again", () => {
+    for (const code of ["stop_refused", "response_lost"]) {
+      harness.reset();
+      const tree = renderCard({
+        operation: { ...kRunningOperation, phase: "failed", error: { message: "x", code } },
+        onRetry: vi.fn(),
+        onViewLogs: vi.fn(),
+      });
+      expect(findButton(tree, "Try again"), code).toBeUndefined();
+      expect(findButton(tree, "View logs"), code).toBeTruthy();
+    }
   });
 
   it("renders nothing without an operation", () => {
     harness.beginRender();
     expect(RestartProgressCard({ operation: null })).toBeNull();
   });
-
-  // The former formatSecondsAgo helper is gone — freeze stamps now render
-  // through the shared formatRelativeTime core (covered in format.test.js;
-  // the gateway card's "as of Xs ago" rendering is covered in
-  // gateway-card.test.js).
 });

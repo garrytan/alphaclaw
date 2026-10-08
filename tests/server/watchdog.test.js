@@ -6919,16 +6919,17 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
-    it("1A′. an incumbent that survives the cold restart (GatewayIncumbentRestartError) is a FAILED replacement, never ok: failed {incumbent_gateway_still_running}, runRepair ok:false, the operation ledger names the reason", async () => {
-      const { GatewayIncumbentRestartError } = require("../../lib/server/gateway");
+    it("1A′. an incumbent the stop ladder could not take down (GatewayStopError stop_failed) is a FAILED replacement, never ok: failed {stop_failed}, runRepair ok:false, the operation ledger names the reason", async () => {
+      const { GatewayStopError } = require("../../lib/server/gateway");
       const { control, fetchImpl } = createGatewayControl();
       const requestGatewayLaunch = vi.fn(async () =>
         launchOutcome("incumbent_present", { pid: 700, serving: kIncumbentIdentity }),
       );
       const restartGatewayColdStart = vi.fn(async () => {
-        throw new GatewayIncumbentRestartError(
-          "the previous gateway is still running: the gateway port never released after stop",
-          { preStopPids: [700], survivingPids: [700], newPids: [] },
+        throw new GatewayStopError(
+          "stop_failed",
+          "the gateway did not exit after SIGKILL (pid 700 still alive)",
+          { pids: [700], survivors: [700] },
         );
       });
       const { watchdog, insertWatchdogEvent } = createHarness({
@@ -6957,14 +6958,14 @@ describe("server/watchdog", () => {
       expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
       expect(restartRows(insertWatchdogEvent, { source: "repair", status: "failed" })).toEqual([
         expect.objectContaining({
-          details: expect.objectContaining({ reason: "incumbent_gateway_still_running", intent: "replace" }),
+          details: expect.objectContaining({ reason: "stop_failed", intent: "replace" }),
         }),
       ]);
       expect(restartRows(insertWatchdogEvent, { status: "ok" })).toHaveLength(0);
       expect(operationRows(insertWatchdogEvent).map((event) => event.status)).toEqual(["started", "failed"]);
       expect(operationRows(insertWatchdogEvent)[1].details).toMatchObject({
         trigger: "repair",
-        reason: "incumbent_gateway_still_running",
+        reason: "stop_failed",
       });
       const status = watchdog.getStatus();
       expect(status.health).not.toBe("healthy");

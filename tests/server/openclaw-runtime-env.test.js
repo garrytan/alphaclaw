@@ -6,7 +6,7 @@ const {
 } = require("../../lib/server/openclaw-runtime-env");
 
 describe("server/openclaw-runtime-env", () => {
-  it("defaults OpenClaw CLI startup settings to the stable AlphaClaw root", () => {
+  it("defaults OpenClaw CLI startup settings to the stable AlphaClaw root and leaves OPENCLAW_NO_RESPAWN unset under the external supervisor (the gateway's own restart exits 0 for AlphaClaw to relaunch)", () => {
     const env = withOpenclawStartupEnv({ FOO: "bar" });
 
     expect(env).toEqual(
@@ -17,9 +17,14 @@ describe("server/openclaw-runtime-env", () => {
           "cache",
           "openclaw-compile-cache",
         ),
-        OPENCLAW_NO_RESPAWN: "1",
       }),
     );
+    expect("OPENCLAW_NO_RESPAWN" in env).toBe(false);
+  });
+
+  it("pins OPENCLAW_NO_RESPAWN=1 only when the supervisor escape hatch is on (an unmanaged gateway keeps its pid across its own restarts)", () => {
+    expect(withOpenclawStartupEnv({ OPENCLAW_SUPERVISOR_MODE: "off" }).OPENCLAW_NO_RESPAWN).toBe("1");
+    expect(withOpenclawStartupEnv({ OPENCLAW_SUPERVISOR_MODE: "none" }).OPENCLAW_NO_RESPAWN).toBe("1");
   });
 
   it("preserves explicit OpenClaw startup settings", () => {
@@ -86,7 +91,7 @@ describe("server/openclaw-runtime-env", () => {
       recursive: true,
     });
     expect(env.NODE_COMPILE_CACHE).toBe(result.NODE_COMPILE_CACHE);
-    expect(env.OPENCLAW_NO_RESPAWN).toBe("1");
+    expect("OPENCLAW_NO_RESPAWN" in env).toBe(false);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 });

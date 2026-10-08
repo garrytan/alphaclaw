@@ -141,30 +141,45 @@ extracts it into a fresh staging directory (see `openclaw backup --help` and
 files into place, and keep the current state directory until the restored
 gateway is verified healthy.
 
-## Restart did not take effect (incumbent gateway)
+## Restart failed: couldn't stop the old gateway
 
 **What it means:** a gateway restart (manual, API, agent-admin, env save,
-repair) reported **failed** with `reason: "incumbent_gateway_still_running"`
-(`code: restart_incumbent`, event `restart_incumbent`, notification
-`restart-incumbent-<opId>`). AlphaClaw only calls a restart successful when
-the OLD gateway is proven gone — the port was observed down, or a new
-gateway pid appeared with every pre-stop pid exited. Otherwise the gateway
-that answered `/health` is the incumbent, still running the OLD config and
-env; the restart-required banner stays up and no autotune stamp is taken
-from the child that never launched.
+repair, memory mitigation) reported **failed** with `code: "stop_failed"`
+(or `stop_refused`; event `gateway_restart` with that code, notification
+`restart-failed-<opId>`). AlphaClaw only calls a restart successful once
+every pre-restart gateway pid is gone and `/readyz` answers from the new
+`gateway run` child. The restart-required banner stays up and no autotune
+stamp is taken from a child that never launched.
 
-**Why it happens:** since 2026.8.2 the OpenClaw CLI refuses
-`openclaw gateway stop` from a non-interactive shell unless `--force` is
-passed ("re-run with --force"). AlphaClaw passes `--force` only when the
-installed CLI *advertises* it (probed once per installed version via
-`gateway stop --help`, so a broken or stale install that predates the flag is
-still handled; an unknown probe result retries on a short TTL). An externally supervised gateway (systemd,
-a manual `openclaw gateway run`) is the other common incumbent.
+**Why it happens:** the stop ladder (`gateway restart --wait 30000ms` →
+SIGTERM the gateway's process group → SIGKILL it) could not take the old
+gateway down (`stop_failed`: it survived SIGKILL, which on Linux means the
+pid is stuck in the kernel or `/proc` is lying), or refused to try
+(`stop_refused`: the port is held by a process AlphaClaw cannot prove is the
+gateway — a foreign service on the gateway port, or two unrelated OpenClaw
+trees, or no `/proc` to read). An externally supervised gateway (systemd, a
+manual `openclaw gateway run`) that AlphaClaw adopted at boot IS stopped by
+the ladder — it is identified from `/proc` like a managed one.
 
-**Next steps:** the operation record's evidence names the pids and whether
-the CLI refused. Stop the incumbent yourself (`openclaw gateway stop
---force` on 2026.8.2+, or the external supervisor), then restart from the
-Watchdog tab.
+**Next steps:** the operation record on the Watchdog tab names the pids. For
+`stop_refused`, find what holds the port (`ss -ltnp` / `openclaw gateway
+status --deep`) and stop it, or restart the container; for `stop_failed`,
+restart the container. Then press Restart again.
+
+## Restart failed: the old gateway stopped, but OpenClaw didn't start / wasn't ready
+
+**What it means:** `code: "launch_failed"` — the new `gateway run` exited
+before `/readyz` answered (the card appends OpenClaw's last error line, e.g.
+a configuration error, exit 78), or another process took the port between
+stop and spawn; `code: "ready_timeout"` — the new gateway is up but did not
+report ready inside the ready budget (`GATEWAY_RESTART_READY_TIMEOUT`,
+default 300 s). On `ready_timeout` the child is left running: the watchdog's
+readiness ladder (transitional budget → degraded → repair) owns it from
+there, and Try again runs the ladder on it.
+
+**Next steps:** View logs; for a configuration error run Repair (Doctor) or
+fix the setting it names; for a lock wait ("waiting for OpenClaw's state
+lock") let the other OpenClaw process finish, then Try again.
 
 ## Gateway is up but not ready
 
@@ -320,10 +335,10 @@ it with an incumbent probe. Two cases:
   problem: after the sustained-failure gate it runs `doctor --fix`,
   re-probes the port (a holder that answers healthy by then is adopted, not
   stopped) and replaces a still-unhealthy holder through the verified
-  cold-restart path (`intent: "replace"`, the same `gateway stop` →
-  `--force` → ready-wait that manual restarts use, with the
-  incumbent-still-running verdict above). A refused stop counts as a repair
-  attempt and the automatic ladder waits for a recovery before trying again —
+  cold-restart path (`intent: "replace"`, the same stop ladder → `gateway
+  run` → `/readyz` wait that manual restarts use, with the `stop_failed` /
+  `stop_refused` classes above). A failed stop counts as a repair attempt
+  and the automatic ladder waits for a recovery before trying again —
   if you stop the wedged gateway yourself (the notice names its pid), the
   watchdog sees there is nothing left to replace and relaunches on its next
   probe (`repair/<source>/ok {latchLifted: true}`); the grace ends early the
@@ -336,7 +351,7 @@ it with an incumbent probe. Two cases:
   `degradedReason: state_writer_conflict`, notifies once ("🟡 Another
   OpenClaw process (<role>, pid N) holds the state directory — the gateway
   will be relaunched once it releases") and relaunches on the crash-restart
-  backoff ladder only; it never runs `doctor --fix` or `gateway stop` for
+  backoff ladder only; it never runs `doctor --fix` or the stop ladder for
   this case.
 
 **Why it happens:** OpenClaw acquires the state-ownership lock BEFORE the
@@ -564,7 +579,7 @@ pause it creates; classification still records.
   (also listed in the diagnose bundle's **Backups** section).
 - **Watchdog events:** Watchdog tab event log (restart causes, doctor
   actions, `notification_partial`, `notification_abandoned`,
-  `restart_incumbent`, `prelaunch_hook`, `readiness_degraded`,
+  `gateway_restart` (with `code: stop_refused | stop_failed | launch_failed | ready_timeout`; `restart_incumbent` on pre-v0.10.0 records), `prelaunch_hook`, `readiness_degraded`,
   `readiness_probe_error`, `serving_identity_lost`, the
   `restart/<source>/requested` → `ok {verified: true}` pair a verified
   relaunch leaves behind, and the `repair/<source>/skipped` reasons

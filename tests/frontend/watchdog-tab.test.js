@@ -57,6 +57,7 @@ import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-t
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { Gateway } from "../../lib/public/js/components/gateway.js";
+import { WatchdogRestartEvidence } from "../../lib/public/js/components/watchdog-tab/restart-evidence.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 
 const harness = preactHooks.__harness;
@@ -159,6 +160,45 @@ describe("frontend/watchdog tab (safe-mode ownership + upstream-merge seams)", (
     // server-driven Gateway card presents safe_mode itself.
     expect(findAllByType(tree, WatchdogSafeModeBanner)).toHaveLength(0);
     expect(findAllByType(tree, Gateway)).toHaveLength(1);
+  });
+
+  it("a failed restart gets a 'Restart evidence' disclosure that loads the redacted tail on open — nothing while running or idle", async () => {
+    const loadEvidence = vi.fn(async () => "stderr line 1\nstderr line 2");
+    gatewayShellStore.publish({
+      hasStatus: true,
+      statusState: { state: "down", label: "Down" },
+      restartOperation: { operationId: "op-1", phase: "failed", startedAt: 1, steps: [], error: { message: "boom", code: "launch_failed" } },
+      actions: { loadEvidence },
+    });
+    let tree = renderTab({ watchdogStatus: kSafeModeWatchdog });
+    const evidence = findAllByType(tree, WatchdogRestartEvidence)[0];
+    expect(evidence).toBeTruthy();
+    expect(evidence.props.operation.operationId).toBe("op-1");
+    expect(evidence.props.onLoadEvidence).toBe(loadEvidence);
+
+    // Rendered on its own: a <details> whose toggle loads the evidence once.
+    harness.reset();
+    harness.beginRender();
+    let detailsTree = expandTree(WatchdogRestartEvidence(evidence.props));
+    const details = collectDeep(detailsTree).find((vnode) => vnode.type === "details");
+    expect(collectText(details).join(" ")).toContain("Restart evidence");
+    expect(loadEvidence).not.toHaveBeenCalled();
+    details.props.ontoggle({ currentTarget: { open: true } });
+    expect(loadEvidence).toHaveBeenCalledWith("op-1");
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    harness.beginRender();
+    detailsTree = expandTree(WatchdogRestartEvidence(evidence.props));
+    const pre = collectDeep(detailsTree).find((vnode) => vnode.type === "pre");
+    expect(collectText(pre).join("")).toContain("stderr line 2");
+    // Re-opening never refetches.
+    collectDeep(detailsTree).find((vnode) => vnode.type === "details").props.ontoggle({ currentTarget: { open: true } });
+    expect(loadEvidence).toHaveBeenCalledTimes(1);
+
+    harness.reset();
+    harness.beginRender();
+    expect(WatchdogRestartEvidence({ operation: { operationId: "op-2", phase: "running", steps: [] }, onLoadEvidence: loadEvidence })).toBeNull();
+    harness.beginRender();
+    expect(WatchdogRestartEvidence({ operation: null, onLoadEvidence: loadEvidence })).toBeNull();
   });
 
   it("version skew (no statusState): the standalone banner survives and renders the safe-mode copy", () => {

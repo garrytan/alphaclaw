@@ -5,6 +5,72 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.0] - 2026-10-07
+
+Gateway restart, rebuilt. Every restart while the agent had work in flight
+failed the same way on OpenClaw 2026.9.8 — and then the card buried the
+operator in evidence about it. Root cause (verified against the pinned
+binary with AlphaClaw's real child env): OpenClaw drains a SIGTERMed gateway
+for up to ~315 s while the port stays open; AlphaClaw waited 15 s; both CLI
+verbs the pipeline leaned on are refused on an AlphaClaw box (`gateway stop
+--force` under `OPENCLAW_SUPERVISOR_MODE=external`, `gateway --force` with
+exit 78 while the old gateway still owns the state directory); and the
+managed child AlphaClaw signalled was OpenClaw's compile-cache launcher, not
+the gateway — a SIGKILL of it orphaned the worker on the port.
+
+### Changed
+
+- **One stop ladder, one launch, one proof** (`lib/server/gateway.js`,
+  `gateway-identity.js`, `gateway-readiness.js`). A restart prepares first
+  (prelaunch hook + plugin preflight while the old gateway serves), resolves
+  the gateway's identity from `/proc` (managed tree → serving tree → port
+  listener; a foreign or ambiguous listener is `stop_refused` and nothing is
+  signalled), then escalates: ask OpenClaw to restart itself (`gateway
+  restart --wait 30000ms` — admission closes, the agent's turn compacts,
+  work drains ≤ 30 s, the gateway exits 0), SIGTERM the gateway's process
+  group (10 s), SIGKILL it (5 s). Only once every pid is gone does it spawn
+  `openclaw gateway run` (detached, managed) and wait on `/readyz` inside
+  the ready budget; success requires the listener to be inside the new
+  child's tree. Autotune is stamped only at verified ready. Failures are one
+  of `stop_refused | stop_failed | launch_failed | ready_timeout | aborted`.
+- **`OPENCLAW_NO_RESPAWN` is no longer pinned to `1`** under the external
+  supervisor: the gateway's own restart (config write, `gateway restart`,
+  SIGUSR2) now exits 0 with a restart-handoff row that the watchdog consumes
+  and relaunches with a fresh environment, instead of restarting in-process
+  and keeping the old env. The supervisor escape hatch still pins `1`.
+- **The managed child's serving pid is the worker**, resolved from `/proc`
+  once the gateway listens (`servingPid`/`workerPid`): the memory monitor,
+  the restart-handoff consume and exit classification all key on the right
+  process. Shutdown runs the same ladder (no ask) inside a 6 s slice of the
+  process deadline; `killManagedGatewayChildNow` SIGKILLs the whole group.
+- **The gateway card is one button and one line.** Restart (or Start when
+  the gateway is down) is one click with no confirmation — the server's
+  admission gate is the safety and a refusal renders as "Can't restart right
+  now: …". During a restart the button row becomes a single server-timed
+  line (checking plugins → asking OpenClaw to finish its current work →
+  forcing it, active work may be interrupted → starting OpenClaw → checking
+  readiness → Running: restarted in Ns (down for Ms)). On failure: one
+  sentence naming which half failed, Try again, View logs. Repair keeps its
+  confirmation ("Resume repair once" when automatic repair is paused). The
+  failure evidence moved to the Watchdog tab's operation record.
+- **Persisted operation record** carries `code`, `hint`, `how`, `budgetMs`
+  and `phaseAt{step: epochMs}`; SSE steps carry `at` and structured
+  `detail`; the sync endpoint answers `{ code, error, hint, detail }`.
+- **Notifications:** one `restart_failed` message per failed restart
+  (`restart-failed-<opId>`) with the same sentence the card shows.
+
+### Removed
+
+- `openclaw gateway --force` cold starts, the cold-restart supervisor
+  adoption, the pid-diff incumbent verdict (`GatewayIncumbentRestartError`,
+  `incumbent_gateway_still_running`, event `restart_incumbent`), the CLI
+  `gateway stop` (restart and shutdown) and its `gatewayStopForce`
+  capability probe, `runGatewayCmd`, the TCP-only ready wait.
+- The "Restart options" panel (Refresh status / Check again / Open human
+  recovery tools / Confirm restart gateway / Close options / Current
+  assessment / Database findings), the per-step progress list, "Show
+  evidence" and "Dismiss" on the card.
+
 ## [0.9.99] - 2026-10-03
 
 AlphaClaw now runs exactly the OpenClaw pinned in `package.json`, and nothing

@@ -43,7 +43,6 @@ import * as preactHooks from "preact/hooks";
 import {
   GlobalRestartBanner,
   buildGlobalBannerModel,
-  buildRestartBannerProgress,
   kAlphaclawRestartingBannerText,
   kReconnectingBannerText,
   kRestartRequiredBannerText,
@@ -165,14 +164,15 @@ describe("frontend/global-restart-banner (demoted)", () => {
     expect(root).toBeTruthy();
   });
 
-  it("while an operation runs: 'Restart in progress — step X/Y' with view link and no buttons", () => {
+  it("while an operation runs: the current phase sentence (never a step count) with view link and no buttons", () => {
     gatewayShellStore.publish({
       restartRequired: true,
       restartOperation: kRunningOperation,
     });
     const tree = renderBanner({ visible: true });
     const text = treeText(tree);
-    expect(text).toContain("Restart in progress — step 2/4");
+    expect(text).toContain("Restarting: starting OpenClaw");
+    expect(text).not.toMatch(/step \d+\/\d+/);
     expect(
       findAllByType(tree, "a").find((vnode) => vnode.props.href === "#/general"),
     ).toBeTruthy();
@@ -265,87 +265,41 @@ describe("frontend/global-restart-banner (demoted)", () => {
     ).toBeNull();
   });
 
-  it("buildRestartBannerProgress widens the total for a leading waiting_for_lock step (queued restart) so the counter never runs ahead", () => {
-    const queued = {
-      ...kRunningOperation,
-      steps: [
-        { name: "waiting_for_lock", label: "Waiting for the current operation to finish", status: "done" },
-        { name: "preparing_plugins", label: "Checking plugins", status: "skipped" },
-        ...kRunningOperation.steps,
-      ],
-    };
-    // waiting + preparing + stopping + launching started = step 4 of 6.
-    expect(buildRestartBannerProgress(queued)).toEqual({ step: 4, of: 6 });
-    const queuedNoPrepare = {
-      ...kRunningOperation,
-      steps: [
-        { name: "waiting_for_lock", label: "Waiting for the current operation to finish", status: "running" },
-      ],
-    };
-    expect(buildRestartBannerProgress(queuedNoPrepare)).toEqual({ step: 1, of: 5 });
-  });
-
-  it("buildRestartBannerProgress counts server steps (optional preparing_plugins widens the total)", () => {
-    expect(buildRestartBannerProgress(kRunningOperation)).toEqual({
-      step: 2,
-      of: 4,
-    });
-    expect(
-      buildRestartBannerProgress({
-        ...kRunningOperation,
-        steps: [
-          { name: "preparing_plugins", label: "Checking plugins", status: "done" },
-          ...kRunningOperation.steps,
-        ],
-      }),
-    ).toEqual({ step: 3, of: 5 });
-    // The optimistic placeholder never counts — with no real step yet there
-    // is no plan to count against (the banner shows plain "Restart in
-    // progress" instead of a denominator that would jump 4→5 mid-op).
-    expect(
-      buildRestartBannerProgress({
-        ...kRunningOperation,
-        steps: [{ name: "__requesting", label: "Contacting AlphaClaw…", status: "running" }],
-      }),
-    ).toBeNull();
-    expect(buildRestartBannerProgress(null)).toBeNull();
-  });
-
-  it("tracks the started step across the REAL server sequence ('skipped' prepare, no launching terminal) instead of sticking at 2/5", () => {
-    // The exact emission order locked in by tests/server/gateway-restart
-    // .e2e.test.js: preparing_plugins running→skipped, stopping running→done,
-    // launching running (never gets a terminal status), waiting_ready
-    // running, ready done. done_count+1 arithmetic sat at "step 2/5" through
-    // launch and the entire (up to 120s) health-check wait.
+  it("the banner phase follows the server sequence: plugins → asking → stopping → starting → readiness → ready", () => {
     const emitted = [];
-    const progressAfter = (event) => {
+    const textAfter = (event) => {
       emitted.push(event);
-      return buildRestartBannerProgress({
-        ...kRunningOperation,
-        steps: [...emitted],
-      });
+      return buildGlobalBannerModel({
+        shell: { connectivityMode: "online", restartOperation: { ...kRunningOperation, steps: [...emitted] } },
+      }).text;
     };
-
     expect(
-      progressAfter({ name: "preparing_plugins", label: "Checking plugins", status: "running" }),
-    ).toEqual({ step: 1, of: 5 });
+      buildGlobalBannerModel({
+        shell: {
+          connectivityMode: "online",
+          restartOperation: { ...kRunningOperation, steps: [{ name: "__requesting", label: "Contacting AlphaClaw…", status: "running" }] },
+        },
+      }).text,
+    ).toBe("Restarting: contacting AlphaClaw…");
     expect(
-      progressAfter({ name: "preparing_plugins", label: "Checking plugins", status: "skipped" }),
-    ).toEqual({ step: 1, of: 5 });
-    expect(
-      progressAfter({ name: "stopping", label: "Stopping gateway", status: "running" }),
-    ).toEqual({ step: 2, of: 5 });
-    expect(
-      progressAfter({ name: "stopping", label: "Stopping gateway", status: "done" }),
-    ).toEqual({ step: 2, of: 5 });
-    expect(
-      progressAfter({ name: "launching", label: "Starting gateway", status: "running" }),
-    ).toEqual({ step: 3, of: 5 });
-    expect(
-      progressAfter({ name: "waiting_ready", label: "Waiting for health check", status: "running" }),
-    ).toEqual({ step: 4, of: 5 });
-    expect(
-      progressAfter({ name: "ready", label: "Ready", status: "done" }),
-    ).toEqual({ step: 5, of: 5 });
+      buildGlobalBannerModel({ shell: { connectivityMode: "online", restartOperation: { ...kRunningOperation, steps: [] } } }).text,
+    ).toBe("Restart in progress");
+    expect(textAfter({ name: "preparing_plugins", status: "running" })).toBe("Restarting: checking plugins (gateway still running)");
+    expect(textAfter({ name: "preparing_plugins", status: "skipped" })).toBe("Restarting: checking plugins (gateway still running)");
+    expect(textAfter({ name: "stopping", status: "running", detail: { phase: "asking", activeWork: 2 } })).toBe(
+      "Restarting: asking OpenClaw to finish its current work (2 tasks)",
+    );
+    expect(textAfter({ name: "stopping", status: "running", detail: { phase: "forcing", graceSeconds: 10 } })).toBe(
+      "Restarting: OpenClaw didn't stop in 10s, forcing it (active work may be interrupted)",
+    );
+    expect(textAfter({ name: "stopping", status: "done", detail: { how: "sigkill" } })).toBe(
+      "Restarting: OpenClaw didn't stop in 10s, forcing it (active work may be interrupted)",
+    );
+    expect(textAfter({ name: "launching", status: "running" })).toBe("Restarting: starting OpenClaw");
+    expect(textAfter({ name: "waiting_ready", status: "running", detail: { phase: "lock_wait" } })).toBe(
+      "Restarting: waiting for OpenClaw's state lock (another OpenClaw process is finishing)",
+    );
+    expect(textAfter({ name: "waiting_ready", status: "running" })).toBe("Restarting: checking readiness");
+    expect(textAfter({ name: "ready", status: "done" })).toBe("Restarting: OpenClaw is ready");
   });
 });

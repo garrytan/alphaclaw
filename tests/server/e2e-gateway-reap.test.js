@@ -6,12 +6,11 @@
 //   1. stopGatewayChildAndWait SIGKILL escalation past Node's `.killed`
 //      flag (set on SIGTERM SEND) against a child that really ignores
 //      SIGTERM — the v0.9.36 escalation fix.
-//   2. stopGatewayForShutdown cancelling an in-flight execOpenclaw CLI
-//      call: the lifecycle-lock abort must SIGTERM the real execFile child
-//      and complete well inside the 10s shutdown deadline.
-//   3. runGatewayRestartCmd abort wiring: a SIGTERM-trapping restart
-//      supervisor spawn must be reaped by the 3s SIGKILL escalation timer
-//      after shutdown aborts the lifecycle signal.
+//   2. The stop ladder reaping a real launcher→worker tree as one process
+//      group (the production shape under OpenClaw's compile-cache launcher):
+//      a SIGKILL to the launcher alone would orphan the worker on the port.
+//   3. stopGatewayForShutdown aborting an in-flight cold restart's ready
+//      wait and reaping the spawned child inside the shutdown slice.
 //   4. resolveServingIdentity against the REAL /proc: a launcher→worker tree
 //      resolves to its root, worker and start ticks, and the ticks change
 //      when the child is replaced (the watchdog's pid-reuse guard).
@@ -30,6 +29,7 @@ process.env.ALPHACLAW_ROOT_DIR = kTmpRoot;
 
 const { OPENCLAW_DIR } = require("../../lib/server/constants");
 const lockContention = require("../../lib/server/openclaw-lock-contention");
+const gatewayIdentity = require("../../lib/server/gateway-identity");
 const {
   readProcStartTicks,
   readProcParentPid,
@@ -208,19 +208,30 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
     expect(elapsedMs).toBeLessThan(5000);
   });
 
-  it("stopGatewayForShutdown aborts an in-flight CLI call and the real execFile child dies", async () => {
-    // First `gateway stop` records its pid and sleeps 60s (exec keeps the
-    // pid). Any later `gateway stop` — stopGatewayForShutdown's best-effort
-    // trailing exec — sees the pidfile and exits 0 immediately, so the
-    // measured shutdown time is the abort path, not a second hang.
-    const pidFile = path.join(caseDir, "stop.pid");
+  it("the stop ladder reaps a REAL launcher→worker tree that ignores SIGTERM as one process group (the detached spawn), SIGKILL after the grace, both pids dead", async () => {
+    // The fake `gateway run` is a launcher that forks a SIGTERM-ignoring
+    // worker and waits on it — the production shape (openclaw.mjs → worker).
+    // A SIGKILL to the launcher alone would orphan the worker; the ladder
+    // signals the launcher's process group instead.
+    const launcherPidFile = path.join(caseDir, "launcher.pid");
+    const workerPidFile = path.join(caseDir, "worker.pid");
+    const workerPath = path.join(caseDir, "worker.js");
+    fs.writeFileSync(
+      workerPath,
+      [
+        'process.on("SIGTERM", () => {});',
+        `require("fs").writeFileSync(${JSON.stringify(workerPidFile)}, String(process.pid));`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+    );
     installOpenclawShim(
       [
         "#!/bin/sh",
-        'if [ "$1" = "gateway" ] && [ "$2" = "stop" ]; then',
-        `  if [ -f ${JSON.stringify(pidFile)} ]; then exit 0; fi`,
-        `  echo $$ > ${JSON.stringify(pidFile)}`,
-        "  exec sleep 60",
+        'if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then',
+        "  trap '' TERM",
+        `  echo $$ > ${JSON.stringify(launcherPidFile)}`,
+        `  ${JSON.stringify(process.execPath)} ${JSON.stringify(workerPath)} &`,
+        "  wait",
         "fi",
         "exit 0",
         "",
@@ -228,40 +239,53 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
     );
 
     gateway = loadGateway();
-    const cmdPromise = gateway.runGatewayCmd("stop");
-
-    await pollUntil(() => readPid(pidFile) !== null, {
-      label: "in-flight gateway-stop shim pidfile",
+    const child = await gateway.launchGatewayProcess();
+    expect(child).toBeTruthy();
+    trackPid(child.pid);
+    await pollUntil(() => readPid(launcherPidFile) === child.pid && readPid(workerPidFile) !== null, {
+      label: "launcher + worker pidfiles",
     });
-    const cliPid = trackPid(readPid(pidFile));
-    expect(isPidAlive(cliPid)).toBe(true);
+    const workerPid = trackPid(readPid(workerPidFile));
+    expect(readProcParentPid(workerPid)).toBe(child.pid);
+    // detached: the launcher leads its own process group.
+    expect(gatewayIdentity.readProcessGroupId(child.pid)).toBe(child.pid);
+    expect(gatewayIdentity.readProcessGroupId(workerPid)).toBe(child.pid);
+
+    const identity = gateway.resolveGatewayIdentity();
+    expect(identity).toMatchObject({ owner: "managed", rootPid: child.pid, pgid: child.pid });
+    expect(identity.pids).toEqual(expect.arrayContaining([child.pid, workerPid]));
 
     const startedAt = Date.now();
-    await gateway.stopGatewayForShutdown();
+    const stop = await gateway.stopGatewayLadder({
+      allowGracefulRestart: false,
+      termGraceMs: 400,
+      killGraceMs: 3000,
+    });
     const elapsedMs = Date.now() - startedAt;
 
-    // The lock cancel aborted the op's signal; Node's native execFile abort
-    // SIGTERMed the shim, and the callback (and therefore the cancel await)
-    // only fires after the child closed — the 60s sleep never ran out.
-    expect(elapsedMs).toBeLessThan(5000);
-    expect(isPidAlive(cliPid)).toBe(false);
-    // The op promise settles cleanly (execOpenclaw resolves ok:false on
-    // abort — never rejects into an unhandled rejection).
-    await expect(cmdPromise).resolves.toBeUndefined();
+    expect(stop.how).toBe("sigkill");
+    expect(isPidAlive(child.pid)).toBe(false);
+    expect(isPidAlive(workerPid)).toBe(false);
+    // SIGTERM alone cannot have done it (both ignore it): the grace elapsed
+    // first, and the whole stop stays bounded.
+    expect(elapsedMs).toBeGreaterThanOrEqual(350);
+    expect(elapsedMs).toBeLessThan(6000);
+    await pollUntil(() => child.signalCode === "SIGKILL", {
+      timeoutMs: 2000,
+      label: "launcher exit event with signalCode SIGKILL",
+    });
   });
 
-  it("reaps a SIGTERM-trapping restart supervisor via the 3s SIGKILL escalation timer", async () => {
-    // `gateway --force` (the cold-start supervisor spawn) ignores SIGTERM:
-    // `trap '' TERM` sets SIG_IGN, which survives exec into sleep. The
-    // abort's immediate child.kill("SIGTERM") is therefore a no-op and only
-    // the 3s unref'd killTimer's SIGKILL can reap it. `gateway stop` (issued
-    // by runGatewayColdStart before the spawn and by the best-effort
-    // shutdown exec after) exits 0 immediately.
-    const pidFile = path.join(caseDir, "supervisor.pid");
+  it("stopGatewayForShutdown aborts an in-flight cold restart's ready wait and reaps the spawned child inside its budget", async () => {
+    // `gateway run` ignores SIGTERM and never listens, so the restart parks
+    // in its ready wait; shutdown must end that wait within a poll tick and
+    // reap the child by SIGKILL inside the shutdown slice — never wait out
+    // the 120s ready budget.
+    const pidFile = path.join(caseDir, "run.pid");
     installOpenclawShim(
       [
         "#!/bin/sh",
-        'if [ "$1" = "gateway" ] && [ "$2" = "--force" ]; then',
+        'if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then',
         "  trap '' TERM",
         `  echo $$ > ${JSON.stringify(pidFile)}`,
         "  exec sleep 60",
@@ -272,39 +296,32 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
     );
 
     gateway = loadGateway();
-    const restartPromise = gateway.restartGateway(() => {});
-
-    await pollUntil(() => readPid(pidFile) !== null, {
-      label: "restart supervisor shim pidfile",
-    });
-    const supervisorPid = trackPid(readPid(pidFile));
-    expect(isPidAlive(supervisorPid)).toBe(true);
+    // Nothing on the port: the ladder has nothing to stop (how: none) and the
+    // restart goes straight to the spawn.
+    // Settled handler attached up front: the rejection lands while the
+    // shutdown await below is in flight.
+    const restartOutcome = gateway.restartGateway(() => {}).then(
+      () => ({ ok: true }),
+      (error) => ({ error }),
+    );
+    await pollUntil(() => readPid(pidFile) !== null, { label: "gateway-run shim pidfile" });
+    const runPid = trackPid(readPid(pidFile));
+    expect(isPidAlive(runPid)).toBe(true);
 
     const startedAt = Date.now();
-    await gateway.stopGatewayForShutdown();
+    await gateway.stopGatewayForShutdown({ budgetMs: 3000 });
     const shutdownMs = Date.now() - startedAt;
 
-    // Shutdown must not wait for the supervisor: the abort check inside
-    // waitForGatewayReady ends the 120s ready poll within one 500ms tick.
     expect(shutdownMs).toBeLessThan(5000);
     // The cancelled restart settles deterministically — as an HONEST failure
-    // carrying abort evidence, never a silent success over a dead gateway
-    // (this branch's restart contract: outcomes are never fabricated).
-    await expect(restartPromise).rejects.toMatchObject({
+    // carrying abort evidence, never a silent success over a dead gateway.
+    const { error } = await restartOutcome;
+    expect(error).toMatchObject({
       name: "GatewayRestartError",
       evidence: expect.objectContaining({ aborted: true }),
     });
-
-    // The killTimer fires 3s after abort — the supervisor survived SIGTERM
-    // (proving the trap held) and must then die to the real SIGKILL.
-    if (shutdownMs < 2500) {
-      expect(isPidAlive(supervisorPid)).toBe(true);
-    }
-    await pollUntil(() => !isPidAlive(supervisorPid), {
-      timeoutMs: 6000,
-      intervalMs: 100,
-      label: "supervisor reaped by SIGKILL escalation",
-    });
+    // SIGTERM was ignored (the trap held); the ladder's SIGKILL reaped it.
+    expect(isPidAlive(runPid)).toBe(false);
   });
 
   it("resolveServingIdentity sees the real launcher→worker tree with start ticks, and the ticks change when the child is replaced", async () => {

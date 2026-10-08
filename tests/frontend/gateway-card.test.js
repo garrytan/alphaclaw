@@ -4,6 +4,11 @@ import { createRequire } from "node:module";
 // Minimal hook harness: hook state lives
 // in per-call-index slots so component functions can be invoked directly
 // without a DOM renderer. Effects are collected, not run.
+vi.mock("../../lib/public/js/lib/api.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  triggerWatchdogRepair: vi.fn(async () => ({ ok: true })),
+}));
+
 vi.mock("preact/hooks", () => {
   const harness = { slots: [], cursor: 0, effects: [] };
   harness.beginRender = () => {
@@ -43,8 +48,18 @@ vi.mock("preact/hooks", () => {
 });
 
 import * as preactHooks from "preact/hooks";
-import { Gateway, buildReasonsSummary, dotClassFor } from "../../lib/public/js/components/gateway.js";
+import { triggerWatchdogRepair } from "../../lib/public/js/lib/api.js";
+import {
+  Gateway,
+  buildReasonsSummary,
+  dotClassFor,
+  kStaleRestartGuardText,
+} from "../../lib/public/js/components/gateway.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
+import {
+  kRepairConfirmMessage,
+  kRepairConfirmTitle,
+} from "../../lib/public/js/components/repair-button.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { ConfirmDialog } from "../../lib/public/js/components/confirm-dialog.js";
 import { Tooltip } from "../../lib/public/js/components/tooltip.js";
@@ -110,6 +125,16 @@ const collectText = (node, out = []) => {
 };
 
 const treeText = (tree) => collectText(tree).join(" ");
+
+const findButton = (tree, label) =>
+  findAllByType(tree, ActionButton).find((vnode) => vnode.props.idleLabel === label);
+
+const findDialog = (tree, title) =>
+  findAllByType(tree, ConfirmDialog).find((vnode) => vnode.props.title === title);
+
+const flushMicrotasks = async () => {
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+};
 
 const findDotSpan = (tree) =>
   findAllByType(tree, "span").find((vnode) =>
@@ -283,14 +308,23 @@ describe("frontend/gateway card (server-state matrix)", () => {
       // and at most one is primary.
       const buttons = findAllByType(tree, ActionButton);
       for (const action of state.actions) {
-        const button = buttons.find((vnode) => vnode.props.idleLabel === action.label);
-        expect(button, `action "${action.label}" missing in ${name}`).toBeTruthy();
+        // The restart control reads "Start" when the server says the gateway
+        // is stopped; every other label renders verbatim.
+        const label = action.id === "restart" && action.stopped === true ? "Start" : action.label;
+        const button = buttons.find((vnode) => vnode.props.idleLabel === label);
+        expect(button, `action "${label}" missing in ${name}`).toBeTruthy();
         expect(button.props.tone).toBe(
           { primary: "primary", secondary: "secondary", danger: "danger" }[action.kind],
         );
         if (action.disabledReason) {
           expect(button.props.disabled).toBe(true);
           expect(button.props.title).toBe(action.disabledReason);
+        }
+        // Restart/Repair are disabled whenever the server's admission
+        // projection is not "execute" (another operation, no status, setup).
+        if (["restart", "repair"].includes(action.id) && action.disposition !== "execute") {
+          expect(button.props.disabled, `${action.id} enabled in ${name}`).toBe(true);
+          expect(button.props.title).toBeTruthy();
         }
       }
       const primaryCount = state.actions.filter(
@@ -315,7 +349,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
     },
   );
 
-  it("renders the operation badge from the server operation field", () => {
+  it("renders the operation badge from the server operation field and disables Restart while it runs", () => {
     const state = makeServerState({
       operation: { kind: "repair", label: "Repairing", startedAt: kNow },
     });
@@ -323,34 +357,51 @@ describe("frontend/gateway card (server-state matrix)", () => {
     const tree = renderGateway({});
     expect(treeText(tree)).toContain("Repairing");
 
-    const restartButton = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Restart",
-    );
-    expect(restartButton.props.disabled).toBeFalsy();
-    restartButton.props.onClick();
-    expect(treeText(renderGateway({}))).toContain("No new repair or restart was queued");
+    const restartButton = findButton(tree, "Restart");
+    expect(restartButton.props.disabled).toBe(true);
+    expect(restartButton.props.title).toContain("No new repair or restart was queued");
+    expect(findButton(tree, "Repair").props.disabled).toBe(true);
   });
 
-  it("restart inspection requires fresh deliberate confirmation before dispatch", async () => {
+  it("Restart dispatches immediately — no confirmation, no options panel", () => {
     const restart = vi.fn();
     publishShell({ statusState: makeServerState({}) });
     gatewayShellStore.publish({
       actions: { ...gatewayShellStore.get().actions, restart },
     });
     const tree = renderGateway({});
-    const restartButton = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Restart",
-    );
+    const restartButton = findButton(tree, "Restart");
+    expect(restartButton.props.tone).toBe("primary");
+    expect(restartButton.props.disabled).toBeFalsy();
     restartButton.props.onClick();
-    expect(restart).not.toHaveBeenCalled();
-    let options = renderGateway({});
-    findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Restart gateway").props.onClick();
-    options = renderGateway({});
-    await findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Confirm restart gateway").props.onClick();
     expect(restart).toHaveBeenCalledTimes(1);
+    const after = renderGateway({});
+    const text = treeText(after);
+    for (const gone of ["Restart options", "Check again", "Refresh status", "Open human recovery tools", "Close options", "Current assessment"]) {
+      expect(text).not.toContain(gone);
+    }
+    expect(findButton(after, "Restart gateway")).toBeUndefined();
+    expect(findButton(after, "Confirm restart gateway")).toBeUndefined();
+    for (const dialog of findAllByType(after, ConfirmDialog)) {
+      expect(dialog.props.visible).toBe(false);
+    }
   });
 
-  it("flapping offers Restart next to Repair and confirms before dispatch", async () => {
+  it("reads 'Start' when the server reports the gateway stopped", () => {
+    const state = makeServerState({
+      tcp: kFreshDown,
+      watchdog: { ...kHealthyWatchdog, lifecycle: "stopped", health: "unhealthy" },
+    });
+    expect(state.state).toBe("down");
+    expect(state.actions.find((action) => action.id === "restart").stopped).toBe(true);
+    publishShell({ statusState: state });
+    const tree = renderGateway({});
+    expect(findButton(tree, "Start")).toBeTruthy();
+    expect(findButton(tree, "Restart")).toBeUndefined();
+    expect(findButton(tree, "Start").props.disabled).toBeFalsy();
+  });
+
+  it("flapping offers Restart next to a primary Repair", () => {
     // Regression: the Unstable card used to be repair-only, leaving no way
     // to relaunch the gateway from the admin UI in that state.
     const restart = vi.fn();
@@ -363,19 +414,87 @@ describe("frontend/gateway card (server-state matrix)", () => {
       actions: { ...gatewayShellStore.get().actions, restart },
     });
     const tree = renderGateway({});
-    const buttons = findAllByType(tree, ActionButton);
-    const repairButton = buttons.find((vnode) => vnode.props.idleLabel === "Repair");
-    expect(repairButton.props.tone).toBe("primary");
-    const restartButton = buttons.find((vnode) => vnode.props.idleLabel === "Restart");
-    expect(restartButton).toBeTruthy();
+    expect(findButton(tree, "Repair").props.tone).toBe("primary");
+    const restartButton = findButton(tree, "Restart");
+    expect(restartButton.props.tone).toBe("secondary");
     expect(restartButton.props.disabled).toBeFalsy();
     restartButton.props.onClick();
-    expect(restart).not.toHaveBeenCalled();
-    let options = renderGateway({});
-    findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Restart gateway").props.onClick();
-    options = renderGateway({});
-    await findAllByType(options, ActionButton).find((node) => node.props.idleLabel === "Confirm restart gateway").props.onClick();
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("Repair keeps its confirmation: the dialog runs Doctor once confirmed, cancel runs nothing", async () => {
+    publishShell({ statusState: makeServerState({}) });
+    triggerWatchdogRepair.mockClear();
+    let tree = renderGateway({});
+    const repairButton = findButton(tree, "Repair");
+    expect(repairButton.props.disabled).toBeFalsy();
+    expect(findDialog(tree, kRepairConfirmTitle).props.visible).toBe(false);
+
+    repairButton.props.onClick();
+    expect(triggerWatchdogRepair).not.toHaveBeenCalled();
+    tree = renderGateway({});
+    const dialog = findDialog(tree, kRepairConfirmTitle);
+    expect(dialog.props.visible).toBe(true);
+    expect(dialog.props.title).toBe("Run Doctor repair?");
+    expect(dialog.props.message).toBe(kRepairConfirmMessage);
+    expect(dialog.props.confirmLabel).toBe("Repair");
+
+    dialog.props.onCancel();
+    tree = renderGateway({});
+    expect(findDialog(tree, kRepairConfirmTitle).props.visible).toBe(false);
+    expect(triggerWatchdogRepair).not.toHaveBeenCalled();
+
+    findButton(tree, "Repair").props.onClick();
+    tree = renderGateway({});
+    await findDialog(tree, kRepairConfirmTitle).props.onConfirm();
+    expect(triggerWatchdogRepair).toHaveBeenCalledTimes(1);
+    expect(triggerWatchdogRepair).toHaveBeenCalledWith({});
+    tree = renderGateway({});
+    expect(findDialog(tree, kRepairConfirmTitle).props.visible).toBe(false);
+    expect(gatewayShellStore.get().actions.refresh).toHaveBeenCalled();
+  });
+
+  it("a paused auto-repair projection confirms as 'Resume repair once' and sends force: true", async () => {
+    const state = makeServerState({
+      watchdog: { ...kHealthyWatchdog, autoRepairPaused: true },
+    });
+    const repair = state.actions.find((action) => action.id === "repair");
+    expect(repair.paused).toBe(true);
+    expect(repair.resolution).toBeNull();
+    publishShell({ statusState: state });
+    triggerWatchdogRepair.mockClear();
+    let tree = renderGateway({});
+    findButton(tree, "Repair").props.onClick();
+    tree = renderGateway({});
+    const dialog = findDialog(tree, kRepairConfirmTitle);
+    expect(dialog.props.visible).toBe(true);
+    expect(dialog.props.confirmLabel).toBe("Resume repair once");
+    await dialog.props.onConfirm();
+    expect(triggerWatchdogRepair).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("a repair refusal renders one line under the button and never replays", async () => {
+    publishShell({ statusState: makeServerState({}) });
+    triggerWatchdogRepair.mockClear();
+    triggerWatchdogRepair.mockRejectedValueOnce(
+      Object.assign(new Error("Another operation is in progress"), { notStarted: true, responseReceived: true }),
+    );
+    let tree = renderGateway({});
+    findButton(tree, "Repair").props.onClick();
+    tree = renderGateway({});
+    await findDialog(tree, kRepairConfirmTitle).props.onConfirm();
+    await flushMicrotasks();
+    tree = renderGateway({});
+    expect(treeText(tree)).toContain("Not started: Another operation is in progress");
+    expect(triggerWatchdogRepair).toHaveBeenCalledTimes(1);
+
+    triggerWatchdogRepair.mockRejectedValueOnce(new Error("network down"));
+    findButton(tree, "Repair").props.onClick();
+    tree = renderGateway({});
+    await findDialog(tree, kRepairConfirmTitle).props.onConfirm();
+    await flushMicrotasks();
+    tree = renderGateway({});
+    expect(treeText(tree)).toContain("Result unknown: the response was lost");
   });
 
   it("safe_mode (Channels paused) offers Restart next to Resume channels", () => {
@@ -436,31 +555,82 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(text).not.toContain("Webhook mappings changed");
   });
 
-  it("retains current state and both inspection controls during an operation", () => {
+  it("a running restart replaces the button row with the one-line status (attach rendering on a resumed operation)", () => {
     publishShell({
       statusState: makeServerState({}),
       restartOperation: {
         operationId: "op-1",
         startedAt: kNow - 5000,
         phase: "running",
+        resumed: true,
         steps: [
-          { name: "stopping", label: "Stopping gateway", status: "done" },
-          { name: "launching", label: "Starting gateway", status: "running" },
+          { name: "stopping", label: "Stopping gateway", status: "done", at: kNow - 5000 },
+          { name: "launching", label: "Starting gateway", status: "running", at: kNow - 2000 },
         ],
         error: null,
       },
     });
     const tree = renderGateway({});
     const text = treeText(tree);
-    expect(text).toContain("Restarting gateway");
-    expect(text).toContain("Stopping gateway");
-    expect(text).toContain("Starting gateway");
+    expect(text).toContain("Restarting: starting OpenClaw");
+    expect(text).not.toContain("Stopping gateway");
+    expect(findButton(tree, "Restart")).toBeUndefined();
+    expect(findButton(tree, "Repair")).toBeUndefined();
+    // Server-projected secondary actions survive alongside the line.
+    expect(findButton(tree, "Refresh")).toBeUndefined();
+    const live = collectNodes(tree).find((vnode) => vnode.props?.["aria-live"] === "polite" && String(vnode.props.class || "").includes("ac-restart-line"));
+    expect(live).toBeTruthy();
+  });
 
-    const restartButton = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Restart",
-    );
-    expect(restartButton).toBeTruthy();
-    expect(restartButton.props.disabled).toBeFalsy();
+  it("a failed restart renders the sentence with Try again (→ restart) and View logs (→ watchdog)", () => {
+    const restart = vi.fn();
+    const onOpenWatchdog = vi.fn();
+    publishShell({
+      statusState: makeServerState({}),
+      restartOperation: {
+        operationId: "op-1",
+        startedAt: kNow - 5000,
+        phase: "failed",
+        steps: [],
+        error: { message: "boom", code: "stop_failed", hint: null },
+      },
+    });
+    gatewayShellStore.publish({ actions: { ...gatewayShellStore.get().actions, restart } });
+    const tree = renderGateway({ onOpenWatchdog });
+    expect(treeText(tree)).toContain("Couldn't stop the old gateway, so your changes are not live yet.");
+    expect(findButton(tree, "Restart")).toBeUndefined();
+    expect(findButton(tree, "Repair")).toBeUndefined();
+    findButton(tree, "Try again").props.onClick();
+    expect(restart).toHaveBeenCalledTimes(1);
+    findButton(tree, "View logs").props.onClick();
+    expect(onOpenWatchdog).toHaveBeenCalledTimes(1);
+    expect(collectNodes(tree).find((vnode) => vnode.props?.role === "alert")).toBeTruthy();
+  });
+
+  it("View logs falls back to the Watchdog route when no handler is wired", () => {
+    publishShell({
+      statusState: makeServerState({}),
+      restartOperation: { operationId: "op-1", startedAt: kNow, phase: "failed", steps: [], error: { message: "boom", code: null } },
+    });
+    const previous = globalThis.window;
+    globalThis.window = { location: { hash: "" } };
+    try {
+      findButton(renderGateway({}), "View logs").props.onClick();
+      expect(globalThis.window.location.hash).toBe("/watchdog");
+    } finally {
+      globalThis.window = previous;
+    }
+  });
+
+  it("a policy refusal renders as an info line, not a failure", () => {
+    publishShell({
+      statusState: makeServerState({}),
+      restartNotice: { message: "Another operation is in progress" },
+    });
+    const tree = renderGateway({});
+    expect(treeText(tree)).toContain("Can't restart right now: Another operation is in progress");
+    expect(findButton(tree, "Try again")).toBeUndefined();
+    expect(findButton(tree, "Restart")).toBeTruthy();
   });
 
   it("freezes with an 'as of Xs ago' stamp when connectivity is lost", () => {
@@ -493,19 +663,41 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(treeText(tree)).not.toMatch(/as of/);
   });
 
-  it("pre-first-frame renders usable inspection controls without mutation", () => {
+  it("pre-first-frame renders the controls without a server projection (the server gate decides)", () => {
     // Store still at defaults: no status frame has arrived.
     const tree = renderGateway({ status: null });
     const text = treeText(tree);
     expect(text).toContain("Connecting to AlphaClaw…");
-    const restartButton = findAllByType(tree, ActionButton).find(
-      (vnode) => vnode.props.idleLabel === "Restart",
-    );
-    expect(restartButton.props.disabled).toBeFalsy();
-    restartButton.props.onClick();
-    expect(treeText(renderGateway({}))).toContain("Status is not current");
+    expect(findButton(tree, "Restart")).toBeTruthy();
+    expect(findButton(tree, "Repair")).toBeTruthy();
     const dotSpan = findDotSpan(tree);
     expect(String(dotSpan.props.class || "")).toContain("ac-gateway-dot--gray");
+  });
+
+  it("stale or offline status disables both controls behind one guard line", () => {
+    for (const shell of [
+      { connectivityMode: "online", statusFreshness: { mode: "stale", observedAtMs: Date.now() - 12000 } },
+      { connectivityMode: "reconnecting", lastFrameAtMs: Date.now() - 12000 },
+    ]) {
+      harness.reset();
+      publishShell({ statusState: makeServerState({}), ...shell });
+      const tree = renderGateway({});
+      expect(treeText(tree)).toContain(kStaleRestartGuardText);
+      const restartButton = findButton(tree, "Restart");
+      expect(restartButton.props.disabled).toBe(true);
+      expect(restartButton.props.title).toBe(kStaleRestartGuardText);
+      const repairButton = findButton(tree, "Repair");
+      expect(repairButton.props.disabled).toBe(true);
+      expect(repairButton.props.title).toBe(kStaleRestartGuardText);
+    }
+  });
+
+  it("setupRequired disables both controls without the stale guard copy", () => {
+    publishShell({ statusState: makeServerState({}) });
+    const tree = renderGateway({ setupRequired: true });
+    expect(findButton(tree, "Restart").props.disabled).toBe(true);
+    expect(findButton(tree, "Repair").props.disabled).toBe(true);
+    expect(treeText(tree)).not.toContain(kStaleRestartGuardText);
   });
 
   it("version skew (no status.state) renders the legacy presentation", () => {
@@ -518,9 +710,9 @@ describe("frontend/gateway card (server-state matrix)", () => {
     const text = treeText(tree);
     expect(text).toContain("OpenClaw Gateway");
     expect(text).toContain("running");
-    expect(text).toContain("Repair");
-    expect(text).toContain("Restart");
-    expect(text).toContain("Refresh status");
+    expect(findButton(tree, "Repair")).toBeTruthy();
+    expect(findButton(tree, "Restart")).toBeTruthy();
+    expect(text).toContain("Refresh status to inspect current recovery options.");
   });
 
   it("dotClassFor never renders undefined for malformed dots", () => {
@@ -546,14 +738,16 @@ describe("frontend/gateway card (server-state matrix)", () => {
     );
     expect(button).toBeTruthy();
     expect(button.props.tone).toBe("danger");
-    let dialog = findAllByType(tree, ConfirmDialog)[0];
+    const cardDialog = (root) =>
+      findAllByType(root, ConfirmDialog).find((vnode) => vnode.props.title !== kRepairConfirmTitle);
+    let dialog = cardDialog(tree);
     expect(dialog.props.visible).toBe(false);
 
     // needsConfirm: the click opens the dialog and dispatches NOTHING yet.
     button.props.onClick();
     expect(resumeChannels).not.toHaveBeenCalled();
     tree = renderGateway({});
-    dialog = findAllByType(tree, ConfirmDialog)[0];
+    dialog = cardDialog(tree);
     expect(dialog.props.visible).toBe(true);
     expect(dialog.props.title).toBe("Resume channels?");
     expect(dialog.props.message).toBe(confirmAction.description);
@@ -562,18 +756,18 @@ describe("frontend/gateway card (server-state matrix)", () => {
     dialog.props.onConfirm();
     expect(resumeChannels).toHaveBeenCalledTimes(1);
     tree = renderGateway({});
-    expect(findAllByType(tree, ConfirmDialog)[0].props.visible).toBe(false);
+    expect(cardDialog(tree).props.visible).toBe(false);
 
     // Canceling a fresh confirm never dispatches.
     findAllByType(tree, ActionButton)
       .find((vnode) => vnode.props.idleLabel === "Resume channels")
       .props.onClick();
     tree = renderGateway({});
-    dialog = findAllByType(tree, ConfirmDialog)[0];
+    dialog = cardDialog(tree);
     expect(dialog.props.visible).toBe(true);
     dialog.props.onCancel();
     tree = renderGateway({});
-    expect(findAllByType(tree, ConfirmDialog)[0].props.visible).toBe(false);
+    expect(cardDialog(tree).props.visible).toBe(false);
     expect(resumeChannels).toHaveBeenCalledTimes(1);
   });
 

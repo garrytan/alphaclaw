@@ -268,84 +268,88 @@ Conflict UX: Repair and Restart remain usable inspection controls while progress
 
 ---
 
-## 8. Restart sequence — current vs target
+## 8. Restart sequence (v0.10.0: one stop ladder, one launch, one proof)
 
-### Current (as-implemented)
+> **History.** Until v0.9.99 the cold restart was `openclaw gateway stop` (15 s
+> port wait) → `openclaw gateway --force` → TCP "ready" → a pid-diff incumbent
+> verdict (`incumbent_gateway_still_running`). Against OpenClaw 2026.9.8 on an
+> AlphaClaw box both CLI verbs are dead (`stop --force` is refused under
+> `OPENCLAW_SUPERVISOR_MODE=external`; `gateway --force` exits 78 "another
+> gateway owns this state directory" while the old gateway is still draining,
+> which under the 330 s stop policy can be minutes), and the managed child was
+> never the gateway (it is the compile-cache launcher; the worker is its
+> child), so a SIGKILL of the child handle orphaned the worker on the port. The
+> ladder below replaced all of it (plan + two independent reviews, 2026-10-07).
 
-Current code: `POST /api/gateway/restart` (`system.js:964-980`) → `restartGateway` → `runGatewayColdStart` (`gateway.js:364-368`). Pre-M1 every step was `execSync` (event loop frozen up to ~270s); M1.4 made them async but the ordering and silent-failure semantics are unchanged.
-
-```mermaid
-sequenceDiagram
-    participant UI
-    participant Route as POST /api/gateway/restart
-    participant GW as gateway.js
-    participant OC as openclaw CLI
-    UI->>Route: POST (blocking)
-    Route->>Route: markRestartInProgress
-    Route->>GW: restartGateway()
-    GW->>OC: gateway stop (15s cap) — gateway now DOWN
-    GW->>OC: plugins list --json preflight (up to 120s + retry) while gateway is DOWN
-    GW->>OC: spawn gateway --force (detached supervisor)
-    GW->>GW: TCP poll every 500ms, budget 120s
-    alt ready
-        GW-->>Route: resolves — gatewayChild = null (blind spot, gateway.js:348)
-    else not ready
-        GW->>OC: SIGTERM supervisor, gateway stop
-        GW-->>Route: resolves NORMALLY — silent success-on-failure (gateway.js:353-362)
-    end
-    Route->>Route: clearRequired + markRestartComplete BEFORE verifying (system.js:971-973)
-    Route-->>UI: ok true — UI toasts "restarted" over a possibly dead gateway
-```
-
-### Target (M3)
-
-Prepare-first ordering (M3.1) + streamed operation (M3.2) + honest outcomes (M3.3). HTTP compat: blocking semantics remain the default (`POST /api/gateway/restart` without `?async=1` still awaits the restart; the planned async-by-default flip has not shipped and is tracked in TODOS.md, "Remove legacy status fields"); `?async=1` → `202 { operationId }` streamed over the existing `/api/operations/:id/events` (replay on reconnect), which is what the Setup UI calls (`restartGatewayAsync` in `lib/public/js/lib/api.js`). Internal `restartGateway()` promise semantics unchanged.
+`POST /api/gateway/restart?async=1` → `202 { operationId }` streamed over
+`/api/operations/:id/events` (replay on reconnect); the blocking form still
+awaits. Internal `restartGateway()` promise contract unchanged: a RESOLVED value
+means a new gateway is up and ready; every other outcome THROWS.
 
 ```mermaid
-sequenceDiagram
-    participant UI
-    participant Route as POST /api/gateway/restart
-    participant Op as operation record + SSE
-    participant GW as gateway
-    UI->>Route: POST ?async=1
-    Route->>Op: acquire lifecycle lease, persist record
-    Route-->>UI: 202 + operationId
-    UI->>Op: subscribe /api/operations/:id/events (replay on reconnect)
-    Op->>GW: preparing_plugins (gateway STILL SERVING — skipped entirely when desired-state hash unchanged)
-    Op->>GW: stopping
-    Op->>GW: launching
-    Op->>GW: waiting_ready (elapsed / budget streamed)
-    alt ready
-        Op-->>UI: ready — clearRequired only now, "Gateway is running — ready in Xs"
-    else failure
-        Op-->>UI: failed with evidenceRef + hint — persistent remediation region, no success toast
-    end
+flowchart TD
+  P[restart requested<br/>manual / env / channels / team / watchdog replace / memory mitigation] --> PREP["prepare ONCE, gateway still serving:<br/>prelaunch hook + plugin preflight"]
+  PREP --> ID["resolveGatewayIdentity<br/>managed tree → serving tree (/proc) → port listener<br/>pids + start ticks + listener inode + pgid"]
+  ID -->|nothing on the port| L
+  ID -->|foreign / ambiguous listener| REF["GatewayStopError stop_refused<br/>(nothing signalled)"]
+  ID --> MARK[mark the exit EXPECTED]
+  MARK --> ASK["1. ask: openclaw gateway restart --wait 30000ms<br/>admission closes, turn compacts, drain ≤ 30 s, exit 0 + handoff row<br/>(skipped when OPENCLAW_NO_RESPAWN is set or the deadline cannot fit)"]
+  ASK -->|every pid gone| GONE
+  ASK -->|alive / CLI refused| TERM["2. SIGTERM the process group (10 s)<br/>start ticks re-read before every signal"]
+  TERM -->|gone| GONE
+  TERM -->|alive| KILL["3. SIGKILL the group (5 s)"]
+  KILL -->|gone| GONE["old gateway gone: every resolved pid exited"]
+  KILL -->|alive| SF["GatewayStopError stop_failed"]
+  GONE -->|stranger now listens| LF1["launch_failed"]
+  GONE --> L["requestGatewayLaunch({ prepared, deferAutotuneStamp })<br/>spawn `openclaw gateway run` detached, generation++"]
+  L --> RZ{"/readyz 200 (gateway-readiness.js)<br/>inside kGatewayRestartReadyTimeoutMs?<br/>starting / draining / refused keep waiting;<br/>the state-ownership wait line → step lock_wait"}
+  RZ -->|child exited| LF2["launch_failed (stderr tail)"]
+  RZ -->|budget| RT["ready_timeout (child left to the watchdog's readiness ladder)"]
+  RZ -->|ready, listener ∈ new child's tree| OK["stamp autotune, resolve worker pid,<br/>notifyGatewayLaunch, { ok, durationMs, downtimeMs, how }"]
+  RZ -->|ready from a listener outside the tree| LF3["launch_failed"]
 ```
 
-Step labels are human ("Checking plugins", "Stopping gateway", "Starting gateway", "Waiting for health check"); the skipped `preparing_plugins` step is not rendered. Concurrent restart POSTs return the existing operationId; restart during a channel apply → 409.
+Streamed steps (`{ name, label, status, at, budgetMs?, detail? }`):
+`preparing_plugins` (`running | done | skipped | warning`), `stopping`
+(`running` with `detail.phase ∈ asking | terminating | forcing` and
+`graceSeconds`; `done` with `detail.how ∈ graceful | sigterm | sigkill | none`),
+`launching`, `waiting_ready` (`budgetMs`; `detail.phase: lock_wait`), `ready`.
+The failure event is `{ code, error, hint, budgetMs?, how? }` with `code ∈
+stop_refused | stop_failed | launch_failed | ready_timeout | aborted |
+restart_failed` and `error` the user sentence (`routes/system.js`
+`kRestartFailureCopy`); the technical summary + redacted tail stay on the
+record (`errorSummary`, `evidence`) behind View logs. The record persists
+`code`, `hint`, `how`, `budgetMs` and `phaseAt{step: epochMs}` so a reload
+renders the same line and timer. `durationMs` = prepare → ready;
+`downtimeMs` = stop initiated → ready.
 
----
+Interruption policy is one policy for every trigger: ask → term → kill. The
+automated triggers (`replace`, memory mitigation) already target an unhealthy
+or about-to-OOM gateway. Shutdown (`stopGatewayForShutdown`) runs the ladder
+without the ask inside a 6 s slice of the process deadline;
+`killManagedGatewayChildNow` SIGKILLs the managed group synchronously for the
+second-signal path.
 
 ## 9. Supervision modes — detection documentation
 
-> **2026-09-02 update (v0.9.70, issue #56).** The left column now also covers the
-> post-cold-restart case. `runGatewayRestartCmd` spawns OpenClaw's `openclaw.mjs`
-> compile-cache launcher (a signal-forwarding passthrough that exits with the
-> gateway's code and never respawns); once the gateway is proven ready and the
-> launcher is still alive one second later, it is ADOPTED as the managed child
-> (`attachManagedGatewayExitClassification`, `supervisor: true`, gateway pid
-> resolved from /proc as `workerPid` for the restart-handoff consume). Two shape
-> differences from a `gateway run` child: the graceful stop path
-> (`stopGatewayChildAndWait`) SIGTERMs the launcher and skips its SIGKILL
-> escalation (its own backstop re-SIGTERMs at 1s, SIGKILLs the gateway at 2s,
-> exits 1 at 3s; the shutdown last-ditch `killGatewayNow` reap goes through
-> `killManagedGatewayChildNow`, which returns false for an adopted launcher for
-> the same reason), and an EXPECTED exit with code 1 is booked as a
-> managed stop.
-> An expected late exit of a pid that is no longer `state.gatewayPid` is recorded
-> `stalePredecessor: true` and never rewrites the live lifecycle. The right column
-> applies only when the launcher has already exited by ready (daemonizing builds).
-> Known gap: behind the launcher a kernel-OOM SIGKILL of the gateway surfaces as
+> **2026-10-07 update (v0.10.0).** The supervisor-adoption shape is gone with
+> `gateway --force`: every managed child is a `gateway run` spawn, and under
+> AlphaClaw's `NODE_COMPILE_CACHE` that child is OpenClaw's compile-cache
+> launcher with the gateway worker as ITS child (verified against 2026.9.8:
+> `child pid 118149; LISTENER pid = 118168`). `requestGatewayLaunch` resolves
+> the worker from `/proc` once the gateway listens (the listener inside the
+> child's tree, `gateway-identity.js`) and carries it as `servingPid` /
+> `workerPid`; the launcher relays the worker's exit code, so an EXPECTED exit
+> with code 1 (the worker hit its own drain deadline) stays a managed stop
+> (`supervisor: true` in the exit payload means "launcher shape", not
+> "adopted"). The pinned launcher's own SIGKILL backstop for a foreground
+> `gateway run` is ~328 s (`gateway-shutdown-budget.mjs`), not the 2 s older
+> notes describe — which is why the stop ladder signals the process GROUP
+> (`detached: true` spawn) and never the child handle alone. An expected late
+> exit of a pid that is no longer `state.gatewayPid` is recorded
+> `stalePredecessor: true` and never rewrites the live lifecycle. The right
+> column applies to a gateway AlphaClaw neither spawned nor could identify.
+> Known gap: behind the launcher a kernel-OOM SIGKILL of the worker surfaces as
 > launcher exit 1, so the 137/SIGKILL OOM classifier does not fire (TODOS.md).
 
 | signal | managed child (AlphaClaw spawned it, incl. an adopted cold-restart supervisor) | detached mode (supervisor already exited by ready — daemonizing builds; the post-manual-restart default before v0.9.70) |
@@ -370,7 +374,7 @@ One relaunch primitive, `runVerifiedRelaunch({ source, correlationId, hold, inte
 | launch outcome (`gateway.js` `kGatewayLaunchOutcomes`) | `incumbent_present` (port answers, no live handle — identity returned, NO launch handler fired; the watchdog decides), `child_retained` (a live managed child already exists), `launch_requested` (a NEW child was spawned, `generation` stamped, not yet proven serving), `launch_aborted` (prelaunch hook refused, shutdown, or `shouldAbort()` true immediately before spawn → `detail: "lease_expired"`), `launch_failed` (preflight/spawn threw; the error is returned, never thrown) |
 | intent (watchdog) | `relaunch_if_absent` (crash restart, config-change retry, medic, probe death): a healthy incumbent whose root is not the pid that just exited is adopted; an unhealthy incumbent is `incumbent_unhealthy` and the degraded ladder owns escalation. `replace` (repair after sustained degradation): the incumbent IS the problem — after Doctor it is **re-probed** first (Doctor may have run for minutes; a gateway that answers healthy now is retained (`child_retained`) or adopted (`incumbent_adopted`) with `recoveredBeforeReplace: true`, and a manual "Run repair" on a healthy gateway is Doctor only), and an incumbent that is still unhealthy is recycled through the verified cold-restart path (`restartGatewayColdStart` → `runGatewayColdStart`, #59 `assessRestartIncumbent`) under the held lock, bracketed by `onExpectedRestart`/`onExpectedRestartSettled`. "Healthy" for that re-probe means every probe of the run answered (a flapping incumbent is replaced, not retained), and the draining corpse of the process that just exited never counts. A relaunch that fails or aborts under `replace` counts as a repair attempt and (automatic sources) sets `awaitingAutoRepairRecovery`, so a wedged incumbent that refuses `gateway stop` is not re-stopped on every failing tick; the ladder lifts that latch itself (`repair/<source>/ok {latchLifted: true, reason: nothing_left_to_replace}`) once the pid it could not stop is gone (pid evidence only — a TCP "port closed" would also hold for a launch that never happened and would turn the lift into a repair per tick), because no recovery can arrive for a dead port. An EXTERNAL incumbent that holds the port or state directory but is not green yet (ownership conflict, `incumbent_unhealthy` with an identified root that is not the corpse) gets a cold-boot grace of `kGatewayRestartReadyTimeoutMs` (`incumbentGraceUntil` in status; one `repair/<source>/skipped {incumbent_startup_grace}` row; a non-forced `runRepair` gate, so crash-loop repairs honour it) before the ladder may replace it — upstream takes the lock before `/health` is green; the grace ends early when the holder pid is gone. `onExpectedRestart` (route restart, memory mitigation, the repair's own cold restart — opened before its pending is armed) supersedes any open pending replacement (`replacement_superseded {supersededBy: expected_restart}`) |
 | verdict (`kRestartVerdicts`, `getStatus().lastRepairVerdict`) | `replacement_ready`, `replacement_pending`, `replacement_failed`, `replacement_superseded`, `incumbent_adopted`, `incumbent_unhealthy`, `child_retained`, `launch_aborted`, `launch_failed`, `lease_expired` |
-| ledger rows | `restart/<source>/requested {pid, generation, intent, stateDb?: {userVersion, agentUserVersions[]}}` on spawn or cold restart (`stateDb` = the DBs' `PRAGMA user_version` read ONCE at request time through the injected `readStateDbVersions`, #76 A2 — absent when no reader is wired or it failed); `restart/<source>/skipped {reason: incumbent_adopted \| child_retained \| lease_expired \| incumbent_unhealthy}`; `restart/<source>/failed {reason: replacement_not_ready \| replacement_exited \| replacement_superseded \| incumbent_gateway_still_running}` (plus today's `noChildDetails()` / `{error}` shapes); **`restart/<source>/ok {pid, generation, verified: true}` is written only by the deferred verifier** — no caller logs `ok` because a child handle came back. Crash rows (#76 A3): `crash` / `crash_loop` / `config_error` carry `cause` + `fingerprint` from the injected stderr classifier (`suspectedCause` while the cause has a corroborator but no independent fact has agreed yet); ONE follow-up `crash_cause/crash_classifier/{failed\|info} {cause, fingerprint, corroborated, by, suspectedCause}` lands after the async facts read; a latched mismatch writes ONE `version_mismatch/<boot\|crash\|runtime>/failed {expected, running, source}` (A4; `runtime` = the installed tree is not the pin). `gateway-state.json` persists `cause` and `versionMismatch` beside the headline. **Stage 3 (#76 B1):** `repair/structural/{ok\|failed\|skipped} {cause, fingerprint, corroborated, by, plan[{step, outcome}], paused, verdict, runId}` — ONE row per structural repair run (rungs `rename_exec_approvals` → `relaunch` for `legacy_exec_approvals`; every other corroborated version-family cause is plan step `ladder → no_remedy` and pauses at once, because the pin is the only build; `skipped {reason: auto_repair_paused \| operation_in_progress \| lifecycle_operation_in_progress \| unavailable}` when it stood down; the relaunch it drives is `restart/repair/structural/…`); `auto_repair_paused/<source>/failed {cause, fingerprint, reason: structural_repair_failed \| replacement_exited_twice, attempts, installedVersion, lastPlan, plan}` when the pause latches (a `kCriticalEventTypes` member — the incident escalates) and `repair/<source>/ok {pauseCleared: installed_version_changed \| healthy_acceptance \| operator_resume}` when it clears; `repair/<source>/skipped {reason: auto_repair_paused}` / `restart/<source>/skipped {reason: auto_repair_paused}` while paused; `repair/<source>/skipped {reason: repair_attempts_exhausted, attempts, limit}` past `kWatchdogMaxRepairAttempts` (automatic sources only); The pause is persisted to `<managedDir>/auto-repair-pause.json` (`{ at, cause, fingerprint, installedVersion, attempts, lastPlan: { rung, outcome }, reason }`, `writeFileAtomic`) and re-armed by `createWatchdog` for the same `installedVersion`. |
+| ledger rows | `restart/<source>/requested {pid, generation, intent, stateDb?: {userVersion, agentUserVersions[]}}` on spawn or cold restart (`stateDb` = the DBs' `PRAGMA user_version` read ONCE at request time through the injected `readStateDbVersions`, #76 A2 — absent when no reader is wired or it failed); `restart/<source>/skipped {reason: incumbent_adopted \| child_retained \| lease_expired \| incumbent_unhealthy}`; `restart/<source>/failed {reason: replacement_not_ready \| replacement_exited \| replacement_superseded \| stop_refused \| stop_failed \| launch_failed \| ready_timeout}` (plus today's `noChildDetails()` / `{error}` shapes); **`restart/<source>/ok {pid, generation, verified: true}` is written only by the deferred verifier** — no caller logs `ok` because a child handle came back. Crash rows (#76 A3): `crash` / `crash_loop` / `config_error` carry `cause` + `fingerprint` from the injected stderr classifier (`suspectedCause` while the cause has a corroborator but no independent fact has agreed yet); ONE follow-up `crash_cause/crash_classifier/{failed\|info} {cause, fingerprint, corroborated, by, suspectedCause}` lands after the async facts read; a latched mismatch writes ONE `version_mismatch/<boot\|crash\|runtime>/failed {expected, running, source}` (A4; `runtime` = the installed tree is not the pin). `gateway-state.json` persists `cause` and `versionMismatch` beside the headline. **Stage 3 (#76 B1):** `repair/structural/{ok\|failed\|skipped} {cause, fingerprint, corroborated, by, plan[{step, outcome}], paused, verdict, runId}` — ONE row per structural repair run (rungs `rename_exec_approvals` → `relaunch` for `legacy_exec_approvals`; every other corroborated version-family cause is plan step `ladder → no_remedy` and pauses at once, because the pin is the only build; `skipped {reason: auto_repair_paused \| operation_in_progress \| lifecycle_operation_in_progress \| unavailable}` when it stood down; the relaunch it drives is `restart/repair/structural/…`); `auto_repair_paused/<source>/failed {cause, fingerprint, reason: structural_repair_failed \| replacement_exited_twice, attempts, installedVersion, lastPlan, plan}` when the pause latches (a `kCriticalEventTypes` member — the incident escalates) and `repair/<source>/ok {pauseCleared: installed_version_changed \| healthy_acceptance \| operator_resume}` when it clears; `repair/<source>/skipped {reason: auto_repair_paused}` / `restart/<source>/skipped {reason: auto_repair_paused}` while paused; `repair/<source>/skipped {reason: repair_attempts_exhausted, attempts, limit}` past `kWatchdogMaxRepairAttempts` (automatic sources only); The pause is persisted to `<managedDir>/auto-repair-pause.json` (`{ at, cause, fingerprint, installedVersion, attempts, lastPlan: { rung, outcome }, reason }`, `writeFileAtomic`) and re-armed by `createWatchdog` for the same `installedVersion`. |
 
 Status scalars added for the UI (`watchdog-status-fields.test.js` pins the `null` defaults): `versionMismatch`, `autoRepairPaused`, `lastExit.cause`; the reducer's `down` reason reads `kAutoRepairPauseCopy` / `kRepairAttemptsExhaustedCopy` (§4 row 5).
 

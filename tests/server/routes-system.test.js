@@ -11,7 +11,7 @@ const { registerSystemRoutes } = require("../../lib/server/routes/system");
 // restart, caught by runRestartOperation by instanceof (same module instance).
 const {
   GatewayRestartError,
-  GatewayIncumbentRestartError,
+  GatewayStopError,
 } = require("../../lib/server/gateway");
 
 // readAlphaclawConfig serves identical re-reads from a module-level
@@ -2972,7 +2972,10 @@ describe("server/routes/system", () => {
 
       const res = await request(app).post("/api/gateway/restart");
       expect(res.status).toBe(500);
-      expect(res.body.error).toContain("did not become ready");
+      // The sync body carries the user sentence in `error` and the technical
+      // summary in `detail` (same envelope as the SSE failure event).
+      expect(res.body.error).toBe("Restart failed.");
+      expect(res.body.detail).toContain("did not become ready");
       expect(res.body.evidence).toContain("boom with *** inside");
       expect(res.body.evidence).not.toContain("super-secret-token");
       expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
@@ -3054,7 +3057,7 @@ describe("server/routes/system", () => {
     const failRes = await request(app).post("/api/gateway/restart");
     expect(failRes.status).toBe(500);
     expect(failRes.body).toEqual(
-      expect.objectContaining({ ok: false, error: "restart blew up" }),
+      expect.objectContaining({ ok: false, code: "restart_failed", error: "Restart failed.", detail: "restart blew up" }),
     );
     expect(deps.restartRequiredState.markRestartInProgress).toHaveBeenCalled();
     expect(deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
@@ -3123,7 +3126,10 @@ describe("server/routes/system", () => {
       ok: false,
       attached: true,
       operationId: "op-attach-fail",
-      error: "gateway never came back",
+      code: "restart_failed",
+      error: "Restart failed.",
+      hint: "Try again, run Repair, or open View logs.",
+      detail: "gateway never came back",
     });
     expect(deps.restartGateway).toHaveBeenCalledTimes(1);
   });
@@ -3281,6 +3287,7 @@ describe("server/routes/system", () => {
           operationId: "op-bad",
           trigger: "manual",
           error: "bind failed for token ***",
+          code: "restart_failed",
         },
       });
     } finally {
@@ -3292,12 +3299,9 @@ describe("server/routes/system", () => {
     }
   });
 
-  it("an incumbent restart verdict is recorded as a failure with reason incumbent_gateway_still_running: banner kept, step warnings, ledger events, important notification", async () => {
+  const failureDeps = ({ operationId, error, notify = vi.fn(async () => ({ ok: true })) } = {}) => {
     const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
-      operationId: "op-inc",
-      reasonsSnapshot: ["env_vars_changed"],
-    }));
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId, reasonsSnapshot: ["env_vars_changed"] }));
     deps.restartRequiredState.completeRestart = vi.fn();
     deps.watchdog = {
       getStatus: vi.fn(() => ({})),
@@ -3305,181 +3309,157 @@ describe("server/routes/system", () => {
       onExpectedRestartSettled: vi.fn(),
       recordOperationEvent: vi.fn(),
     };
-    deps.operationEvents = {
-      createOperation: vi.fn(),
-      publish: vi.fn(),
-      complete: vi.fn(),
-      fail: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => ({ ok: true }));
-    // gateway.js's cold-start outcome for a refused stop + surviving incumbent:
-    // THROWN as GatewayIncumbentRestartError (P1 review fix — it used to be a
-    // returned { ok:false, incumbent:true } that only this route understood).
-    deps.restartGateway = vi.fn(async ({ onStep }) => {
-      onStep({
-        step: "stopping",
-        status: "warning",
-        detail: "openclaw gateway stop was refused by the CLI (non-interactive guard) and the old gateway still holds the port",
-      });
-      throw new GatewayIncumbentRestartError(
-        "the previous gateway is still running: the gateway port never released after stop (the OpenClaw CLI refused the non-interactive stop); 1 pre-restart gateway process(es) still alive (pid 777) and no new gateway process observed",
-        {
-          wasRunningBefore: true,
-          stopConfirmed: false,
-          cliRefused: true,
-          cliExitCode: 1,
-          cliForced: false,
-          managedChildPid: 4242,
-          preStopPids: [777],
-          postReadyPids: [777],
-          newPids: [],
-          survivingPids: [777],
-          supervisorPid: 5151,
-          stderrTail: ["gateway: another OpenClaw process owns state-lifecycle"],
-          stdoutTail: [],
-          supervisorExit: { code: 1, signal: null },
-        },
-      );
+    deps.operationEvents = { createOperation: vi.fn(), publish: vi.fn(), complete: vi.fn(), fail: vi.fn() };
+    deps.notify = notify;
+    deps.restartGateway = vi.fn(async ({ onStep } = {}) => {
+      onStep?.({ step: "stopping", status: "running", detail: { phase: "forcing", graceSeconds: 30 } });
+      throw typeof error === "function" ? error() : error;
+    });
+    return deps;
+  };
+
+  it("a stop the ladder could not complete (GatewayStopError stop_failed) is a failed restart: banner kept, one user sentence + hint in the stream, the record and the sync body, ledger row with the code, one important notification", async () => {
+    const deps = failureDeps({
+      operationId: "op-stop",
+      error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 777 still alive)", {
+        pids: [776, 777],
+        survivors: [777],
+        stderrTail: ["gateway: another OpenClaw process owns state-lifecycle"],
+      }),
     });
     const app = createApp(deps);
 
     const res = await request(app).post("/api/gateway/restart");
 
     // Sync callers see the failure, never a 200 over a gateway that did not
-    // restart.
+    // restart — with the user sentence, the class, and the technical detail.
     expect(res.status).toBe(500);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.error).toContain("Gateway restart did not take effect");
-    expect(res.body.evidence).toContain("incumbent evidence:");
-    expect(res.body.evidence).toContain('"survivingPids":[777]');
-    expect(res.body.evidence).toContain("owns state-lifecycle");
-
-    // The record fails (reasons snapshot is NOT cleared by a failed record),
-    // with the verdict persisted in the evidence tail.
-    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith({
-      operationId: "op-inc",
+    expect(res.body).toMatchObject({
       ok: false,
-      errorSummary: expect.stringContaining("the previous gateway is still running"),
-      evidenceTail: expect.stringContaining('"cliRefused":true'),
+      code: "stop_failed",
+      error: "Couldn't stop the old gateway, so your changes are not live yet.",
+      hint: expect.stringContaining("Try again"),
+      detail: expect.stringContaining("pid 777 still alive"),
+    });
+    expect(res.body.evidence).toContain("owns state-lifecycle");
+    // The record fails with the class + hint (a failed record keeps the
+    // reasons snapshot: the banner stays up).
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith({
+      operationId: "op-stop",
+      ok: false,
+      errorSummary: expect.stringContaining("did not exit after SIGKILL"),
+      code: "stop_failed",
+      hint: expect.stringContaining("Try again"),
+      how: null,
+      budgetMs: null,
+      evidenceTail: expect.stringContaining("owns state-lifecycle"),
     });
     expect(deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
-    // Step stream: the gateway's stopping warning rides through with its
-    // detail, and the terminal "ready" step is a warning, not done.
-    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-inc", {
+    // Step stream: structured details ride through untouched, with the
+    // server clock on each step.
+    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-stop", {
       event: "step",
       data: expect.objectContaining({
         name: "stopping",
         label: "Stopping gateway",
-        status: "warning",
-        detail: expect.stringContaining("refused by the CLI"),
-      }),
-    });
-    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-inc", {
-      event: "step",
-      data: expect.objectContaining({
-        name: "ready",
-        label: "Ready",
-        status: "warning",
-        detail: expect.stringContaining("the previous gateway is still running"),
+        status: "running",
+        at: expect.any(Number),
+        detail: { phase: "forcing", graceSeconds: 30 },
       }),
     });
     expect(deps.operationEvents.complete).not.toHaveBeenCalled();
     expect(deps.operationEvents.fail).toHaveBeenCalledWith(
-      "op-inc",
+      "op-stop",
       expect.objectContaining({
-        code: "restart_incumbent",
-        reason: "incumbent_gateway_still_running",
-        hint: expect.stringContaining("still running"),
+        message: "Couldn't stop the old gateway, so your changes are not live yet.",
+        code: "stop_failed",
+        hint: expect.stringContaining("Try again"),
       }),
     );
-    // Ledger: the failed gateway_restart carries the reason; restart_incumbent
-    // carries the pid/port evidence (tails excluded).
     expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
       kind: "gateway_restart",
       status: "failed",
-      details: expect.objectContaining({
-        operationId: "op-inc",
-        trigger: "manual",
-        reason: "incumbent_gateway_still_running",
-      }),
-    });
-    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
-      kind: "restart_incumbent",
-      status: "failed",
-      details: {
-        operationId: "op-inc",
-        trigger: "manual",
-        reason: "incumbent_gateway_still_running",
-        evidence: {
-          wasRunningBefore: true,
-          stopConfirmed: false,
-          cliRefused: true,
-          cliExitCode: 1,
-          cliForced: false,
-          managedChildPid: 4242,
-          preStopPids: [777],
-          postReadyPids: [777],
-          newPids: [],
-          survivingPids: [777],
-          supervisorPid: 5151,
-        },
-      },
+      details: expect.objectContaining({ operationId: "op-stop", trigger: "manual", code: "stop_failed" }),
     });
     expect(deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ kind: "gateway_restart", status: "ok" }),
     );
-    // Important-class notification: house format, reason in backticks, the
-    // outbox id keyed by operation, and NO verbose tag.
+    // Important-class notification: house format, the same sentence, the
+    // outbox id keyed by operation, NO verbose tag.
     expect(deps.notify).toHaveBeenCalledTimes(1);
     const [message, opts] = deps.notify.mock.calls[0];
     expect(message.split("\n")[0]).toBe("🐺 *AlphaClaw Watchdog*");
-    expect(message).toContain(
-      "🔴 Gateway restart did not take effect - [View logs](https://setup.example.com/#/watchdog)",
-    );
-    expect(message).toContain("Reason: `incumbent_gateway_still_running`");
-    expect(opts).toEqual({
-      eventType: "restart_incumbent",
-      id: "restart-incumbent-op-inc",
-      operationId: "op-inc",
-    });
+    expect(message).toContain("🔴 Gateway restart failed - [View logs](https://setup.example.com/#/watchdog)");
+    expect(message).toContain("Couldn't stop the old gateway, so your changes are not live yet.");
+    expect(message).toContain("the restart-required banner stays up");
+    expect(opts).toEqual({ eventType: "restart_failed", id: "restart-failed-op-stop", operationId: "op-stop" });
     expect(opts.verbose).toBeUndefined();
     expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
   });
 
-  it("a notification failure on the incumbent path is logged and never masks the restart outcome", async () => {
-    const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
-      operationId: "op-inc-2",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => {
-      throw new Error("telegram down");
+  it("stop_refused (nothing was signalled) renders its own sentence and hint", async () => {
+    const deps = failureDeps({
+      operationId: "op-refused",
+      error: new GatewayStopError("stop_refused", "Port 18789 is held by a process that is not the gateway (pid 4242)", { listeners: [4242] }),
     });
-    deps.restartGateway = vi.fn(async () => {
-      throw new GatewayIncumbentRestartError(
-        "the previous gateway is still running: the gateway port never released after stop",
-        { wasRunningBefore: true, stopConfirmed: false },
-      );
+    const res = await request(createApp(deps)).post("/api/gateway/restart");
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: "stop_refused",
+      error: "Couldn't safely identify the running gateway, so nothing was stopped.",
+      hint: expect.stringContaining("View logs"),
+    });
+    expect(deps.operationEvents.fail).toHaveBeenCalledWith("op-refused", expect.objectContaining({ code: "stop_refused" }));
+  });
+
+  it("launch_failed appends the last error-shaped gateway line to the user sentence; ready_timeout carries budgetMs; aborted sends no notification", async () => {
+    const launch = failureDeps({
+      operationId: "op-launch",
+      error: new GatewayRestartError("OpenClaw exited before it was ready (code 78)", {
+        code: "launch_failed",
+        exitCode: 78,
+        stderrTail: ["Another gateway (pid 9) already owns this state directory; refusing to run automatic startup migrations", "Error: config invalid: gateway.port must be a number"],
+      }),
+    });
+    const launchRes = await request(createApp(launch)).post("/api/gateway/restart");
+    expect(launchRes.status).toBe(500);
+    expect(launchRes.body.code).toBe("launch_failed");
+    expect(launchRes.body.error).toMatch(/^The old gateway stopped, but OpenClaw didn't start\. .*config invalid/);
+    expect(launch.notify).toHaveBeenCalledTimes(1);
+
+    const timeout = failureDeps({
+      operationId: "op-timeout",
+      error: new GatewayRestartError("OpenClaw did not become ready within 300s", { code: "ready_timeout", budgetMs: 300000, stderrTail: [] }),
+    });
+    const timeoutRes = await request(createApp(timeout)).post("/api/gateway/restart");
+    expect(timeoutRes.body).toMatchObject({ code: "ready_timeout", budgetMs: 300000, error: "OpenClaw started but wasn't ready in time." });
+    expect(timeout.operationEvents.fail).toHaveBeenCalledWith("op-timeout", expect.objectContaining({ code: "ready_timeout", budgetMs: 300000 }));
+    expect(timeout.restartRequiredState.completeRestart).toHaveBeenCalledWith(expect.objectContaining({ code: "ready_timeout", budgetMs: 300000 }));
+
+    const aborted = failureDeps({
+      operationId: "op-aborted",
+      error: new GatewayRestartError("Gateway restart aborted by caller before launch", { aborted: true, reason: "aborted_by_caller" }),
+    });
+    const abortedRes = await request(createApp(aborted)).post("/api/gateway/restart");
+    expect(abortedRes.body.code).toBe("aborted");
+    expect(aborted.notify).not.toHaveBeenCalled();
+  });
+
+  it("a notification failure is logged and never masks the restart outcome", async () => {
+    const deps = failureDeps({
+      operationId: "op-notify-down",
+      error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 1 still alive)"),
+      notify: vi.fn(async () => {
+        throw new Error("telegram down");
+      }),
     });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-
+    const res = await request(createApp(deps)).post("/api/gateway/restart");
     expect(res.status).toBe(500);
-    expect(res.body.error).toContain("Gateway restart did not take effect");
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("incumbent-restart notification failed: telegram down"),
-    );
+    expect(res.body.code).toBe("stop_failed");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("restart-failure notification failed: telegram down"));
     expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "restart_incumbent", status: "failed" }),
+      expect.objectContaining({ kind: "gateway_restart", status: "failed" }),
     );
   });
 
@@ -3487,333 +3467,122 @@ describe("server/routes/system", () => {
   // request from the async tail — a TypeError in production (no link, no
   // notification, an unhandled rejection). The base URL is resolved in the
   // handler and a resolver failure costs only the link.
-  it("the incumbent notification's View-logs link is request-derived; a throwing getBaseUrl drops the link, never the notification", async () => {
-    const deps = createSystemDeps();
+  it("the failure notification's View-logs link is request-derived; a throwing getBaseUrl drops the link, never the notification", async () => {
+    const deps = failureDeps({
+      operationId: "op-nolink",
+      error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 1 still alive)"),
+    });
     deps.getBaseUrl = vi.fn(() => {
       throw new TypeError("Cannot read properties of undefined (reading 'headers')");
     });
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
-      operationId: "op-inc-nolink",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => ({ ok: true }));
-    deps.restartGateway = vi.fn(async () => {
-      throw new GatewayIncumbentRestartError(
-        "the previous gateway is still running: the gateway port never released after stop",
-        { wasRunningBefore: true, stopConfirmed: false },
-      );
-    });
-    const app = createApp(deps);
-
-    const res = await request(app)
-      .post("/api/gateway/restart")
-      .set("x-forwarded-host", "ops.example.net");
-
+    const res = await request(createApp(deps)).post("/api/gateway/restart").set("x-forwarded-host", "ops.example.net");
     expect(res.status).toBe(500);
-    expect(res.body.error).toContain("Gateway restart did not take effect");
-    // The resolver saw the request (production shape), failed, and the
-    // notification still went out — without a link.
     expect(deps.getBaseUrl).toHaveBeenCalledWith(expect.objectContaining({ headers: expect.any(Object) }));
     expect(deps.notify).toHaveBeenCalledTimes(1);
     const [message] = deps.notify.mock.calls[0];
-    expect(message).toContain("🔴 Gateway restart did not take effect\n");
+    expect(message).toContain("🔴 Gateway restart failed\n");
     expect(message).not.toContain("View logs");
   });
 
-  it("the incumbent notification's View-logs link honors the request's forwarded host", async () => {
-    const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
-      operationId: "op-inc-fwd",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => ({ ok: true }));
-    deps.restartGateway = vi.fn(async () => {
-      throw new GatewayIncumbentRestartError("the previous gateway is still running", {
-        wasRunningBefore: true,
-        stopConfirmed: false,
-      });
+  it("the failure notification's View-logs link honors the request's forwarded host", async () => {
+    const deps = failureDeps({
+      operationId: "op-fwd",
+      error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 1 still alive)"),
     });
-    const app = createApp(deps);
-
-    await request(app).post("/api/gateway/restart").set("x-forwarded-host", "ops.example.net");
-
-    expect(deps.notify).toHaveBeenCalledTimes(1);
-    expect(deps.notify.mock.calls[0][0]).toContain(
-      "[View logs](https://ops.example.net/#/watchdog)",
-    );
+    deps.getBaseUrl = vi.fn((req) => `https://${req.headers["x-forwarded-host"]}`);
+    const res = await request(createApp(deps)).post("/api/gateway/restart").set("x-forwarded-host", "ops.example.net");
+    expect(res.status).toBe(500);
+    const [message] = deps.notify.mock.calls[0];
+    expect(message).toContain("[View logs](https://ops.example.net/#/watchdog)");
   });
 
-  // X8: the "View logs" link was built from X-Forwarded-Proto/Host — a
-  // spoofable header could plant a phishing host or Markdown delimiters in an
-  // important-class operator notification. The configured public URL wins
-  // when one exists; a request-derived base is embedded only when it is a
-  // plain http(s) origin; otherwise the link is dropped, never the message.
-  describe("incumbent notification link hardening (X8)", () => {
-    const incumbentDeps = ({ operationId }) => {
-      const deps = createSystemDeps();
-      deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId, reasonsSnapshot: [] }));
-      deps.restartRequiredState.completeRestart = vi.fn();
-      deps.watchdog = {
-        getStatus: vi.fn(() => ({})),
-        onExpectedRestart: vi.fn(),
-        onExpectedRestartSettled: vi.fn(),
-        recordOperationEvent: vi.fn(),
-      };
-      deps.notify = vi.fn(async () => ({ ok: true }));
-      deps.restartGateway = vi.fn(async () => {
-        throw new GatewayIncumbentRestartError("the previous gateway is still running", {
-          wasRunningBefore: true,
-          stopConfirmed: false,
-        });
+  describe("failure notification link hardening (X8)", () => {
+    const hardenedDeps = ({ operationId, baseUrl }) => {
+      const deps = failureDeps({
+        operationId,
+        error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 1 still alive)"),
       });
+      deps.getBaseUrl = vi.fn(() => baseUrl);
       return deps;
     };
-
-    it("prefers the configured public URL over the request's forwarded host", async () => {
-      const deps = incumbentDeps({ operationId: "op-inc-cfg" });
-      deps.resolveSetupUrl = vi.fn(() => "https://ops.configured.example/");
-      const app = createApp(deps);
-
-      await request(app).post("/api/gateway/restart").set("x-forwarded-host", "evil.example");
-
-      expect(deps.notify).toHaveBeenCalledTimes(1);
-      const [message] = deps.notify.mock.calls[0];
-      expect(message).toContain("[View logs](https://ops.configured.example/#/watchdog)");
-      expect(message).not.toContain("evil.example");
-    });
-
-    it("a localhost default from the resolver counts as unconfigured — the (valid) request-derived origin is used", async () => {
-      const deps = incumbentDeps({ operationId: "op-inc-local" });
-      deps.resolveSetupUrl = vi.fn(() => "http://localhost:3000");
-      const app = createApp(deps);
-
-      await request(app).post("/api/gateway/restart").set("x-forwarded-host", "ops.example.net:8443");
-
-      const [message] = deps.notify.mock.calls[0];
-      expect(message).toContain("[View logs](https://ops.example.net:8443/#/watchdog)");
-    });
-
-    it.each([
-      ["Markdown delimiters", "evil.example)[x](https://phish.example"],
-      ["whitespace", "evil.example /#/watchdog"],
-      ["userinfo", "user@phish.example"],
-      ["a path", "phish.example/login"],
-    ])("drops the link (message still delivered) when the request-derived base carries %s", async (_label, host) => {
-      const deps = incumbentDeps({ operationId: "op-inc-forged" });
-      deps.resolveSetupUrl = vi.fn(() => "");
-      const app = createApp(deps);
-
-      const res = await request(app).post("/api/gateway/restart").set("x-forwarded-host", host);
-
-      expect(res.status).toBe(500);
-      expect(deps.notify).toHaveBeenCalledTimes(1);
-      const [message] = deps.notify.mock.calls[0];
-      expect(message).toContain("🔴 Gateway restart did not take effect\n");
-      expect(message).not.toContain("View logs");
-      expect(message).not.toContain("phish.example");
+    const kForged = [
+      ["whitespace", "https://ops.example.net evil"],
+      ["userinfo", "https://user:pw@ops.example.net"],
+      ["a path", "https://ops.example.net/phish"],
+      ["Markdown delimiters", "https://ops.example.net)[x]("],
+    ];
+    it.each(kForged)("drops the link (message still delivered) when the request-derived base carries %s", async (_label, baseUrl) => {
+      const previous = process.env.ALPHACLAW_SETUP_URL;
+      delete process.env.ALPHACLAW_SETUP_URL;
+      try {
+        const deps = hardenedDeps({ operationId: `op-x8-${_label.replace(/\W+/g, "")}`, baseUrl });
+        deps.resolveSetupUrl = vi.fn(() => "");
+        const res = await request(createApp(deps)).post("/api/gateway/restart");
+        expect(res.status).toBe(500);
+        expect(deps.notify).toHaveBeenCalledTimes(1);
+        const [message] = deps.notify.mock.calls[0];
+        expect(message).toContain("🔴 Gateway restart failed\n");
+        expect(message).not.toContain("View logs");
+        expect(message).not.toContain(baseUrl);
+      } finally {
+        if (previous === undefined) delete process.env.ALPHACLAW_SETUP_URL;
+        else process.env.ALPHACLAW_SETUP_URL = previous;
+      }
     });
   });
 
-  // C23: the structured evidence line rides on the STDERR side of the merge
-  // (stderr is merged last), so a noisy stderr ring cannot push it out of the
-  // tail-keeping 4000-char cap.
-  it("the incumbent evidence line survives the evidence cap under a >4000-char stderr tail", async () => {
-    const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
-      operationId: "op-inc-noisy",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => ({ ok: true }));
-    // 40 lines x 200 chars — what createStderrTail's 50x2KB ring can hold.
-    const noisyStderr = Array.from(
-      { length: 40 },
-      (_, i) => `gateway: warn ${String(i).padStart(3, "0")} ${"x".repeat(180)}`,
-    );
-    deps.restartGateway = vi.fn(async () => {
-      throw new GatewayIncumbentRestartError("the previous gateway is still running", {
-        wasRunningBefore: true,
-        stopConfirmed: false,
-        preStopPids: [777],
-        postReadyPids: [777],
-        newPids: [],
-        survivingPids: [777],
-        stderrTail: noisyStderr,
-        stdoutTail: ["gateway: stdout line"],
-      });
-    });
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-
-    expect(res.status).toBe(500);
-    expect(res.body.evidence.length).toBeLessThanOrEqual(4000);
-    expect(res.body.evidence).toContain("incumbent evidence:");
-    expect(res.body.evidence).toContain('"survivingPids":[777]');
-    // The structured line is the LAST line of the tail.
-    expect(res.body.evidence.split("\n").at(-1)).toMatch(/^\[alphaclaw\] incumbent evidence: \{/);
-    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
-      expect.objectContaining({
-        operationId: "op-inc-noisy",
-        ok: false,
-        evidenceTail: expect.stringContaining('"survivingPids":[777]'),
-      }),
-    );
-  });
-
-  // R4: the notification used to be awaited while the lifecycle lock and
-  // restartInFlight were held — an outbox-unavailable direct send blocking on
-  // channel I/O held the restart lock with it.
-  it("the incumbent notification never holds the lifecycle lock or restartInFlight — a slow notify leaves both released when the failure returns", async () => {
-    const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+  it("the failure notification never holds the lifecycle lock or restartInFlight — a slow notify leaves both released when the failure returns", async () => {
+    let releaseNotify;
+    const notify = vi.fn(() => new Promise((resolve) => { releaseNotify = resolve; }));
+    const deps = failureDeps({
       operationId: "op-slow-notify",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
+      error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 1 still alive)"),
+      notify,
+    });
     const release = vi.fn();
     deps.gatewayLifecycleLock = {
       tryAcquire: vi.fn(() => release),
       getActiveOperation: vi.fn(() => null),
     };
-    let settleNotify = null;
-    deps.notify = vi.fn(
-      () =>
-        new Promise((resolve) => {
-          settleNotify = resolve;
-        }),
-    );
-    deps.restartGateway = vi.fn(async () => {
-      throw new GatewayIncumbentRestartError(
-        "the previous gateway is still running: the gateway port never released after stop",
-        { wasRunningBefore: true, stopConfirmed: false },
-      );
-    });
     const app = createApp(deps);
-
     const res = await request(app).post("/api/gateway/restart");
-
     expect(res.status).toBe(500);
-    expect(res.body.error).toContain("Gateway restart did not take effect");
-    expect(deps.notify).toHaveBeenCalledTimes(1);
-    // The failure record + ledger events are synchronous truth…
-    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "op-slow-notify", ok: false }),
-    );
-    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "restart_incumbent", status: "failed" }),
-    );
-    // …and the lock/window are released while the notify is still pending.
+    expect(notify).toHaveBeenCalledTimes(1);
     expect(release).toHaveBeenCalledTimes(1);
-    expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
-    // restartInFlight is clear: a second restart starts fresh instead of
-    // attaching to a "still running" first one.
+    // A second restart is admitted (restartInFlight is clear) while the
+    // notification is still pending.
+    deps.restartRequiredState.beginRestart.mockReturnValue({ operationId: "op-after", reasonsSnapshot: [] });
+    deps.restartGateway.mockResolvedValueOnce({ ok: true, durationMs: 5, downtimeMs: 2 });
     const second = await request(app).post("/api/gateway/restart");
-    expect(second.status).toBe(500);
-    expect(second.body.attached).toBeUndefined();
-    expect(deps.restartRequiredState.beginRestart).toHaveBeenCalledTimes(2);
-    expect(deps.gatewayLifecycleLock.tryAcquire).toHaveBeenCalledTimes(2);
-    expect(release).toHaveBeenCalledTimes(2);
-    settleNotify?.({ ok: true });
+    expect(second.status).toBe(200);
+    releaseNotify?.({ ok: true });
   });
 
-  it("a successful restart result carrying ok:true is unchanged (no incumbent handling)", async () => {
-    const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
-      operationId: "op-fine",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => ({ ok: true }));
-    deps.restartGateway = vi.fn(async () => ({ ok: true, durationMs: 5, downtimeMs: 2 }));
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-
+  it("a successful restart result carrying ok:true is unchanged: record ok with how, no notification", async () => {
+    const deps = failureDeps({ operationId: "op-fine", error: new Error("unused") });
+    deps.restartGateway = vi.fn(async () => ({ ok: true, durationMs: 5, downtimeMs: 2, how: "graceful" }));
+    const res = await request(createApp(deps)).post("/api/gateway/restart");
     expect(res.status).toBe(200);
     expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "op-fine", ok: true }),
+      expect.objectContaining({ operationId: "op-fine", ok: true, how: "graceful" }),
     );
+    expect(deps.operationEvents.complete).toHaveBeenCalledWith("op-fine", { ok: true, durationMs: 5, downtimeMs: 2, how: "graceful" });
     expect(deps.notify).not.toHaveBeenCalled();
-    expect(deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "restart_incumbent" }),
-    );
   });
 
-  it("a plain GatewayRestartError (never ready) is a restart_failed, never classified incumbent", async () => {
-    const deps = createSystemDeps();
-    deps.restartRequiredState.beginRestart = vi.fn(() => ({
+  it("a plain GatewayRestartError with no class is restart_failed with the generic sentence (and still notified)", async () => {
+    const deps = failureDeps({
       operationId: "op-never-ready",
-      reasonsSnapshot: [],
-    }));
-    deps.restartRequiredState.completeRestart = vi.fn();
-    deps.watchdog = {
-      getStatus: vi.fn(() => ({})),
-      onExpectedRestart: vi.fn(),
-      onExpectedRestartSettled: vi.fn(),
-      recordOperationEvent: vi.fn(),
-    };
-    deps.operationEvents = {
-      createOperation: vi.fn(),
-      publish: vi.fn(),
-      complete: vi.fn(),
-      fail: vi.fn(),
-    };
-    deps.notify = vi.fn(async () => ({ ok: true }));
-    deps.restartGateway = vi.fn(async () => {
-      throw new GatewayRestartError("Gateway did not become ready within 300s", {
-        stderrTail: ["boot: listen EADDRINUSE"],
-      });
+      error: new GatewayRestartError("Gateway did not become ready within 300s", { stderrTail: ["boot: listen EADDRINUSE"] }),
     });
-    const app = createApp(deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-
+    const res = await request(createApp(deps)).post("/api/gateway/restart");
     expect(res.status).toBe(500);
-    expect(deps.operationEvents.fail).toHaveBeenCalledWith(
-      "op-never-ready",
-      expect.objectContaining({ code: "restart_failed" }),
-    );
-    expect(deps.notify).not.toHaveBeenCalled();
-    expect(deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "restart_incumbent" }),
-    );
+    expect(res.body).toMatchObject({ code: "restart_failed", error: "Restart failed." });
+    expect(deps.operationEvents.fail).toHaveBeenCalledWith("op-never-ready", expect.objectContaining({ code: "restart_failed" }));
     const failed = deps.watchdog.recordOperationEvent.mock.calls.find(
       ([event]) => event.kind === "gateway_restart" && event.status === "failed",
     );
-    expect(failed[0].details.reason).toBeUndefined();
+    expect(failed[0].details.code).toBe("restart_failed");
   });
 
   it("contract guard: a restart primitive that RESOLVES ok:false (instead of throwing) is recorded as a failure, never as success", async () => {
@@ -3849,8 +3618,8 @@ describe("server/routes/system", () => {
     const res = await request(app).post("/api/gateway/restart");
 
     expect(res.status).toBe(500);
-    expect(res.body.error).toContain("reported failure without throwing");
-    expect(res.body.error).toContain("legacy returned failure");
+    expect(res.body.detail).toContain("reported failure without throwing");
+    expect(res.body.detail).toContain("legacy returned failure");
     expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
       expect.objectContaining({ operationId: "op-resolved-false", ok: false }),
     );

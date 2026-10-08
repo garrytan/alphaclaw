@@ -1,5 +1,5 @@
 // Lane I integration wiring for the gateway seams lane C exported
-// (setGatewayCapabilities, setGatewayPrelaunchHookHandler,
+// (setGatewayPrelaunchHookHandler,
 // getLastGatewayStopEvidence) and the restart route's `notify` dep.
 //
 // lib/server.js boots the whole process on require, so its composition is
@@ -100,22 +100,12 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
       serverSource.indexOf('} = require("./server/gateway")'),
     );
     expect(gatewayImport).toContain("setGatewayPrelaunchHookHandler,");
-    expect(gatewayImport).toContain("setGatewayCapabilities,");
+    expect(gatewayImport).toContain("killManagedGatewayChildNow,");
+    // The stop-force capability hand-off is gone with the CLI stop.
+    expect(gatewayImport).not.toContain("setGatewayCapabilities");
     expect(serverSource).toMatch(
       /const \{\s*createWatchdog,\s*createGatewayPrelaunchHookHandler,\s*\} = require\("\.\/server\/watchdog"\)/,
     );
-  });
-
-  it("hands the SHARED capabilities instance to the gateway module right after it is created (one gatewayStopForce probe cache)", () => {
-    const created = serverSource.indexOf(
-      "const openclawCapabilities = createOpenclawCapabilities({",
-    );
-    const handed = serverSource.indexOf("setGatewayCapabilities(openclawCapabilities);");
-    expect(created).toBeGreaterThan(-1);
-    expect(handed).toBeGreaterThan(created);
-    // Before any consumer that could trigger a lazy private instance.
-    expect(handed).toBeLessThan(serverSource.indexOf("const watchdog = createWatchdog({"));
-    expect(serverSource.match(/setGatewayCapabilities\(/g)).toHaveLength(1);
   });
 
   it("installs the prelaunch-hook handler next to the exit/launch handlers, composed from the watchdog and the outbox-backed upgradeNotifier", () => {
@@ -216,7 +206,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     expect(serverSource).not.toContain("openclawChannelService");
   });
 
-  it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the incumbent-restart notification's carrier)", () => {
+  it("register-server-routes passes the outbox-backed notify into registerSystemRoutes (the restart-failure notification's carrier)", () => {
     const source = readSource("lib", "server", "init", "register-server-routes.js");
     const start = source.indexOf("registerSystemRoutes({");
     expect(start).toBeGreaterThan(-1);
@@ -230,63 +220,38 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
       serverSource.indexOf("} = registerServerRoutes({") + 6000,
     );
     expect(routesCall).toMatch(/\n  upgradeNotifier,\n/);
-    // ...and routes/system.js consumes it for the incumbent verdict with the
+    // ...and routes/system.js consumes it for the failed restart with the
     // id the operator-facing contract names.
     const systemSource = readSource("lib", "server", "routes", "system.js");
     expect(systemSource).toContain("notify = null,");
-    expect(systemSource).toContain("id: `restart-incumbent-${operationId}`");
-    expect(systemSource).toContain('eventType: "restart_incumbent"');
+    expect(systemSource).toContain("id: `restart-failed-${operationId}`");
+    expect(systemSource).toContain('eventType: "restart_failed"');
   });
 
-  it("the incumbent verdict is ONE class: thrown by gateway.js, caught by routes/system.js by instanceof, read by the watchdog mitigation via its incumbent flag (P1 review fix)", () => {
-    // routes/system.js imports the class from gateway.js instead of defining
-    // a private one, and no longer converts a returned { ok:false, incumbent }.
+  it("the stop failure is ONE class: GatewayStopError thrown by gateway.js's ladder with its user-facing code, classified by routes/system.js from `code`, read by the watchdog from `code` too (no incumbent flag, no instanceof fan-out)", () => {
     const systemSource = readSource("lib", "server", "routes", "system.js");
-    const importStart = systemSource.indexOf("const {\n  GatewayRestartError,");
-    expect(importStart).toBeGreaterThan(-1);
-    const importBlock = systemSource.slice(
-      importStart,
-      systemSource.indexOf('} = require("../gateway");', importStart),
-    );
-    expect(importBlock).toContain("GatewayIncumbentRestartError,");
-    expect(importBlock).toContain("kGatewayIncumbentRestartReason,");
-    expect(systemSource).not.toMatch(/class GatewayIncumbentRestartError/);
-    expect(systemSource).not.toContain("result?.incumbent");
-    expect(systemSource).toContain("err instanceof GatewayIncumbentRestartError");
-    // gateway.js THROWS it from the cold restart and no longer returns it.
+    expect(systemSource).toContain('const { GatewayRestartError } = require("../gateway");');
+    expect(systemSource).not.toContain("GatewayIncumbentRestartError");
+    expect(systemSource).not.toContain("incumbent_gateway_still_running");
+    expect(systemSource).toContain("const classifyRestartFailure = (err) =>");
     const gatewaySource = readSource("lib", "server", "gateway.js");
-    expect(gatewaySource).toContain("throw new GatewayIncumbentRestartError(");
-    expect(gatewaySource).not.toMatch(/return \{\s*ok: false,\s*incumbent: true/);
-    // The watchdog mitigation reads the flag the class carries.
+    expect(gatewaySource).toContain("class GatewayStopError extends GatewayRestartError");
+    expect(gatewaySource).toContain('throw new GatewayStopError(\n      "stop_refused"');
+    expect(gatewaySource).toContain('throw new GatewayStopError(\n      "stop_failed"');
+    expect(gatewaySource).not.toContain("GatewayIncumbentRestartError");
     const watchdogSource = readSource("lib", "server", "watchdog.js");
-    expect(watchdogSource).toContain("const incumbent = err?.incumbent === true;");
+    expect(watchdogSource).not.toContain("err?.incumbent === true");
+    expect(watchdogSource).toContain("err?.code || err?.evidence?.code");
 
-    // The exported class's contract.
     const gateway = require(gatewayModulePath);
-    expect(typeof gateway.GatewayIncumbentRestartError).toBe("function");
-    expect(gateway.kGatewayIncumbentRestartReason).toBe("incumbent_gateway_still_running");
-    const error = new gateway.GatewayIncumbentRestartError(
-      "the previous gateway is still running: the gateway port never released after stop",
-      { cliRefused: true, survivingPids: [777] },
-    );
+    const error = new gateway.GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 777 still alive)", { survivors: [777] });
     expect(error).toBeInstanceOf(Error);
     expect(error).toBeInstanceOf(gateway.GatewayRestartError);
-    expect(error).toBeInstanceOf(gateway.GatewayIncumbentRestartError);
-    expect(error).toMatchObject({
-      name: "GatewayIncumbentRestartError",
-      code: "restart_incumbent",
-      reason: "incumbent_gateway_still_running",
-      incumbent: true,
-      detail: "the previous gateway is still running: the gateway port never released after stop",
-      evidence: { cliRefused: true, survivingPids: [777] },
-    });
-    expect(error.message).toBe(
-      "Gateway restart did not take effect — the previous gateway is still running: the gateway port never released after stop",
-    );
-    // A plain GatewayRestartError is NOT an incumbent verdict.
-    const plain = new gateway.GatewayRestartError("never ready", {});
-    expect(plain).not.toBeInstanceOf(gateway.GatewayIncumbentRestartError);
-    expect(plain.incumbent).toBeUndefined();
+    expect(error).toMatchObject({ name: "GatewayStopError", code: "stop_failed", evidence: { survivors: [777] } });
+    const plain = new gateway.GatewayRestartError("never ready", { code: "ready_timeout" });
+    expect(plain).not.toBeInstanceOf(gateway.GatewayStopError);
+    expect(plain.code).toBeUndefined();
+    expect(plain.evidence.code).toBe("ready_timeout");
   });
 });
 
@@ -326,15 +291,16 @@ describe("gateway seam contracts + behaviour through the installed handler", () 
     delete require.cache[gatewayModulePath];
     const gateway = require(gatewayModulePath);
     for (const name of [
-      "setGatewayCapabilities",
       "setGatewayPrelaunchHookHandler",
       "getLastGatewayPrelaunchHookOutcome",
+      "killManagedGatewayChildNow",
+      "stopGatewayForShutdown",
+      "stopGatewayLadder",
+      "resolveGatewayIdentity",
     ]) {
       expect(typeof gateway[name]).toBe("function");
     }
-    // A capabilities object without get() is rejected (falls back to lazy).
-    expect(() => gateway.setGatewayCapabilities({ get: () => null })).not.toThrow();
-    expect(() => gateway.setGatewayCapabilities(null)).not.toThrow();
+    expect(gateway.setGatewayCapabilities).toBeUndefined();
   });
 
   it("a REAL refused managed launch flows gateway → installed handler → watchdog narration + operator notification (id prelaunch-hook-<code>-<site>)", async () => {

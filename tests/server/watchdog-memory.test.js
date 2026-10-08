@@ -15,7 +15,7 @@ const {
 } = require("../../lib/server/watchdog");
 // The incumbent verdict gateway.js THROWS from a cold restart (P1 review fix):
 // the mitigation must treat it as the failed restart it is.
-const { GatewayIncumbentRestartError } = require("../../lib/server/gateway");
+const { GatewayStopError } = require("../../lib/server/gateway");
 
 const kMb = 1024 * 1024;
 const kStartMs = 1_700_000_000_000;
@@ -916,26 +916,17 @@ describe("server/watchdog memory monitor", () => {
       expect(String(notice[0])).toContain("lost its lifecycle-lock lease");
     });
 
-    it("an INCUMBENT verdict thrown by the restart (gateway.js GatewayIncumbentRestartError) is a FAILED mitigation: failed gateway_restart event naming the reason, budget stamp refunded, anti-thrash cooldown, loud notification", async () => {
+    it("a stop the ladder could not complete (gateway.js GatewayStopError stop_failed) is a FAILED mitigation: failed gateway_restart event naming the reason, budget stamp refunded, anti-thrash cooldown, loud notification", async () => {
       // Pre-fix, gateway.js RETURNED { ok:false, incumbent:true } and this
       // path recorded gateway_restart:ok, kept the brake stamp, and left the
       // leaking gateway running with no notification (the #54 class).
       let incumbent = true;
       const restart = vi.fn(async () => {
         if (incumbent) {
-          throw new GatewayIncumbentRestartError(
-            "the previous gateway is still running: the gateway port never released after stop (the OpenClaw CLI refused the non-interactive stop); 1 pre-restart gateway process(es) still alive (pid 777) and no new gateway process observed",
-            {
-              wasRunningBefore: true,
-              stopConfirmed: false,
-              cliRefused: true,
-              cliExitCode: 1,
-              cliForced: false,
-              preStopPids: [777],
-              postReadyPids: [777],
-              newPids: [],
-              survivingPids: [777],
-            },
+          throw new GatewayStopError(
+            "stop_failed",
+            "the gateway did not exit after SIGKILL (pid 777 still alive)",
+            { pids: [776, 777], survivors: [777] },
           );
         }
         return { ok: true };
@@ -962,21 +953,21 @@ describe("server/watchdog memory monitor", () => {
       expect(restartRows.map((row) => row.status)).toEqual(["started", "failed"]);
       expect(restartRows[1].details).toEqual({
         trigger: "memory_mitigation",
-        error: expect.stringContaining("Gateway restart did not take effect"),
-        reason: "incumbent_gateway_still_running",
+        error: expect.stringContaining("did not exit after SIGKILL"),
+        reason: "stop_failed",
       });
       const failedEvent = memoryEvents(harness.insertWatchdogEvent).find(
         (e) => e.details.kind === "mitigation_restart_failed",
       );
       expect(failedEvent.details).toMatchObject({
-        reason: "incumbent_gateway_still_running",
-        message: expect.stringContaining("the previous gateway is still running"),
+        reason: "stop_failed",
+        message: expect.stringContaining("did not exit after SIGKILL"),
       });
       // Loud, with the reason: the leak was NOT mitigated.
       const failureNotice = notifications(harness.notifier).find((m) =>
         m.includes("Pre-OOM gateway restart failed"),
       );
-      expect(failureNotice).toContain("Reason: `incumbent_gateway_still_running`");
+      expect(failureNotice).toContain("Reason: `stop_failed`");
       expect(failureNotice).toContain("The previous gateway is still running");
       // The window settled: the failure is never hidden as "expected".
       expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();

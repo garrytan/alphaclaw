@@ -35,10 +35,10 @@ const {
 // The REAL watchdog for the repair drills below (wired like lib/server.js
 // against the drill's fresh gateway instance and its real lifecycle lock).
 const { createWatchdog } = require("../../lib/server/watchdog");
-// routes/system.js binds gateway.js's GatewayIncumbentRestartError at ITS
-// load time (the class the restart route catches by instanceof). Each drill
-// fresh-requires gateway.js, so the routes module is fresh-required against
-// the same instance (createFakeGateway/createApp) — production has one of each.
+// routes/system.js binds gateway.js's GatewayRestartError at ITS load time.
+// Each drill fresh-requires gateway.js, so the routes module is fresh-required
+// against the same instance (createFakeGateway/createApp) — production has one
+// of each.
 const kSystemRoutesModulePath = require.resolve("../../lib/server/routes/system");
 const { registerAgentRoutes } = require("../../lib/server/routes/agents");
 const {
@@ -67,15 +67,9 @@ const kGatewayModulePath = require.resolve("../../lib/server/gateway");
 // Namespace-required by gateway.js: the incumbent verdict's live-pid scan is
 // pinned per drill (never the real /proc).
 const lockContention = require("../../lib/server/openclaw-lock-contention");
-
-// `openclaw gateway stop --help` contract pins (tarball-verified): --force is
-// present on 2026.8.2 / 2026.9.1-beta.1 and absent on the 2026.7.1-2 pin.
-const kStopHelpWithForce =
-  "Usage: openclaw gateway stop [options]\n\nOptions:\n  --force     Allow stop from a non-interactive shell\n  -h, --help  display help for command\n";
-const kStopHelpWithoutForce =
-  "Usage: openclaw gateway stop [options]\n\nOptions:\n  -h, --help  display help for command\n";
-const kStopRefusal =
-  "This stops the operator's running gateway service. Use an isolated dev gateway (openclaw gateway run --dev, or --profile <name> with a free port) for testing, or re-run with --force\n";
+// Namespace-required by gateway.js: the ladder's /proc identity readers
+// (listeners, trees, start ticks) are pinned per drill (never the real /proc).
+const gatewayIdentity = require("../../lib/server/gateway-identity");
 
 const originalSpawn = childProcess.spawn;
 const originalExecFile = childProcess.execFile;
@@ -88,6 +82,7 @@ const kSilentLogger = { log() {}, warn() {}, error() {} };
 // The fake `gateway --force` supervisor's pid (every spawn), and the pid of a
 // gateway AlphaClaw did not start (the incumbent the repair drills replace).
 const kFakeSupervisorPid = 4242;
+const kFakeRestartCliPid = 4343;
 const kIncumbentPid = 31337;
 const kIncumbentCmdline =
   "node /app/node_modules/openclaw/dist/entry.js gateway run";
@@ -127,105 +122,125 @@ const waitUntil = async (predicate, { timeoutMs = 5000, stepMs = 5 } = {}) => {
   }
 };
 
-// Controllable fake gateway at the process/exec/TCP boundary. Installs the
-// child_process + net mocks, then fresh-requires the REAL gateway module so
-// its load-time execFile/spawn bindings capture the fakes (the gateway.test.js
-// pattern). `portOpen` drives the ready probe; `holdStop` parks the restart
-// inside `openclaw gateway stop` until `releaseStop()` is called.
+// Controllable fake gateway at the process/signal/TCP/readyz boundary.
+// Installs the child_process + net + /proc-identity + fetch fakes, then
+// fresh-requires the REAL gateway module so its load-time bindings capture
+// them (the gateway.test.js pattern). One process serves the port at a time:
+// the incumbent (`kIncumbentPid`, a gateway AlphaClaw did not spawn) until a
+// `gateway run` spawn replaces it with the fake child (`kFakeSupervisorPid`).
+// `portOpen` drives the TCP probe, the listener lookup and /readyz; `holdStop`
+// parks the restart inside the stop ladder until `releaseStop()` is called.
 const createFakeGateway = ({
   portOpen = true,
-  // Whether the fake CLI's `gateway stop --help` advertises --force.
-  forceSupported = false,
-  // The CLI's NON_INTERACTIVE guard: exit 1 + refusal text, port kept.
-  stopRefused = false,
-  // Live openclaw processes the incumbent verdict sees (pre AND post stop).
+  // The incumbent ignores the restart request AND every signal: the ladder
+  // ends in stop_failed and nothing is spawned on top of it.
+  unstoppable = false,
+  // The `gateway restart` ask is refused (CLI exits 1); SIGTERM still works.
+  askRefused = false,
+  // Live openclaw processes the serving-identity scan sees.
   livePids = [],
-  // The /proc view once `gateway --force` (or `gateway run`) was spawned: a
-  // successfully stopped incumbent is gone and the new supervisor tree is
-  // visible. null = unchanged (the stop-refused incumbent keeps its pid).
+  // The /proc view once `gateway run` was spawned. null = unchanged.
   livePidsAfterLaunch = null,
-  // Issue #56 launcher shape: the `--force` supervisor stays alive as the
-  // gateway's process-tree root, so the cold restart adopts it as the managed
-  // child and the launch notification carries its pid + generation. Default
-  // off = the older daemonizing CLI (supervisor gone before the port answers).
-  supervisorLingers = false,
 } = {}) => {
   const fake = {
     portOpen,
+    servingPid: kIncumbentPid,
     holdStop: false,
     releaseStop: null,
+    neverReady: false,
     stderrLines: [],
     spawnCalls: [],
-    stopCalls: [],
-    supervisors: [],
+    signals: [],
+    children: [],
     livePids,
+  };
+  // What the ladder sees: the serving pid holds the listener while the port
+  // is open; a signal (or an honoured ask) closes the port.
+  const alive = (pid) => fake.portOpen && pid === fake.servingPid;
+  const stopServing = () => {
+    if (unstoppable) return;
+    if (fake.holdStop) {
+      fake.releaseStop = () => {
+        fake.portOpen = false;
+      };
+      return;
+    }
+    fake.portOpen = false;
   };
   vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockImplementation(
     () => fake.livePids,
   );
-
-  childProcess.execFile = vi.fn((file, args, opts, cb) => {
-    if (args?.[0] === "gateway" && args?.[1] === "stop" && args.includes("--help")) {
-      // The one-time --force capability probe.
-      cb(null, forceSupported ? kStopHelpWithForce : kStopHelpWithoutForce, "");
-      return;
+  vi.spyOn(lockContention, "readProcStartTicks").mockImplementation(() => 1);
+  vi.spyOn(gatewayIdentity, "findPortListenerPids").mockImplementation(() =>
+    fake.portOpen ? [fake.servingPid] : [],
+  );
+  vi.spyOn(gatewayIdentity, "listProcessTree").mockImplementation((pid) =>
+    alive(pid) || fake.children.some((child) => child.pid === pid && child.exitCode === null && child.signalCode === null)
+      ? [pid]
+      : [],
+  );
+  vi.spyOn(gatewayIdentity, "readProcessGroupId").mockReturnValue(null);
+  vi.spyOn(gatewayIdentity, "isSameProcess").mockImplementation((pid) => alive(pid));
+  vi.spyOn(gatewayIdentity, "isOpenclawPid").mockReturnValue(true);
+  vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    fake.signals.push([pid, signal]);
+    if (signal === 0) {
+      if (alive(pid)) return true;
+      throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
     }
-    if (args?.[0] === "gateway" && args?.[1] === "stop") {
-      fake.stopCalls.push(args);
-      if (stopRefused) {
-        cb(
-          Object.assign(new Error("Command failed: openclaw gateway stop"), {
-            code: 1,
-            stdout: "",
-            stderr: kStopRefusal,
-          }),
-          "",
-          kStopRefusal,
-        );
-        return;
-      }
-      // A real `openclaw gateway stop` releases the port; the restart
-      // pipeline now waits for that release before launching.
-      if (fake.holdStop) {
-        fake.releaseStop = () => {
-          fake.portOpen = false;
-          cb(null, "", "");
-        };
-        return;
-      }
-      fake.portOpen = false;
-      cb(null, "", "");
-      return;
-    }
-    cb(null, "", "");
+    if ((signal === "SIGTERM" || signal === "SIGKILL") && pid === fake.servingPid) stopServing();
+    return true;
   });
+
+  childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
 
   childProcess.spawn = vi.fn((file, args) => {
     const child = new EventEmitter();
-    child.pid = kFakeSupervisorPid;
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.exitCode = null;
-    // The adoption check reads `signalCode === null`; a child without the
-    // field reads as an already-exited supervisor (the pre-#56 shape).
-    if (supervisorLingers) child.signalCode = null;
+    child.signalCode = null;
     child.killed = false;
-    child.kill = vi.fn();
+    const exit = (code, signal = null) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.exitCode = signal ? null : code;
+      child.signalCode = signal;
+      child.emit("exit", child.exitCode, signal);
+      child.emit("close", child.exitCode, signal);
+    };
+    child.kill = vi.fn((signal = "SIGTERM") => {
+      child.killed = true;
+      if (child.pid === fake.servingPid) stopServing();
+      if (child.pid !== fake.servingPid || !unstoppable) queueMicrotask(() => exit(null, signal));
+      return true;
+    });
     fake.spawnCalls.push({ file, args });
-    fake.supervisors.push(child);
-    // `gateway --force` brings the port back up unless the drill is
-    // simulating a gateway that never becomes ready.
-    if (args?.[0] === "gateway" && !fake.neverReady) {
+    if (args?.[0] === "gateway" && args?.[1] === "restart") {
+      child.pid = kFakeRestartCliPid;
+      // The graceful ask: honoured → the serving gateway exits 0 inside the
+      // grace (the CLI itself blocks on post-restart health until reaped);
+      // refused → the CLI exits 1 at once.
+      queueMicrotask(() => {
+        if (askRefused || unstoppable) exit(1);
+        else stopServing();
+      });
+      return child;
+    }
+    child.pid = kFakeSupervisorPid;
+    fake.children.push(child);
+    // `gateway run`: the new gateway binds the port unless the drill is
+    // simulating one that never becomes ready.
+    fake.servingPid = kFakeSupervisorPid;
+    if (!fake.neverReady) {
       queueMicrotask(() => {
         fake.portOpen = true;
+        child.stdout.emit("data", "http server listening on 127.0.0.1\n");
       });
     }
-    if (args?.[0] === "gateway" && livePidsAfterLaunch) {
-      fake.livePids = livePidsAfterLaunch;
-    }
+    if (livePidsAfterLaunch) fake.livePids = livePidsAfterLaunch;
     if (fake.stderrLines.length) {
-      // The restart supervisor attaches its stderr handler synchronously right
-      // after spawn(), so a microtask emission is always observed (and stays
+      // The launch attaches its stderr handler synchronously right after
+      // spawn(), so a microtask emission is always observed (and stays
       // independent of faked timers).
       const payload = `${fake.stderrLines.join("\n")}\n`;
       queueMicrotask(() => child.stderr.emit("data", payload));
@@ -251,6 +266,10 @@ const createFakeGateway = ({
     }
     return originalCreateConnection(port, host, ...rest);
   });
+
+  // /readyz for the restart's ready wait: the port answers ready whenever it
+  // is open (the watchdog drills layer /health on top of this).
+  global.fetch = vi.fn(createGatewayHealthFetch({ isHealthy: () => true, fake }));
 
   delete require.cache[kGatewayModulePath];
   fake.gateway = require(kGatewayModulePath);
@@ -430,13 +449,17 @@ const stepTuple = (event) => [
 // holds and otherwise fails the way a wedged gateway does (TCP accepts, the
 // HTTP answer never comes — the probe's own timeout).
 const createGatewayHealthFetch =
-  ({ isHealthy }) =>
+  ({ isHealthy, fake = null }) =>
   async (url) => {
     const json = (body) => ({
       ok: true,
       status: 200,
+      headers: { get: () => null },
       text: async () => JSON.stringify(body),
     });
+    if (fake && !fake.portOpen) {
+      throw Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    }
     if (String(url).includes("/readyz")) {
       return json({ ready: true, failing: [], eventLoop: { degraded: false } });
     }
@@ -451,7 +474,7 @@ const createGatewayHealthFetch =
 // observed here for the lock kind it runs under). Auto-repair on.
 const createDrillWatchdog = ({ fake, harness, isHealthy }) => {
   process.env.WATCHDOG_AUTO_REPAIR = "true";
-  global.fetch = vi.fn(createGatewayHealthFetch({ isHealthy }));
+  global.fetch = vi.fn(createGatewayHealthFetch({ isHealthy, fake }));
   const insertWatchdogEvent = vi.fn();
   const notifier = { notify: vi.fn(async () => ({ ok: true })) };
   const clawCmd = vi.fn(async (command) =>
@@ -552,12 +575,13 @@ const wedgeIncumbentToTheGate = async ({ incumbent, watchdog, insertWatchdogEven
     expect.objectContaining({ reason: "awaiting_sustained_failure", failures: 2, threshold: 3 }),
   ]);
   expect(doctorFixCalls(clawCmd)).toBe(0);
-  expect(fake.stopCalls).toEqual([]);
+  expect(fake.signals.filter(([, signal]) => signal !== 0)).toEqual([]);
   expect(fake.spawnCalls).toEqual([]);
 };
 
 describe("server/gateway restart drills (e2e)", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     childProcess.spawn = originalSpawn;
     childProcess.execFile = originalExecFile;
     net.createConnection = originalCreateConnection;
@@ -608,9 +632,15 @@ describe("server/gateway restart drills (e2e)", () => {
         ["step", "Stopping gateway", "running"],
         ["step", "Stopping gateway", "done"],
         ["step", "Starting gateway", "running"],
+        ["step", "Starting gateway", "done"],
         ["step", "Waiting for health check", "running"],
         ["step", "Ready", "done"],
       ]);
+      // Structured details for the card: the ask phase, then how the old
+      // gateway went away; every step stamped with the server clock.
+      const stopping = events.filter((e) => e.data?.name === "stopping").map((e) => e.data);
+      expect(stopping[0]).toMatchObject({ status: "running", at: expect.any(Number), detail: { phase: "asking", graceSeconds: 30 } });
+      expect(stopping.at(-1)).toMatchObject({ status: "done", detail: { how: "graceful" } });
       const waiting = events.find((e) => e.data?.name === "waiting_ready");
       expect(waiting.data.budgetMs).toBe(120000);
       // Event ids are the service's own monotonically increasing sequence.
@@ -623,6 +653,7 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(terminal.data.ok).toBe(true);
       expect(terminal.data.durationMs).toEqual(expect.any(Number));
       expect(terminal.data.downtimeMs).toBeGreaterThanOrEqual(0);
+      expect(terminal.data.how).toBe("graceful");
       expect(events.some((e) => e.event === "error")).toBe(false);
 
       const status = await request(app).get("/api/restart-status");
@@ -633,6 +664,9 @@ describe("server/gateway restart drills (e2e)", () => {
         durationMs: expect.any(Number),
         downtimeMs: expect.any(Number),
         errorSummary: null,
+        how: "graceful",
+        phaseAt: expect.objectContaining({ stopping: expect.any(Number), launching: expect.any(Number), waiting_ready: expect.any(Number) }),
+        budgetMs: 120000,
       });
       // The reasons snapshot captured at begin was cleared by the success.
       expect(status.body.restartRequired).toBe(false);
@@ -640,47 +674,31 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(status.body.restartInProgress).toBe(false);
       expect(status.body.activeOperation).toBeNull();
 
-      // Exactly one restart execution reached the process boundary, and the
-      // stop ran WITHOUT --force: this fake CLI (the pin) does not have it.
+      // Exactly one restart execution reached the process boundary: the
+      // graceful ask (honoured, so no signal reached the gateway), then one
+      // managed `gateway run` — never `--force`, never a CLI stop.
       expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-        ["gateway", "--force"],
+        ["gateway", "restart", "--wait", "30000ms"],
+        ["gateway", "run"],
       ]);
-      expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
+      expect(fake.signals.filter(([pid, signal]) => signal !== 0 && pid === kIncumbentPid)).toEqual([]);
     } finally {
       client.close();
     }
   });
 
-  it("passes --force to the stop when the installed CLI advertises it (FORCE-CAPABLE DRILL)", async () => {
-    const fake = createFakeGateway({ portOpen: true, forceSupported: true });
-    const harness = createDrillHarness({ fake });
-    const app = createApp(harness.deps);
-
-    const res = await request(app).post("/api/gateway/restart");
-
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(fake.stopCalls).toEqual([["gateway", "stop", "--force"]]);
-    expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-      ["gateway", "--force"],
-    ]);
-    expect(harness.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "gateway_restart", status: "ok" }),
-    );
-  });
-
-  it("refuses to report success when the CLI refuses the stop and the incumbent keeps the port (INCUMBENT DRILL)", async () => {
-    // The #54 recovery-restart shape: the pin's CLI has no --force, so the
-    // non-interactive stop is refused (exit 1); the old gateway keeps the
-    // port and its pid through the whole "restart"; --force's supervisor
-    // then finds the port answering. Before WI-5.2 this recorded
-    // "succeeded" and cleared the restart-required banner.
+  it("refuses to report success when the old gateway survives the whole ladder (STOP-FAILED DRILL): ask → SIGTERM → SIGKILL, nothing spawned, banner kept, one sentence + notification", async () => {
+    // The #54 recovery-restart shape, now as the ladder sees it: the old
+    // gateway ignores the restart request and both signals and keeps the
+    // port. Before WI-5.2 this recorded "succeeded" and cleared the
+    // restart-required banner; the ladder names it stop_failed and never
+    // spawns a second gateway into a held port.
     const fake = createFakeGateway({
       portOpen: true,
-      stopRefused: true,
+      unstoppable: true,
       livePids: [
         {
-          pid: 31337,
+          pid: kIncumbentPid,
           cmdline: "node /app/node_modules/openclaw/dist/entry.js gateway run",
         },
       ],
@@ -691,7 +709,7 @@ describe("server/gateway restart drills (e2e)", () => {
     const app = createApp(harness.deps);
     const sseHandler = captureOperationsSseHandler(harness.operationEvents);
 
-    // Fake timers step the 15s stop-settle window.
+    // Fake timers step the 30s ask + 10s SIGTERM + 5s SIGKILL graces.
     vi.useFakeTimers();
     let client = null;
     try {
@@ -700,14 +718,14 @@ describe("server/gateway restart drills (e2e)", () => {
       const { operationId } = res.body;
       client = openSseClient(sseHandler, operationId);
 
-      for (let i = 0; i < 20; i += 1) {
+      for (let i = 0; i < 40; i += 1) {
         if (
           harness.operationEvents.getOperation(operationId)?.status ===
           "failed"
         ) {
           break;
         }
-        await vi.advanceTimersByTimeAsync(5_000);
+        await vi.advanceTimersByTimeAsync(2_500);
       }
       expect(harness.operationEvents.getOperation(operationId)?.status).toBe(
         "failed",
@@ -719,37 +737,31 @@ describe("server/gateway restart drills (e2e)", () => {
         ["step", "Checking plugins", "running"],
         ["step", "Checking plugins", "skipped"],
         ["step", "Stopping gateway", "running"],
-        ["step", "Stopping gateway", "warning"],
-        ["step", "Starting gateway", "running"],
-        ["step", "Waiting for health check", "running"],
-        ["step", "Waiting for health check", "warning"],
-        ["step", "Ready", "warning"],
+        ["step", "Stopping gateway", "running"],
+        ["step", "Stopping gateway", "running"],
       ]);
-      const stoppingWarning = events.find(
-        (e) => e.data?.name === "stopping" && e.data?.status === "warning",
-      );
-      expect(stoppingWarning.data.detail).toContain(
-        "was refused by the CLI (non-interactive guard)",
-      );
-      const readyWarning = events.find(
-        (e) => e.data?.name === "ready" && e.data?.status === "warning",
-      );
-      expect(readyWarning.data.detail).toContain(
-        "the previous gateway is still running",
-      );
+      expect(events.filter((e) => e.data?.name === "stopping").map((e) => e.data.detail)).toEqual([
+        { phase: "asking", graceSeconds: 30 },
+        { phase: "terminating" },
+        { phase: "forcing", graceSeconds: 30 },
+      ]);
       const terminal = events[events.length - 1];
       expect(terminal.event).toBe("error");
-      expect(terminal.data).toMatchObject({ code: "restart_incumbent" });
-      expect(terminal.data.error).toContain("Gateway restart did not take effect");
-      expect(terminal.data.error).toContain("port never released");
-      expect(terminal.data.hint).toContain("still running");
+      expect(terminal.data).toMatchObject({
+        code: "stop_failed",
+        error: "Couldn't stop the old gateway, so your changes are not live yet.",
+        hint: expect.stringContaining("Try again"),
+      });
       expect(events.some((e) => e.event === "done")).toBe(false);
 
-      // The stop went out WITHOUT --force (the probe said the pin lacks it),
-      // and --force's supervisor still ran.
-      expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
+      // The ask went out, then SIGTERM and SIGKILL to the identified pid —
+      // and no `gateway run` was spawned on top of the survivor.
       expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-        ["gateway", "--force"],
+        ["gateway", "restart", "--wait", "30000ms"],
+      ]);
+      expect(fake.signals.filter(([pid]) => pid === kIncumbentPid)).toEqual([
+        [kIncumbentPid, "SIGTERM"],
+        [kIncumbentPid, "SIGKILL"],
       ]);
 
       const status = await request(app).get("/api/restart-status");
@@ -764,59 +776,33 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(status.body.lastOperation).toMatchObject({
         operationId,
         status: "failed",
+        code: "stop_failed",
+        hint: expect.stringContaining("Try again"),
       });
       expect(status.body.lastOperation.errorSummary).toContain(
-        "the previous gateway is still running",
+        "did not exit after SIGKILL",
       );
-      // The pid/port verdict is persisted with the record's evidence.
-      expect(status.body.lastOperation.evidence).toContain(
-        "incumbent evidence:",
-      );
-      expect(status.body.lastOperation.evidence).toContain('"survivingPids":[31337]');
-      expect(status.body.lastOperation.evidence).toContain('"cliRefused":true');
 
-      // Ledger: the generic failed restart carries the reason, and the
-      // dedicated restart_incumbent event carries the evidence.
+      // Ledger: the failed restart carries the class.
       expect(harness.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
         kind: "gateway_restart",
         status: "failed",
         details: expect.objectContaining({
           operationId,
           trigger: "manual",
-          reason: "incumbent_gateway_still_running",
+          code: "stop_failed",
         }),
-      });
-      expect(harness.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
-        kind: "restart_incumbent",
-        status: "failed",
-        details: {
-          operationId,
-          trigger: "manual",
-          reason: "incumbent_gateway_still_running",
-          evidence: expect.objectContaining({
-            wasRunningBefore: true,
-            stopConfirmed: false,
-            cliRefused: true,
-            cliExitCode: 1,
-            preStopPids: [31337],
-            postReadyPids: [31337],
-            newPids: [],
-            survivingPids: [31337],
-            supervisorPid: 4242,
-          }),
-        },
       });
       // Important-class notification (never verbose), outbox-deduped by op.
       expect(harness.deps.notify).toHaveBeenCalledTimes(1);
       const [message, opts] = harness.deps.notify.mock.calls[0];
       expect(message).toContain("🐺 *AlphaClaw Watchdog*");
-      expect(message).toContain("🔴 Gateway restart did not take effect");
+      expect(message).toContain("🔴 Gateway restart failed");
       expect(message).toContain("[View logs](https://setup.example.com/#/watchdog)");
-      expect(message).toContain("Reason: `incumbent_gateway_still_running`");
-      expect(message).toContain("refused the non-interactive `gateway stop`");
+      expect(message).toContain("Couldn't stop the old gateway");
       expect(opts).toEqual({
-        eventType: "restart_incumbent",
-        id: `restart-incumbent-${operationId}`,
+        eventType: "restart_failed",
+        id: `restart-failed-${operationId}`,
         operationId,
       });
     } finally {
@@ -825,7 +811,7 @@ describe("server/gateway restart drills (e2e)", () => {
     }
   });
 
-  it("fails with restart_failed + hint and serves redacted evidence when the gateway never becomes ready (NEVER-READY DRILL)", async () => {
+  it("fails with ready_timeout + hint and serves redacted evidence when the gateway never becomes ready (NEVER-READY DRILL)", async () => {
     const kSecret = "supersecrettoken123";
     const fake = createFakeGateway({ portOpen: false });
     fake.neverReady = true;
@@ -871,18 +857,15 @@ describe("server/gateway restart drills (e2e)", () => {
       const events = client.events();
       const terminal = events[events.length - 1];
       expect(terminal.event).toBe("error");
-      // The summary now names the blocking CAUSE (last error-shaped line of
-      // the redacted gateway output), not just the timeout symptom.
+      // The stream carries the user sentence + class + budget; the record's
+      // summary names the blocking CAUSE (last error-shaped line of the
+      // redacted gateway output), not just the timeout symptom.
       expect(terminal.data).toMatchObject({
-        code: "restart_failed",
-        hint: "Retry, run Repair, or check the gateway logs.",
+        code: "ready_timeout",
+        error: "OpenClaw started but wasn't ready in time.",
+        hint: "Try again. If it keeps failing, open View logs.",
+        budgetMs: 120000,
       });
-      expect(terminal.data.error).toContain(
-        "Gateway did not become ready within 120s",
-      );
-      expect(terminal.data.error).toContain(
-        "last gateway error: bind: address already in use",
-      );
       expect(events.some((e) => e.event === "done")).toBe(false);
       expect(events.some((e) => e.data?.name === "ready")).toBe(false);
       // Evidence rides by reference on /api/restart-status, never on frames —
@@ -900,9 +883,11 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(status.body.lastOperation).toMatchObject({
         operationId,
         status: "failed",
+        code: "ready_timeout",
+        budgetMs: 120000,
       });
       expect(status.body.lastOperation.errorSummary).toContain(
-        "Gateway did not become ready within 120s",
+        "did not become ready within 120s",
       );
       expect(status.body.lastOperation.errorSummary).toContain(
         "last gateway error: bind: address already in use",
@@ -952,8 +937,8 @@ describe("server/gateway restart drills (e2e)", () => {
     expect(first.status).toBe(202);
     const { operationId } = first.body;
 
-    // The restart is now parked inside `openclaw gateway stop`, holding the
-    // lifecycle lock.
+    // The restart is now parked inside the stop ladder (the asked gateway
+    // has not exited yet), holding the lifecycle lock.
     await waitUntil(() => typeof fake.releaseStop === "function");
 
     // A second POST attaches to the running operation instead of starting a
@@ -993,7 +978,8 @@ describe("server/gateway restart drills (e2e)", () => {
 
     // One restart execution total, despite three POSTs.
     expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-      ["gateway", "--force"],
+      ["gateway", "restart", "--wait", "30000ms"],
+      ["gateway", "run"],
     ]);
     // The lock is free again once the operation completes.
     const release = harness.gatewayLifecycleLock.tryAcquire("repair");
@@ -1006,7 +992,7 @@ describe("server/gateway restart drills (e2e)", () => {
     expect(blocked.body.ok).toBe(false);
     expect(blocked.body.code).toBe("operation_in_progress");
     release();
-    expect(fake.spawnCalls).toHaveLength(1);
+    expect(fake.spawnCalls).toHaveLength(2);
   });
 
   it("reconciles a restart interrupted by an AlphaClaw death into a terminal answer on boot (KILL-MID-RESTART DRILL)", async () => {
@@ -1100,6 +1086,7 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(events.slice(3).map(stepTuple)).toEqual([
         ["step", "Stopping gateway", "done"],
         ["step", "Starting gateway", "running"],
+        ["step", "Starting gateway", "done"],
         ["step", "Waiting for health check", "running"],
         ["step", "Ready", "done"],
         ["done", null, null],
@@ -1203,15 +1190,14 @@ describe("server/gateway restart drills (e2e)", () => {
   //
   //   boot around incumbent (adopted) ─▶ /health wedges ─▶ probe ✗ ✗ ✗ (sustained gate)
   //     ─▶ runRepair: skip live Doctor ─▶ requestGatewayLaunch → incumbent_present
-  //     ─▶ replace: `gateway stop` → `gateway --force` → ready → #59 verdict
+  //     ─▶ replace: stop ladder (ask → SIGTERM → SIGKILL) → `gateway run` → /readyz
   //          ├ new tree answers ─▶ requested {replace} … ok {verified: true}   (REPLACE DRILL)
-  //          └ incumbent survives ─▶ failed {incumbent_gateway_still_running}  (REPLACE-INCUMBENT)
+  //          └ incumbent survives ─▶ failed {stop_failed}                      (REPLACE-STOP-FAILED)
   //   lock lease expires mid ready-wait ─▶ aborted_by_caller, poll ends       (LEASE-FENCE DRILL)
   describe("watchdog repair `replace` through the real cold restart", () => {
-    it("replaces a wedged incumbent after three failed probes: Doctor skipped, `gateway stop` + `gateway --force` on the fake, restart/repair/requested {intent: replace} then ok {verified: true} once the new supervisor's tree answers (REPLACE DRILL)", async () => {
+    it("replaces a wedged incumbent after three failed probes: Doctor skipped, the stop ladder + `gateway run` on the fake, restart/repair/requested {intent: replace} then ok {verified: true} once the new child's tree answers (REPLACE DRILL)", async () => {
       const fake = createFakeGateway({
         portOpen: true,
-        supervisorLingers: true,
         livePids: [{ pid: kIncumbentPid, cmdline: kIncumbentCmdline }],
         livePidsAfterLaunch: [{ pid: kFakeSupervisorPid, cmdline: kSupervisorCmdline }],
       });
@@ -1254,11 +1240,11 @@ describe("server/gateway restart drills (e2e)", () => {
         expect(repairSkipReasons(insertWatchdogEvent).filter((details) => details.reason === "gateway_running")).toEqual([
           expect.objectContaining({ skipped: true, pid: kIncumbentPid }),
         ]);
-        // The pin's CLI has no --force on stop; the relaunch is the cold
-        // restart's `gateway --force` — never a `gateway run` alongside.
-        expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
+        // The relaunch is the cold restart: the graceful ask (honoured), then
+        // one managed `gateway run` — never a second gateway alongside.
         expect(fake.spawnCalls.map((call) => [call.file, ...call.args])).toEqual([
-          ["openclaw", "gateway", "--force"],
+          ["openclaw", "gateway", "restart", "--wait", "30000ms"],
+          ["openclaw", "gateway", "run"],
         ]);
         expect(coldRestartHolds).toEqual(["repair"]);
 
@@ -1293,8 +1279,7 @@ describe("server/gateway restart drills (e2e)", () => {
           source: "repair",
         });
 
-        // The adopted supervisor IS the new managed gateway (issue #56 shape).
-        expect(fake.gateway.isManagedGatewayChildSupervisor()).toBe(true);
+        // The `gateway run` child IS the new managed gateway.
         expect(fake.gateway.getLaunchGeneration()).toBe(1);
         expect(watchdog.getStatus()).toMatchObject({
           lifecycle: "running",
@@ -1315,17 +1300,17 @@ describe("server/gateway restart drills (e2e)", () => {
       }
     });
 
-    it("an incumbent that refuses the stop and keeps the port is a FAILED replacement: restart/repair/failed {incumbent_gateway_still_running}, no ok row, identity untouched (REPLACE-INCUMBENT DRILL)", async () => {
+    it("an incumbent that survives the whole stop ladder is a FAILED replacement: restart/repair/failed {stop_failed}, no ok row, identity untouched (REPLACE-STOP-FAILED DRILL)", async () => {
       const fake = createFakeGateway({
         portOpen: true,
-        stopRefused: true,
+        unstoppable: true,
         livePids: [{ pid: kIncumbentPid, cmdline: kIncumbentCmdline }],
       });
       const harness = createDrillHarness({ fake });
       const incumbent = { healthy: true };
       const { watchdog, insertWatchdogEvent, clawCmd, notifier, coldRestartHolds } =
         createDrillWatchdog({ fake, harness, isHealthy: () => incumbent.healthy });
-      // Fake timers step the 15s stop-settle window the refused stop burns.
+      // Fake timers step the ladder's ask + SIGTERM + SIGKILL graces.
       vi.useFakeTimers();
       try {
         await bootAroundIncumbent(fake);
@@ -1339,7 +1324,7 @@ describe("server/gateway restart drills (e2e)", () => {
         await wedgeIncumbentToTheGate({ incumbent, watchdog, insertWatchdogEvent, clawCmd, fake });
 
         const third = watchdog.runHealthCheck({ source: "health_timer" });
-        for (let i = 0; i < 40; i += 1) {
+        for (let i = 0; i < 80; i += 1) {
           if (restartRows(insertWatchdogEvent, { source: "repair", status: "failed" }).length) {
             break;
           }
@@ -1352,18 +1337,23 @@ describe("server/gateway restart drills (e2e)", () => {
         expect(repairSkipReasons(insertWatchdogEvent).filter((details) => details.reason === "gateway_running")).toEqual([
           expect.objectContaining({ skipped: true, pid: kIncumbentPid }),
         ]);
-        expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
-        expect(fake.spawnCalls.map((call) => call.args)).toEqual([["gateway", "--force"]]);
+        // Ask refused, SIGTERM and SIGKILL ignored — and nothing spawned on
+        // top of the survivor.
+        expect(fake.spawnCalls.map((call) => call.args)).toEqual([["gateway", "restart", "--wait", "30000ms"]]);
+        expect(fake.signals.filter(([pid]) => pid === kIncumbentPid)).toEqual([
+          [kIncumbentPid, "SIGTERM"],
+          [kIncumbentPid, "SIGKILL"],
+        ]);
         expect(coldRestartHolds).toEqual(["repair"]);
 
         const repairRows = restartRows(insertWatchdogEvent, { source: "repair" });
         expect(repairRows.map((row) => row.status)).toEqual(["requested", "failed"]);
         expect(repairRows[0].details).toMatchObject({ intent: "replace", coldRestart: true });
         expect(repairRows[1].details).toMatchObject({
-          reason: "incumbent_gateway_still_running",
+          reason: "stop_failed",
           intent: "replace",
         });
-        expect(repairRows[1].details.error).toContain("port never released");
+        expect(repairRows[1].details.error).toContain("did not exit after SIGKILL");
         expect(restartRows(insertWatchdogEvent, { status: "ok" })).toHaveLength(0);
         expect(operationRows(insertWatchdogEvent).map((row) => row.status)).toEqual([
           "started",
@@ -1371,13 +1361,13 @@ describe("server/gateway restart drills (e2e)", () => {
         ]);
         expect(operationRows(insertWatchdogEvent)[1].details).toMatchObject({
           trigger: "repair",
-          reason: "incumbent_gateway_still_running",
+          reason: "stop_failed",
         });
 
-        // Nothing new is running: no adoption, no generation-bearing launch
-        // notice, the incumbent's identity is what the watchdog still tracks.
-        expect(fake.gateway.isManagedGatewayChildSupervisor()).toBe(false);
+        // Nothing new is running: no generation-bearing launch notice, the
+        // incumbent's identity is what the watchdog still tracks.
         expect(fake.gateway.getManagedGatewayWorkerPid()).toBeNull();
+        expect(fake.gateway.getLaunchGeneration()).toBe(0);
         const status = watchdog.getStatus();
         expect(status.health).not.toBe("healthy");
         expect(status).toMatchObject({
@@ -1420,11 +1410,14 @@ describe("server/gateway restart drills (e2e)", () => {
             },
           );
 
-        // Stop settles at once (port released), `--force` is spawned, and the
-        // ready wait polls a port that never answers — while the lease holds.
+        // The ask is honoured at once (port released), `gateway run` is
+        // spawned, and the ready wait polls a port that never answers — while
+        // the lease holds.
         await vi.advanceTimersByTimeAsync(1_000);
-        expect(fake.stopCalls).toEqual([["gateway", "stop"]]);
-        expect(fake.spawnCalls.map((call) => call.args)).toEqual([["gateway", "--force"]]);
+        expect(fake.spawnCalls.map((call) => call.args)).toEqual([
+          ["gateway", "restart", "--wait", "30000ms"],
+          ["gateway", "run"],
+        ]);
         expect(hold.isValid()).toBe(true);
         expect(outcome).toBeUndefined();
 
@@ -1440,15 +1433,15 @@ describe("server/gateway restart drills (e2e)", () => {
         expect(elapsedMs).toBeLessThan(kLeaseMs + 2_000);
         expect(elapsedMs).toBeLessThan(kGatewayRestartReadyTimeoutMs);
         expect(outcome.error).toBeInstanceOf(fake.gateway.GatewayRestartError);
-        expect(outcome.error).not.toBeInstanceOf(fake.gateway.GatewayIncumbentRestartError);
+        expect(outcome.error).not.toBeInstanceOf(fake.gateway.GatewayStopError);
         expect(outcome.error.message).toContain("aborted by caller");
         expect(outcome.error.evidence).toMatchObject({
           aborted: true,
           reason: "aborted_by_caller",
         });
-        // Nothing claimed success: one spawn, no launch notice, and the
-        // generation counter records the one spawn that happened.
-        expect(fake.spawnCalls).toHaveLength(1);
+        // Nothing claimed success: one `gateway run` spawn, no launch notice,
+        // and the generation counter records the one spawn that happened.
+        expect(fake.spawnCalls.filter((call) => call.args[1] === "run")).toHaveLength(1);
         expect(launchHandler).not.toHaveBeenCalled();
         expect(fake.gateway.getLaunchGeneration()).toBe(1);
       } finally {
