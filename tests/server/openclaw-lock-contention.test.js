@@ -472,9 +472,18 @@ describe("readProcStartTicks / readProcParentPid (/proc/<pid>/stat field 22 and 
     // shift the field indexes.
     expect(readProcStartTicks(58, { fsModule })).toBe(8239901);
     expect(readProcParentPid(58, { fsModule })).toBe(57);
-    expect(parseProcStat(statLine(58, "node (gateway) run", 57, 8239901))).toEqual({
+    // v0.10.1 (bug #137): the state field rides along so liveness can tell a
+    // zombie (Z) / dead (X) entry from a running one.
+    expect(parseProcStat(statLine(58, "node (gateway) run", 57, 8239901))).toMatchObject({
       parentPid: 57,
       startTicks: 8239901,
+      state: "S",
+      dead: false,
+    });
+    expect(parseProcStat("60 (node) Z 57 60 60 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 8239901 0 0")).toMatchObject({
+      state: "Z",
+      dead: true,
+      parentPid: 57,
     });
     expect(readProcStartTicks(59, { fsModule })).toBeNull();
     expect(parseProcStat("")).toBeNull();

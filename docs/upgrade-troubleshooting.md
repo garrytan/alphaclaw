@@ -152,19 +152,79 @@ every pre-restart gateway pid is gone and `/readyz` answers from the new
 stamp is taken from a child that never launched.
 
 **Why it happens:** the stop ladder (`gateway restart --wait 30000ms` →
-SIGTERM the gateway's process group → SIGKILL it) could not take the old
-gateway down (`stop_failed`: it survived SIGKILL, which on Linux means the
-pid is stuck in the kernel or `/proc` is lying), or refused to try
-(`stop_refused`: the port is held by a process AlphaClaw cannot prove is the
-gateway — a foreign service on the gateway port, or two unrelated OpenClaw
-trees, or no `/proc` to read). An externally supervised gateway (systemd, a
-manual `openclaw gateway run`) that AlphaClaw adopted at boot IS stopped by
-the ladder — it is identified from `/proc` like a managed one.
+SIGTERM the gateway's process group → SIGKILL it) could not prove the old
+gateway went down (`stop_failed`: a gateway pid still ran after SIGKILL, or
+its `/proc` entry could not be read so its state is `unknown` — v0.10.1 no
+longer counts a zombie, a pid that exited but was not reaped by its parent,
+as alive), or refused to try (`stop_refused`: the port is held by a process
+AlphaClaw cannot prove is the gateway — a foreign service on the gateway
+port, two unrelated OpenClaw trees, or no `/proc` to read). An externally
+supervised gateway that AlphaClaw adopted at boot IS stopped by the ladder.
 
-**Next steps:** the operation record on the Watchdog tab names the pids. For
-`stop_refused`, find what holds the port (`ss -ltnp` / `openclaw gateway
-status --deep`) and stop it, or restart the container; for `stop_failed`,
-restart the container. Then press Restart again.
+**What the card says (v0.10.1 copy matrix, no sentence asks for a container
+restart):**
+
+| code | sentence | then |
+| --- | --- | --- |
+| `stop_refused` | Couldn't safely identify the running gateway, so nothing was stopped and your changes are not live yet. | Open View logs to see what holds the gateway port, then try again. |
+| `stop_failed` (count known) | *N* gateway process(es) did not exit after SIGKILL, so your changes are not live yet. | Automatic recovery is checking now. |
+| `stop_failed` (unverified) | Couldn't verify that *N* gateway process(es) exited after SIGKILL, so your changes are not live yet. | Automatic recovery is checking now. |
+| `stop_failed` (no count) | Couldn't confirm the old gateway stopped, so your changes are not live yet. | Automatic recovery is checking now. |
+| `launch_failed` | The old gateway stopped, but OpenClaw didn't start: *last error line*. | Automatic recovery is checking now. |
+| `ready_timeout` | OpenClaw started but wasn't ready in time. | AlphaClaw keeps watching it. |
+
+The recovery clause is what the watchdog's admission says it WILL do:
+"Automatic recovery is checking now." (a note was filed and the 0/5/15/30/60 s
+recheck ladder armed), "Automatic recovery is paused — press Resume repair
+once to let it run.", "Automatic recovery is off — press Repair to run it.",
+or "…could not run (*reason*)". A successful restart that had to force the
+stop says so: "Running: restarted in 12s (forced; 2 other processes exited)".
+
+**Where the evidence lives:** the Watchdog tab's **Restart evidence**
+disclosure (admin sessions only; members and the agent actor get the
+sentence, never pids) lists how the gateway was stopped, whether the graceful
+ask ran or why it was skipped, the gateway processes that were stopped, the
+non-OpenClaw processes that exited with the group, any still running, and the
+processes that did not exit with their verdict. `alphaclaw diagnose` renders
+the same record (**Restart operation** → timeline + stop evidence) plus
+**Gateway identity**: what the last restart recorded, who holds the port in
+`/proc` right now, and which `lsof` the ask would use.
+
+**Log grammar** (`process.log`): one line per ladder event,
+`[alphaclaw] restart op=<first 8 of operationId> <event> key=value …`, arrays
+as compact JSON, every string redacted. Events in order:
+
+```text
+restart op=9e1e29ab identity owner=managed rootPid=4200 workerPid=4201 pgid=4200 gateway=[4201] helpers=1 other=[4312]
+restart op=9e1e29ab asking status=skipped reason=no_lsof fix="install lsof (apt-get install -y lsof) — …"
+restart op=9e1e29ab asking status=running graceMs=30000 lsof=shim lsofPath=/…/lsof-shim/lsof
+restart op=9e1e29ab asking status=honoured|refused ms=… [exit=… line=…]
+restart op=9e1e29ab stopping signal=SIGTERM target=group pgid=4200
+restart op=9e1e29ab forcing signal=SIGKILL target=group pgid=4200
+restart op=9e1e29ab stopped how=graceful|sigterm|sigkill ms=… gateway=[…] observedExits={…}
+restart op=9e1e29ab stop_refused reason=unidentified_listener port=18789
+restart op=9e1e29ab stop_failed survivors=[{pid,verdict,reason}] unverified=true|false
+restart op=9e1e29ab launch pid=… generation=…
+restart op=9e1e29ab launch_failed reason=port_held|exited_before_ready|stranger_serving|…
+restart op=9e1e29ab ready_timeout budgetMs=300000 last=…
+restart op=9e1e29ab ready ms=… downMs=…
+```
+
+`asking status=skipped reason=…` carries the fix: `no_lsof` → install `lsof`
+in the image (`apt-get install -y lsof`; the shim covers the ask until then),
+`no_respawn_pinned` → unset `OPENCLAW_NO_RESPAWN`, `no_budget` → the
+operation deadline cannot fit ask + SIGTERM + SIGKILL grace, `no_worker` →
+no gateway worker pid was identified, `caller_disabled` →
+`ALPHACLAW_GATEWAY_STOP_ASK=0` or a shutdown/replace caller.
+
+**Next steps:** for `stop_refused`, find what holds the port (`ss -ltnp` /
+`alphaclaw diagnose` → Gateway identity) and stop it, then press Restart
+again. For `stop_failed`, wait for the recovery clause to resolve (the
+watchdog rechecks within the first minute and runs Doctor + relaunch when the
+port is down); if the card still shows the failure after two minutes, open
+View logs for the `stop_failed survivors=` line — a survivor with
+`verdict=unknown` means `/proc` could not be read for that pid, a
+`verdict=alive` survivor after SIGKILL is a kernel-stuck process.
 
 ## Restart failed: the old gateway stopped, but OpenClaw didn't start / wasn't ready
 

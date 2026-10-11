@@ -563,6 +563,8 @@ describe("frontend/app-shell controller (shared status feed)", () => {
       code: "ready_timeout",
       budgetMs: 300000,
       how: "graceful",
+      phase: null,
+      recovery: null,
     });
   });
 
@@ -841,6 +843,8 @@ describe("frontend/app-shell controller (shared status feed)", () => {
       code: "ready_timeout",
       budgetMs: 120000,
       how: "sigterm",
+      phase: null,
+      recovery: null,
     });
     expect(state.state.restartOperation.steps.map((step) => step.name)).toEqual([
       "stopping",

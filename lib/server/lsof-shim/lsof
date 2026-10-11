@@ -16,7 +16,9 @@
 //   exit 0, stdout `p<pid>\nc<comm>\n` per listener (`n*:<port>` when `n` is requested)
 //   exit 1, EMPTY stdout                  → port free (pollPortOnce: status 1 + empty = free)
 //   exit 2, one stderr line               → unsupported arguments or incomplete discovery
-//                                           (the pin logs a warning and skips — never "free")
+//                                           (the pin logs a warning and skips — never "free");
+//                                           owners that WERE read are reported even when
+//                                           another listener's fd dir was denied, like lsof
 // Supported argv: -n -P (or -nP), -iTCP:<port>, -sTCP:LISTEN, -F<fields>
 // with fields built from p/c/n (`F` separators ignored: -Fpc, -FpFc, -FpFcn,
 // -Fp -Fc). Anything else exits 2. Linux only.
@@ -83,9 +85,14 @@ const main = (argv) => {
   if (process.platform !== "linux") return refuse("Linux only");
   const parsed = parseArgs(argv);
   if (!parsed) return refuse("unsupported arguments");
+  // Like lsof itself, report the owners we could read even when some
+  // /proc/<pid>/fd was denied (a root-owned listener on another interface
+  // next to the gateway's): the pin verifies every pid by argv and against
+  // the gateway lock before it signals anything, so a partial list can only
+  // leave a listener unnamed, never name the wrong one. An incomplete scan
+  // that found NOBODY is never reported as "free".
   const { complete, pids } = findPortListeners(parsed.port);
-  if (!complete) return refuse("discovery incomplete");
-  if (pids.length === 0) return 1;
+  if (pids.length === 0) return complete ? 1 : refuse("discovery incomplete");
   let out = "";
   for (const pid of pids) {
     out += `p${pid}\n`;

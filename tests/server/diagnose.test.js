@@ -190,6 +190,20 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, pidfile }) => 
     errorSummary: "gateway exited 1",
     evidenceTail: `ERROR Legacy exec approvals exist ${kConfigSecret}\n`,
     reasonsSnapshot: ["config_changed"],
+    failedPhase: "stopping",
+    how: "sigkill",
+    recovery: { status: "will_check", reason: null },
+    phaseAt: { stopping: kNow - 30_000, asking: kNow - 29_500, forcing: kNow - 21_000, failed: kNow - 20_000 },
+    stopEvidence: {
+      how: "sigkill",
+      askSkippedReason: "no_lsof",
+      askRefusedLine: null,
+      askExit: null,
+      observedExits: { helpers: 1, other: { items: [{ pid: 4312, cmd: "node trip-reminder-stream.mjs" }], omitted: 0 } },
+      stillRunning: { items: [], omitted: 0 },
+      survivors: { items: [{ pid: 4201, cmd: "openclaw-gateway", verdict: "unknown", reason: "EACCES" }], omitted: 0 },
+      identity: { owner: "managed", rootPid: 4200, workerPid: 4201, pgid: 4200, gateway: { items: [{ pid: 4201, cmd: "openclaw-gateway" }], omitted: 0 }, helpers: 1, other: { items: [], omitted: 0 } },
+    },
   });
   writeJson(path.join(rootDir, "gateway-state.json"), {
     state: "degraded",
@@ -309,7 +323,7 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     // The CLI path computes the OpenClaw runtime facts, the pidfile decision
     // and the state-DB reads live; everything else is read from disk.
     expect(bundle.mode).toBe("cli");
-    expect(bundle.summary.sources).toEqual({ live: 3, disk: 8, unavailable: 1 });
+    expect(bundle.summary.sources).toEqual({ live: 4, disk: 8, unavailable: 1 });
     expect(bundle.summary.unavailable).toEqual(["watchdog"]);
     for (const name of kDiagnoseSectionNames) {
       const section = bundle.sections[name];
@@ -420,6 +434,28 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(gateway.source).toBe("disk");
     expect(gateway.data.path).toBe(path.join(ctx.rootDir, "gateway-state.json"));
     expect(gateway.data.record).toMatchObject({ state: "degraded", since: kNow - 60_000, cause: { cause: "legacy_exec_approvals" } });
+  });
+
+  it("restartOperation renders the phase timeline and the bounded stop evidence; gatewayIdentity carries recorded vs observed vs lsof (bug #137)", () => {
+    const md = renderDiagnoseMarkdown(bundle);
+    expect(md).toContain("- failed phase: stopping");
+    expect(md).toContain("- recovery: will_check");
+    expect(md).toContain("- timeline:\n  - +0s stopping\n  - +0.5s asking\n  - +9s forcing\n  - +10s failed");
+    expect(md).toContain("  - graceful ask: skipped (no_lsof)");
+    expect(md).toContain("  - gateway set: 4201 `openclaw-gateway`");
+    expect(md).toContain("  - observed exits: 1 helpers; other 4312 `node trip-reminder-stream.mjs`");
+    expect(md).toContain("  - survivors: 4201 `openclaw-gateway` [unknown: EACCES]");
+
+    const identity = bundle.sections.gatewayIdentity;
+    expect(identity.source).toBe("live");
+    expect(identity.data.port).toBe(18789);
+    expect(identity.data.recorded).toMatchObject({ operationId: "op-restart-1", status: "failed", owner: "managed", rootPid: 4200, workerPid: 4201 });
+    expect(Array.isArray(identity.data.observed.listeners)).toBe(true);
+    expect(["real", "shim", "none"]).toContain(identity.data.lsof.kind);
+    expect(md).toContain("## Gateway identity (live)");
+    expect(md).toContain("- recorded by last restart: `op-restart-1` failed — owner managed, root 4200, worker 4201, pgid 4200; gateway set 4201 `openclaw-gateway`");
+    expect(md).toMatch(/- observed listeners now: /);
+    expect(md).toMatch(/- lsof for the graceful ask: /);
   });
 
   it("backups: every entry of the backups dir, newest first, with a byte total", () => {
@@ -661,7 +697,7 @@ describe("diagnose: a throwing reader degrades its own section only", () => {
     expect(md.split("\n").filter((l) => l.startsWith("## "))).toHaveLength(kDiagnoseSectionNames.length);
     expect(md).toContain("## OpenClaw (unavailable)\n_Unavailable: openclaw failed: runtime info exploded_");
     expect(md).toContain("## Boot reports (unavailable)");
-    expect(md).toContain("- sections: 12 — live 1, disk 3, unavailable 8 (");
+    expect(md).toContain("- sections: 13 — live 2, disk 3, unavailable 8 (");
   });
 
 });

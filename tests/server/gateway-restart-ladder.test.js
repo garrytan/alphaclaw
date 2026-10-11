@@ -15,6 +15,7 @@ const { kDefaultGatewayPort } = require("../../lib/server/constants");
 const modulePath = require.resolve("../../lib/server/gateway");
 const gatewayIdentity = require("../../lib/server/gateway-identity");
 const lockContention = require("../../lib/server/openclaw-lock-contention");
+const lsofShim = require("../../lib/server/lsof-shim");
 const autotune = require("../../lib/server/autotune");
 
 const originalSpawn = childProcess.spawn;
@@ -55,11 +56,22 @@ const createWorld = () => {
     listenDelayMs: 200,
     lockWaitLine: false,
     spawned: [],
-    add(pid, { ppid = null, listens = false, openclaw = true, ignoreSigterm = false, pgid = null, child = null } = {}) {
-      procs.set(pid, { pid, ppid, alive: true, listens, openclaw, ignoreSigterm, pgid: pgid ?? pid, child, exitCode: null });
+    add(pid, { ppid = null, listens = false, openclaw = true, ignoreSigterm = false, pgid = null, child = null, cmd = null, zombie = false, unknown = false } = {}) {
+      procs.set(pid, { pid, ppid, alive: true, listens, openclaw, ignoreSigterm, pgid: pgid ?? pid, child, exitCode: null, cmd: cmd ?? (openclaw ? "node openclaw" : "node service.mjs"), zombie, unknown });
       return procs.get(pid);
     },
     alive: (pid) => procs.get(pid)?.alive === true,
+    // Three-way liveness as gateway-identity.resolveProcessVerdict answers it:
+    // a dead pid is gone; a `zombie` proc is gone even while kill(0) would
+    // succeed; an `unknown` proc has an unreadable /proc.
+    verdict(pid) {
+      const proc = procs.get(pid);
+      if (!proc || !proc.alive) return { verdict: "gone", reason: "esrch" };
+      if (proc.zombie) return { verdict: "gone", reason: "state_z" };
+      if (proc.unknown) return { verdict: "unknown", reason: "stat_eacces" };
+      return { verdict: "alive", reason: "state_s" };
+    },
+    groupMembers: (pgid) => [...procs.values()].filter((p) => p.alive && p.pgid === pgid).map((p) => p.pid).sort((a, b) => a - b),
     listeners: () => [...procs.values()].filter((p) => p.alive && p.listens).map((p) => p.pid).sort((a, b) => a - b),
     tree(root) {
       if (!world.alive(root)) return [];
@@ -167,9 +179,20 @@ const installWorld = (world) => {
   vi.spyOn(gatewayIdentity, "readProcessGroupId").mockImplementation((pid) =>
     pid === process.pid ? 1 : (world.procs.get(pid)?.pgid ?? null),
   );
-  vi.spyOn(gatewayIdentity, "isSameProcess").mockImplementation((pid) => world.alive(pid));
+  vi.spyOn(gatewayIdentity, "isSameProcess").mockImplementation((pid) => world.verdict(pid).verdict === "alive");
+  vi.spyOn(gatewayIdentity, "resolveProcessVerdict").mockImplementation((pid) => world.verdict(pid));
   vi.spyOn(gatewayIdentity, "isOpenclawPid").mockImplementation((pid) => world.procs.get(pid)?.openclaw === true);
+  vi.spyOn(gatewayIdentity, "isOpenclawProgramPid").mockImplementation((pid) => world.procs.get(pid)?.openclaw === true);
+  vi.spyOn(gatewayIdentity, "listProcessGroupMembers").mockImplementation((pgid) => world.groupMembers(pgid));
+  vi.spyOn(gatewayIdentity, "describeProcessCommand").mockImplementation((pid) => world.procs.get(pid)?.cmd ?? "");
   vi.spyOn(lockContention, "readProcStartTicks").mockImplementation((pid) => (world.procs.has(pid) ? 1 : null));
+  vi.spyOn(lockContention, "readProcParentPid").mockImplementation((pid) => world.procs.get(pid)?.ppid ?? null);
+  // The ask preflight needs an lsof on the ask CLI's PATH; the world has one
+  // unless a test takes it away (world.lsof = null).
+  world.lsof = "/usr/bin/lsof";
+  vi.spyOn(lsofShim, "resolveAskLsofPath").mockImplementation(() =>
+    world.lsof ? { path: world.lsof, kind: "real" } : { path: null, kind: "none" },
+  );
   vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockReturnValue([]);
   vi.spyOn(process, "kill").mockImplementation((pid, sig) => world.signal(pid, sig));
   childProcess.spawn = vi.fn((file, args, options) => {
@@ -380,10 +403,11 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       { pid: root, cmdline: "openclaw gateway run" },
       { pid: worker, cmdline: "node /app/node_modules/openclaw/dist/entry.js gateway run" },
     ]);
-    vi.spyOn(lockContention, "readProcParentPid").mockImplementation((pid) => world.procs.get(pid)?.ppid ?? null);
     // The root's pid is reused by a stranger right after resolve: its start
     // ticks no longer match, so it must not be signalled.
-    gatewayIdentity.isSameProcess.mockImplementation((pid) => pid !== root && world.alive(pid));
+    gatewayIdentity.resolveProcessVerdict.mockImplementation((pid) =>
+      pid === root ? { verdict: "gone", reason: "pid_reused" } : world.verdict(pid),
+    );
     world.restartCli = "ignored";
     const { value, error } = await runRestart({}, 12000);
     expect(error).toBeNull();

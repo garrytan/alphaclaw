@@ -3129,6 +3129,7 @@ describe("server/routes/system", () => {
       code: "restart_failed",
       error: "Restart failed.",
       hint: "Try again, run Repair, or open View logs.",
+      phase: "starting",
       detail: "gateway never came back",
     });
     expect(deps.restartGateway).toHaveBeenCalledTimes(1);
@@ -3263,6 +3264,8 @@ describe("server/routes/system", () => {
         trigger: "manual",
         durationMs: 900,
         downtimeMs: 350,
+        how: null,
+        observedExitsCount: 0,
       },
     });
 
@@ -3288,6 +3291,8 @@ describe("server/routes/system", () => {
           trigger: "manual",
           error: "bind failed for token ***",
           code: "restart_failed",
+          phase: "starting",
+          signalled: false,
         },
       });
     } finally {
@@ -3299,15 +3304,17 @@ describe("server/routes/system", () => {
     }
   });
 
-  const failureDeps = ({ operationId, error, notify = vi.fn(async () => ({ ok: true })) } = {}) => {
+  const failureDeps = ({ operationId, error, notify = vi.fn(async () => ({ ok: true })), admission = { ok: true } } = {}) => {
     const deps = createSystemDeps();
     deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId, reasonsSnapshot: ["env_vars_changed"] }));
     deps.restartRequiredState.completeRestart = vi.fn();
+    deps.restartRequiredState.patchRestartOperation = vi.fn();
     deps.watchdog = {
       getStatus: vi.fn(() => ({})),
       onExpectedRestart: vi.fn(),
       onExpectedRestartSettled: vi.fn(),
       recordOperationEvent: vi.fn(),
+      noteRestartFailure: vi.fn(() => ({ admission, recheck: { scheduled: admission.ok, delaysMs: [] } })),
     };
     deps.operationEvents = { createOperation: vi.fn(), publish: vi.fn(), complete: vi.fn(), fail: vi.fn() };
     deps.notify = notify;
@@ -3321,9 +3328,17 @@ describe("server/routes/system", () => {
   it("a stop the ladder could not complete (GatewayStopError stop_failed) is a failed restart: banner kept, one user sentence + hint in the stream, the record and the sync body, ledger row with the code, one important notification", async () => {
     const deps = failureDeps({
       operationId: "op-stop",
-      error: new GatewayStopError("stop_failed", "the gateway did not exit after SIGKILL (pid 777 still alive)", {
+      error: new GatewayStopError("stop_failed", "1 gateway process did not exit after SIGKILL (pid 777: alive/state_s)", {
         pids: [776, 777],
-        survivors: [777],
+        signalled: true,
+        stopEvidence: {
+          how: null,
+          askSkippedReason: "no_lsof",
+          observedExits: { helpers: 1, other: [{ pid: 778, cmd: "node trip-reminder-stream.mjs" }] },
+          stillRunning: [],
+          survivors: [{ pid: 777, verdict: "alive", reason: "state_s", cmd: "node openclaw" }],
+          identity: { owner: "managed", rootPid: 776, workerPid: 777, pgid: 776, gateway: [{ pid: 776, cmd: "node openclaw" }, { pid: 777, cmd: "node openclaw" }], helpers: 1, other: [{ pid: 778, cmd: "node trip-reminder-stream.mjs" }] },
+        },
         stderrTail: ["gateway: another OpenClaw process owns state-lifecycle"],
       }),
     });
@@ -3332,27 +3347,50 @@ describe("server/routes/system", () => {
     const res = await request(app).post("/api/gateway/restart");
 
     // Sync callers see the failure, never a 200 over a gateway that did not
-    // restart — with the user sentence, the class, and the technical detail.
+    // restart — with the user sentence (a COUNT, never pids), the class, and
+    // the technical detail.
     expect(res.status).toBe(500);
     expect(res.body).toMatchObject({
       ok: false,
       code: "stop_failed",
-      error: "Couldn't stop the old gateway, so your changes are not live yet.",
-      hint: expect.stringContaining("Try again"),
-      detail: expect.stringContaining("pid 777 still alive"),
+      error: "1 gateway process did not exit after SIGKILL, so your changes are not live yet.",
+      hint: expect.stringContaining("Automatic recovery is checking now"),
+      detail: expect.stringContaining("pid 777: alive/state_s"),
+      phase: "forcing",
     });
     expect(res.body.evidence).toContain("owns state-lifecycle");
-    // The record fails with the class + hint (a failed record keeps the
-    // reasons snapshot: the banner stays up).
+    // The record fails with the class + hint + the stop evidence + the phase
+    // (a failed record keeps the reasons snapshot: the banner stays up).
     expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith({
       operationId: "op-stop",
       ok: false,
       errorSummary: expect.stringContaining("did not exit after SIGKILL"),
       code: "stop_failed",
-      hint: expect.stringContaining("Try again"),
+      hint: expect.stringContaining("Automatic recovery"),
       how: null,
       budgetMs: null,
       evidenceTail: expect.stringContaining("owns state-lifecycle"),
+      stopEvidence: expect.objectContaining({ askSkippedReason: "no_lsof", survivors: [expect.objectContaining({ pid: 777 })] }),
+      failedPhase: "forcing",
+    });
+    // Handoff (bug #137): the watchdog gets the note AFTER the lock release
+    // and window settlement, the record is patched with the recovery clause
+    // and the stream carries it.
+    const order = [];
+    deps.watchdog.onExpectedRestartSettled.mock.invocationCallOrder.forEach((n) => order.push(["settled", n]));
+    deps.watchdog.noteRestartFailure.mock.invocationCallOrder.forEach((n) => order.push(["note", n]));
+    deps.restartRequiredState.completeRestart.mock.invocationCallOrder.forEach((n) => order.push(["record", n]));
+    order.sort((a, b) => a[1] - b[1]);
+    expect(order.map(([name]) => name)).toEqual(["record", "settled", "note"]);
+    expect(deps.watchdog.noteRestartFailure).toHaveBeenCalledWith({
+      operationId: "op-stop", code: "stop_failed", phase: "forcing", signalled: true, gatewayDown: true,
+    });
+    expect(deps.restartRequiredState.patchRestartOperation).toHaveBeenCalledWith({
+      operationId: "op-stop", recovery: { status: "will_check", reason: null },
+    });
+    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-stop", {
+      event: "recovery",
+      data: expect.objectContaining({ status: "will_check", text: "Automatic recovery is checking now." }),
     });
     expect(deps.restartRequiredState.markRestartComplete).toHaveBeenCalled();
     // Step stream: structured details ride through untouched, with the
@@ -3371,9 +3409,10 @@ describe("server/routes/system", () => {
     expect(deps.operationEvents.fail).toHaveBeenCalledWith(
       "op-stop",
       expect.objectContaining({
-        message: "Couldn't stop the old gateway, so your changes are not live yet.",
+        message: "1 gateway process did not exit after SIGKILL, so your changes are not live yet.",
         code: "stop_failed",
-        hint: expect.stringContaining("Try again"),
+        hint: expect.stringContaining("Automatic recovery"),
+        phase: "forcing",
       }),
     );
     expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
@@ -3390,11 +3429,38 @@ describe("server/routes/system", () => {
     const [message, opts] = deps.notify.mock.calls[0];
     expect(message.split("\n")[0]).toBe("🐺 *AlphaClaw Watchdog*");
     expect(message).toContain("🔴 Gateway restart failed - [View logs](https://setup.example.com/#/watchdog)");
-    expect(message).toContain("Couldn't stop the old gateway, so your changes are not live yet.");
-    expect(message).toContain("the restart-required banner stays up");
+    expect(message).toContain("1 gateway process did not exit after SIGKILL, so your changes are not live yet.");
+    // stop_failed never claims the old gateway is still running: the
+    // recovery clause from the watchdog's admission is what follows.
+    expect(message).toContain("Automatic recovery is checking now.");
+    expect(message).not.toContain("still running");
     expect(opts).toEqual({ eventType: "restart_failed", id: "restart-failed-op-stop", operationId: "op-stop" });
     expect(opts.verbose).toBeUndefined();
     expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("stop evidence on /api/restart-status is admin-only: members get the record without pids or commands (bug #137)", async () => {
+    const record = {
+      operationId: "op-ev",
+      status: "failed",
+      code: "stop_failed",
+      failedPhase: "forcing",
+      reasonsSnapshot: [],
+      stopEvidence: { survivors: { items: [{ pid: 777, cmd: "node openclaw", verdict: "alive" }], omitted: 0 } },
+    };
+    const deps = createSystemDeps();
+    deps.restartRequiredState.getLastRestartOperation = vi.fn(() => ({ ...record }));
+    const appFor = (role) => {
+      const app = express();
+      app.use((req, res, next) => { req.alphaclawIdentity = { role }; next(); });
+      registerSystemRoutes({ app, agentSessionsCacheTtlMs: 0, ...deps });
+      return app;
+    };
+    const admin = await request(appFor("admin")).get("/api/restart-status");
+    expect(admin.body.lastOperation.stopEvidence.survivors.items[0]).toMatchObject({ pid: 777 });
+    const member = await request(appFor("member")).get("/api/restart-status");
+    expect(member.body.lastOperation).toMatchObject({ operationId: "op-ev", code: "stop_failed", failedPhase: "forcing" });
+    expect(member.body.lastOperation.stopEvidence).toBeUndefined();
   });
 
   it("stop_refused (nothing was signalled) renders its own sentence and hint", async () => {
@@ -3406,10 +3472,15 @@ describe("server/routes/system", () => {
     expect(res.status).toBe(500);
     expect(res.body).toMatchObject({
       code: "stop_refused",
-      error: "Couldn't safely identify the running gateway, so nothing was stopped.",
-      hint: expect.stringContaining("View logs"),
+      error: "Couldn't safely identify the running gateway, so nothing was stopped and your changes are not live yet.",
+      hint: expect.stringContaining("The old gateway is still running"),
     });
     expect(deps.operationEvents.fail).toHaveBeenCalledWith("op-refused", expect.objectContaining({ code: "stop_refused" }));
+    // Nothing was signalled: no handoff to the watchdog, the notification
+    // says the old gateway is still running.
+    expect(deps.watchdog.noteRestartFailure).not.toHaveBeenCalled();
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+    expect(deps.notify.mock.calls[0][0]).toContain("Nothing was stopped: the previous gateway is still running");
   });
 
   it("launch_failed appends the last error-shaped gateway line to the user sentence; ready_timeout carries budgetMs; aborted sends no notification", async () => {
@@ -3481,7 +3552,7 @@ describe("server/routes/system", () => {
     expect(deps.notify).toHaveBeenCalledTimes(1);
     const [message] = deps.notify.mock.calls[0];
     expect(message).toContain("🔴 Gateway restart failed\n");
-    expect(message).not.toContain("View logs");
+    expect(message).not.toContain("[View logs](");
   });
 
   it("the failure notification's View-logs link honors the request's forwarded host", async () => {
@@ -3522,7 +3593,7 @@ describe("server/routes/system", () => {
         expect(deps.notify).toHaveBeenCalledTimes(1);
         const [message] = deps.notify.mock.calls[0];
         expect(message).toContain("🔴 Gateway restart failed\n");
-        expect(message).not.toContain("View logs");
+        expect(message).not.toContain("[View logs](");
         expect(message).not.toContain(baseUrl);
       } finally {
         if (previous === undefined) delete process.env.ALPHACLAW_SETUP_URL;
@@ -3661,7 +3732,7 @@ describe("server/routes/system", () => {
     expect(res.status).toBe(200);
     // The suppression window forwarded to the watchdog is the operation
     // record's OWN lease, not a value invented by the route.
-    expect(deps.watchdog.onExpectedRestart).toHaveBeenCalledWith({ expiresAt });
+    expect(deps.watchdog.onExpectedRestart).toHaveBeenCalledWith({ expiresAt, supersedes: "user" });
     expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
   });
 });

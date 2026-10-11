@@ -159,6 +159,25 @@ describeLinux("lsof shim: spawned against real sockets", () => {
     }
   });
 
+  it("still names the owners it could read when another listener's fd dir is denied (lsof's own behaviour)", async () => {
+    // A root-owned listener on the same port cannot be attributed from a
+    // non-root scan; the shim must not turn that into exit 2 when the
+    // gateway's own pid WAS found — the pin verifies pids by argv anyway.
+    const server = await listen();
+    try {
+      const { port } = server.address();
+      const deadline = Date.now() + 1500;
+      let res;
+      do {
+        res = runShim(["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"]);
+      } while (res.status !== 0 && Date.now() < deadline);
+      expect(res.status).toBe(0);
+      expect(res.stdout.split("\n")).toContain(`p${process.pid}`);
+    } finally {
+      await close(server);
+    }
+  });
+
   it("exits 1 with EMPTY stdout for a free port (the pin's 'free')", async () => {
     const port = await freePort();
     const res = runShim(["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"]);

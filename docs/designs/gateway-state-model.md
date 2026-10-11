@@ -293,13 +293,13 @@ flowchart TD
   ID -->|nothing on the port| L
   ID -->|foreign / ambiguous listener| REF["GatewayStopError stop_refused<br/>(nothing signalled)"]
   ID --> MARK[mark the exit EXPECTED]
-  MARK --> ASK["1. ask: openclaw gateway restart --wait 30000ms<br/>admission closes, turn compacts, drain ≤ 30 s, exit 0 + handoff row<br/>(skipped when OPENCLAW_NO_RESPAWN is set or the deadline cannot fit)"]
+  MARK --> ASK["1. ask: openclaw gateway restart --wait 30000ms<br/>admission closes, turn compacts, drain ≤ 30 s, exit 0 + handoff row<br/>(skipped + logged: caller_disabled / no_worker / no_respawn_pinned / no_budget / no_lsof)"]
   ASK -->|every pid gone| GONE
   ASK -->|alive / CLI refused| TERM["2. SIGTERM the process group (10 s)<br/>start ticks re-read before every signal"]
   TERM -->|gone| GONE
   TERM -->|alive| KILL["3. SIGKILL the group (5 s)"]
   KILL -->|gone| GONE["old gateway gone: every resolved pid exited"]
-  KILL -->|alive| SF["GatewayStopError stop_failed"]
+  KILL -->|alive or unknown| SF["GatewayStopError stop_failed<br/>+ stopEvidence → watchdog.noteRestartFailure"]
   GONE -->|stranger now listens| LF1["launch_failed"]
   GONE --> L["requestGatewayLaunch({ prepared, deferAutotuneStamp })<br/>spawn `openclaw gateway run` detached, generation++"]
   L --> RZ{"/readyz 200 (gateway-readiness.js)<br/>inside kGatewayRestartReadyTimeoutMs?<br/>starting / draining / refused keep waiting;<br/>the state-ownership wait line → step lock_wait"}
@@ -322,6 +322,28 @@ record (`errorSummary`, `evidence`) behind View logs. The record persists
 `code`, `hint`, `how`, `budgetMs` and `phaseAt{step: epochMs}` so a reload
 renders the same line and timer. `durationMs` = prepare → ready;
 `downtimeMs` = stop initiated → ready.
+
+**v0.10.1 (bug #137).** Liveness is a verdict, never `kill(pid, 0)`:
+`resolveProcessVerdict` → `gone` (no `/proc` entry, or state `Z`/`X` with no
+live thread), `alive`, or `unknown` (`/proc` unreadable); `unknown` never
+counts as gone and is never signalled per pid, and a ladder that ends with only
+`unknown` verdicts reports `stop_failed` as *unverified*. The ask runs only
+when it can work — preflight order `caller_disabled` (`ALPHACLAW_GATEWAY_STOP_ASK=0`,
+shutdown/replace) → `no_worker` → `no_respawn_pinned` → `no_budget` →
+`no_lsof` — and the skip is one logged line with its fix; OpenClaw's restart
+CLI needs `lsof`, so the ask's PATH (only the ask's) gets `lib/server/lsof-shim`
+when the real binary is missing. Before signalling, the ladder inventories the
+process group (`gateway | helper | other` by argv), signals the whole group as
+before, and returns `{ how, identity, evidence }`; `stopEvidence` (identity,
+observed exits, still-running non-OpenClaw processes, survivors with verdicts)
+is bounded structurally (8 samples per list + `omitted`) on the record,
+rendered to admin sessions only. A failed restart hands the watchdog one
+`noteRestartFailure({ operationId, code, phase, signalled, gatewayDown })` from
+the route's `finally` after the lifecycle lock is released; the reply's
+admission becomes the card's recovery clause (`recovery` stream event, before
+the terminal `error`), and the watchdog's bounded recheck (0/5/15/30/60 s,
+repair allowed, sustained-failure gate bypassed while the note stands) owns the
+recovery. The restart operation never runs Doctor itself.
 
 Interruption policy is one policy for every trigger: ask → term → kill. The
 automated triggers (`replace`, memory mitigation) already target an unhealthy

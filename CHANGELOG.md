@@ -5,6 +5,71 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.1] - 2026-10-11
+
+Restart told the truth about the wrong thing (bug #137). A manual Restart
+ended in `stop_failed` — "Couldn't stop the old gateway" — while the gateway
+was already down, and nothing brought it back for eight minutes. Verified on
+the box and against the pinned OpenClaw: the graceful ask (`gateway restart
+--wait`) fails in milliseconds inside the image because OpenClaw's restart
+CLI locates the gateway with `lsof`, which the `node:24-slim` image does not
+ship; the SIGKILL of the process group then left a **zombie** gateway pid
+whose parent had not reaped it, `process.kill(pid, 0)` kept answering
+"alive", and the ladder reported survivors that had in fact exited; the
+route closed the record and handed the watchdog nothing, so the only path
+to Doctor was three 120 s health misses.
+
+### Fixed
+
+- **Zombie-aware liveness** (`gateway-identity.js` `resolveProcessVerdict`,
+  `openclaw-lock-contention.js`): a pid is `gone` when `/proc/<pid>/stat` says
+  `Z`/`X` with no live thread, `alive` when it runs, `unknown` when `/proc`
+  cannot be read — never a bare `kill(pid, 0)`. `unknown` is never counted as
+  gone and is never signalled per pid; a stop that ends with only `unknown`
+  verdicts is reported as unverified, not as survivors.
+- **Honest ask** (`gateway.js`): the graceful `openclaw gateway restart
+  --wait 30000ms` runs only when it can work; otherwise it is skipped with one
+  logged reason (`no_lsof | no_respawn_pinned | no_worker | no_budget |
+  caller_disabled`) and its fix, and the ladder goes straight to SIGTERM.
+  `ALPHACLAW_GATEWAY_STOP_ASK=0` disables the ask (deployment env).
+- **lsof for the ask** (`lib/server/lsof-shim/`, Dockerfile): the image now
+  installs `lsof`; where it is missing, a `/proc`-backed shim that answers
+  exactly the `-nP -iTCP:<port> -sTCP:LISTEN -Fpc` query OpenClaw's restart
+  CLI makes is appended to the ask's PATH (never the gateway's).
+  `ALPHACLAW_LSOF_SHIM=0` disables it. A pin-contract test fails CI when the
+  pinned OpenClaw changes the query.
+- **Kill-set evidence**: the ladder inventories the process group before it
+  signals it (`gateway | helper | other`), signals the whole group as before,
+  and records what died and what was left (`stopEvidence`: identity, observed
+  exits, still-running non-OpenClaw processes, survivors with verdicts). The
+  user sentence names a COUNT ("2 gateway processes did not exit after
+  SIGKILL…"); pids, states and commands live in the evidence, served to admin
+  sessions only (stripped for members and the agent actor) behind the Watchdog
+  tab's **Restart evidence** disclosure, now in plain language.
+- **Failure → watchdog handoff** (`routes/system.js`, `watchdog.js`): a
+  failed restart files one `noteRestartFailure` after the lifecycle lock is
+  released; while the note stands and the port is proven down, the watchdog
+  rechecks at 0/5/15/30/60 s with repair allowed and bypasses the
+  three-miss sustained-failure gate. The card's failure line ends with what
+  recovery WILL do ("Automatic recovery is checking now." / "…is paused —
+  press Resume repair once…" / "…is off — press Repair…"), streamed as a
+  `recovery` event before the terminal error. A new user restart supersedes
+  the note; the watchdog's own planned restarts carry it so the recovery can
+  be attributed.
+- **Copy matrix**: no failure sentence tells the operator to restart the
+  container. `stop_refused` → "Couldn't safely identify the running gateway,
+  so nothing was stopped…"; `stop_failed` → "Couldn't confirm the old gateway
+  stopped, so your changes are not live yet." (or the count sentence);
+  success qualifies a forced stop ("forced; 2 other processes exited").
+- **One log grammar**: every ladder event is `[alphaclaw] restart op=<8>
+  <event> key=value …` (`identity`, `asking`, `stopping`, `forcing`,
+  `stopped`, `stop_refused`, `stop_failed`, `launch`, `launch_failed`,
+  `ready_timeout`, `ready`), strings redacted.
+- **`alphaclaw diagnose`**: the Restart operation section renders the phase
+  timeline and the bounded stop evidence; a new **Gateway identity** section
+  shows what the last restart recorded, who holds the port in `/proc` right
+  now, and which `lsof` the ask would use.
+
 ## [0.10.0] - 2026-10-07
 
 Gateway restart, rebuilt. Every restart while the agent had work in flight

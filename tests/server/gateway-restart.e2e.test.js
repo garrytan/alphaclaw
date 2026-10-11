@@ -67,6 +67,7 @@ const kGatewayModulePath = require.resolve("../../lib/server/gateway");
 // Namespace-required by gateway.js: the incumbent verdict's live-pid scan is
 // pinned per drill (never the real /proc).
 const lockContention = require("../../lib/server/openclaw-lock-contention");
+const lsofShim = require("../../lib/server/lsof-shim");
 // Namespace-required by gateway.js: the ladder's /proc identity readers
 // (listeners, trees, start ticks) are pinned per drill (never the real /proc).
 const gatewayIdentity = require("../../lib/server/gateway-identity");
@@ -181,7 +182,15 @@ const createFakeGateway = ({
   );
   vi.spyOn(gatewayIdentity, "readProcessGroupId").mockReturnValue(null);
   vi.spyOn(gatewayIdentity, "isSameProcess").mockImplementation((pid) => alive(pid));
+  vi.spyOn(gatewayIdentity, "resolveProcessVerdict").mockImplementation((pid) =>
+    alive(pid) ? { verdict: "alive", reason: "state_s" } : { verdict: "gone", reason: "esrch" },
+  );
   vi.spyOn(gatewayIdentity, "isOpenclawPid").mockReturnValue(true);
+  vi.spyOn(gatewayIdentity, "isOpenclawProgramPid").mockReturnValue(true);
+  vi.spyOn(gatewayIdentity, "listProcessGroupMembers").mockReturnValue([]);
+  vi.spyOn(gatewayIdentity, "describeProcessCommand").mockReturnValue("node openclaw");
+  vi.spyOn(lockContention, "readProcParentPid").mockReturnValue(null);
+  vi.spyOn(lsofShim, "resolveAskLsofPath").mockReturnValue({ path: "/usr/bin/lsof", kind: "real" });
   vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
     fake.signals.push([pid, signal]);
     if (signal === 0) {
@@ -749,10 +758,16 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(terminal.event).toBe("error");
       expect(terminal.data).toMatchObject({
         code: "stop_failed",
-        error: "Couldn't stop the old gateway, so your changes are not live yet.",
-        hint: expect.stringContaining("Try again"),
+        error: "1 gateway process did not exit after SIGKILL, so your changes are not live yet.",
+        hint: expect.stringContaining("Automatic recovery is checking now"),
+        phase: "forcing",
       });
       expect(events.some((e) => e.event === "done")).toBe(false);
+      // The recovery clause (bug #137) precedes the terminal event: `error`
+      // closes the client's stream.
+      const recovery = events.find((e) => e.event === "recovery");
+      expect(recovery).toBeTruthy();
+      expect(events.indexOf(recovery)).toBeLessThan(events.indexOf(terminal));
 
       // The ask went out, then SIGTERM and SIGKILL to the identified pid —
       // and no `gateway run` was spawned on top of the survivor.
@@ -777,8 +792,12 @@ describe("server/gateway restart drills (e2e)", () => {
         operationId,
         status: "failed",
         code: "stop_failed",
-        hint: expect.stringContaining("Try again"),
+        hint: expect.stringContaining("Automatic recovery"),
+        failedPhase: "forcing",
       });
+      // Stop evidence is admin-only: this harness has no admin session, so
+      // the member view carries the outcome without pids or commands.
+      expect(status.body.lastOperation.stopEvidence).toBeUndefined();
       expect(status.body.lastOperation.errorSummary).toContain(
         "did not exit after SIGKILL",
       );
@@ -799,7 +818,8 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(message).toContain("🐺 *AlphaClaw Watchdog*");
       expect(message).toContain("🔴 Gateway restart failed");
       expect(message).toContain("[View logs](https://setup.example.com/#/watchdog)");
-      expect(message).toContain("Couldn't stop the old gateway");
+      expect(message).toContain("1 gateway process did not exit after SIGKILL");
+      expect(message).not.toContain("still running");
       expect(opts).toEqual({
         eventType: "restart_failed",
         id: `restart-failed-${operationId}`,
@@ -863,7 +883,7 @@ describe("server/gateway restart drills (e2e)", () => {
       expect(terminal.data).toMatchObject({
         code: "ready_timeout",
         error: "OpenClaw started but wasn't ready in time.",
-        hint: "Try again. If it keeps failing, open View logs.",
+        hint: "AlphaClaw keeps watching it. If it is not Running in about two minutes, open View logs.",
         budgetMs: 120000,
       });
       expect(events.some((e) => e.event === "done")).toBe(false);

@@ -1,5 +1,29 @@
 # TODOS
 
+## P2 — Upstream: lsof-free gateway discovery for `openclaw gateway restart` (2026-10-11, bug #137 / v0.10.1)
+
+**What:** OpenClaw's restart CLI (`restart-stale-pids` → `ports-lsof` in the 2026.9.8 dist) finds the gateway with `lsof -nP -iTCP:<port> -sTCP:LISTEN -Fpc` and treats ENOENT as "no gateway", so the graceful ask fails in milliseconds on any image without `lsof`. AlphaClaw ships `lsof` in the image and a `/proc` shim on the ask's PATH (`lib/server/lsof-shim/`); the durable fix is a `/proc/net/tcp` fallback upstream. File it against openclaw with the pin-contract test (`tests/server/openclaw-pin-lsof-contract.test.js`) as the reproduction; retire the shim when the pin carries the fallback.
+
+## P3 — A targeted gateway RPC instead of the CLI ask (2026-10-11, bug #137 / v0.10.1)
+
+**What:** the ask is `openclaw gateway restart --wait 30000ms` because it is the one documented verb that closes admission, compacts the turn and drains. A direct gateway RPC (the same handoff the CLI triggers) would remove the `lsof` dependency and the CLI's own process-discovery heuristics from the hot path. Blocked on an upstream contract for the RPC; keep `kAskSkipReasons` as the seam.
+
+## P3 — `exec` tool children should start in their own session (2026-10-11, bug #137 / v0.10.1)
+
+**What:** the group SIGKILL took a two-day-old `node …/trip-reminder-stream.mjs` the agent had spawned with it (`stopEvidence.observedExits.other`). The ladder reports it now (UC2: signal the group, classify what died); the next step is upstream/deployed-agent guidance to `setsid` long-lived helpers so they survive a gateway restart by design. Decide whether AlphaClaw's `exec` guidance (`lib/setup/core-prompts/TOOLS.md`) should say so.
+
+## P3 — Skip-Doctor policy for the restart-failure recheck (2026-10-11, bug #137 / v0.10.1)
+
+**What:** the recheck ladder runs the ordinary repair (Doctor → relaunch) when the port is down after a failed restart. When the failure was `stop_failed` with the config unchanged, Doctor is wasted time; a relaunch-only rung would be faster. Needs a measured Doctor cost on the deployed image before deciding.
+
+## P3 — The 0-byte mirror log on the #137 box (2026-10-11)
+
+**What:** `process.log`'s mirror on the box was empty for the window, which is why the incident had to be reconstructed from the watchdog DB. Find which writer owns that mirror and why a rotation left it at 0 bytes.
+
+## P3 — Template handoff for 0.10.1 (2026-10-11)
+
+**What:** the railway/render/apex templates must pick up `lsof` in their images (the AlphaClaw Dockerfile installs it; a template that builds its own image does not). Part of the 0.10.1 release steps, not the PR.
+
 ## ~~P3 — Flaky on the Linux CI runner: `openclaw-backup-minimal.test.js › shares the excluded measurement cap across roots and never treats its bytes as complete`~~ (FIXED by /qa on fix/live-tier-drift, 2026-09-22: not a timing flake — the assertion pinned which excluded directory readdir yields first; it now accepts either) (2026-09-22, PR #106: failed 3 of 5 hermetic runs across the Node 24 and 26 lanes, passed on retry)
 - **What:** The excluded-tree measuring pass has a shared 10,000-entry / 250 ms limit (the former `docs/designs/backup-offline-copy.md`, removed in v0.9.99); the test asserts the cap is shared across roots and that partial bytes are never reported as complete. On a loaded runner the 250 ms budget trips at a different point than the fixture expects. `gmail-watch-service › stopWatch › stops the watch and disables the account` also failed once (retry passed) in the same window.
 - **Why:** Wall-clock budgets in a hermetic test; the Node 26 lane is non-blocking, but the Node 24 lane is the required check and lost one attempt to it.

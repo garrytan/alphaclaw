@@ -66,14 +66,11 @@ const pollUntil = async (
   throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label}`);
 };
 
-const isPidAlive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+// State-aware liveness: kill(pid, 0) succeeds for a zombie (a SIGKILLed
+// child its parent — libuv here, a slow init on the reporter's box — has not
+// reaped yet), which is exactly the false "still alive" bug #137 fixed. A
+// pid is alive only when the ladder's own verdict says so.
+const isPidAlive = (pid) => gatewayIdentity.resolveProcessVerdict(pid).verdict !== "gone";
 
 const readPid = (file) => {
   try {

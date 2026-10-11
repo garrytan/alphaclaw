@@ -597,7 +597,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
     });
     gatewayShellStore.publish({ actions: { ...gatewayShellStore.get().actions, restart } });
     const tree = renderGateway({ onOpenWatchdog });
-    expect(treeText(tree)).toContain("Couldn't stop the old gateway, so your changes are not live yet.");
+    expect(treeText(tree)).toContain("Couldn't confirm the old gateway stopped, so your changes are not live yet.");
     expect(findButton(tree, "Restart")).toBeUndefined();
     expect(findButton(tree, "Repair")).toBeUndefined();
     findButton(tree, "Try again").props.onClick();

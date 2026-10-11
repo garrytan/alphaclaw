@@ -256,6 +256,17 @@ describe("frontend/restart-progress-card", () => {
     expect(treeText(tree)).not.toContain("Dismiss");
     expect(describeRestartSuccess({ durationMs: 20000, downtimeMs: null })).toBe("Running: restarted in 20s");
     expect(describeRestartSuccess({})).toBe("Running: gateway restarted");
+    // A forced stop is qualified, and so are the non-gateway processes that
+    // exited with it (bug #137); a graceful stop stays clean.
+    expect(describeRestartSuccess({ durationMs: 12000, downtimeMs: 3000, how: "sigkill", observedExitsCount: 2 })).toBe(
+      "Running: restarted in 12s (down for 3s; forced; 2 other processes exited)",
+    );
+    expect(describeRestartSuccess({ durationMs: 12000, how: "sigterm", observedExitsCount: 1 })).toBe(
+      "Running: restarted in 12s (forced; 1 other process exited)",
+    );
+    expect(describeRestartSuccess({ durationMs: 12000, downtimeMs: 3000, how: "graceful", observedExitsCount: 0 })).toBe(
+      "Running: restarted in 12s (down for 3s)",
+    );
   });
 
   it("humanDuration renders whole minutes as 'N min' and everything else in seconds", () => {
@@ -267,8 +278,25 @@ describe("frontend/restart-progress-card", () => {
 
   // One sentence per failure code.
   it.each([
-    [{ code: "stop_refused", message: "x" }, "Couldn't safely identify the running gateway. Restart the container, or open View logs.", false],
-    [{ code: "stop_failed", message: "x" }, "Couldn't stop the old gateway, so your changes are not live yet.", true],
+    [{ code: "stop_refused", message: "x" }, "Couldn't safely identify the running gateway, so nothing was stopped. Open View logs to see what holds the gateway port.", false],
+    [{ code: "stop_failed", message: "x" }, "Couldn't confirm the old gateway stopped, so your changes are not live yet.", true],
+    // The server's count sentence is kept verbatim; the watchdog's recovery
+    // clause follows it (bug #137).
+    [
+      { code: "stop_failed", message: "2 gateway processes did not exit after SIGKILL, so your changes are not live yet.", recovery: { status: "will_check" } },
+      "2 gateway processes did not exit after SIGKILL, so your changes are not live yet. Automatic recovery is checking now.",
+      true,
+    ],
+    [
+      { code: "stop_failed", message: "x", recovery: { status: "auto_repair_paused", reason: "auto_repair_paused" } },
+      "Couldn't confirm the old gateway stopped, so your changes are not live yet. Automatic recovery is paused — press Resume repair once to let it run.",
+      true,
+    ],
+    [
+      { code: "launch_failed", message: "spawn ENOENT.", recovery: { status: "auto_repair_disabled" } },
+      "The old gateway stopped, but OpenClaw didn't start: spawn ENOENT. Automatic recovery is off — press Repair to run it.",
+      true,
+    ],
     [{ code: "launch_failed", message: "spawn ENOENT." }, "The old gateway stopped, but OpenClaw didn't start: spawn ENOENT.", true],
     [{ code: "ready_timeout", budgetMs: 300000 }, "OpenClaw started but wasn't ready within 5 min.", true],
     [{ code: "ready_timeout", budgetMs: 90000 }, "OpenClaw started but wasn't ready within 90 s.", true],
