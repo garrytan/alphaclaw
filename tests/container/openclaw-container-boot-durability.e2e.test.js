@@ -295,6 +295,9 @@ describeContainer("container E2E: boot durability — fresh and restarted contai
       "const fs = require('node:fs'); process.stdout.write(JSON.stringify(['memory.max', 'memory.swap.max'].map(name => fs.readFileSync('/sys/fs/cgroup/' + name, 'utf8').trim())))",
     ]);
     expect(JSON.parse(limits)).toEqual(["4294967296", "0"]);
+    // The pinned CLI's `gateway restart` discovers the listener through lsof;
+    // the image must ship it (bug #137 — without it the graceful ask refuses).
+    await execInContainer(kContainerA, ["test", "-x", "/usr/bin/lsof"]);
     await waitForUiUp(kContainerA, 3 * kMin);
     ctx.cookie = await loginForCookie(baseUrl(), kSetupPassword);
     await waitForVersion(kContainerA, ctx.stablePin, 5 * kMin);

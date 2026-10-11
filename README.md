@@ -91,11 +91,13 @@ npm install @chrysb/alphaclaw
 npx alphaclaw start
 ```
 
+On a Debian/Ubuntu host also run `command -v lsof || apt-get install -y lsof`: the pinned OpenClaw CLI finds the running gateway through `lsof`, and without it the graceful restart ask (`openclaw gateway restart --wait`) refuses with "No verified gateway process is listening" and every restart goes straight to SIGTERM (AlphaClaw ships a `/proc`-backed shim for the ask when `lsof` is missing, see `ALPHACLAW_LSOF_SHIM` below).
+
 Or with Docker:
 
 ```dockerfile
 FROM node:24-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux lsof ca-certificates && rm -rf /var/lib/apt/lists/*
 # Optional but recommended: the local Claude Code rescue session needs tmux
 # (above) and the claude CLI. Keep this pin in step with the reference
 # Dockerfile; without this layer the launcher reports not_installed and
@@ -358,6 +360,8 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `ALPHACLAW_GATEWAY_ENV_PASSTHROUGH` | Optional | Extra env keys (or `PREFIX*` globs, comma/space separated) to pass to the OpenClaw gateway/CLI children beyond the built-in allowlist. Internal secrets (`SETUP_PASSWORD`, etc.) can never be passed this way — the deny list always wins. Read from the deployment environment only. |
 | `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED` | Optional | Break-glass: set `1` to restore the legacy full-`process.env` spread to the gateway child (minus the absolute deny list). Deprecated; deployment env only. Use only if a needed var is being withheld and the passthrough list is impractical, then report it. |
 | `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK` | Optional | Absolute path of a root-owned, out-of-tree executable run (and awaited, 120 s budget) before every gateway launch with a minimal env — see [Gateway prelaunch hook](#gateway-prelaunch-hook). Any check or run failure aborts the launch. Deployment env only — never honored from `.env`. |
+| `ALPHACLAW_LSOF_SHIM`             | Optional | Default on: when no `lsof` binary resolves (`/usr/bin/lsof`, `/usr/sbin/lsof`, `PATH`), the one `openclaw gateway restart --wait` ask in the restart ladder runs with AlphaClaw's `/proc`-backed `lsof` shim appended to its `PATH`, so the pinned CLI can find the listener and ask the gateway to drain instead of refusing ("No verified gateway process is listening"). Set `0` to disable the shim (the ask then refuses on a box without `lsof` and the ladder moves on to SIGTERM). The shim never reaches the gateway's own environment or any other CLI call. Deployment env only |
+| `ALPHACLAW_GATEWAY_STOP_ASK`      | Optional | Set `0` to skip the graceful ask step of the restart ladder (`openclaw gateway restart --wait 30000ms`) and go straight to SIGTERM of the gateway's process group; the restart then interrupts an agent turn instead of letting it drain (≤ 30 s). Default on. Deployment env only |
 | `GATEWAY_RESTART_READY_TIMEOUT`   | Optional | Seconds a gateway restart waits for the port to answer before failing (default `300`, clamped `30`–`480`). Raise on slow boxes with many plugins — the wait returns the instant the gateway is up, so a generous value costs nothing on healthy restarts. Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |
 | `WATCHDOG_CHECK_INTERVAL`         | Optional | Seconds between regular gateway health probes (default `120`, clamped `30`–`3600`). Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |
 | `WATCHDOG_DEGRADED_CHECK_INTERVAL` | Optional | First degraded retry delay in seconds; each further retry doubles it (default `5`, clamped `2`–`120`). Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |

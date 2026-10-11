@@ -18,7 +18,10 @@
 FROM node:24-slim
 # tmux hosts the local Claude Code rescue session in a detached session that
 # survives AlphaClaw process restarts (a human can also attach over SSH).
-RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux ca-certificates && rm -rf /var/lib/apt/lists/*
+# lsof: the pinned OpenClaw CLI discovers the gateway listener through it, so
+# the graceful `openclaw gateway restart` ask refuses without it (bug #137;
+# lib/server/lsof-shim covers images built before this line).
+RUN apt-get update && apt-get install -y --no-install-recommends git curl procps cron tini tmux lsof ca-certificates && rm -rf /var/lib/apt/lists/*
 # Claude Code CLI for the local rescue session. PINNED on purpose: the
 # TUI-parsing fixtures (tests/server/fixtures/claude-code-tui/) are captured
 # per CLI version — bump this pin and refresh the fixtures together. Costs

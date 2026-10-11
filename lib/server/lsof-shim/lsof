@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+// AlphaClaw's lsof shim for the pinned OpenClaw CLI (bug #137).
+//
+// `openclaw gateway restart --wait <ms>` discovers the listener on the
+// gateway port by shelling out to lsof (restart-stale-pids-*.mjs →
+// `spawnSync(lsof, ["-nP", "-iTCP:<port>", "-sTCP:LISTEN", "-Fpc"])`) and
+// treats a missing binary (ENOENT) as "no listeners", so on an image without
+// lsof the graceful ask refuses with "No verified gateway process is
+// listening". This file is a drop-in for exactly that call shape, answering
+// from /proc instead of the lsof binary. It is APPENDED to PATH only for the
+// ask spawn (see ./index.js, withAskLsofPath) — never installed, never on the
+// gateway's own PATH — so a real lsof always wins and nothing else learns a
+// partial lsof exists.
+//
+// Contract (what the pin's parsers read, tests/server/openclaw-pin-lsof-contract.test.js):
+//   exit 0, stdout `p<pid>\nc<comm>\n` per listener (`n*:<port>` when `n` is requested)
+//   exit 1, EMPTY stdout                  → port free (pollPortOnce: status 1 + empty = free)
+//   exit 2, one stderr line               → unsupported arguments or incomplete discovery
+//                                           (the pin logs a warning and skips — never "free")
+// Supported argv: -n -P (or -nP), -iTCP:<port>, -sTCP:LISTEN, -F<fields>
+// with fields built from p/c/n (`F` separators ignored: -Fpc, -FpFc, -FpFcn,
+// -Fp -Fc). Anything else exits 2. Linux only.
+"use strict";
+
+const fs = require("fs");
+const { findPortListeners } = require("../gateway-identity");
+
+const kExitUnsupported = 2;
+const kInstallHint = "install lsof (apt-get install -y lsof)";
+
+const refuse = (reason) => {
+  process.stderr.write(`AlphaClaw lsof shim: ${reason} — ${kInstallHint}\n`);
+  return kExitUnsupported;
+};
+
+const parseArgs = (argv) => {
+  let port = null;
+  let listenState = false;
+  let fields = "";
+  let sawFields = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (/^-[nP]+$/.test(arg)) continue;
+    if (arg.startsWith("-i") || arg.startsWith("-s")) {
+      let value = arg.slice(2);
+      if (value === "") {
+        i += 1;
+        if (i >= argv.length) return null;
+        value = argv[i];
+      }
+      if (arg.startsWith("-s")) {
+        if (value !== "TCP:LISTEN") return null;
+        listenState = true;
+        continue;
+      }
+      const m = /^TCP:(\d{1,5})$/.exec(value);
+      if (!m) return null;
+      port = Number.parseInt(m[1], 10);
+      continue;
+    }
+    if (arg.startsWith("-F")) {
+      fields += arg.slice(2);
+      sawFields = true;
+      continue;
+    }
+    return null;
+  }
+  if (port === null || port < 1 || port > 65535 || !listenState || !sawFields) return null;
+  const selectors = fields.replace(/F/g, "");
+  if (!/^[pcn]+$/.test(selectors) || !selectors.includes("p")) return null;
+  return { port, command: selectors.includes("c"), name: selectors.includes("n") };
+};
+
+const readComm = (pid) => {
+  try {
+    return fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim();
+  } catch {
+    return "";
+  }
+};
+
+const main = (argv) => {
+  if (process.platform !== "linux") return refuse("Linux only");
+  const parsed = parseArgs(argv);
+  if (!parsed) return refuse("unsupported arguments");
+  const { complete, pids } = findPortListeners(parsed.port);
+  if (!complete) return refuse("discovery incomplete");
+  if (pids.length === 0) return 1;
+  let out = "";
+  for (const pid of pids) {
+    out += `p${pid}\n`;
+    if (parsed.command) out += `c${readComm(pid)}\n`;
+    if (parsed.name) out += `n*:${parsed.port}\n`;
+  }
+  process.stdout.write(out);
+  return 0;
+};
+
+process.exitCode = main(process.argv.slice(2));
