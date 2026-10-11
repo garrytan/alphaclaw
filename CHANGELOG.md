@@ -33,6 +33,11 @@ banner that had silently cleared itself.
   Restart to be sure." (with a Restart button). It replaces the failure
   sentence on reload and when the one-minute retire timer fires; a new
   restart or dismissal retires it.
+- **Doctor heartbeat** (`doctor-fix-runner.js`): while `doctor --fix` runs,
+  one line every 30 s — `[alphaclaw] doctor heartbeat elapsed=<s>s
+  sinceOutput=<s>s last="<redacted last line>"` — so a hung Doctor is
+  distinguishable from a slow one; a failed or timed-out run's result carries
+  `lastOutputAgeMs` / `lastOutputLine`.
 - **Record timeline**: every streamed step lands on the operation record as
   `timeline[] { at, step, status, detail? }` (≤ 32 entries + `timelineOmitted`,
   details limited to phase/how/reason/signal/graceSeconds/status). Admin

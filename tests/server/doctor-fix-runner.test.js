@@ -6,7 +6,12 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createDoctorFixRunner } = require("../../lib/server/doctor-fix-runner");
+const {
+  createDoctorFixRunner,
+  createOutputLineTracker,
+  kDoctorHeartbeatMs,
+  kDoctorPartialLineCapBytes,
+} = require("../../lib/server/doctor-fix-runner");
 const {
   createDoctorGuard,
   buildDoctorRestoreBlockedNotification,
@@ -38,16 +43,23 @@ const createRunner = (openclawDir, overrides = {}) => {
   };
   const notifier = overrides.notifier ?? { notify: vi.fn() };
   const doctorGuard = overrides.doctorGuard ?? passthroughGuard();
+  const logger = overrides.logger ?? { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const run = createDoctorFixRunner({
     openclawDir,
     doctorGuard,
     runStream,
     gatewayEnv: () => kGatewayEnv,
     notifier,
+    logger,
     ...(overrides.nowFn ? { nowFn: overrides.nowFn } : {}),
   });
-  return { run, runStream, notifier, doctorGuard };
+  return { run, runStream, notifier, doctorGuard, logger };
 };
+
+const heartbeatLines = (logger) =>
+  logger.log.mock.calls
+    .map(([line]) => String(line))
+    .filter((line) => line.startsWith("[alphaclaw] doctor heartbeat "));
 
 describe("server/doctor-fix-runner", () => {
   it("writes the rolling pre-doctor backup, then runs doctor inside the guard", async () => {
@@ -74,7 +86,11 @@ describe("server/doctor-fix-runner", () => {
       env: kGatewayEnv,
       timeoutMs: 10 * 60 * 1000,
       killGraceMs: 1000,
+      onOutput: expect.any(Function),
     });
+    // A succeeded run carries no hang diagnostics.
+    expect(result).not.toHaveProperty("lastOutputAgeMs");
+    expect(result).not.toHaveProperty("lastOutputLine");
   });
 
   it("forwards a caller timeout and never aborts on a missing config (backup is best-effort)", async () => {
@@ -197,5 +213,197 @@ describe("server/doctor-fix-runner", () => {
     expect(readJson(openclawDir, "openclaw.json.pre-doctor.bak")).toEqual(
       liveConfig,
     );
+  });
+});
+
+// Bug #137 PR 2: the 30 s heartbeat that tells a hung doctor from a slow one.
+describe("server/doctor-fix-runner heartbeat", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // runStreamed stand-in driven by the fake clock: emits output at the given
+  // offsets, settles (or rejects) at `settleAt`.
+  const scriptedRunStream = ({ outputs = [], settleAt, result, error = null }) => ({
+    runStreamed: vi.fn(({ onOutput }) => new Promise((resolve, reject) => {
+      for (const { at, text, stream = "stdout" } of outputs) {
+        if (at === 0) onOutput(text, stream);
+        else setTimeout(() => onOutput(text, stream), at);
+      }
+      setTimeout(() => (error ? reject(error) : resolve(result)), settleAt);
+    })),
+  });
+
+  it("logs one heartbeat every 30 s with elapsed, sinceOutput and the last line, none after settle", async () => {
+    const openclawDir = mkOpenclawDir();
+    const runStream = scriptedRunStream({
+      outputs: [
+        { at: 0, text: "Checking config\n" },
+        { at: 45_000, text: "Repairing agents\n" },
+      ],
+      settleAt: 70_000,
+      result: { ok: true, tail: "Doctor complete\n" },
+    });
+    const { run, logger } = createRunner(openclawDir, { runStream });
+    const baseline = vi.getTimerCount();
+
+    const pending = run();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(heartbeatLines(logger)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(heartbeatLines(logger)).toEqual([
+      '[alphaclaw] doctor heartbeat elapsed=30s sinceOutput=30s last="Checking config"',
+    ]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(heartbeatLines(logger)).toEqual([
+      '[alphaclaw] doctor heartbeat elapsed=30s sinceOutput=30s last="Checking config"',
+      '[alphaclaw] doctor heartbeat elapsed=60s sinceOutput=15s last="Repairing agents"',
+    ]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(result.ok).toBe(true);
+    expect(vi.getTimerCount()).toBe(baseline);
+    // Long after settle: still exactly two.
+    await vi.advanceTimersByTimeAsync(kDoctorHeartbeatMs * 10);
+    expect(heartbeatLines(logger)).toHaveLength(2);
+  });
+
+  it('reports last="-" and sinceOutput=elapsed before doctor has printed anything', async () => {
+    const openclawDir = mkOpenclawDir();
+    const runStream = scriptedRunStream({
+      settleAt: 40_000,
+      result: { ok: true, tail: "" },
+    });
+    const { run, logger } = createRunner(openclawDir, { runStream });
+
+    const pending = run();
+    await vi.advanceTimersByTimeAsync(40_000);
+    await pending;
+
+    expect(heartbeatLines(logger)).toEqual([
+      '[alphaclaw] doctor heartbeat elapsed=30s sinceOutput=30s last="-"',
+    ]);
+  });
+
+  it("re-splits chunks on newlines and carries a trailing partial line into the next chunk", () => {
+    let now = 1_000;
+    const tracker = createOutputLineTracker({ nowFn: () => now, startedAt: 0 });
+
+    tracker.onOutput("abc", "stdout");
+    expect(tracker.lastLine()).toBeNull();
+    expect(tracker.lastOutputAgeMs()).toBe(0);
+
+    now = 6_000;
+    tracker.onOutput("def\nghi", "stdout");
+    expect(tracker.lastLine()).toBe("abcdef");
+
+    now = 7_000;
+    tracker.onOutput("\n", "stderr");
+    expect(tracker.lastLine()).toBe("ghi");
+    expect(tracker.lastOutputAgeMs()).toBe(0);
+    now = 9_500;
+    expect(tracker.lastOutputAgeMs()).toBe(2_500);
+
+    // Blank lines never replace the last meaningful one.
+    tracker.onOutput("\n   \n", "stdout");
+    expect(tracker.lastLine()).toBe("ghi");
+  });
+
+  it("caps the partial-line buffer at 4 KB by dropping the head", () => {
+    const tracker = createOutputLineTracker({ nowFn: () => 0, startedAt: 0 });
+
+    // One unterminated 8 KB line: the head ("a"s) is dropped, the most recent
+    // 4 KB ("b"s) survives into the next chunk.
+    tracker.onOutput(`${"a".repeat(kDoctorPartialLineCapBytes)}${"b".repeat(kDoctorPartialLineCapBytes)}`, "stdout");
+    expect(tracker.lastLine()).toBeNull();
+    tracker.onOutput("\n", "stdout");
+
+    expect(tracker.lastLine()).toBe("b".repeat(240));
+  });
+
+  it("redacts token-shaped secrets in the heartbeat line and in lastOutputLine", async () => {
+    const openclawDir = mkOpenclawDir();
+    const secretLine = "auth failed for Bearer abcdefghijklmnop0123 at https://hooks.slack.com/services/T000/B000/XXXX\n";
+    const runStream = scriptedRunStream({
+      outputs: [{ at: 0, text: secretLine, stream: "stderr" }],
+      settleAt: 35_000,
+      result: { ok: false, code: 1, tail: secretLine },
+    });
+    const { run, logger } = createRunner(openclawDir, { runStream });
+
+    const pending = run();
+    await vi.advanceTimersByTimeAsync(35_000);
+    const result = await pending;
+
+    const [heartbeat] = heartbeatLines(logger);
+    expect(heartbeat).toBe(
+      '[alphaclaw] doctor heartbeat elapsed=30s sinceOutput=30s last="auth failed for *** at https://hooks.slack.com/services/***"',
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      lastOutputAgeMs: 35_000,
+      lastOutputLine: "auth failed for *** at https://hooks.slack.com/services/***",
+    });
+    expect(result.lastOutputLine).not.toContain("abcdefghijklmnop0123");
+    expect(JSON.stringify(logger.log.mock.calls)).not.toContain("abcdefghijklmnop0123");
+  });
+
+  it("clears the heartbeat when runStreamed throws (no late beats, timer count back to baseline)", async () => {
+    const openclawDir = mkOpenclawDir();
+    const runStream = scriptedRunStream({
+      outputs: [{ at: 0, text: "spawning\n" }],
+      settleAt: 1_000,
+      error: new Error("spawn ENOENT"),
+    });
+    const { run, logger } = createRunner(openclawDir, { runStream });
+    const baseline = vi.getTimerCount();
+
+    const pending = run();
+    const settled = pending.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await settled;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe("spawn ENOENT");
+    expect(vi.getTimerCount()).toBe(baseline);
+    await vi.advanceTimersByTimeAsync(kDoctorHeartbeatMs * 3);
+    expect(heartbeatLines(logger)).toEqual([]);
+  });
+
+  it("a timed-out run carries lastOutputAgeMs/lastOutputLine; a succeeded one does not", async () => {
+    const openclawDir = mkOpenclawDir();
+    const timedOut = scriptedRunStream({
+      outputs: [{ at: 0, text: "Step 1\n" }, { at: 20_000, text: "Step 2 (slow)\n" }],
+      settleAt: 50_000,
+      result: { ok: false, code: null, tail: "Step 2 (slow)\n", timedOut: true },
+    });
+    const first = createRunner(openclawDir, { runStream: timedOut });
+    const pendingTimeout = first.run({ timeoutMs: 50_000 });
+    await vi.advanceTimersByTimeAsync(50_000);
+    const timedOutResult = await pendingTimeout;
+    expect(timedOutResult).toMatchObject({
+      ok: false,
+      timedOut: true,
+      stderr: "doctor --fix timed out after 50s",
+      lastOutputAgeMs: 30_000,
+      lastOutputLine: "Step 2 (slow)",
+    });
+
+    const succeeded = scriptedRunStream({
+      outputs: [{ at: 0, text: "Doctor complete\n" }],
+      settleAt: 1_000,
+      result: { ok: true, tail: "Doctor complete\n" },
+    });
+    const second = createRunner(openclawDir, { runStream: succeeded });
+    const pendingOk = second.run();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const okResult = await pendingOk;
+    expect(okResult.ok).toBe(true);
+    expect(okResult).not.toHaveProperty("lastOutputAgeMs");
+    expect(okResult).not.toHaveProperty("lastOutputLine");
   });
 });
