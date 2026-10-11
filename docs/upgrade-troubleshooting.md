@@ -217,6 +217,19 @@ operation deadline cannot fit ask + SIGTERM + SIGKILL grace, `no_worker` →
 no gateway worker pid was identified, `caller_disabled` →
 `ALPHACLAW_GATEWAY_STOP_ASK=0` or a shutdown/replace caller.
 
+**After the failure (v0.10.2):** when the port answers ready again the card
+line changes to what happened: "Automatic repair brought the gateway back at
+HH:MM — your changes are live." (the watchdog relaunched from the current
+config; the restart-required banner clears for the reasons that restart
+covered), "The gateway finished starting at HH:MM — your changes are live."
+(a `ready_timeout` whose child came up), or "The gateway came back at HH:MM,
+but AlphaClaw cannot tell whether your changes are live — press Restart to be
+sure." (the recovery could not be attributed; the banner stays). The
+down→up heuristic that used to clear the banner on its own is held while a
+fresh failed restart is unrecovered. The record carries `recovered { by, at,
+launchedAt, changesLive }` and the step `timeline` (`alphaclaw diagnose` →
+Restart operation).
+
 **Next steps:** for `stop_refused`, find what holds the port (`ss -ltnp` /
 `alphaclaw diagnose` → Gateway identity) and stop it, then press Restart
 again. For `stop_failed`, wait for the recovery clause to resolve (the

@@ -345,6 +345,15 @@ the terminal `error`), and the watchdog's bounded recheck (0/5/15/30/60 s,
 repair allowed, sustained-failure gate bypassed while the note stands) owns the
 recovery. The restart operation never runs Doctor itself.
 
+**v0.10.2 (bug #137 PR 2).** Recovery after a failed restart is attributed,
+never guessed: the watchdog's note clears at the identity-clear green probe
+with `recoveredBy ∈ watchdog_repair | restart_child | unknown` and calls
+`onRestartFailureRecovered`; `restart-required-state.markRecovered` stamps the
+closed record (`recovered { by, at, launchedAt, changesLive }`) and clears only
+attributable, pre-launch snapshot reasons. While a fresh failed restart stands
+unrecovered (≤ 15 min) the legacy down→up heuristic is held. The record also
+keeps the streamed step `timeline` (≤ 32 + `timelineOmitted`; admin-only).
+
 Interruption policy is one policy for every trigger: ask → term → kill. The
 automated triggers (`replace`, memory mitigation) already target an unhealthy
 or about-to-OOM gateway. Shutdown (`stopGatewayForShutdown`) runs the ladder

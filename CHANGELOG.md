@@ -5,6 +5,43 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.2] - 2026-10-11
+
+The linkage half of bug #137 (0.10.1 was the hotfix). After a failed restart
+the box now says what happened next — in the incident, on the record and on
+the card — instead of leaving "none recorded", a stale failure sentence and a
+banner that had silently cleared itself.
+
+### Changed
+
+- **Banner truth** (`restart-required-state.js`): the down→up heuristic no
+  longer clears restart-required reasons while the last operation is a fresh
+  (≤ 15 min) unrecovered failed restart. Recovery is the watchdog's verdict:
+  at the first identity-clear green probe after a failed restart it calls
+  `onRestartFailureRecovered({ operationId, code, by, launchedAt })` and the
+  record's new `markRecovered` stamps `recovered { by, at, launchedAt,
+  changesLive }`. `by = watchdog_repair` (the watchdog relaunched from the
+  current config) or `restart_child` (a `ready_timeout`'s own child came up)
+  clears only the snapshotted reasons added at or before that launch — a
+  same-code edit made after the spawn still asks for a restart; `unknown`
+  clears nothing.
+- **Recovered card line**: a failed restart whose gateway came back reads
+  "Automatic repair brought the gateway back at HH:MM — your changes are
+  live." / "The gateway finished starting at HH:MM — your changes are live."
+  or, when the recovery cannot be attributed, "The gateway came back at
+  HH:MM, but AlphaClaw cannot tell whether your changes are live — press
+  Restart to be sure." (with a Restart button). It replaces the failure
+  sentence on reload and when the one-minute retire timer fires; a new
+  restart or dismissal retires it.
+- **Record timeline**: every streamed step lands on the operation record as
+  `timeline[] { at, step, status, detail? }` (≤ 32 entries + `timelineOmitted`,
+  details limited to phase/how/reason/signal/graceSeconds/status). Admin
+  sessions only (stripped for members and the agent actor). `alphaclaw
+  diagnose` renders it with offsets ("+0.5s stopping running (phase=asking
+  status=skipped reason=no_lsof)") and falls back to the 0.10.1 `phaseAt`
+  view ("timeline: not recorded" on older records); the Watchdog tab's
+  Restart evidence disclosure lists it.
+
 ## [0.10.1] - 2026-10-11
 
 Restart told the truth about the wrong thing (bug #137). A manual Restart
