@@ -49,6 +49,7 @@ import {
   humanDuration,
   kOptimisticStepName,
   restartStartedAtMs,
+  describeRestartRecovered,
 } from "../../lib/public/js/components/restart-progress-card.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 
@@ -267,6 +268,34 @@ describe("frontend/restart-progress-card", () => {
     expect(describeRestartSuccess({ durationMs: 12000, downtimeMs: 3000, how: "graceful", observedExitsCount: 0 })).toBe(
       "Running: restarted in 12s (down for 3s)",
     );
+  });
+
+  it("a recovered failed restart renders the recovery sentence: green + 'your changes are live' when attributable, yellow + Restart when not (bug #137 PR 2)", () => {
+    const at = new Date(2026, 9, 11, 7, 5).getTime();
+    const hhmm = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    expect(describeRestartRecovered({ by: "watchdog_repair", at, changesLive: true })).toBe(
+      `Automatic repair brought the gateway back at ${hhmm} — your changes are live.`,
+    );
+    expect(describeRestartRecovered({ by: "restart_child", at, changesLive: true })).toBe(
+      `The gateway finished starting at ${hhmm} — your changes are live.`,
+    );
+    expect(describeRestartRecovered({ by: "unknown", at, changesLive: false })).toBe(
+      `The gateway came back at ${hhmm}, but AlphaClaw cannot tell whether your changes are live — press Restart to be sure.`,
+    );
+    const onRetry = vi.fn();
+    const live = renderCard({
+      operation: { ...kRunningOperation, phase: "recovered", recovered: { by: "watchdog_repair", at, changesLive: true } },
+      onRetry,
+    });
+    expect(treeText(live)).toContain("your changes are live");
+    expect(findAllByType(live, ActionButton)).toEqual([]);
+    const unsure = renderCard({
+      operation: { ...kRunningOperation, phase: "recovered", recovered: { by: "unknown", at, changesLive: false } },
+      onRetry,
+    });
+    expect(treeText(unsure)).toContain("press Restart to be sure");
+    const buttons = findAllByType(unsure, ActionButton);
+    expect(buttons.map((b) => b.props.idleLabel)).toEqual(["Restart"]);
   });
 
   it("humanDuration renders whole minutes as 'N min' and everything else in seconds", () => {

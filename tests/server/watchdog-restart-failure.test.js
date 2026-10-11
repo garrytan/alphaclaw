@@ -38,6 +38,7 @@ const createHarness = ({
   getOpenclawInfo = null,
   supervisorModeActive = () => false,
   consumeRestartHandoffImpl = null,
+  onRestartFailureRecovered = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "true";
@@ -73,6 +74,7 @@ const createHarness = ({
     ...(pidAlive ? { pidAlive } : {}),
     ...(readPersistedPause ? { readPersistedPause, writePersistedPause: vi.fn() } : {}),
     ...(getOpenclawInfo ? { getOpenclawInfo } : {}),
+    ...(onRestartFailureRecovered ? { onRestartFailureRecovered } : {}),
   });
   const rows = () => insertWatchdogEvent.mock.calls.map(([row]) => row);
   const rowsOf = (eventType, status = null, source = null) =>
@@ -579,6 +581,46 @@ describe("watchdog failed-restart handoff (bug #137)", () => {
         }),
       ]);
       h2.watchdog.stop();
+    });
+
+    it("the recovery hook (PR 2) receives the verdict once per note: watchdog_repair with the relaunch time, restart_child for a ready_timeout whose own child came up, unknown otherwise; a throwing hook is contained", async () => {
+      vi.useFakeTimers();
+      const hook = vi.fn();
+      const h = createHarness({ onRestartFailureRecovered: hook });
+      await h.failUserRestart();
+      h.watchdog.noteRestartFailure({ operationId: "op-1", code: "stop_failed", gatewayDown: true });
+      h.watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000 });
+      const launchedAt = Date.now() + 1_000;
+      h.watchdog.onGatewayLaunch({ startedAt: launchedAt, pid: 500, rootPid: 500, generation: 7 });
+      h.control.healthy = true;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(hook).toHaveBeenCalledWith({ operationId: "op-1", code: "stop_failed", by: "watchdog_repair", launchedAt, at: expect.any(Number) });
+      await h.watchdog.runHealthCheck({ source: "health_timer" });
+      expect(hook).toHaveBeenCalledTimes(1);
+      h.watchdog.stop();
+
+      const hook2 = vi.fn(() => { throw new Error("boom"); });
+      const h2 = createHarness({ onRestartFailureRecovered: hook2 });
+      await h2.failUserRestart();
+      h2.watchdog.noteRestartFailure({ operationId: "op-2", code: "ready_timeout", gatewayDown: false });
+      h2.control.healthy = true;
+      await h2.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(hook2).toHaveBeenCalledWith(expect.objectContaining({ operationId: "op-2", code: "ready_timeout", by: "restart_child" }));
+      expect(h2.watchdog.getStatus()).toMatchObject({ health: "healthy", restartFailureNote: null });
+      expect(h2.rowsOf("restart", "ok", "restart_failure_note")[0].details.recoveredBy).toBe("restart_child");
+      h2.watchdog.stop();
+
+      const hook3 = vi.fn();
+      const h3 = createHarness({ onRestartFailureRecovered: hook3 });
+      await h3.failUserRestart();
+      h3.watchdog.noteRestartFailure({ operationId: "op-3", code: "launch_failed", gatewayDown: false });
+      h3.control.healthy = true;
+      await h3.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(hook3).toHaveBeenCalledWith(expect.objectContaining({ operationId: "op-3", by: "unknown" }));
+      h3.watchdog.stop();
     });
 
     it("expires after 15 minutes: the note reads null, and a note filed again is a fresh one", async () => {

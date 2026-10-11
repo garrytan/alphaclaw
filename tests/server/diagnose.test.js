@@ -194,6 +194,14 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, pidfile }) => 
     how: "sigkill",
     recovery: { status: "will_check", reason: null },
     phaseAt: { stopping: kNow - 30_000, asking: kNow - 29_500, forcing: kNow - 21_000, failed: kNow - 20_000 },
+    timeline: [
+      { at: kNow - 30_000, step: "stopping", status: "running", detail: { phase: "asking", graceSeconds: 30 } },
+      { at: kNow - 29_500, step: "stopping", status: "running", detail: { phase: "asking", status: "skipped", reason: "no_lsof" } },
+      { at: kNow - 21_000, step: "stopping", status: "running", detail: { phase: "forcing" } },
+      { at: kNow - 20_000, step: "stopping", status: "failed" },
+    ],
+    timelineOmitted: 1,
+    recovered: { by: "watchdog_repair", at: kNow - 10_000, launchedAt: kNow - 12_000, changesLive: true },
     stopEvidence: {
       how: "sigkill",
       askSkippedReason: "no_lsof",
@@ -440,7 +448,10 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     const md = renderDiagnoseMarkdown(bundle);
     expect(md).toContain("- failed phase: stopping");
     expect(md).toContain("- recovery: will_check");
-    expect(md).toContain("- timeline:\n  - +0s stopping\n  - +0.5s asking\n  - +9s forcing\n  - +10s failed");
+    expect(md).toContain(
+      "- timeline:\n  - +0s stopping running (phase=asking graceSeconds=30)\n  - +0.5s stopping running (phase=asking status=skipped reason=no_lsof)\n  - +9s stopping running (phase=forcing)\n  - +10s stopping failed\n  - (+1 more steps not recorded)",
+    );
+    expect(md).toContain(`- recovered: ${iso(kNow - 10_000)} by watchdog_repair (gateway launched ${iso(kNow - 12_000)}), changes live: true`);
     expect(md).toContain("  - graceful ask: skipped (no_lsof)");
     expect(md).toContain("  - gateway set: 4201 `openclaw-gateway`");
     expect(md).toContain("  - observed exits: 1 helpers; other 4312 `node trip-reminder-stream.mjs`");

@@ -384,6 +384,91 @@ describe("server/restart-required-state (operation lifecycle)", () => {
   });
 });
 
+describe("server/restart-required-state (failed-restart recovery truth, bug #137 PR 2)", () => {
+  const failedRestart = (store) => {
+    store.markRequired("env_vars_changed");
+    const { operationId } = store.beginRestart();
+    store.completeRestart({ operationId, ok: false, errorSummary: "stop failed", code: "stop_failed" });
+    return operationId;
+  };
+
+  it("the down→up heuristic no longer clears reasons while the last restart is a fresh unrecovered failure", async () => {
+    let nowMs = 100_000;
+    let running = true;
+    const store = makeStore({ now: () => nowMs, isGatewayRunning: async () => running });
+    failedRestart(store);
+    running = false;
+    await store.getSnapshot();
+    running = true;
+    expect((await store.getSnapshot()).restartRequired).toBe(true);
+    // Past the hold window the legacy heuristic resumes (an expired,
+    // unrecovered note must never pin the banner forever).
+    nowMs += 15 * 60 * 1000 + 1;
+    running = false;
+    await store.getSnapshot();
+    running = true;
+    expect((await store.getSnapshot()).restartRequired).toBe(false);
+  });
+
+  it("markRecovered(watchdog_repair) clears only snapshot reasons added at or before the recovering launch; a later same-code edit survives", async () => {
+    let nowMs = 100_000;
+    const store = makeStore({ now: () => nowMs });
+    const operationId = failedRestart(store);
+    // The watchdog relaunches at 130 s; the user edits env again at 140 s.
+    nowMs = 140_000;
+    store.markRequired("env_vars_changed");
+    nowMs = 150_000;
+    const record = store.markRecovered({ operationId, by: "watchdog_repair", launchedAt: 130_000, at: 150_000 });
+    expect(record.recovered).toEqual({ by: "watchdog_repair", at: 150_000, launchedAt: 130_000, changesLive: true });
+    expect((await store.getSnapshot()).reasons.map((r) => r.code)).toEqual(["env_vars_changed"]);
+
+    const storeB = makeStore({ now: () => nowMs });
+    const opB = failedRestart(storeB);
+    storeB.markRecovered({ operationId: opB, by: "watchdog_repair", launchedAt: nowMs + 5_000, at: nowMs + 10_000 });
+    expect((await storeB.getSnapshot()).restartRequired).toBe(false);
+    expect(storeB.getLastRestartOperation().recovered.changesLive).toBe(true);
+  });
+
+  it("markRecovered(unknown) stamps the record but clears nothing; a mismatched or running operation is a no-op; the stamp survives a reload", async () => {
+    const dir = makeStateDir();
+    const storeA = makeStore({ stateDir: dir, now: () => 100_000 });
+    const operationId = failedRestart(storeA);
+    expect(storeA.markRecovered({ operationId: "someone-else", by: "watchdog_repair" })).toBeNull();
+    const record = storeA.markRecovered({ operationId, by: "unknown", at: 101_000 });
+    expect(record.recovered).toEqual({ by: "unknown", at: 101_000, changesLive: false });
+    expect((await storeA.getSnapshot()).restartRequired).toBe(true);
+    // Idempotent: a second verdict never rewrites the first.
+    expect(storeA.markRecovered({ operationId, by: "watchdog_repair", at: 102_000 }).recovered.by).toBe("unknown");
+
+    const storeB = makeStore({ stateDir: dir, now: () => 103_000 });
+    expect(storeB.getLastRestartOperation().recovered).toEqual({ by: "unknown", at: 101_000, changesLive: false });
+    const { operationId: runningId } = storeB.beginRestart();
+    expect(storeB.markRecovered({ operationId: runningId, by: "watchdog_repair" })).toBeNull();
+  });
+
+  it("records the step timeline in order, bounded to 32 entries with an omitted count, and reloads it", () => {
+    const dir = makeStateDir();
+    let nowMs = 50_000;
+    const storeA = makeStore({ stateDir: dir, now: () => nowMs });
+    const { operationId } = storeA.beginRestart();
+    storeA.updateRestartOperation({ operationId, timelineEntry: { at: 50_100, step: "stopping", status: "running", detail: { phase: "asking", graceSeconds: 30, secret: "nope" } } });
+    storeA.updateRestartOperation({ operationId, timelineEntry: { at: 50_200, step: "stopping", status: "running", detail: { phase: "asking", status: "skipped", reason: "no_lsof" } } });
+    storeA.updateRestartOperation({ operationId, timelineEntry: { at: "garbage", step: "stopping", status: "done" } });
+    for (let i = 0; i < 35; i += 1) {
+      storeA.updateRestartOperation({ operationId, timelineEntry: { at: 51_000 + i, step: "waiting_ready", status: "running" } });
+    }
+    storeA.completeRestart({ operationId, ok: false, errorSummary: "x", code: "ready_timeout" });
+    const record = storeA.getLastRestartOperation();
+    expect(record.timeline).toHaveLength(32);
+    expect(record.timelineOmitted).toBe(5);
+    expect(record.timeline[0]).toEqual({ at: 50_100, step: "stopping", status: "running", detail: { phase: "asking", graceSeconds: 30 } });
+    expect(record.timeline[1].detail).toEqual({ phase: "asking", status: "skipped", reason: "no_lsof" });
+
+    const storeB = makeStore({ stateDir: dir, now: () => nowMs });
+    expect(storeB.getLastRestartOperation().timeline).toEqual(record.timeline);
+  });
+});
+
 describe("server/restart-required-state (state DB schema stamp, #76 A2)", () => {
   const flushAsync = async () => {
     for (let index = 0; index < 3; index += 1) {

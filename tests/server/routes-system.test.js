@@ -3447,6 +3447,9 @@ describe("server/routes/system", () => {
       failedPhase: "forcing",
       reasonsSnapshot: [],
       stopEvidence: { survivors: { items: [{ pid: 777, cmd: "node openclaw", verdict: "alive" }], omitted: 0 } },
+      timeline: [{ at: 1, step: "stopping", status: "running", detail: { phase: "asking" } }],
+      timelineOmitted: 2,
+      recovered: { by: "watchdog_repair", at: 5, changesLive: true },
     };
     const deps = createSystemDeps();
     deps.restartRequiredState.getLastRestartOperation = vi.fn(() => ({ ...record }));
@@ -3458,9 +3461,13 @@ describe("server/routes/system", () => {
     };
     const admin = await request(appFor("admin")).get("/api/restart-status");
     expect(admin.body.lastOperation.stopEvidence.survivors.items[0]).toMatchObject({ pid: 777 });
+    expect(admin.body.lastOperation.timeline).toHaveLength(1);
     const member = await request(appFor("member")).get("/api/restart-status");
-    expect(member.body.lastOperation).toMatchObject({ operationId: "op-ev", code: "stop_failed", failedPhase: "forcing" });
+    // The recovery verdict is for everyone; the timeline is operator material.
+    expect(member.body.lastOperation).toMatchObject({ operationId: "op-ev", code: "stop_failed", failedPhase: "forcing", recovered: { by: "watchdog_repair", changesLive: true } });
     expect(member.body.lastOperation.stopEvidence).toBeUndefined();
+    expect(member.body.lastOperation.timeline).toBeUndefined();
+    expect(member.body.lastOperation.timelineOmitted).toBeUndefined();
   });
 
   it("stop_refused (nothing was signalled) renders its own sentence and hint", async () => {

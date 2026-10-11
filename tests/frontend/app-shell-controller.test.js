@@ -862,6 +862,47 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toBeNull();
   });
 
+  it("a failed lastOperation the record marks `recovered` renders the recovery line on reload, and a live failure flips to it on the next refresh (bug #137 PR 2)", async () => {
+    const recovered = { by: "watchdog_repair", at: 9000, changesLive: true };
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: {
+        operationId: "op-r",
+        status: "failed",
+        code: "stop_failed",
+        errorSummary: "2 gateway processes did not exit",
+        startedAt: 1000,
+        phaseAt: { stopping: 1000 },
+        recovered,
+      },
+    });
+    let state = await settle();
+    expect(state.state.restartOperation).toMatchObject({ operationId: "op-r", phase: "recovered", recovered });
+
+    // Live path: the card is showing a failure; the record gains the stamp.
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: true,
+      restartInProgress: false,
+      reasons: [{ code: "env_vars_changed", label: "Env", addedAt: 1 }],
+      lastOperation: { operationId: "op-s", status: "failed", code: "stop_failed", errorSummary: "x", startedAt: 1000, phaseAt: {} },
+    });
+    state.actions.dismissRestartOutcome();
+    await state.actions.dismissRestartBanner();
+    state = await settle();
+    expect(state.state.restartOperation).toMatchObject({ operationId: "op-s", phase: "failed" });
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: false,
+      reasons: [],
+      lastOperation: { operationId: "op-s", status: "failed", code: "stop_failed", errorSummary: "x", startedAt: 1000, phaseAt: {}, recovered: { by: "unknown", at: 9500, changesLive: false } },
+    });
+    await state.actions.dismissRestartBanner();
+    state = await settle();
+    expect(state.state.restartOperation).toMatchObject({ operationId: "op-s", phase: "recovered", recovered: { by: "unknown", changesLive: false } });
+  });
+
   it("Retry status after a managed update only reads the saved attempt and never posts or reconnects", async () => {
     const attempt = { id: "deploy-2", state: "unknown", target: { alphaclawVersion: "0.9.35" } };
     api.fetchAlphaclawVersion.mockResolvedValue({ currentVersion: "0.9.35", hasUpdate: false, managedUpdateAttempt: attempt });
