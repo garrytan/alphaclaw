@@ -51,6 +51,7 @@ import {
   restartStartedAtMs,
   describeRestartRecovered,
 } from "../../lib/public/js/components/restart-progress-card.js";
+import { formatLocaleTime } from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 
 const harness = preactHooks.__harness;
@@ -272,7 +273,7 @@ describe("frontend/restart-progress-card", () => {
 
   it("a recovered failed restart renders the recovery sentence: green + 'your changes are live' when attributable, yellow + Restart when not (bug #137 PR 2)", () => {
     const at = new Date(2026, 9, 11, 7, 5).getTime();
-    const hhmm = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const hhmm = formatLocaleTime(at, { hour: "2-digit", minute: "2-digit" });
     expect(describeRestartRecovered({ by: "watchdog_repair", at, changesLive: true })).toBe(
       `Automatic repair brought the gateway back at ${hhmm} — your changes are live.`,
     );
