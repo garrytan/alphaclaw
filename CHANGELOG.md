@@ -33,6 +33,17 @@ banner that had silently cleared itself.
   Restart to be sure." (with a Restart button). It replaces the failure
   sentence on reload and when the one-minute retire timer fires; a new
   restart or dismissal retires it.
+- **Incident cause** (`watchdog.js`): while a failed restart's note stands,
+  every `health_check … failed` / `readiness_degraded … failed` row — the rows
+  that open a `gateway_down` / `gateway_readiness` incident — carries `cause:
+  restart_<code>` (`restart_stop_failed | restart_launch_failed |
+  restart_ready_timeout | restart_aborted`), `by: restart:<operationId>`,
+  `corroborated: false`; filing the note also books one
+  `restart / restart_failed / failed` row so an already-open incident gets the
+  same cause. A corroborated crash cause is never overwritten. The Watchdog
+  tab's incident timeline renders "suspected: restart stop failed — not
+  corroborated" with the failed phase; `alphaclaw diagnose` shows
+  `cause: restart_stop_failed, corroborated false` instead of "none recorded".
 - **Doctor heartbeat** (`doctor-fix-runner.js`): while `doctor --fix` runs,
   one line every 30 s — `[alphaclaw] doctor heartbeat elapsed=<s>s
   sinceOutput=<s>s last="<redacted last line>"` — so a hung Doctor is

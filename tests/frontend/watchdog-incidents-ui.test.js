@@ -133,6 +133,50 @@ describe("describeEvent", () => {
     expect(describeEvent({ eventType: "crash_cause", status: "info" }).detail).toContain("suspected: unknown");
   });
 
+  // Bug #137 PR 2: the failed restart op's note row (`restart /
+  // restart_failed / failed`) names the restart as the SUSPECTED cause of the
+  // outage it left behind — same register as a suspected crash cause, with
+  // the ladder phase as evidence and never an "exit code" out of the
+  // restart failure class.
+  it("renders a failed restart row carrying a restart_<code> cause as a suspected, uncorroborated cause", async () => {
+    const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
+    const noted = describeEvent({
+      eventType: "restart",
+      source: "restart_failed",
+      status: "failed",
+      details: {
+        operationId: "9e1e29ab-0000-4000-8000-000000000000",
+        code: "stop_failed",
+        phase: "sigkill",
+        signalled: true,
+        gatewayDown: true,
+        cause: "restart_stop_failed",
+        by: "restart:9e1e29ab-0000-4000-8000-000000000000",
+        corroborated: false,
+      },
+    });
+    expect(noted).toMatchObject({ label: "Gateway restart", tone: "danger" });
+    expect(noted.detail).toBe("suspected: restart stop failed — not corroborated · phase sigkill");
+    expect(noted.detail).not.toContain("exit code");
+    for (const [cause, phrase] of [
+      ["restart_launch_failed", "restart launch failed"],
+      ["restart_ready_timeout", "restart ready timeout"],
+      ["restart_aborted", "restart aborted"],
+      ["restart_failed", "restart failed"],
+    ]) {
+      expect(
+        describeEventOutcome({ eventType: "restart", status: "failed", details: { cause, code: "x" } }),
+      ).toEqual({ phrase: `suspected: ${phrase} — not corroborated`, tone: "danger" });
+    }
+    // Without a cause the restart rows read as before.
+    expect(
+      describeEventOutcome({ eventType: "restart", status: "failed", details: { reason: "replacement_exited" } }),
+    ).toBeNull();
+    expect(
+      describeEvent({ eventType: "restart", status: "failed", details: { reason: "replacement_exited" } }).detail,
+    ).toBe("replacement_exited");
+  });
+
   it("labels version_mismatch rows with the running/expected pair", async () => {
     const { kWatchdogEventLabels, describeEvent } = await loadIncidentHelpers();
     expect(kWatchdogEventLabels.version_mismatch).toBe("Version mismatch");

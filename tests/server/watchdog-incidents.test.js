@@ -1068,6 +1068,87 @@ describe("version_mismatch signal + fingerprint escalation + persisted cause (#7
     expect(incident.cause).toMatchObject({ cause: "state_schema_too_new" });
   });
 
+  // Bug #137 PR 2: the watchdog stamps the failed restart op as a SUSPECTED
+  // cause on the rows that open a degraded incident and on the note's own
+  // `restart / restart_failed / failed` row — plain details the tracker
+  // already reads; the restart row stays append-only (never an open trigger).
+  it("carries a restart_<code> cause through unchanged: on the opening health_check row, on an appended restart/restart_failed row, never over a corroborated verdict", () => {
+    initContext();
+    const insert = wrapped(createTracker({ nowFn: () => Date.parse("2026-10-10T20:00:00Z") }));
+    const noteRow = (code, operationId) => ({
+      eventType: "restart",
+      source: "restart_failed",
+      status: "failed",
+      details: {
+        operationId,
+        code: code.replace(/^restart_/, ""),
+        phase: "sigkill",
+        signalled: true,
+        gatewayDown: true,
+        cause: code,
+        by: `restart:${operationId}`,
+        corroborated: false,
+      },
+      correlationId: "r1",
+    });
+    expect(classifyEvent(noteRow("restart_stop_failed", "op-1"))).toBe("append");
+    // With nothing open the note row opens nothing.
+    insert(noteRow("restart_stop_failed", "op-0"));
+    expect(db.getOpenIncident()).toBeNull();
+
+    // The failed probe that opens the incident carries the cause verbatim.
+    insert({
+      eventType: "health_check",
+      source: "health_timer",
+      status: "failed",
+      details: {
+        reason: "connect ECONNREFUSED",
+        cause: "restart_stop_failed",
+        by: "restart:9e1e29ab-0000-4000-8000-000000000000",
+        corroborated: false,
+      },
+      correlationId: "h1",
+    });
+    const incidentId = db.getOpenIncident().id;
+    expect(db.getIncidentById(incidentId).cause).toEqual({
+      cause: "restart_stop_failed",
+      fingerprint: null,
+      corroborated: false,
+      by: "restart:9e1e29ab-0000-4000-8000-000000000000",
+      suspectedCause: null,
+      at: "2026-10-10T20:00:00.000Z",
+    });
+    expect(db.getIncidentById(incidentId).severity).toBeNull();
+
+    // A note filed while the incident is open updates the suspected cause
+    // (latest wins inside the suspected tier) and books `restart` as an action.
+    insert(noteRow("restart_ready_timeout", "op-2"));
+    expect(db.getOpenIncident().id).toBe(incidentId);
+    expect(db.getIncidentById(incidentId).cause).toMatchObject({
+      cause: "restart_ready_timeout",
+      by: "restart:op-2",
+      corroborated: false,
+    });
+
+    // A corroborated crash verdict outranks it, and a later note never
+    // downgrades the verdict.
+    insert({
+      eventType: "crash_cause",
+      source: "crash_classifier",
+      status: "failed",
+      details: { cause: "oom", fingerprint: "0123456789ab", corroborated: true, by: "exit_code" },
+    });
+    insert(noteRow("restart_launch_failed", "op-3"));
+    expect(db.getIncidentById(incidentId).cause).toMatchObject({ cause: "oom", corroborated: true, by: "exit_code" });
+
+    insert(recoveryEvent());
+    const [incident] = db.listIncidents();
+    expect(incident.summary.cause).toMatchObject({ cause: "oom", corroborated: true });
+    expect(incident.summary.actions).toEqual(["restart"]);
+    // op-0 landed before the open: only the two in-incident note rows count.
+    expect(incident.summary.eventCounts.restart).toBe(2);
+  });
+
   it("the close-time rollup reads the persisted severity back (an escalation written by a previous process is the floor)", () => {
     initContext();
     const insert = wrapped(createTracker());
