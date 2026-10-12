@@ -5,6 +5,55 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.4] - 2026-10-12
+
+Issue #140, part 2 of 2: the dashboard surfaces move onto the 0.10.3 git-sync
+engine, and the scheduled sync stops landing on the minute every other cron
+job uses.
+
+### Changed
+
+- **Offset sync schedule** (`lib/cli/system-cron.js`): new installs and
+  every schedule default use a per-install minute derived from a sha256 of
+  the repo and the managed path (1–59, never a quarter hour), so two installs
+  on one box spread out and none of them collides with `:00` jobs. The minute
+  is computed on every read, so nothing is stored. The General tab offers
+  `Every 30 min`, `Hourly` and `Daily` presets labelled with the real minute
+  (for example `Hourly · :49`). A stored schedule is never rewritten: a legacy
+  `:00` preset or a custom expression stays selected, labelled
+  `Hourly · :00` or `Custom · <expr>`.
+- **Last-run status on the General tab**: the sync-cron status (part of the
+  status snapshot) adds `scheduleLabel`, `offsetMinute`, `presets` and
+  `lastRun`, a redacted summary of `.alphaclaw/git-sync-status.json` (code,
+  headline, times, failure count, how many files are behind GitHub; never the
+  detail text or owner pids, because the agent can read the snapshot). The
+  repo card shows "Last synced 5 minutes ago · abc1234", a warning when a
+  pushed run left local files behind GitHub, or a red line such as "Git sync
+  blocked by an unfinished rebase or merge since 3 hours ago (3 runs).
+  Workspace changes are not being backed up."
+- **Sync button runs the engine**: `POST /api/browse/git-sync` no longer runs
+  its own `add -A` / commit / push in the live tree. It runs `alphaclaw
+  git-sync --json --trigger manual` (`lib/server/git-sync-runner.js`: argv
+  form, this package's bin under the server's Node, 30 s SIGKILL backstop
+  over the CLI's 25 s deadline), so it shares the writer lock, scoped
+  commits, merge-tree integration and status file. It answers 200 for
+  `ok`/`warning`, 400 when sync is not configured, 409 with the engine's next
+  step for a refusal and 500 for other failures. A busy writer lock shows
+  "Another git writer is busy. Try again in a minute."
+- **Settings routes back up through the same runner**: models, Telegram and
+  webhook saves call it with `--trigger caller` (models still scoped to
+  `openclaw.json`) instead of `shellCmd`/`execFileCmd` strings against
+  `alphaclaw` on `PATH`. `syncWarning` is now the engine's sentence ("Backup
+  push deferred: another git writer was busy…" for a busy lock or a spent
+  deadline) instead of raw `Command failed: …` stderr, and the toasts read
+  "Saved. <sentence>".
+- **`alphaclaw git-sync --json`** prints exactly one
+  `{"gitSync":{outcome,code,message,action,shortHash,committed,pushed,integration,paths}}`
+  line on stdout and moves every log line to stderr. Usage errors report code
+  `usage` (exit 2).
+- Agent docs: the `browse.git-sync` manifest title and the admin skill's
+  browse fragment describe the engine-backed sync.
+
 ## [0.10.3] - 2026-10-12
 
 Issue #140: `alphaclaw git-sync` cooperates with the other writers on the box

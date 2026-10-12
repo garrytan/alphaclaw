@@ -22,6 +22,7 @@ const createModelDeps = () => {
   const deps = {
     shellCmd: vi.fn(),
     execFileCmd: vi.fn(),
+    gitSync: vi.fn(async () => null),
     gatewayEnv: vi.fn(() => ({ OPENCLAW_GATEWAY_TOKEN: "token" })),
     parseJsonFromNoisyOutput: vi.fn(() => ({})),
     normalizeOnboardingModels: vi.fn(() => []),
@@ -369,10 +370,10 @@ describe("server/routes/models", () => {
     expect(deps.authProfiles.syncConfigAuthReferencesForAgent).toHaveBeenCalledWith(
       undefined,
     );
-    expect(deps.shellCmd).toHaveBeenCalledWith(
-      'alphaclaw git-sync -m "models: update config" -f "openclaw.json"',
-      { timeout: 30000 },
-    );
+    expect(deps.gitSync).toHaveBeenCalledWith({
+      message: "models: update config",
+      file: "openclaw.json",
+    });
   });
 
   it("prefills default api-key auth profiles from env vars on GET /api/models/config", async () => {

@@ -158,3 +158,37 @@ describe("cli/system-cron buildSystemCronFile", () => {
     });
   });
 });
+
+describe("sync schedule offset presets (issue #140)", () => {
+  const {
+    deriveSyncOffsetMinute,
+    buildSyncSchedulePresets,
+    resolveSyncScheduleOptions,
+    isSafeCronSchedule: isSafe,
+  } = require("../../lib/cli/system-cron");
+
+  it("derives a stable minute that is never a quarter hour, and normalizes the repo spelling", () => {
+    const minute = deriveSyncOffsetMinute({ repo: "Owner/Repo", openclawDir: "/data/.openclaw" });
+    expect(minute).toBeGreaterThanOrEqual(1);
+    expect(minute % 15).not.toBe(0);
+    expect(deriveSyncOffsetMinute({ repo: "https://github.com/owner/repo.git", openclawDir: "/data/.openclaw" })).toBe(minute);
+    for (let index = 0; index < 500; index += 1) {
+      expect(deriveSyncOffsetMinute({ repo: `o/r${index}`, openclawDir: "/x" }) % 15).not.toBe(0);
+    }
+  });
+
+  it("builds valid presets off the minute and labels legacy and custom schedules", () => {
+    expect(buildSyncSchedulePresets(37)).toEqual([
+      { id: "every30", label: "Every 30 min · :07/:37", schedule: "7,37 * * * *" },
+      { id: "hourly", label: "Hourly · :37", schedule: "37 * * * *" },
+      { id: "daily", label: "Daily · 13:37", schedule: "37 13 * * *" },
+    ]);
+    for (const minute of [1, 14, 29, 31, 59]) {
+      for (const preset of buildSyncSchedulePresets(minute)) expect(isSafe(preset.schedule)).toBe(true);
+    }
+    const options = resolveSyncScheduleOptions({ repo: "o/r", openclawDir: "/d", schedule: "0 * * * *" });
+    expect(options.scheduleLabel).toBe("Hourly · :00");
+    expect(options.defaultSchedule).toBe(options.presets[1].schedule);
+    expect(resolveSyncScheduleOptions({ repo: "o/r", openclawDir: "/d", schedule: "5 */2 * * *" }).scheduleLabel).toBe("Custom · 5 */2 * * *");
+  });
+});

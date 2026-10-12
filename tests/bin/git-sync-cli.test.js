@@ -97,4 +97,17 @@ describe("bin/alphaclaw git-sync (issue #140)", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("ALPHACLAW_GIT_SYNC_PATHS entry");
   });
+
+  it("--json prints exactly one JSON document on stdout, and a message spelled --json stays a message", () => {
+    const result = runCli(["-m", "--json", "--trigger", "scheduled"]);
+    expect(result.stdout).not.toContain("{\"gitSync\"");
+    const json = runCli(["--json", "-m", "--json"]);
+    expect(json.status).toBe(1);
+    const lines = json.stdout.trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toEqual({
+      gitSync: expect.objectContaining({ outcome: "failed", code: "not_configured", committed: false, pushed: false }),
+    });
+    expect(json.stderr).toContain("Missing GITHUB_TOKEN");
+  });
 });

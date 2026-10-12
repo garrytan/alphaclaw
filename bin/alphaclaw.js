@@ -69,7 +69,11 @@ const {
   resolveRealGitPath,
   shouldRefreshHourlyGitSyncScript,
 } = require("../lib/cli/git-runtime");
-const { buildSystemCronFile, isSafeCronSchedule } = require("../lib/cli/system-cron");
+const {
+  buildSystemCronFile,
+  isSafeCronSchedule,
+  resolveSyncScheduleOptions,
+} = require("../lib/cli/system-cron");
 const {
   ensureMainUpstream,
   restoreMissingOpenclawConfigFromRemote,
@@ -135,6 +139,27 @@ const command = commandArgs[0];
 const commandScope = commandArgs[1];
 const commandAction = commandArgs[2];
 
+// `git-sync --json` (issue #140): stdout carries exactly one JSON document
+// for the dashboard and route callers, so every log line moves to stderr.
+// Values of the verb's value flags are skipped, so a commit message spelled
+// "--json" stays a message.
+const kGitSyncValueFlags = new Set([
+  "--message", "-m", "--file", "-f", "--trigger", "--deadline-seconds", "--lock-wait",
+]);
+const gitSyncJson =
+  command === "git-sync" &&
+  (() => {
+    for (let index = 1; index < commandArgs.length; index += 1) {
+      if (kGitSyncValueFlags.has(commandArgs[index])) {
+        index += 1;
+      } else if (commandArgs[index] === "--json") {
+        return true;
+      }
+    }
+    return false;
+  })();
+if (gitSyncJson) console.log = (...logArgs) => console.error(...logArgs);
+
 const pkg = JSON.parse(
   fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
 );
@@ -179,6 +204,7 @@ git-sync options:
   --file, -f <path>    Optional file path in .openclaw to sync only one file
   --trigger <kind>     scheduled | manual | caller (default caller); sets the default budgets
   --deadline-seconds <n>  Whole-run time budget (default 600 scheduled, 25 otherwise)
+  --json               Print one JSON result ({"gitSync":{outcome,code,message,...}}) on stdout; logs go to stderr
   --lock-wait <n>      Seconds to wait for alphaclaw-writer.lock (default 120 scheduled, 15 otherwise;
                       env ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS)
                       Only paths with working-tree changes are committed; set ALPHACLAW_GIT_SYNC_PATHS
@@ -547,11 +573,40 @@ const parseBoundedSeconds = (raw, { min, max }) => {
   return Math.min(max, Math.max(min, Number(text)));
 };
 
+let gitSyncJsonResult = null;
+const reportGitSync = (result) => {
+  const codeInfo = getGitSyncCode(result.code);
+  const outcome = result.outcome || codeInfo.outcome;
+  let message = "";
+  if (outcome === "ok") {
+    message = result.pushed
+      ? `Synced ${result.shortHash || "changes"} to GitHub`
+      : result.committed
+        ? `Committed ${result.shortHash || "changes"}`
+        : "No changes to sync";
+  } else {
+    message = `${codeInfo.headline}${result.detail ? `: ${result.detail}` : ""}`;
+  }
+  gitSyncJsonResult = {
+    outcome,
+    code: result.code,
+    message: message.slice(0, 400),
+    action: codeInfo.action || "",
+    shortHash: result.shortHash || "",
+    committed: result.committed === true,
+    pushed: result.pushed === true,
+    integration: result.integration || "none",
+    paths: Array.isArray(result.paths) ? result.paths.slice(0, 20) : [],
+  };
+  return result;
+};
+
 const runGitSync = () => {
   const startedAtMs = Date.now();
   const trigger = String(flagValue(commandArgs, "--trigger") || "caller").trim();
   if (!kGitSyncTriggers.has(trigger)) {
     console.error("[alphaclaw] --trigger must be scheduled, manual or caller");
+    reportGitSync({ code: "usage", outcome: "failed", detail: "--trigger must be scheduled, manual or caller" });
     return 2;
   }
   const defaults = kGitSyncDefaults[trigger];
@@ -567,6 +622,7 @@ const runGitSync = () => {
     console.error(
       "[alphaclaw] --deadline-seconds, --lock-wait and ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS take whole seconds",
     );
+    reportGitSync({ code: "usage", outcome: "failed", detail: "budgets take whole seconds" });
     return 2;
   }
   const deadlineAtMs =
@@ -588,6 +644,7 @@ const runGitSync = () => {
   // can say the backup stopped; a caller's missing flag is just a usage error.
   const refuseNotConfigured = (message) => {
     console.error(message);
+    reportGitSync({ code: "not_configured", detail: message.replace(/^\[alphaclaw\] /, "") });
     if (trigger === "scheduled" && hasRepo) {
       recordGitSyncRun({
         openclawDir,
@@ -600,12 +657,14 @@ const runGitSync = () => {
   };
   if (!commitMessage) {
     console.error("[alphaclaw] Missing --message for git-sync");
+    reportGitSync({ code: "usage", outcome: "failed", detail: "Missing --message" });
     return 1;
   }
   if (normalizedFilePath) {
     const pathValidation = validateGitSyncFilePath(normalizedFilePath);
     if (!pathValidation.ok) {
       console.error(pathValidation.error);
+      reportGitSync({ code: "usage", outcome: "failed", detail: "--file must stay within the managed directory" });
       return 1;
     }
   }
@@ -618,6 +677,7 @@ const runGitSync = () => {
   }
   if (!hasRepo) {
     console.error(`[alphaclaw] No git repository at ${openclawDir}`);
+    reportGitSync({ code: "not_configured", detail: "No git repository in the managed directory" });
     return 1;
   }
 
@@ -689,6 +749,7 @@ const runGitSync = () => {
         const codeInfo = getGitSyncCode("lock_timeout");
         console.error(`[alphaclaw] git-sync ${codeInfo.outcome} (lock_timeout): ${codeInfo.headline}. ${detail} ${codeInfo.action}`);
         recordGitSyncRun({ openclawDir, trigger, lock: "timeout", result: { code: "lock_timeout", detail } });
+        reportGitSync({ code: "lock_timeout", detail: "another git writer held the writer lock for the whole wait" });
         return codeInfo.exitCode;
       }
       if (lock.status === "acquired") {
@@ -713,6 +774,7 @@ const runGitSync = () => {
       deadlineAtMs,
     });
     recordGitSyncRun({ openclawDir, trigger, lock: lockState, result });
+    reportGitSync(result);
     return result.exitCode;
   } finally {
     lock?.release?.();
@@ -724,7 +786,13 @@ const runGitSync = () => {
 };
 
 if (command === "git-sync") {
-  process.exit(runGitSync());
+  const exitCode = runGitSync();
+  if (gitSyncJson) {
+    process.stdout.write(
+      `${JSON.stringify({ gitSync: gitSyncJsonResult || { outcome: "failed", code: "failed", message: "git-sync failed" } })}\n`,
+    );
+  }
+  process.exit(exitCode);
 }
 
 const runDoctorFindingComplete = () => {
@@ -1411,7 +1479,10 @@ if (fs.existsSync(hourlyGitSyncPath)) {
   try {
     const syncCronConfig = path.join(openclawDir, "cron", "system-sync.json");
     let cronEnabled = true;
-    let cronSchedule = "0 * * * *";
+    let cronSchedule = resolveSyncScheduleOptions({
+      repo: process.env.GITHUB_WORKSPACE_REPO,
+      openclawDir,
+    }).defaultSchedule;
 
     if (fs.existsSync(syncCronConfig)) {
       try {

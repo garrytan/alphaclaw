@@ -18,6 +18,7 @@ const createCacheStub = () => ({
 const createModelDeps = () => ({
   shellCmd: vi.fn(async () => ""),
   execFileCmd: vi.fn(async () => ""),
+  gitSync: vi.fn(async () => null),
   gatewayEnv: vi.fn(() => ({ OPENCLAW_GATEWAY_TOKEN: "token" })),
   parseJsonFromNoisyOutput: vi.fn(() => ({})),
   normalizeOnboardingModels: vi.fn(() => []),
@@ -259,7 +260,7 @@ describe("server/routes/models coverage", () => {
   it("saves profiles, auth order, and reports git-sync warnings on PUT /api/models/config", async () => {
     const deps = createModelDeps();
     deps.readEnvFile.mockReturnValue([]);
-    deps.shellCmd.mockRejectedValue(new Error("git sync down"));
+    deps.gitSync.mockResolvedValue("git sync down");
     const cacheStub = createCacheStub();
     const app = createApp(deps, cacheStub);
 
@@ -627,15 +628,14 @@ describe("server/routes/models config_unreadable mapping (F213)", () => {
         code: "OPENCLAW_CONFIG_UNREADABLE",
       });
     });
-    const shellCmd = vi.fn(async () => ({ ok: true }));
-    const app = createApp({ ...deps, shellCmd });
+    const app = createApp(deps);
     const res = await request(app)
       .put("/api/models/config")
       .send({ primary: "openai/gpt-5" });
     expect(res.status).toBe(503);
     expect(res.body.code).toBe("config_unreadable");
     expect(res.body.error).toMatch(/will not rewrite openclaw\.json/);
-    expect(shellCmd).not.toHaveBeenCalled();
+    expect(deps.gitSync).not.toHaveBeenCalled();
   });
 
   it("maps the same refusal on profile upsert and removal", async () => {

@@ -1117,136 +1117,94 @@ describe("server/routes/browse git-diff", () => {
 });
 
 describe("server/routes/browse git-sync", () => {
-  it("returns 500 when git status fails for non-repo reasons", async () => {
+  // Issue #140: the Sync button runs the shared engine (`alphaclaw git-sync
+  // --json --trigger manual`) and maps its result; the engine itself is
+  // covered by git-sync-real-git.test.js.
+  const createSyncApp = (rootDir, result) => {
+    const runGitSync = vi.fn(async () => result);
+    const app = express();
+    app.use(express.json());
+    registerBrowseRoutes({ app, fs, kRootDir: rootDir, runGitSync });
+    return { app, runGitSync };
+  };
+  const repoRoot = () => {
     const rootDir = createTestRoot();
-    fs.writeFileSync(path.join(rootDir, ".git"), "garbage\n", "utf8");
-    const app = createApp(rootDir);
-
-    const res = await request(app).post("/api/browse/git-sync").send({});
-
-    expect(res.status).toBe(500);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.error).toContain("invalid gitfile format");
-  });
-
-  it("reports no changes for clean repos without upstream", async () => {
-    const rootDir = createTestRoot();
-    const app = createApp(rootDir);
-    fs.writeFileSync(path.join(rootDir, "a.txt"), "hi\n", "utf8");
     initRepo(rootDir);
-    runGit(rootDir, "add .");
-    runGit(rootDir, 'commit -q -m "initial"');
-
-    const res = await request(app).post("/api/browse/git-sync").send({});
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      ok: true,
-      committed: false,
-      pushed: false,
-      message: "No changes to sync",
-    });
-  });
-
-  it("commits locally and reports push failure without a remote", async () => {
-    if (!gitReportsPushFailures()) {
-      return; // host git shim swallows push exit codes — failure inexpressible
-    }
-    const rootDir = createTestRoot();
-    const app = createApp(rootDir);
-    fs.writeFileSync(path.join(rootDir, "a.txt"), "hi\n", "utf8");
-    initRepo(rootDir);
-    runGit(rootDir, "add .");
-    runGit(rootDir, 'commit -q -m "initial"');
-    fs.writeFileSync(path.join(rootDir, "a.txt"), "changed\n", "utf8");
-
-    const res = await request(app)
-      .post("/api/browse/git-sync")
-      .send({ message: "local sync" });
-
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.committed).toBe(true);
-    expect(res.body.pushed).toBe(false);
-    expect(res.body.shortHash).toBeTruthy();
-    expect(res.body.message).toContain("locally; push failed");
-    expect(res.body.pushError).toBeTruthy();
-    expect(runGit(rootDir, "log -1 --pretty=%s")).toBe("local sync");
-  });
-
-  const setupRepoWithRemote = () => {
-    const baseDir = createTestRoot();
-    const remoteDir = path.join(baseDir, "origin.git");
-    const rootDir = path.join(baseDir, "work");
-    fs.mkdirSync(remoteDir, { recursive: true });
-    fs.mkdirSync(rootDir, { recursive: true });
-    runGit(remoteDir, "init -q --bare");
-    fs.writeFileSync(path.join(rootDir, "a.txt"), "hi\n", "utf8");
-    initRepo(rootDir);
-    runGit(rootDir, "add .");
-    runGit(rootDir, 'commit -q -m "initial"');
-    runGit(rootDir, `remote add origin "${remoteDir}"`);
-    runGit(rootDir, "push -q -u origin main");
-    return { rootDir, remoteDir };
+    return rootDir;
   };
 
-  it("pushes existing local commits when the tree is clean but ahead", async () => {
-    const { rootDir } = setupRepoWithRemote();
-    const app = createApp(rootDir);
-    fs.writeFileSync(path.join(rootDir, "b.txt"), "second\n", "utf8");
-    runGit(rootDir, "add b.txt");
-    runGit(rootDir, 'commit -q -m "second"');
+  it("runs the engine with the manual trigger and returns its success", async () => {
+    const rootDir = repoRoot();
+    const { app, runGitSync } = createSyncApp(rootDir, {
+      outcome: "ok",
+      code: "ok",
+      message: "Synced abc1234 to GitHub",
+      committed: true,
+      pushed: true,
+      shortHash: "abc1234",
+      paths: ["a.txt"],
+    });
 
-    const res = await request(app).post("/api/browse/git-sync").send({});
+    const res = await request(app).post("/api/browse/git-sync").send({ message: "remote sync" });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       ok: true,
-      committed: false,
+      outcome: "ok",
+      code: "ok",
+      committed: true,
       pushed: true,
-      shortHash: "",
-      message: "Pushed local commits",
+      shortHash: "abc1234",
+      paths: ["a.txt"],
+      message: "Synced abc1234 to GitHub",
+    });
+    expect(runGitSync).toHaveBeenCalledWith({
+      message: "remote sync",
+      trigger: "manual",
+      openclawDir: fs.realpathSync(rootDir),
     });
   });
 
-  it("commits and pushes dirty changes with an upstream", async () => {
-    const { rootDir } = setupRepoWithRemote();
-    const app = createApp(rootDir);
-    fs.writeFileSync(path.join(rootDir, "a.txt"), "changed\n", "utf8");
-
-    const res = await request(app)
-      .post("/api/browse/git-sync")
-      .send({ message: "remote sync" });
-
+  it("reports a live-tree-behind warning as a success with its outcome", async () => {
+    const { app } = createSyncApp(repoRoot(), {
+      outcome: "warning",
+      code: "live_tree_behind",
+      message: "Pushed, but files on this box are behind GitHub",
+      committed: true,
+      pushed: true,
+      shortHash: "abc1234",
+      paths: ["notes.md"],
+    });
+    const res = await request(app).post("/api/browse/git-sync").send({});
     expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.committed).toBe(true);
-    expect(res.body.pushed).toBe(true);
-    expect(res.body.shortHash).toBeTruthy();
-    expect(res.body.message).toBe(
-      `Committed and pushed ${res.body.shortHash}`,
-    );
+    expect(res.body).toMatchObject({ ok: true, outcome: "warning", code: "live_tree_behind", paths: ["notes.md"] });
   });
 
-  it("reports push failure for ahead commits when the remote is gone", async () => {
-    if (!gitReportsPushFailures()) {
-      return; // host git shim swallows push exit codes — failure inexpressible
-    }
-    const { rootDir, remoteDir } = setupRepoWithRemote();
-    const app = createApp(rootDir);
-    fs.writeFileSync(path.join(rootDir, "b.txt"), "second\n", "utf8");
-    runGit(rootDir, "add b.txt");
-    runGit(rootDir, 'commit -q -m "second"');
-    fs.rmSync(remoteDir, { recursive: true, force: true });
-
+  it("maps refusals to 409 with the code and the action as hint", async () => {
+    const { app } = createSyncApp(repoRoot(), {
+      outcome: "refused",
+      code: "lock_timeout",
+      message: "Git sync skipped: another git writer held the writer lock",
+      action: "The next run retries.",
+    });
     const res = await request(app).post("/api/browse/git-sync").send({});
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      ok: false,
+      code: "lock_timeout",
+      outcome: "refused",
+      error: "Git sync skipped: another git writer held the writer lock",
+      hint: "The next run retries.",
+    });
+  });
 
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.committed).toBe(false);
-    expect(res.body.pushed).toBe(false);
-    expect(res.body.message).toBe("Could not push commits");
-    expect(res.body.pushError).toBeTruthy();
+  it("maps not_configured to 400 and other failures to 500", async () => {
+    const missing = createSyncApp(repoRoot(), { outcome: "failed", code: "not_configured", message: "Git sync is not configured" });
+    expect((await request(missing.app).post("/api/browse/git-sync").send({})).status).toBe(400);
+    const failed = createSyncApp(repoRoot(), { outcome: "failed", code: "push_failed", message: "Git sync could not push to GitHub" });
+    const res = await request(failed.app).post("/api/browse/git-sync").send({});
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Git sync could not push to GitHub");
   });
 });
 

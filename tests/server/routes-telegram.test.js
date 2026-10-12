@@ -9,7 +9,7 @@ process.env.ALPHACLAW_ROOT_DIR = tmpRoot;
 
 const {
   registerTelegramRoutes,
-  buildTelegramGitSyncCommand,
+  buildTelegramGitSyncMessage,
 } = require("../../lib/server/routes/telegram");
 const { OPENCLAW_DIR, WORKSPACE_DIR } = require("../../lib/server/constants");
 const topicRegistry = require("../../lib/server/topic-registry");
@@ -67,8 +67,8 @@ const makeTelegramApi = (overrides = {}) => ({
 const createApp = ({
   telegramApi,
   syncPromptFiles,
-  shellCmd,
-  omitShellCmd,
+  gitSync,
+  omitGitSync,
   topicDiscovery,
 } = {}) => {
   const app = express();
@@ -77,10 +77,10 @@ const createApp = ({
     app,
     telegramApi: telegramApi || makeTelegramApi(),
     syncPromptFiles: syncPromptFiles || vi.fn(),
-    shellCmd: shellCmd || vi.fn(async () => ({ ok: true })),
+    gitSync: gitSync || vi.fn(async () => null),
     ...(topicDiscovery ? { topicDiscovery } : {}),
   };
-  if (omitShellCmd) delete deps.shellCmd;
+  if (omitGitSync) delete deps.gitSync;
   registerTelegramRoutes(deps);
   return { app, ...deps };
 };
@@ -106,25 +106,18 @@ describe("server/routes/telegram", () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  describe("buildTelegramGitSyncCommand", () => {
-    it("quotes git-sync commit messages as a single shell arg", () => {
-      const command = buildTelegramGitSyncCommand("rename-topic", "topic's name");
-      expect(command).toBe(
-        "alphaclaw git-sync -m 'telegram workspace: rename-topic topic'\"'\"'s name'",
-      );
-    });
-
+  describe("buildTelegramGitSyncMessage", () => {
     it("normalizes whitespace and keeps message content literal", () => {
-      const command = buildTelegramGitSyncCommand(
+      expect(buildTelegramGitSyncMessage("rename-topic", "topic's name")).toBe(
+        "telegram workspace: rename-topic topic's name",
+      );
+      const message = buildTelegramGitSyncMessage(
         "create-topic",
         "line one\nline\t two  $(touch /tmp/pwned)  `uname -a`",
       );
-      expect(command).toContain("$(touch /tmp/pwned)");
-      expect(command).toContain("`uname -a`");
-      expect(command).not.toContain("\n");
-      expect(command).not.toContain("\t");
-      expect(command.startsWith("alphaclaw git-sync -m '")).toBe(true);
-      expect(command.endsWith("'")).toBe(true);
+      expect(message).toBe(
+        "telegram workspace: create-topic line one line two $(touch /tmp/pwned) `uname -a`",
+      );
     });
   });
 
@@ -296,7 +289,7 @@ describe("server/routes/telegram", () => {
     });
 
     it("creates a topic, updates the registry and syncs config", async () => {
-      const { app, telegramApi, syncPromptFiles, shellCmd } = createApp();
+      const { app, telegramApi, syncPromptFiles, gitSync } = createApp();
 
       const res = await request(app)
         .post("/api/telegram/groups/-100/topics")
@@ -335,10 +328,7 @@ describe("server/routes/telegram", () => {
       expect(cfg.agents.defaults.maxConcurrent).toBe(8);
       expect(cfg.agents.defaults.subagents.maxConcurrent).toBe(6);
       expect(syncPromptFiles).toHaveBeenCalled();
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: create-topic Ops'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: create-topic Ops" });
     });
 
     it("ignores invalid icon colors and empty agent ids", async () => {
@@ -366,31 +356,18 @@ describe("server/routes/telegram", () => {
       });
     });
 
-    it("surfaces git-sync failures as syncWarning", async () => {
-      const shellCmd = vi.fn(async () => {
-        throw new Error("git sync exploded");
-      });
-      const { app } = createApp({ shellCmd });
+    it("surfaces the runner's sync warning as syncWarning", async () => {
+      const gitSync = vi.fn(async () => "Git sync could not push to GitHub");
+      const { app } = createApp({ gitSync });
       const res = await request(app)
         .post("/api/telegram/groups/-100/topics")
         .send({ name: "Ops" });
       expect(res.body.ok).toBe(true);
-      expect(res.body.syncWarning).toBe("git sync exploded");
+      expect(res.body.syncWarning).toBe("Git sync could not push to GitHub");
     });
 
-    it("uses a fallback git-sync warning when the error has no message", async () => {
-      const shellCmd = vi.fn(async () => {
-        throw { code: 1 };
-      });
-      const { app } = createApp({ shellCmd });
-      const res = await request(app)
-        .post("/api/telegram/groups/-100/topics")
-        .send({ name: "Ops" });
-      expect(res.body.syncWarning).toBe("alphaclaw git-sync failed");
-    });
-
-    it("skips git-sync when no shell command is provided", async () => {
-      const { app } = createApp({ omitShellCmd: true });
+    it("skips git-sync when no runner is provided", async () => {
+      const { app } = createApp({ omitGitSync: true });
       const res = await request(app)
         .post("/api/telegram/groups/-100/topics")
         .send({ name: "Ops" });
@@ -431,7 +408,7 @@ describe("server/routes/telegram", () => {
           return { message_thread_id: nextThread, name, icon_color: 1 };
         }),
       });
-      const { app, syncPromptFiles, shellCmd } = createApp({ telegramApi });
+      const { app, syncPromptFiles, gitSync } = createApp({ telegramApi });
 
       const res = await request(app)
         .post("/api/telegram/groups/-100/topics/bulk")
@@ -463,10 +440,7 @@ describe("server/routes/telegram", () => {
         discovered: false,
       });
       expect(syncPromptFiles).toHaveBeenCalled();
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: bulk-create-topics -100'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: bulk-create-topics -100" });
     });
   });
 
@@ -511,7 +485,7 @@ describe("server/routes/telegram", () => {
           throw new Error("Bad Request: message thread not found");
         }),
       });
-      const { app, shellCmd } = createApp({ telegramApi });
+      const { app, gitSync } = createApp({ telegramApi });
 
       const res = await request(app).delete("/api/telegram/groups/-100/topics/5");
 
@@ -528,10 +502,7 @@ describe("server/routes/telegram", () => {
         deletedAt: expect.any(Number),
         stale: false,
       });
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: delete-stale-topic 5'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: delete-stale-topic 5" });
     });
   });
 
@@ -685,7 +656,7 @@ describe("server/routes/telegram", () => {
       writeRegistryFile({
         groups: { "-100": { name: "G", topics: { 5: { name: "Old" } } } },
       });
-      const { app, telegramApi, shellCmd } = createApp();
+      const { app, telegramApi, gitSync } = createApp();
 
       const res = await request(app)
         .put("/api/telegram/groups/-100/topics/5")
@@ -710,10 +681,7 @@ describe("server/routes/telegram", () => {
         agentId: "scout",
         discovered: false,
       });
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: update-topic New'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: update-topic New" });
     });
 
     it("skips the telegram rename when the name is unchanged", async () => {
@@ -803,7 +771,7 @@ describe("server/routes/telegram", () => {
           { agentId: "alpha", match: { channel: "telegram", accountId: "work" } },
         ],
       });
-      const { app, telegramApi, syncPromptFiles, shellCmd } = createApp();
+      const { app, telegramApi, syncPromptFiles, gitSync } = createApp();
 
       const res = await request(app)
         .post("/api/telegram/groups/-100/configure?accountId=work")
@@ -824,10 +792,7 @@ describe("server/routes/telegram", () => {
         agentId: "alpha",
       });
       expect(syncPromptFiles).toHaveBeenCalled();
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: configure-group -100'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: configure-group -100" });
     });
 
     it("resolves the allow-from user from group admins for default account", async () => {
@@ -1158,7 +1123,7 @@ describe("server/routes/telegram", () => {
           telegram: { groups: { "-100": { requireMention: true } } },
         },
       });
-      const { app, telegramApi, shellCmd } = createApp();
+      const { app, telegramApi, gitSync } = createApp();
 
       const res = await request(app).get("/api/telegram/workspace");
 
@@ -1179,10 +1144,7 @@ describe("server/routes/telegram", () => {
       const cfg = readOpenclawJson();
       expect(cfg.channels.telegram.groupAllowFrom).toEqual(["7"]);
       expect(cfg.channels.telegram.groups["-100"].requireMention).toBe(true);
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: repair-group-allow-from -100'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: repair-group-allow-from -100" });
     });
 
     it("scopes workspace lookups to the requested account entry", async () => {
@@ -1278,7 +1240,7 @@ describe("server/routes/telegram", () => {
           "-999": { name: "Keep Me", topics: {} },
         },
       });
-      const { app, syncPromptFiles, shellCmd } = createApp();
+      const { app, syncPromptFiles, gitSync } = createApp();
 
       const res = await request(app).post("/api/telegram/workspace/reset");
 
@@ -1289,10 +1251,7 @@ describe("server/routes/telegram", () => {
         "-999": { name: "Keep Me", topics: {} },
       });
       expect(syncPromptFiles).toHaveBeenCalled();
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'telegram workspace: reset-workspace telegram'",
-        { timeout: 30000 },
-      );
+      expect(gitSync).toHaveBeenCalledWith({ message: "telegram workspace: reset-workspace telegram" });
     });
 
     it("clears only the requested account entry in accounts mode", async () => {
@@ -1476,7 +1435,7 @@ describe("server/routes/telegram", () => {
           { status: "administrator", user: { id: 42, is_bot: true } },
         ]),
       });
-      const { app, shellCmd } = createApp({ telegramApi });
+      const { app, gitSync } = createApp({ telegramApi });
       const before = fs.readFileSync(kOpenclawJsonPath, "utf8");
 
       const res = await request(app).get("/api/telegram/workspace");
@@ -1484,10 +1443,9 @@ describe("server/routes/telegram", () => {
       expect(res.body.ok).toBe(true);
       expect(res.body.groups.map((g) => g.groupId)).toEqual(["-100"]);
       expect(fs.readFileSync(kOpenclawJsonPath, "utf8")).toBe(before);
-      expect(shellCmd).not.toHaveBeenCalledWith(
-        expect.stringContaining("repair-group-allow-from"),
-        expect.anything(),
-      );
+      expect(gitSync).not.toHaveBeenCalledWith({
+        message: expect.stringContaining("repair-group-allow-from"),
+      });
       expect(res.body.repairWarnings).toEqual([
         { groupId: "-100", warning: expect.stringContaining("No human admin found") },
       ]);

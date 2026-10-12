@@ -36,7 +36,7 @@ describe("git-sync status file", () => {
   it("every emitted code has an outcome, exit code and copy", () => {
     for (const [code, info] of Object.entries(kGitSyncCodes)) {
       expect(["ok", "warning", "refused", "failed"]).toContain(info.outcome);
-      expect([0, 1, 75]).toContain(info.exitCode);
+      expect([0, 1, 2, 75]).toContain(info.exitCode);
       expect(info.headline, code).toBeTruthy();
       if (code !== "ok") expect(info.action, code).toBeTruthy();
     }

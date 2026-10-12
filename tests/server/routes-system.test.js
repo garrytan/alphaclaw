@@ -171,6 +171,14 @@ const mockHttpsGetResponse = ({ statusCode = 200, body = "" } = {}) =>
     return requestObject;
   });
 
+// Issue #140: the default sync schedule is the install's offset minute,
+// never :00 (lib/cli/system-cron.js resolveSyncScheduleOptions).
+const kDefaultSyncSchedule = () =>
+  require("../../lib/cli/system-cron").resolveSyncScheduleOptions({
+    repo: process.env.GITHUB_WORKSPACE_REPO,
+    openclawDir: "/tmp/openclaw",
+  }).defaultSchedule;
+
 describe("server/routes/system", () => {
   // boot-phase is a module singleton whose process default is
   // "starting_gateway"; the reducer (and the legacy projection derived from
@@ -576,7 +584,7 @@ describe("server/routes/system", () => {
         },
         syncCron: expect.objectContaining({
           enabled: true,
-          schedule: "0 * * * *",
+          schedule: kDefaultSyncSchedule(),
         }),
       }),
     );
@@ -838,6 +846,51 @@ describe("server/routes/system", () => {
         schedule: "*/30 * * * *",
       }),
     );
+  });
+
+  it("offers offset presets, labels a legacy :00 schedule, and summarizes the last run without detail", async () => {
+    const deps = createSystemDeps();
+    deps.fs.existsSync.mockImplementation(() => true);
+    deps.fs.readFileSync.mockImplementation((targetPath) => {
+      if (String(targetPath).endsWith("system-sync.json")) {
+        return JSON.stringify({ enabled: true, schedule: "0 * * * *" });
+      }
+      if (String(targetPath).endsWith("git-sync-status.json")) {
+        return JSON.stringify({
+          at: "2026-10-12T10:07:00.000Z",
+          outcome: "refused",
+          code: "in_progress_operation",
+          detail: "pid 812 (git rebase) is still running in /data/.openclaw",
+          staleState: { marker: "rebase-merge", owners: [{ pid: 812, cmd: "git rebase" }] },
+          firstFailureAt: "2026-10-12T09:07:00.000Z",
+          consecutiveFailures: 2,
+        });
+      }
+      throw new Error("no file");
+    });
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/sync-cron");
+
+    expect(res.status).toBe(200);
+    expect(res.body.scheduleLabel).toBe("Hourly · :00");
+    expect(res.body.presets.map((preset) => preset.id)).toEqual(["every30", "hourly", "daily"]);
+    expect(res.body.presets.every((preset) => !preset.schedule.startsWith("0 "))).toBe(true);
+    expect(res.body.presets.find((preset) => preset.id === "hourly").schedule).toBe(kDefaultSyncSchedule());
+    expect(res.body.lastRun).toEqual({
+      at: "2026-10-12T10:07:00.000Z",
+      outcome: "refused",
+      code: "in_progress_operation",
+      headline: "Git sync blocked by an unfinished rebase or merge",
+      trigger: "",
+      shortHash: "",
+      lastSuccessAt: null,
+      firstFailureAt: "2026-10-12T09:07:00.000Z",
+      consecutiveFailures: 2,
+      liveTreeBehindCount: 0,
+      liveTreeBehindSince: null,
+    });
+    expect(JSON.stringify(res.body)).not.toContain("812");
   });
 
   it("updates sync cron config on PUT /api/sync-cron", async () => {
@@ -1887,7 +1940,7 @@ describe("server/routes/system", () => {
       expect.objectContaining({
         ok: true,
         enabled: false,
-        schedule: "0 * * * *",
+        schedule: kDefaultSyncSchedule(),
       }),
     );
   });
@@ -1946,7 +1999,7 @@ describe("server/routes/system", () => {
 
     const res = await request(app).get("/api/sync-cron");
     expect(res.status).toBe(200);
-    expect(res.body.schedule).toBe("0 * * * *");
+    expect(res.body.schedule).toBe(kDefaultSyncSchedule());
     // The fallback is observable, never silent: the injected value is named.
     expect(res.body.scheduleFallback).toBe(true);
     expect(res.body.invalidStoredSchedule).toContain("/tmp/evil");
@@ -1963,7 +2016,7 @@ describe("server/routes/system", () => {
     // No schedule provided: the current (default) schedule is preserved.
     expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
       "/tmp/openclaw/cron/system-sync.json",
-      expect.stringContaining('"schedule": "0 * * * *"'),
+      expect.stringContaining(`"schedule": "${kDefaultSyncSchedule()}"`),
     );
     expect(deps.fs.rmSync).toHaveBeenCalledWith("/etc/cron.d/openclaw-hourly-sync", {
       force: true,

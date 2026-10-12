@@ -373,7 +373,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
     expect(output).toContain("Ignoring invalid stored sync-cron schedule");
     const cronContent = fs.readFileSync(capturePath, "utf8");
-    expect(cronContent).toContain('0 * * * * root bash');
+    // The default is the install's offset minute, never :00 (issue #140).
+    expect(cronContent).toMatch(/^([1-9]|[1-5][0-9]) \* \* \* \* root bash/m);
     expect(cronContent).not.toContain("/tmp/evil");
   });
 

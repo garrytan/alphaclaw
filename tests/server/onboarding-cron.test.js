@@ -25,6 +25,8 @@ const createMockFs = () => {
   };
 };
 
+const { resolveSyncScheduleOptions } = require("../../lib/cli/system-cron");
+
 describe("server/onboarding/cron", () => {
   it("writes ALPHACLAW_ROOT_DIR into the generated system cron file", async () => {
     const openclawDir = fs.mkdtempSync(
@@ -35,6 +37,7 @@ describe("server/onboarding/cron", () => {
     const installed = await installHourlyGitSyncCron({
       fs: mockFs,
       openclawDir,
+      repo: "owner/repo",
     });
 
     expect(installed).toBe(true);
@@ -53,7 +56,10 @@ describe("server/onboarding/cron", () => {
       `OPENCLAW_CONFIG_PATH=${path.join(openclawDir, "openclaw.json")}`,
     );
     expect(cronContent).toContain("SHELL=/bin/bash");
-    expect(cronContent).toMatch(/^0 \* \* \* \* root bash /m);
+    // Issue #140: the install's offset minute, never the top of the hour.
+    const { defaultSchedule } = resolveSyncScheduleOptions({ repo: "owner/repo", openclawDir });
+    expect(defaultSchedule).not.toMatch(/^0 /);
+    expect(cronContent).toContain(`\n${defaultSchedule} root bash `);
     // /etc/cron.d files without a trailing newline are ignored by cron.
     expect(cronContent.endsWith("\n")).toBe(true);
   });

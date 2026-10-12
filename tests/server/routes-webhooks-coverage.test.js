@@ -58,8 +58,7 @@ const kOauthRecord = {
 const createApp = ({
   fs,
   webhooksDb,
-  shellCmd,
-  execFileCmd,
+  gitSync,
   restartRequiredState,
   omitWebhooksDb = false,
   omitRestartState = false,
@@ -72,8 +71,7 @@ const createApp = ({
     constants,
     getBaseUrl: () => "https://alphaclaw.example.com",
     webhooksDb: omitWebhooksDb ? undefined : webhooksDb || {},
-    shellCmd,
-    execFileCmd,
+    gitSync,
     restartRequiredState: omitRestartState
       ? undefined
       : restartRequiredState || {
@@ -274,14 +272,12 @@ describe("server/routes/webhooks coverage", () => {
       expect(res.body.syncWarning).toBe(null);
     });
 
-    it("runs git sync via argv and reports restart state", async () => {
-      const execFileCmd = vi.fn(async () => "");
-      const shellCmd = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    it("backs the change up through the shared git-sync runner and reports restart state", async () => {
+      const gitSync = vi.fn(async () => null);
       const markRequired = vi.fn();
       const app = createApp({
         fs: createConfigFs(),
-        shellCmd,
-        execFileCmd,
+        gitSync,
         restartRequiredState: {
           markRequired,
           getSnapshot: async () => ({ restartRequired: true }),
@@ -296,48 +292,17 @@ describe("server/routes/webhooks coverage", () => {
       expect(res.body.syncWarning).toBe(null);
       expect(res.body.restartRequired).toBe(true);
       expect(markRequired).toHaveBeenCalledWith("webhooks");
-      // argv form — the message is one operand, never shell-parsed.
-      expect(execFileCmd).toHaveBeenCalledWith(
-        "alphaclaw",
-        ["git-sync", "-m", "webhooks: create sync-hook"],
-        { timeout: 30000 },
-      );
-      expect(shellCmd).not.toHaveBeenCalled();
+      expect(gitSync).toHaveBeenCalledWith({ message: "webhooks: create sync-hook" });
     });
 
-    it("falls back to a single-quote-escaped shell command when only shellCmd is injected", async () => {
-      const shellCmd = vi.fn(async () => ({ stdout: "", stderr: "" }));
-      const app = createApp({ fs: createConfigFs(), shellCmd });
-      const res = await request(app).post("/api/webhooks").send({ name: "sync-hook" });
-      expect(res.status).toBe(201);
-      expect(shellCmd).toHaveBeenCalledWith(
-        "alphaclaw git-sync -m 'webhooks: create sync-hook'",
-        { timeout: 30000 },
-      );
-    });
-
-    it("reports git sync failures as warnings", async () => {
-      const shellCmd = vi.fn(async () => {
-        throw new Error("git sync down");
-      });
-      const app = createApp({ fs: createConfigFs(), shellCmd });
+    it("reports the runner's sync warning beside the success", async () => {
+      const gitSync = vi.fn(async () => "Git sync could not push to GitHub");
+      const app = createApp({ fs: createConfigFs(), gitSync });
       const res = await request(app)
         .post("/api/webhooks")
         .send({ name: "warn-hook" });
       expect(res.status).toBe(201);
-      expect(res.body.syncWarning).toBe("git sync down");
-    });
-
-    it("falls back to a generic git sync warning without an error message", async () => {
-      const shellCmd = vi.fn(async () => {
-        throw {};
-      });
-      const app = createApp({ fs: createConfigFs(), shellCmd });
-      const res = await request(app)
-        .post("/api/webhooks")
-        .send({ name: "warn-hook-2" });
-      expect(res.status).toBe(201);
-      expect(res.body.syncWarning).toBe("alphaclaw git-sync failed");
+      expect(res.body.syncWarning).toBe("Git sync could not push to GitHub");
     });
   });
 

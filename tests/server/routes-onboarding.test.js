@@ -479,8 +479,9 @@ describe("server/routes/onboarding", () => {
 
     expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
       "/etc/cron.d/openclaw-hourly-sync",
-      expect.stringContaining(
-        '0 * * * * root bash "/tmp/openclaw/.alphaclaw/hourly-git-sync.sh"',
+      // The install's offset minute, never :00 (issue #140).
+      expect.stringMatching(
+        /\n([1-9]|[1-5][0-9]) \* \* \* \* root bash "\/tmp\/openclaw\/\.alphaclaw\/hourly-git-sync\.sh"/,
       ),
       expect.objectContaining({ mode: 0o644 }),
     );
