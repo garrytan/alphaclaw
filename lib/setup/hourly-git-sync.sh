@@ -26,6 +26,7 @@ if [[ -f "$REPO/.env" ]]; then
     if [[ "$key" == "$line" ]]; then continue; fi
     if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then continue; fi
     case "$key" in
+      ALPHACLAW_GIT_LOCK_FD|ALPHACLAW_GIT_LOCK_HELD) continue ;;
       GITHUB_TOKEN|GITHUB_WORKSPACE_REPO|ALPHACLAW_*|OPENCLAW_*) ;;
       *) continue ;;
     esac
@@ -55,75 +56,6 @@ NODE
   fi
 fi
 
-# Drop cron scheduler runtime-only churn when it is metadata/timestamp-only.
-maybe_restore_if_runtime_only() {
-  local file="$1"
-  [[ -f "$file" ]] || return 0
-
-  # Only inspect when the file differs from HEAD.
-  if git diff --quiet -- "$file"; then
-    return 0
-  fi
-
-  if node - "$file" <<'NODE'
-const fs = require('fs');
-const cp = require('child_process');
-const file = process.argv[2];
-
-const sanitize = (value) => {
-  if (Array.isArray(value)) return value.map(sanitize);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) {
-      if (/^(lastRun|nextRun|updatedAt|createdAt|lastStarted|lastFinished|lastSuccess|lastFailure|lastError|lastExitCode|lastDurationMs|runCount|runs|timestamp|time|ts|ms)$/i.test(k)) {
-        continue;
-      }
-      out[k] = sanitize(v);
-    }
-    return out;
-  }
-  return value;
-};
-
-const parseJson = (str) => {
-  try {
-    return JSON.parse(str);
-  } catch {
-    return null;
-  }
-};
-
-let headRaw = '';
-try {
-  headRaw = cp.execSync(`git show HEAD:${file}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-} catch {
-  process.exit(2); // no HEAD version to compare
-}
-
-let workRaw = '';
-try {
-  workRaw = fs.readFileSync(file, 'utf8');
-} catch {
-  process.exit(3);
-}
-
-const headJson = parseJson(headRaw);
-const workJson = parseJson(workRaw);
-if (!headJson || !workJson) process.exit(4);
-
-const a = JSON.stringify(sanitize(headJson));
-const b = JSON.stringify(sanitize(workJson));
-process.exit(a === b ? 0 : 1);
-NODE
-  then
-    # Runtime metadata only; restore cleanly so it doesn't create noise commits.
-    git restore --worktree --staged -- "$file" || git checkout -- "$file"
-  fi
-}
-
-maybe_restore_if_runtime_only "cron/jobs.json"
-maybe_restore_if_runtime_only "crons.json"
-
 resolve_alphaclaw_cmd() {
   if command -v alphaclaw >/dev/null 2>&1; then
     command -v alphaclaw
@@ -152,4 +84,6 @@ if [[ -z "${alphaclaw_cmd:-}" ]]; then
   echo "hourly-git-sync: alphaclaw CLI not found in PATH or known install paths" >&2
   exit 127
 fi
-"$alphaclaw_cmd" git-sync -m "$msg"
+# The CLI takes alphaclaw-writer.lock itself and never rewrites the working
+# tree (issue #140); this script must not run git commands of its own.
+"$alphaclaw_cmd" git-sync --trigger scheduled -m "$msg"

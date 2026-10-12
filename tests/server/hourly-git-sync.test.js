@@ -71,7 +71,7 @@ describe("hourly-git-sync managed script", () => {
       },
     });
 
-    expect(fs.readFileSync(markerPath, "utf8")).toContain("git-sync -m Auto-commit hourly sync");
+    expect(fs.readFileSync(markerPath, "utf8")).toContain("git-sync --trigger scheduled -m Auto-commit hourly sync");
   });
 
   // Issue #26: the script used to `source` .env under `set -euo pipefail` — a
@@ -118,7 +118,7 @@ describe("hourly-git-sync managed script", () => {
     });
 
     // The sync ran to completion despite the hostile .env…
-    expect(fs.readFileSync(markerPath, "utf8")).toContain("git-sync -m Auto-commit hourly sync");
+    expect(fs.readFileSync(markerPath, "utf8")).toContain("git-sync --trigger scheduled -m Auto-commit hourly sync");
     // …nothing was executed…
     expect(fs.existsSync(pwnedPath)).toBe(false);
     // …allowlisted vars arrived (dequoted once, spaces intact), and the
@@ -129,5 +129,44 @@ describe("hourly-git-sync managed script", () => {
     expect(dump).toContain("OPENCLAW_STATE_DIR=/data/.openclaw\n");
     expect(dump).toContain("NODE_OPTIONS=\n");
     expect(dump).toContain("LD_PRELOAD=\n");
+  });
+
+  // Issue #140: the script must not touch the repo itself (its old
+  // runtime-only `git restore` raced the gateway's own writes) and must not
+  // forward the writer-lock handoff variables from the agent-writable .env.
+  it("never runs git itself and drops the writer-lock handoff keys from .env", () => {
+    const script = installScript();
+    const binDir = path.join(tmpDir, "bin");
+    const gitMarker = path.join(tmpDir, "git-called");
+    const envDumpPath = path.join(tmpDir, "env-dump");
+    fs.mkdirSync(path.join(tmpDir, "cron"), { recursive: true });
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "cron", "system-sync.json"),
+      JSON.stringify({ enabled: true, schedule: "7 * * * *" }),
+    );
+    fs.writeFileSync(path.join(tmpDir, "cron", "jobs.json"), "{}");
+    fs.writeFileSync(
+      path.join(tmpDir, ".env"),
+      "ALPHACLAW_GIT_LOCK_FD=3\nALPHACLAW_GIT_LOCK_HELD=/tmp/x\nALPHACLAW_GIT_SYNC_PATHS=cron/\n",
+    );
+    fs.writeFileSync(path.join(binDir, "git"), `#!/usr/bin/env bash\ntouch "${gitMarker}"\n`, { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(binDir, "alphaclaw"),
+      [
+        "#!/usr/bin/env bash",
+        `printf 'FD=%s\\nHELD=%s\\nPATHS=%s\\n' "\${ALPHACLAW_GIT_LOCK_FD:-}" "\${ALPHACLAW_GIT_LOCK_HELD:-}" "\${ALPHACLAW_GIT_SYNC_PATHS:-}" > "${envDumpPath}"`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    execFileSync("bash", [script], {
+      cwd: tmpDir,
+      encoding: "utf8",
+      env: { PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+    });
+
+    expect(fs.existsSync(gitMarker)).toBe(false);
+    expect(fs.readFileSync(envDumpPath, "utf8")).toBe("FD=\nHELD=\nPATHS=cron/\n");
   });
 });

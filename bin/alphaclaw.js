@@ -79,7 +79,13 @@ const {
   kGitAskpassScript,
 } = require("../lib/git-askpass-script");
 const { kGithubRepoSlugPattern } = require("../lib/server/helpers");
-const { performGitSync } = require("../lib/cli/git-sync");
+const { performGitSync, parseGitSyncPaths } = require("../lib/cli/git-sync");
+const { getGitSyncCode } = require("../lib/cli/git-sync-codes");
+const { recordGitSyncRun } = require("../lib/cli/git-sync-status");
+const {
+  resolveWriterLockPath,
+  acquireWriterLock,
+} = require("../lib/cli/git-writer-lock");
 const { resolveSelfDependency } = require("../lib/server/self-dependency");
 const {
   migrateManagedInternalFiles,
@@ -150,7 +156,7 @@ Usage: alphaclaw <command> [options]
 
 Commands:
   start     Start the AlphaClaw server (Setup UI + gateway manager)
-  git-sync  Commit and push the managed .openclaw directory safely using GITHUB_TOKEN
+  git-sync  Commit, integrate and push the managed .openclaw directory using GITHUB_TOKEN
   doctor finding complete  Mark a queued Doctor finding fixed after verification
   telegram topic add  Add/update Telegram topic mapping by thread ID
   telegram topic create  Create a Telegram forum topic and register it
@@ -171,6 +177,13 @@ start options:
 git-sync options:
   --message, -m <text> Commit message
   --file, -f <path>    Optional file path in .openclaw to sync only one file
+  --trigger <kind>     scheduled | manual | caller (default caller); sets the default budgets
+  --deadline-seconds <n>  Whole-run time budget (default 600 scheduled, 25 otherwise)
+  --lock-wait <n>      Seconds to wait for alphaclaw-writer.lock (default 120 scheduled, 15 otherwise;
+                      env ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS)
+                      Only paths with working-tree changes are committed; set ALPHACLAW_GIT_SYNC_PATHS
+                      (comma-separated) to limit them further. Exit 0 synced, 1 refused/failed,
+                      2 usage, 75 skipped (lock busy or out of time).
 
 telegram topic add options:
   --thread <id>       Telegram thread ID
@@ -517,7 +530,48 @@ process.env.OPENCLAW_HOME = rootDir;
 process.env.OPENCLAW_STATE_DIR = openclawDir;
 process.env.OPENCLAW_CONFIG_PATH = path.join(openclawDir, "openclaw.json");
 
+// Defaults per trigger (issue #140): the scheduled run can wait for other
+// writers; dashboard/route callers sit behind a 30 s process timeout, so they
+// wait briefly and leave the rest to the next scheduled run.
+const kGitSyncTriggers = new Set(["scheduled", "manual", "caller"]);
+const kGitSyncDefaults = {
+  scheduled: { deadlineSeconds: 600, lockWaitSeconds: 120 },
+  manual: { deadlineSeconds: 25, lockWaitSeconds: 15 },
+  caller: { deadlineSeconds: 25, lockWaitSeconds: 15 },
+};
+const kGitSyncFinalizeReserveSeconds = 2;
+const parseBoundedSeconds = (raw, { min, max }) => {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  if (!/^[0-9]+$/.test(text)) return NaN;
+  return Math.min(max, Math.max(min, Number(text)));
+};
+
 const runGitSync = () => {
+  const startedAtMs = Date.now();
+  const trigger = String(flagValue(commandArgs, "--trigger") || "caller").trim();
+  if (!kGitSyncTriggers.has(trigger)) {
+    console.error("[alphaclaw] --trigger must be scheduled, manual or caller");
+    return 2;
+  }
+  const defaults = kGitSyncDefaults[trigger];
+  const deadlineSeconds = parseBoundedSeconds(flagValue(commandArgs, "--deadline-seconds"), {
+    min: 5,
+    max: 3600,
+  });
+  const lockWaitSeconds = parseBoundedSeconds(
+    flagValue(commandArgs, "--lock-wait") ?? process.env.ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS,
+    { min: 1, max: 900 },
+  );
+  if (Number.isNaN(deadlineSeconds) || Number.isNaN(lockWaitSeconds)) {
+    console.error(
+      "[alphaclaw] --deadline-seconds, --lock-wait and ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS take whole seconds",
+    );
+    return 2;
+  }
+  const deadlineAtMs =
+    startedAtMs + ((deadlineSeconds ?? defaults.deadlineSeconds) - kGitSyncFinalizeReserveSeconds) * 1000;
+  const syncPathsResult = parseGitSyncPaths(process.env.ALPHACLAW_GIT_SYNC_PATHS);
   const githubToken = String(process.env.GITHUB_TOKEN || "").trim();
   const githubRepo = resolveGithubRepoPath(
     process.env.GITHUB_WORKSPACE_REPO || "",
@@ -529,6 +583,21 @@ const runGitSync = () => {
     flagValue(commandArgs, "--file", "-f") || "",
   ).trim();
   const normalizedFilePath = normalizeGitSyncFilePath(requestedFilePath);
+  const hasRepo = fs.existsSync(path.join(openclawDir, ".git"));
+  // Configuration failures of the SCHEDULED run are recorded so the server
+  // can say the backup stopped; a caller's missing flag is just a usage error.
+  const refuseNotConfigured = (message) => {
+    console.error(message);
+    if (trigger === "scheduled" && hasRepo) {
+      recordGitSyncRun({
+        openclawDir,
+        trigger,
+        lock: "none",
+        result: { code: "not_configured", detail: message.replace(/^\[alphaclaw\] /, "") },
+      });
+    }
+    return 1;
+  };
   if (!commitMessage) {
     console.error("[alphaclaw] Missing --message for git-sync");
     return 1;
@@ -540,15 +609,14 @@ const runGitSync = () => {
       return 1;
     }
   }
+  if (!syncPathsResult.ok) return refuseNotConfigured(syncPathsResult.error);
   if (!githubToken) {
-    console.error("[alphaclaw] Missing GITHUB_TOKEN for git-sync");
-    return 1;
+    return refuseNotConfigured("[alphaclaw] Missing GITHUB_TOKEN for git-sync");
   }
   if (!githubRepo) {
-    console.error("[alphaclaw] Missing GITHUB_WORKSPACE_REPO for git-sync");
-    return 1;
+    return refuseNotConfigured("[alphaclaw] Missing GITHUB_WORKSPACE_REPO for git-sync");
   }
-  if (!fs.existsSync(path.join(openclawDir, ".git"))) {
+  if (!hasRepo) {
     console.error(`[alphaclaw] No git repository at ${openclawDir}`);
     return 1;
   }
@@ -557,38 +625,83 @@ const runGitSync = () => {
     shimPath: resolveGitShimPath(),
   });
   if (!realGitPath) {
-    console.error(
+    return refuseNotConfigured(
       "[alphaclaw] Missing git binary for git-sync; install git in the runtime image",
     );
-    return 1;
   }
 
   if (!kGithubRepoSlugPattern.test(githubRepo)) {
-    console.error(
+    return refuseNotConfigured(
       `[alphaclaw] GITHUB_WORKSPACE_REPO ${JSON.stringify(githubRepo)} is not owner/repo — refusing git-sync`,
     );
-    return 1;
   }
   const originUrl = `https://github.com/${githubRepo}.git`;
   // Shared hardened askpass (H9 host-parse) in a private mkdtemp dir (H14 —
   // no predictable ${pid} path a symlink can hijack, since git executes it).
   const { scriptPath: askPassPath } = writeGitAskpassScript();
-  // argv runner: no shell, no quoting — the sync engine (lib/cli/git-sync.js,
-  // fix wave F103/F104) owns the conflict-recovery logic and is unit-tested
-  // against a fake runner.
-  const git = (gitArgs, { withAuth = false } = {}) =>
-    execFileSync(realGitPath, gitArgs, {
-      cwd: openclawDir,
-      stdio: "pipe",
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GITHUB_TOKEN: githubToken,
-        ...(withAuth ? { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: askPassPath } : {}),
+  let lockPath = "";
+  // argv runner: no shell, no quoting — the sync engine (lib/cli/git-sync.js)
+  // owns the integration logic and is unit-tested against a fake runner.
+  // Network commands abort a stalled transfer instead of hanging the run;
+  // every child is bounded by the run's remaining deadline.
+  const git = (gitArgs, { withAuth = false, input, literalPathspecs = false, timeoutMs } = {}) =>
+    execFileSync(
+      realGitPath,
+      withAuth
+        ? ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30", ...gitArgs]
+        : gitArgs,
+      {
+        cwd: openclawDir,
+        stdio: "pipe",
+        encoding: "utf8",
+        ...(input !== undefined ? { input } : {}),
+        ...(Number.isFinite(timeoutMs) ? { timeout: Math.max(1, Math.floor(timeoutMs)) } : {}),
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: githubToken,
+          ...(lockPath ? { ALPHACLAW_GIT_LOCK_HELD: lockPath } : {}),
+          ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}),
+          ...(withAuth ? { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: askPassPath } : {}),
+        },
       },
-    });
+    );
+  let lock = null;
   try {
-    return performGitSync({
+    let lockState = "unavailable";
+    let resolvedLockPath = "";
+    try {
+      resolvedLockPath = resolveWriterLockPath({ git, openclawDir });
+    } catch {}
+    if (resolvedLockPath) {
+      const waitSeconds = Math.max(
+        0,
+        Math.min(
+          lockWaitSeconds ?? defaults.lockWaitSeconds,
+          Math.floor((deadlineAtMs - Date.now()) / 1000),
+        ),
+      );
+      lock = acquireWriterLock({ lockPath: resolvedLockPath, waitSeconds, trigger });
+      if (lock.status === "timeout") {
+        const holder = lock.holder?.alive
+          ? `pid ${lock.holder.pid}${lock.holder.trigger ? ` (${lock.holder.trigger} sync)` : ""} since ${lock.holder.startedAt}`
+          : "another writer";
+        const detail = `${resolvedLockPath} was held by ${holder} for the whole ${waitSeconds}s wait; nothing was changed`;
+        const codeInfo = getGitSyncCode("lock_timeout");
+        console.error(`[alphaclaw] git-sync ${codeInfo.outcome} (lock_timeout): ${codeInfo.headline}. ${detail} ${codeInfo.action}`);
+        recordGitSyncRun({ openclawDir, trigger, lock: "timeout", result: { code: "lock_timeout", detail } });
+        return codeInfo.exitCode;
+      }
+      if (lock.status === "acquired") {
+        lockState = "acquired";
+        lockPath = resolvedLockPath;
+      }
+    }
+    if (lockState === "unavailable") {
+      console.error(
+        `[alphaclaw] git-sync: the writer lock is unavailable (${lock?.detail || "no lock path"}); syncing without it. Install flock (util-linux) so other writers can cooperate.`,
+      );
+    }
+    const result = performGitSync({
       git,
       fsModule: fs,
       openclawDir,
@@ -596,8 +709,13 @@ const runGitSync = () => {
       originUrl,
       commitMessage,
       filePath: normalizedFilePath,
+      syncPaths: syncPathsResult.paths,
+      deadlineAtMs,
     });
+    recordGitSyncRun({ openclawDir, trigger, lock: lockState, result });
+    return result.exitCode;
   } finally {
+    lock?.release?.();
     try {
       // Remove the private mkdtemp dir, not just the script (H14).
       fs.rmSync(path.dirname(askPassPath), { recursive: true, force: true });

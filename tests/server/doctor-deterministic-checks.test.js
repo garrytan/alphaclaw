@@ -594,6 +594,49 @@ describe("server/doctor/deterministic-checks", () => {
     expect(() => build({})).not.toThrow();
   });
 
+  // Issue #140: a blocked sync is a card, keyed by episode so dismissing one
+  // blocked episode never hides the next.
+  it("flags a blocked git sync per episode once it passes the code's threshold", () => {
+    const status = (overrides) =>
+      write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({
+        outcome: "refused",
+        code: "in_progress_operation",
+        detail: "has an in-progress git operation",
+        firstFailureAt: "2026-10-12T10:00:00.000Z",
+        consecutiveFailures: 1,
+        staleState: { marker: "rebase-merge", ageSeconds: 7200, owners: [] },
+        lock: "acquired",
+        ...overrides,
+      }));
+    status({});
+    const card = findCard(build({}), "det:git-sync-blocked:in_progress_operation:2026-10-12T10:00:00.000Z");
+    expect(card).toMatchObject({ priority: "P1", category: "workspace state", targetPaths: [] });
+    expect(card.evidence.map((item) => item.text)).toContain(".git/rebase-merge, 7200s old; no live git process in the repo");
+    expect(card.fixPrompt).toContain("Never delete files, reset, or force push");
+
+    status({ code: "lock_timeout", staleState: null, consecutiveFailures: 2 });
+    expect(build({}).some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);
+    status({ code: "lock_timeout", staleState: null, consecutiveFailures: 3 });
+    expect(findCard(build({}), "det:git-sync-blocked:lock_timeout:2026-10-12T10:00:00.000Z")).toBeDefined();
+
+    status({ outcome: "ok", code: "ok", firstFailureAt: null, consecutiveFailures: 0, lock: "unavailable" });
+    const cards = build({});
+    expect(cards.some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);
+    expect(findCard(cards, "det:git-sync-lock-unavailable")).toBeDefined();
+  });
+
+  it("flags a live tree that stays behind GitHub after three runs", () => {
+    write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({
+      outcome: "warning",
+      code: "live_tree_behind",
+      consecutiveFailures: 0,
+      liveTreeBehind: { since: "2026-10-12T10:00:00.000Z", runs: 3, paths: ["workspace/notes.md"] },
+    }));
+    const card = findCard(build({}), "det:git-sync-live-tree-behind:2026-10-12T10:00:00.000Z");
+    expect(card).toMatchObject({ priority: "P2" });
+    expect(card.evidence[0].text).toBe("blocking: workspace/notes.md");
+  });
+
   describe("gateway memory-leak cards (runtime trend input)", () => {
     const kEpisodeId = "4242-1700000000000";
     const leakTrend = (state, extra = {}) => ({

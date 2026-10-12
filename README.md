@@ -244,7 +244,7 @@ Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`
 | Command                                                    | Description                                   |
 | ---------------------------------------------------------- | --------------------------------------------- |
 | `alphaclaw start`                                          | Start the server (Setup UI + gateway manager) |
-| `alphaclaw git-sync -m "message"`                          | Commit and push the OpenClaw workspace        |
+| `alphaclaw git-sync -m "message"`                          | Commit, integrate and push the OpenClaw workspace without rewriting the working tree (see [Git sync with other writers](#git-sync-with-other-writers)) |
 | `alphaclaw doctor finding complete`                        | Mark a queued Doctor finding fixed after verification |
 | `alphaclaw telegram topic add --thread <id> --name <text>` | Register a Telegram topic mapping             |
 | `alphaclaw telegram topic create --group <id> --name <text>` | Create a Telegram forum topic and register it |
@@ -254,6 +254,26 @@ Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`
 | `alphaclaw admin manifest`                                 | Print the agent-admin operation catalog       |
 | `alphaclaw version`                                        | Print version                                 |
 | `alphaclaw help`                                           | Show help                                     |
+
+### Git sync with other writers
+
+The scheduled sync (`/etc/cron.d/openclaw-hourly-sync` → `alphaclaw git-sync --trigger scheduled`) shares the `.openclaw` checkout with the agent, cron scripts and hooks, so it never rewrites the live working tree:
+
+- **Shared writer lock.** Every sync holds an exclusive `flock` on `<git common dir>/alphaclaw-writer.lock` (normally `.openclaw/.git/alphaclaw-writer.lock`) from preflight to the final fast-forward, waiting up to 120 s for the scheduled run (15 s for syncs triggered by onboarding and settings saves; `--lock-wait` or `ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS`). The path is fixed. Scripts that write the repo can queue on it:
+
+  ```bash
+  LOCK="$(cd "$OPENCLAW_STATE_DIR" && cd "$(git rev-parse --git-common-dir)" && pwd)/alphaclaw-writer.lock"
+  # Inside AlphaClaw's own commit (a git hook), the lock is already held: don't wait for it.
+  if [ "${ALPHACLAW_GIT_LOCK_HELD:-}" = "$LOCK" ]; then my-commit-push; else flock -o -x -w 120 "$LOCK" my-commit-push; fi
+  ```
+
+  `-o` keeps a backgrounded child from holding the lock after your command exits. A wrapper that already holds the lock on fd N and calls `alphaclaw git-sync` exports `ALPHACLAW_GIT_LOCK_FD=N`; the CLI only trusts a fd that really is the lock file.
+- **No pull, rebase or stash.** The sync commits first, fetches, and when the remote has moved computes the merge with `git merge-tree` (no working tree, no index, no `MERGE_HEAD`), pushes the merge commit, then fast-forwards the live tree with `git merge --ff-only`. A real conflict refuses with nothing pushed and nothing left in the tree. If a locally modified file blocks the fast-forward, the push still lands and the next run catches up. Diverged histories need git 2.38+ (`node:24-slim` ships 2.39).
+- **Only changed paths are committed.** The sync commits files with working-tree changes (and new untracked files the `.gitignore` whitelist allows). Entries another writer staged but has not touched since stay staged. Set `ALPHACLAW_GIT_SYNC_PATHS` (comma-separated, for example `openclaw.json,cron/,workspace/`) to limit the commit further.
+- **Busy git lock files** (`index.lock`, ref locks) are retried with backoff for up to 60 s.
+- **Loud refusals.** Every run writes `.openclaw/.alphaclaw/git-sync-status.json`. A blocked sync (a stranded rebase or merge, conflicts, a detached HEAD, a lock file that never clears) sends one notification per episode and opens a Doctor card naming the stale state's age and whether a git process still owns it; transient failures (lock busy, push or network errors) notify after 3 runs in a row. A recovery line follows the first successful run.
+
+Exit codes: `0` synced (possibly with a warning), `1` refused or failed, `2` usage, `75` skipped because the lock stayed busy or the run ran out of time.
 
 ## Architecture
 
@@ -352,6 +372,9 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL` | Optional | Skip writes to `/etc/cron.d` while keeping cron config (`true`/`false`); the managed hourly script still exits when sync is disabled |
 | `GOG_KEYRING_PASSWORD`            | Optional | Password for the `gog` CLI's file-backend credential keyring (Google OAuth tokens under `<root>/.openclaw/gogcli`; default `alphaclaw`). Read at process start from the deployment environment or a hand-edited `.env` (restart AlphaClaw to change); the Envars page refuses to edit it, and it is never passed to the gateway child — AlphaClaw re-injects it only into its own `gog` spawns |
 | `GOG_VERSION`                     | Optional | gog CLI release to install at boot when `gog` is missing (default `0.11.0`). Must be a plain version (`1.2.3`); anything else falls back to the default with a boot-log note. The download is verified against the release `checksums.txt` when one is published, otherwise recorded as unsigned |
+| `ALPHACLAW_GIT_SYNC_PATHS`        | Optional | Comma- or newline-separated paths (inside `.openclaw`, no pathspec magic) that `alphaclaw git-sync` may commit; unset commits every changed path the `.gitignore` whitelist allows. Set it in the Envars tab: the scheduled sync only sees `.env` |
+| `ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS` | Optional | Seconds `alphaclaw git-sync` waits for `alphaclaw-writer.lock` (1–900; default 120 for the scheduled run, 15 otherwise) |
+| `ALPHACLAW_GIT_LOCK_FD`           | Optional | Set by a wrapper that already holds `alphaclaw-writer.lock` on that fd before calling `alphaclaw git-sync`; the CLI uses it only when the fd is the lock file itself. Process environment only (ignored from `.env`) |
 | `ALPHACLAW_GIT_SHIM_PATH`         | Optional | Install the managed git auth shim at this path and prepend its directory to runtime `PATH` (default `/usr/local/bin/git`) |
 | `ALPHACLAW_GIT_ASKPASS_PATH`      | Optional | Write the boot-time git askpass helper to this exact path instead of the default, a fresh private `mkdtemp` (`0700`) directory under `$TMPDIR` with an unpredictable name (there is deliberately no fixed shared-`/tmp` filename any more). Any existing file or symlink at the path is removed first and the helper is then created `0700` with an exclusive (`wx`) write, so a symlink re-planted in between makes the git-shim install step fail (logged as `git auth shim skipped`, boot continues) instead of redirecting the helper |
 | `ALPHACLAW_DEBUG`                 | Optional | `1`/`true`/`yes`/`on` (or the generic `DEBUG`) sets the `debugEnabled` flag that `GET /api/telegram/workspace` returns, which makes the Telegram workspace management view show a **Reset onboarding** button. Nothing else reads it today |

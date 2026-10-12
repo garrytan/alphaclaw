@@ -5,6 +5,61 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.3] - 2026-10-12
+
+Issue #140: `alphaclaw git-sync` cooperates with the other writers on the box
+(agents, cron scripts, hooks, a second clone) instead of rebasing their work
+in the live tree and refusing in silence.
+
+### Changed
+
+- **Shared writer lock** (`lib/cli/git-writer-lock.js`): every sync holds an
+  exclusive flock on the fixed `<git common dir>/alphaclaw-writer.lock` from
+  preflight to the final fast-forward, on a close-on-exec fd Node owns (git
+  children and hooks never inherit it). Wait budget 120 s scheduled / 15 s
+  otherwise (`--lock-wait`, `ALPHACLAW_GIT_LOCK_TIMEOUT_SECONDS`); a timeout
+  exits 75 and names the holder from the `.holder` sidecar. Nesting is
+  `ALPHACLAW_GIT_LOCK_FD`, trusted only when the fd's dev+inode is the lock
+  file; git children get `ALPHACLAW_GIT_LOCK_HELD` so hooks can skip
+  re-locking. The fd key is deployment-only (ignored from `.env`). No usable
+  `flock`: the sync runs unlocked, says so, and Doctor shows a card.
+- **No pull, rebase, stash or `add -A`** (`lib/cli/git-sync.js`). The sync
+  commits only paths with working-tree changes (`add -N` for new files, one
+  `commit --only --pathspec-from-file`, literal pathspecs), so another
+  writer's staged-only entries stay staged. It then fetches with an explicit
+  refspec and pins `L=HEAD`, `R=origin/<branch>` once: push `L` when it
+  contains `R`; when diverged, `merge-tree --write-tree` + `commit-tree -p L
+  -p R` and push that (`sync: merge origin/<branch> (AlphaClaw)`); retry up
+  to 3 times when the remote moves; then `merge --ff-only` the live tree. A
+  conflict refuses with nothing pushed and no in-tree state; a dirty file
+  that blocks the fast-forward is a `live_tree_behind` warning after a
+  successful push. Lock-file contention (`index.lock` & co.) retries with
+  backoff for 60 s. A detached HEAD refuses instead of syncing to `main`; an
+  `ls-remote` auth/network failure is no longer treated as "branch absent";
+  origin and the identity are rewritten only when they differ; every git
+  child is bounded by the run deadline (600 s scheduled, 25 s otherwise,
+  `--deadline-seconds`) and network commands abort stalled transfers.
+  Unborn-HEAD adoption still runs before the first commit.
+- **Loud refusals**: every run writes `.alphaclaw/git-sync-status.json`
+  (0600; codes in `lib/cli/git-sync-codes.js`). The server's
+  `git-sync-health.js` turns a failure episode into one notification and a
+  `git_sync_refused` watchdog event (immediately for blocked states,
+  after 3 runs for lock/push/network failures, after 2 refusals while a
+  rebase's own git process is still alive), plus one recovery line. Doctor
+  gets episode-scoped `det:git-sync-blocked:<code>:<since>`,
+  `det:git-sync-live-tree-behind:<since>` and `det:git-sync-lock-unavailable`
+  cards, and the scan env signature includes the sync health. The refusal
+  text no longer advises `git rebase --abort` while the rebase's process
+  is alive.
+- **Hourly script** (`lib/setup/hourly-git-sync.sh`) runs `git-sync --trigger
+  scheduled` and no git command of its own: its compare-then-`git restore`
+  of `cron/jobs.json` raced the gateway's writes (and cron jobs live in the
+  state database since OpenClaw 2026.4.20). It no longer exports the lock
+  handoff keys from `.env`.
+- **Deployed agent guidance** (`core-prompts/AGENTS.md`): commit only the
+  paths you changed, integrate with `pull --ff-only` or a merge, never leave
+  a rebase or merge in progress (was "always pull first").
+
 ## [0.10.2] - 2026-10-11
 
 The linkage half of bug #137 (0.10.1 was the hotfix). After a failed restart
