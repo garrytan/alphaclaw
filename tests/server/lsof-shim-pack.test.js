@@ -11,7 +11,11 @@ const kShimRel = "lib/server/lsof-shim/lsof";
 
 describe("packaging: the lsof shim ships executable", () => {
   it("npm pack lists lib/server/lsof-shim/lsof and the file carries an execute bit", () => {
-    const [pack] = JSON.parse(
+    // Under `npm test` / vitest, node_modules/.bin leads PATH, so `npm` is the
+    // copy OpenClaw ships as a dependency: npm 11 (OpenClaw 2026.9.8) prints
+    // an array of pack results, npm 12 (OpenClaw 2026.10.2) an object keyed
+    // by package name.
+    const parsed = JSON.parse(
       execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
         cwd: kRepoRoot,
         encoding: "utf8",
@@ -19,6 +23,7 @@ describe("packaging: the lsof shim ships executable", () => {
         timeout: 60000,
       }),
     );
+    const pack = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
     const entry = pack.files.find((file) => file.path === kShimRel);
     expect(entry, `${kShimRel} missing from the tarball`).toBeTruthy();
     expect(pack.files.some((file) => file.path === "lib/server/lsof-shim/index.js")).toBe(true);
