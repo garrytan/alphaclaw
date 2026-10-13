@@ -42,6 +42,16 @@ the 2026.9.8 and 2026.10.2 dists, and the fixes that audit turned up.
   deleted. A file that still holds a legacy roster keeps it, so the boot
   migration's `doctor --fix` can materialize owners from the marker.
   Supersedes the explicit-fleet-only fix in #127.
+- **The gateway launches with `OPENCLAW_DEBUG=1`.** 2026.10 prints only "The
+  CLI command failed." when `gateway run` fails; the `Reason:` line that
+  2026.9.8 always printed now appears only under `OPENCLAW_DEBUG` or
+  `--verbose`. Without it the crash classifier was blind: a fresh owner lease
+  left by a replaced container (`GatewayLockNamespaceError`, "cannot verify
+  Gateway ownership from this process") read as three unclassified crashes, so
+  the watchdog latched `crash_loop` instead of holding the bounded
+  `owner_lease_held` wait until the 90 s heartbeat window passed. Only the
+  long-running daemon gets the variable; short-lived CLI children keep the
+  terse output their parsers expect.
 - **Readiness reads the phases 2026.x actually reports.** `/readyz` never
   sends `status`. Startup and drain arrive as `{ready:false,
   failing:["startup-sidecars"]}` and `{ready:false,
