@@ -362,6 +362,13 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
+  it("sets OPENCLAW_DEBUG on the daemon launch env only, so a failed gateway run prints its Reason line", () => {
+    delete require.cache[modulePath];
+    const gateway = require(modulePath);
+    expect(gateway.gatewayLaunchEnv().OPENCLAW_DEBUG).toBe("1");
+    expect(gateway.gatewayEnv().OPENCLAW_DEBUG).toBeUndefined();
+  });
+
   it("warns once per distinct stripped memory-flag set, naming the dropped tokens", () => {
     const previousNodeOptions = process.env.NODE_OPTIONS;
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
