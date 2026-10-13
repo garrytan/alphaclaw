@@ -1610,6 +1610,23 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     });
     if (build?.bin) installedOpenclawBinPath = build.bin;
   } catch {}
+  // The gateway child's supervisor contract (gatewayEnv() in
+  // lib/server/gateway.js) applies to operator shells too: OpenClaw 2026.10.2
+  // `openclaw update` refuses to replace the pinned package only when
+  // OPENCLAW_SUPERVISOR_MODE=external ("OpenClaw self-update is disabled while
+  // gateway lifecycle is managed by an external supervisor", dist
+  // update-command-terminal-*.mjs). Same resolution as the child env: an
+  // operator-set value wins and the off|none escape hatch unsets both.
+  let supervisorMode = "external";
+  let serviceRepairPolicy = "external";
+  try {
+    const {
+      resolveOpenclawSupervisorMode,
+      resolveOpenclawServiceRepairPolicy,
+    } = require("../lib/server/openclaw-runtime-env");
+    supervisorMode = resolveOpenclawSupervisorMode(process.env);
+    serviceRepairPolicy = resolveOpenclawServiceRepairPolicy(process.env);
+  } catch {}
   const wrapperContent = [
     "#!/bin/sh",
     `${kManagedSnippetMarker} (wrapper) — regenerated at boot, do not edit.`,
@@ -1617,6 +1634,13 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     `export OPENCLAW_HOME=${shQuote(rootDir)}`,
     `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
     `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    supervisorMode
+      ? `export OPENCLAW_SUPERVISOR_MODE=${shQuote(supervisorMode)}`
+      : "unset OPENCLAW_SUPERVISOR_MODE",
+    serviceRepairPolicy
+      ? `export OPENCLAW_SERVICE_REPAIR_POLICY=${shQuote(serviceRepairPolicy)}`
+      : "unset OPENCLAW_SERVICE_REPAIR_POLICY",
+    "export OPENCLAW_NO_AUTO_UPDATE=1",
     // The alphaclaw install's own (pinned) openclaw bin, then a portable PATH
     // walk that skips this wrapper itself. NOTE: `command -v -a` is NOT the
     // fallback here — POSIX sh (dash, bash-as-sh) rejects the -a flag, which

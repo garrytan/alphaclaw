@@ -628,4 +628,54 @@ describe("server/chat send reliability", () => {
     });
     errorSpy.mockRestore();
   });
+
+  it("surfaces a 2026.10.2 retryable refusal as gateway_busy and lets the client resend the same idempotency key", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Verbatim 2026.10.2 pre-admission refusal (chat-send-pre-admission:
+    // respondChatSendAdmissionError). The gateway does not cache client-retry
+    // refusals in its dedupe map, so the same key is the designed retry. The
+    // bridge itself never resends a written frame (D9b): the classification
+    // reaches the outbox, which owns the retry.
+    let refuse = true;
+    const harness = await kit.startGatewayHarness();
+    harness.onRequest = (frame) => {
+      if (frame.method !== "chat.send") return;
+      if (refuse) {
+        refuse = false;
+        harness.fail(frame.id, {
+          code: "UNAVAILABLE",
+          message: "session transcript is rebuilding; retry shortly",
+          details: { method: "chat.send" },
+          retryable: true,
+          retryAfterMs: 250,
+        });
+        return;
+      }
+      harness.respond(frame.id, { runId: "r-busy" });
+    };
+    const service = kit.createService(harness);
+    const browser = await kit.openBrowser(service);
+    const frame = {
+      type: "message",
+      clientMsgId: "cm-busy",
+      sessionKey: "s-busy",
+      content: "hi",
+    };
+    browser.send(frame);
+    const busy = await browser.waitFor((m) => m.type === "send-failed", "busy");
+    expect(busy).toMatchObject({
+      clientMsgId: "cm-busy",
+      code: "gateway_busy",
+      retryable: true,
+      notSubmitted: true,
+    });
+    expect(harness.requests.filter((f) => f.method === "chat.send")).toHaveLength(1);
+
+    browser.send(frame);
+    const started = await browser.waitFor((m) => m.type === "started", "started");
+    expect(started).toMatchObject({ clientMsgId: "cm-busy", runId: "r-busy" });
+    const sends = harness.requests.filter((f) => f.method === "chat.send");
+    expect(sends.map((f) => f.params.idempotencyKey)).toEqual(["cm-busy", "cm-busy"]);
+    errorSpy.mockRestore();
+  });
 });

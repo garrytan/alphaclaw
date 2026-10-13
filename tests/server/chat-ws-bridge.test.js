@@ -325,6 +325,84 @@ describe("server/chat-ws bridge", () => {
     });
   });
 
+  describe("retryable gateway refusals (OpenClaw 2026.10.2)", () => {
+    // Verbatim chat-history-handler respondChatHistoryUnavailable shape.
+    const kHistoryUnavailable = {
+      code: "UNAVAILABLE",
+      message: "session rows are initializing; reload the conversation",
+      details: { method: "chat.history" },
+      retryable: true,
+      retryAfterMs: 250,
+    };
+
+    it("keeps code, retryable and retryAfterMs on the rejected error", async () => {
+      const harness = await startGatewayHarness();
+      harness.onRequest = (frame) => harness.fail(frame.id, kHistoryUnavailable);
+      const service = createService(harness);
+      const error = await service.fetchHistory("x").catch((err) => err);
+      expect(error).toMatchObject({
+        message: "session rows are initializing; reload the conversation",
+        gatewayResponded: true,
+        gatewayCode: "UNAVAILABLE",
+        gatewayRetryable: true,
+        gatewayRetryAfterMs: 250,
+      });
+      expect(harness.requests.filter((f) => f.method === "chat.history")).toHaveLength(2);
+    });
+
+    it("retries chat.history once after retryAfterMs and returns the second answer", async () => {
+      const harness = await startGatewayHarness();
+      let refusals = 0;
+      harness.onRequest = (frame) => {
+        if (refusals === 0) {
+          refusals += 1;
+          harness.fail(frame.id, kHistoryUnavailable);
+          return;
+        }
+        harness.respond(frame.id, { messages: [{ role: "user", content: "ok" }] });
+      };
+      const service = createService(harness);
+      const history = await service.fetchHistory("x");
+      expect(history.messages).toEqual([
+        expect.objectContaining({ role: "user", content: "ok" }),
+      ]);
+      expect(harness.requests.filter((f) => f.method === "chat.history")).toHaveLength(2);
+    });
+
+    it("does not retry a non-retryable refusal or a long retryAfterMs", async () => {
+      const harness = await startGatewayHarness();
+      let error = { code: "UNAVAILABLE", message: "inspection failed" };
+      harness.onRequest = (frame) => harness.fail(frame.id, error);
+      const service = createService(harness);
+      await expect(service.fetchHistory("x")).rejects.toThrow("inspection failed");
+      error = {
+        code: "UNAVAILABLE",
+        message: "gateway suspending",
+        details: { reason: "gateway-suspending" },
+        retryable: true,
+        retryAfterMs: 60_000,
+      };
+      await expect(service.fetchHistory("y")).rejects.toThrow("gateway suspending");
+      expect(harness.requests.filter((f) => f.method === "chat.history")).toHaveLength(2);
+    });
+
+    it("tells the browser a twice-refused history read is retryable gateway_busy", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const harness = await startGatewayHarness();
+      harness.onRequest = (frame) => harness.fail(frame.id, kHistoryUnavailable);
+      const service = createService(harness);
+      const browser = await openBrowser(service);
+      browser.send({ type: "history", sessionKey: "s1" });
+      const error = await browser.waitFor((m) => m.type === "error", "error");
+      expect(error).toMatchObject({
+        code: "gateway_busy",
+        message: "The gateway is still getting ready. Try again in a moment.",
+        sessionKey: "s1",
+      });
+      errorSpy.mockRestore();
+    });
+  });
+
   describe("history parsing", () => {
     it("returns empty history without a session key", async () => {
       const service = createService(0);

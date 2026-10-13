@@ -84,6 +84,7 @@ describe("bin/alphaclaw port check", () => {
       [
         "#!/bin/sh",
         'printf "REAL_OPENCLAW args=%s OPENCLAW_STATE_DIR=%s\n" "$*" "${OPENCLAW_STATE_DIR:-}"',
+        'printf "SUPERVISOR=%s REPAIR=%s NO_AUTO_UPDATE=%s\n" "${OPENCLAW_SUPERVISOR_MODE:-}" "${OPENCLAW_SERVICE_REPAIR_POLICY:-}" "${OPENCLAW_NO_AUTO_UPDATE:-}"',
       ].join("\n"),
       { mode: 0o755 },
     );
@@ -149,6 +150,9 @@ Module._load = function (request, parent, isMain) {
     });
     expect(output).toContain("REAL_OPENCLAW args=status --json");
     expect(output).toContain(`OPENCLAW_STATE_DIR=${path.join(tmpDir, ".openclaw")}`);
+    // The gateway's supervisor contract reaches operator shells, so a manual
+    // `openclaw update` is refused instead of replacing the pinned package.
+    expect(output).toContain("SUPERVISOR=external REPAIR=external NO_AUTO_UPDATE=1");
 
     // The install outcome is persisted, never silent.
     const outcome = JSON.parse(

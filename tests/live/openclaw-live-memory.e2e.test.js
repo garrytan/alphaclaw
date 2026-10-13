@@ -71,6 +71,15 @@ const kLeakPluginManifest = {
 // api.on hook — a typed hook needs plugins.entries.<id>.hooks.
 // allowConversationAccess=true and is irrelevant to a heap leak; the
 // register-time setInterval is the whole vector.
+//
+// Leak rate: one ~1.4 MB string every 100 ms (~14 MB/s). The terminal stage
+// needs the gateway's own rss_threshold critical (3 GiB, diagnostic-*.mjs
+// DEFAULT_RSS_CRITICAL_BYTES — unchanged 2026.9.8 → 2026.10.2) inside its
+// 4-minute budget; rss_growth critical needs two rising 5-minute half
+// windows and can never fire in time. At the old 250 ms interval 2026.10.2
+// grew RSS at the nominal ~5.6 MB/s (822 MB → 1.29 GB over the slope stage,
+// 2026-10-12), which reaches 3 GiB only after ~7 minutes; 2026.9.8's ~11 MB/s
+// was allocator overhead the build no longer carries.
 const kLeakPluginSource = `
 const leaked = [];
 const plugin = {
@@ -80,7 +89,7 @@ const plugin = {
   register() {
     setInterval(() => {
       leaked.push(Buffer.alloc(1 << 20).toString("base64"));
-    }, 250);
+    }, 100);
   },
 };
 module.exports = plugin;
@@ -185,7 +194,7 @@ describeLive("live: gateway memory leak via a real plugin", () => {
         }
 
         // 5. Slope stage: REAL /proc reads through AlphaClaw's own sampler.
-        //    Direction only, never absolute RSS. ~2.8MB/s expected; assert a
+        //    Direction only, never absolute RSS. ~14MB/s expected; assert a
         //    conservative ≥30MB climb across ~60s unless the abort already
         //    landed (a fast abort is stage-6 success arriving early).
         stage = "rss-growth";

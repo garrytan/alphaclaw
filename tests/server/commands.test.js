@@ -249,6 +249,16 @@ describe("server/commands", () => {
       expect(execMock).toHaveBeenCalledTimes(2);
     });
 
+    it("never replays a 2026.10 state-owner OUTCOME_UNKNOWN even when its text says UNAVAILABLE", () => {
+      const { parseUnavailableRetry } = require("../../lib/server/commands");
+      const stderr =
+        'Gateway owning /data/.openclaw on local port 18789 could not complete exec.approvals.set for default exec approvals: {"code":"UNAVAILABLE","retryable":true}. The outcome may be partial; inspect openclaw approvals get --json and the target before retrying. No local fallback was attempted.';
+      expect(parseUnavailableRetry({ stdout: "", stderr })).toBeNull();
+      expect(
+        parseUnavailableRetry({ stdout: "", stderr: '{"code":"UNAVAILABLE","retryable":true,"retryAfterMs":250}' }),
+      ).toEqual({ retryAfterMs: 250 });
+    });
+
     it("caps the backoff at maxBackoffMs", async () => {
       const execMock = makeExec([
         { err: true, stderr: '{"code":"UNAVAILABLE","retryAfterMs":999999}' },

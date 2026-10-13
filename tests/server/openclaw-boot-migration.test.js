@@ -92,6 +92,81 @@ describe("server/openclaw-boot-migration", () => {
     );
   });
 
+  // Real `openclaw doctor --fix --yes` output on OpenClaw 2026.10.2 for a
+  // state dir carrying a legacy plugins/installs.json (exit 1), trimmed.
+  const kUpgradeWindowRefusalOutput = [
+    "┌  OpenClaw doctor",
+    "◇  Doctor warnings ─────────────────────────────────────────────────────────╮",
+    "│                                                                           │",
+    "│  - Plugin install index /data/.openclaw/plugins/installs.json             │",
+    "│    predates the July 2026 upgrade support window and was left             │",
+    "│    unchanged. Run openclaw doctor --fix on 2026.9.5 with a pre-update     │",
+    "│    backup before upgrading again:                                         │",
+    "│    https://docs.openclaw.ai/install/updating#upgrading-very-old-versions  │",
+    "│                                                                           │",
+    "├───────────────────────────────────────────────────────────────────────────╯",
+    "Doctor stopped because a state migration refused to continue. Resolve the reported migration failure before retrying. Later repairs were not run.",
+    "Failing check plugin-install-index (unsupported-plugin-install-index): Plugin install index [redacted-path]",
+    'Failing check session-entry-state (blocked-by-prior-refusal): Migration step "session-entry-state" was not run because prior step "plugin-install-index" refused execution.',
+    "",
+  ].join("\n");
+
+  const runFailed = async (result) => {
+    const box = newBox();
+    const notify = vi.fn(async () => {});
+    await expect(
+      runBootMigration({ ...box, installedVersion: "2026.10.2", runDoctorFix: async () => result, notify, logger: silentLogger() }),
+    ).resolves.toEqual({ status: "failed", ran: true, reason: result.code });
+    expect(notify).toHaveBeenCalledTimes(1);
+    return notify.mock.calls[0][0];
+  };
+
+  it("names the 2026.9.5 bridge release when doctor refuses pre-July-2026 state", async () => {
+    const message = await runFailed({
+      ok: false,
+      code: "exit_1",
+      stdout: kUpgradeWindowRefusalOutput,
+      lastOutputLine: 'Failing check session-entry-state (blocked-by-prior-refusal): Migration step "session-entry-state" was not run',
+    });
+    expect(message).toContain("refused to migrate state that predates OpenClaw's July 2026 upgrade support window (exit_1)");
+    expect(message).toContain("deploy an AlphaClaw release pinned to OpenClaw 2026.9.5 (v0.9.88–v0.9.97)");
+    expect(message).toContain("then redeploy this release");
+    expect(message).toContain(
+      'OpenClaw said: "Failing check plugin-install-index (unsupported-plugin-install-index): Plugin install index [redacted-path]"',
+    );
+    expect(message).not.toContain("the watchdog repairs and reports it");
+  });
+
+  it("names the bridge version OpenClaw asks for when it is not 2026.9.5", async () => {
+    const message = await runFailed({
+      ok: false,
+      code: "exit_1",
+      stdout:
+        "Config contains retired pre-July-2026 settings: channels.discord.guilds.g1.channels.c1.allow. Doctor cannot remove these settings safely.\n" +
+        'Install OpenClaw 2026.9.7, run "openclaw doctor --fix", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions.\n',
+    });
+    expect(message).toContain("run `openclaw doctor --fix` with OpenClaw 2026.9.7 against this state directory");
+    expect(message).not.toContain("v0.9.88");
+  });
+
+  it("recognizes the session room refusal from its message alone", async () => {
+    const message = await runFailed({
+      ok: false,
+      code: "exit_1",
+      lastOutputLine:
+        'Session field "room" predates July 2026 and is no longer supported. Preserve the original state, install OpenClaw 2026.9.5 and run "openclaw doctor --fix", then upgrade again.',
+    });
+    expect(message).toContain("upgrade support window");
+    expect(message).toContain("OpenClaw 2026.9.5 (v0.9.88–v0.9.97)");
+  });
+
+  it("quotes doctor's last output line in the generic failure notice", async () => {
+    const message = await runFailed({ ok: false, code: "exit_1", stdout: "boom\n", lastOutputLine: "Config invalid: gateway.port" });
+    expect(message).toContain("did not complete (exit_1)");
+    expect(message).toContain('OpenClaw said: "Config invalid: gateway.port"');
+    expect(message).toContain("the watchdog repairs and reports it");
+  });
+
   it("a throwing notifier never turns a failed migration into a throw", async () => {
     const box = newBox();
     await expect(

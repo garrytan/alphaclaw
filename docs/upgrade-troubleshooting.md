@@ -365,9 +365,10 @@ An expired AlphaClaw session behaves differently for resources and documents
 on purpose: a Control UI resource (font, chunk, theme, `sw.js`, bootstrap
 config, avatar, `/assets/*`) gets `401 {"error":"Unauthorized"}`, while a
 document navigation (and the UI's `HEAD` recovery probe) still gets the
-`302 /login.html` redirect. The pinned Control UI service worker caches any
-`ok` response under the requested URL — a redirected 200 login page for a
-font would be served for that font forever, even after logging in — and a
+`302 /login.html` redirect. A Control UI service worker installed by an older
+pin cached any `ok` response under the requested URL — a redirected 200 login
+page for a font would be served for that font forever, even after logging in
+(the 2026.10.2 worker no longer caches redirects or HTML) — and a
 browser refuses HTML as a stylesheet, which is the same banner by another
 route. So a font `401` on an expired session is expected; reload the page
 and log in.

@@ -71,8 +71,13 @@ Constants + validators: `lib/server/chat/protocol.js`; browser mirror
 `classifyError` (`chat/errors.js`) → `{code, retryable, message}`; codes:
 `gateway_unavailable | gateway_timeout | gateway_auth | protocol_mismatch |
 protocol_invalid | session_busy | too_many_pending | unsupported | run_failed
-| payload_too_large | storage_unavailable | unknown_outcome | unknown`. Socket-close reasons map to
-`gateway_unavailable`, not the generic bucket. Raw error text goes to the
+| payload_too_large | storage_unavailable | gateway_busy | unknown_outcome | unknown`. Socket-close reasons map to
+`gateway_unavailable`, not the generic bucket. `gateway_busy` (retryable) is a
+gateway refusal that itself says `retryable: true` — OpenClaw 2026.10 answers
+`UNAVAILABLE` with `retryAfterMs` while agent databases are still being
+inspected after `/readyz` already reports ready; `chat.history` retries once
+after the delay, `chat.send` surfaces `notSubmitted` and the outbox resends
+with the same `clientMsgId`. Raw error text goes to the
 server log only.
 
 ## Idempotency + the ambiguity policy (unknown is unknown)

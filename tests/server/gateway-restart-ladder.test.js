@@ -143,7 +143,11 @@ const createWorld = () => {
           return;
         }
         if (world.lockWaitLine) {
-          child.stdout.emit("data", Buffer.from("waiting for Gateway state ownership held by another OpenClaw process, up to 300 s\n"));
+          const line =
+            typeof world.lockWaitLine === "string"
+              ? world.lockWaitLine
+              : "waiting for Gateway state ownership held by another OpenClaw process, up to 300 s";
+          child.stdout.emit("data", Buffer.from(`${line}\n`));
         }
         if (neverListen || !world.alive(workerPid)) return;
         procs.get(workerPid).listens = true;
@@ -213,10 +217,14 @@ const installWorld = (world) => {
       throw Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } });
     }
     const ready = world.readyState === "ready";
+    // The real /readyz shape (2026.9.8 and 2026.10.2 server-start-*.mjs): no
+    // `status` field; a transitional phase is a single failing[] entry.
+    const phaseFailing = { starting: "startup-sidecars", draining: "gateway-draining" };
     return {
       status: ready ? 200 : 503,
       headers: { get: () => null },
-      text: async () => JSON.stringify(ready ? { ready: true } : { ready: false, status: world.readyState }),
+      text: async () =>
+        JSON.stringify(ready ? { ready: true, failing: [] } : { ready: false, failing: [phaseFailing[world.readyState]] }),
     };
   });
 };
@@ -507,6 +515,24 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     await bootManaged(gateway, world);
     world.readyState = "starting";
     world.lockWaitLine = true;
+    const onStep = vi.fn();
+    setTimeout(() => { world.readyState = "ready"; }, 4000);
+    const { value, error } = await runRestart({ onStep }, 8000);
+    expect(error).toBeNull();
+    expect(value.ok).toBe(true);
+    const waiting = onStep.mock.calls.map(([s]) => s).filter((s) => s.step === "waiting_ready");
+    expect(waiting).toEqual([
+      { step: "waiting_ready", status: "running", budgetMs: 30000 },
+      { step: "waiting_ready", status: "running", budgetMs: 30000, detail: { phase: "lock_wait" } },
+    ]);
+  });
+
+  it("2026.10.2: the owner-heartbeat wait line (a holder in another PID namespace) also streams as a waiting_ready {lock_wait} step", async () => {
+    await bootManaged(gateway, world);
+    world.readyState = "starting";
+    // Verbatim from dist/gateway-lock-*.mjs (log.warn before the 95 s retry).
+    world.lockWaitLine =
+      "[gateway] Waiting for the previous Gateway's owner heartbeat to expire before reclaiming state (up to 95 seconds). cannot verify Gateway ownership from this process (different PID namespace); the owner heartbeat is fresh — run this command inside the Gateway container or with a shared PID namespace. If the previous Gateway stopped, wait up to 90 seconds after its last heartbeat. holder 41 at old-container/pid-ns 4026532201, last renewed 12 s ago. wait 79 s and retry.";
     const onStep = vi.fn();
     setTimeout(() => { world.readyState = "ready"; }, 4000);
     const { value, error } = await runRestart({ onStep }, 8000);

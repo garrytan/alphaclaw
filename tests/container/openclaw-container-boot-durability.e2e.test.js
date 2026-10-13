@@ -410,7 +410,15 @@ describeContainer("container E2E: boot durability — fresh and restarted contai
       intervalMs: 3000,
       label: `gateway /healthz inside ${kContainerB} after the seeded boot`,
     });
-    expect(leaseWaits.length).toBeGreaterThan(0);
+    // 2026.10.2 takes over a SIGKILLed container's gateway-owner lease on its
+    // own: observed 2026-10-12, A's lease row heartbeated 5 s before
+    // `docker rm -f` (owner host = A's hostname, processNamespace recorded)
+    // and B's gateway was ready 14 s after launch with no owner-heartbeat
+    // wait line. 2026.9.8 refused that lease ("Another Gateway owner lease is
+    // still active") and the watchdog's owner_lease_held wait recovered it,
+    // which is what this step asserted on that pin. Any lease wait that does
+    // happen must still be the bounded starting-state wait.
+    expect(leaseWaits).toEqual([]);
     for (const wait of leaseWaits) {
       expect(wait.state).toBe("starting");
       expect(wait.retry).not.toBeNull();

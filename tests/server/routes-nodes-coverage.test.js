@@ -1236,6 +1236,111 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect([...fsModule.files.keys()]).toEqual([]);
     });
 
+    describe("OpenClaw 2026.10.2 state-owner routing", () => {
+      const {
+        kOwnerUnavailable,
+        kOwnerRefused,
+        kOutcomeUnknown,
+        kJsonEnvelope,
+      } = require("./helpers/local-state-owner-fixtures");
+
+      beforeEach(() => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+      });
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it("maps an OWNER_UNAVAILABLE approvals get to a retryable 503 without the upstream service-owner advice", async () => {
+        const { app, fsModule } = createCliHarness({
+          getResult: {
+            ok: false,
+            stdout: kJsonEnvelope(kOwnerUnavailable),
+            stderr: kOwnerUnavailable,
+          },
+        });
+        const res = await request(app).get("/api/nodes/exec-approvals");
+        expect(res.status).toBe(503);
+        expect(res.body).toEqual({
+          ok: false,
+          code: "gateway_state_owner_unavailable",
+          ownerCode: "OWNER_UNAVAILABLE",
+          retryable: true,
+          error: "The gateway is starting or restarting; try again in a few seconds.",
+        });
+        expect(JSON.stringify(res.body)).not.toMatch(/service owner/);
+        expect(fsModule.files.has(approvalsPath)).toBe(false);
+      });
+
+      it("refuses an allowlist edit with 503 when the read hits OWNER_REFUSED, and never calls set", async () => {
+        const { app, clawCmdWithRetry } = createCliHarness({
+          getResult: { ok: false, stdout: "", stderr: kOwnerRefused },
+        });
+        const res = await request(app)
+          .post("/api/nodes/exec-approvals/allowlist")
+          .send({ pattern: "ls *" });
+        expect(res.status).toBe(503);
+        expect(res.body.ownerCode).toBe("OWNER_REFUSED");
+        expect(res.body.retryable).toBe(true);
+        expect(clawCmdWithRetry).not.toHaveBeenCalled();
+      });
+
+      it("answers an OUTCOME_UNKNOWN approvals set with 409 and a re-read instruction, issuing set exactly once", async () => {
+        const fsModule = createMemoryFs();
+        const clawCmd = vi.fn(async () => ({
+          ok: true,
+          stdout: JSON.stringify(storeDoc),
+          stderr: "",
+        }));
+        const clawCmdWithRetry = vi.fn(async () => ({
+          ok: false,
+          stdout: "",
+          stderr: kOutcomeUnknown,
+        }));
+        const app = createApp({
+          clawCmd,
+          clawCmdWithRetry,
+          openclawCapabilities: sqliteEraCapabilities,
+          fsModule,
+        });
+        const res = await request(app).delete("/api/nodes/exec-approvals/allowlist/id-1");
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({
+          ok: false,
+          code: "outcome_unknown",
+          ownerCode: "OUTCOME_UNKNOWN",
+          retryable: false,
+          error:
+            "The gateway may have applied this change but did not confirm it. Reload the exec approvals to see whether the change was saved before trying again.",
+        });
+        expect(clawCmdWithRetry).toHaveBeenCalledTimes(1);
+        expect([...fsModule.files.keys()]).toEqual([]);
+      });
+
+      it("keeps an OWNER_UNAVAILABLE approvals set a retryable 503", async () => {
+        const clawCmd = vi.fn(async () => ({
+          ok: true,
+          stdout: JSON.stringify(storeDoc),
+          stderr: "",
+        }));
+        const app = createApp({
+          clawCmd,
+          clawCmdWithRetry: vi.fn(async () => ({
+            ok: false,
+            stdout: "",
+            stderr: kOwnerUnavailable.replace("exec.approvals.get", "exec.approvals.set"),
+          })),
+          openclawCapabilities: sqliteEraCapabilities,
+          fsModule: createMemoryFs(),
+        });
+        const res = await request(app)
+          .post("/api/nodes/exec-approvals/allowlist")
+          .send({ pattern: "ls *" });
+        expect(res.status).toBe(503);
+        expect(res.body.ownerCode).toBe("OWNER_UNAVAILABLE");
+      });
+    });
+
     it("fails legacy WRITES closed (503) when the era is indeterminate and the CLI is unavailable", async () => {
       // A capability-probe failure on a beta box must not let a dashboard
       // allowlist edit CREATE exec-approvals.json — the file whose existence

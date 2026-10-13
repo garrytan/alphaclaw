@@ -1483,6 +1483,114 @@ describe("server/routes/pairings", () => {
   });
 });
 
+describe("server/routes/pairings OpenClaw 2026.10.2 state-owner routing", () => {
+  const { kJsonEnvelope } = require("./helpers/local-state-owner-fixtures");
+  // Verbatim template from dist/local-state-owner-*.mjs, method/target as
+  // pairing-cli passes them (captured from the real 10.2 CLI).
+  const kGuidance =
+    "Update the Gateway or fix authentication and retry. To run offline, stop the Gateway through its service owner, wait for ownership to release, then rerun this exact command.";
+  const kListUnavailable = `Cannot admit channels.pairing.list for telegram pairing requests in state root /data/.openclaw: Gateway lock inspection is unavailable | Gateway lock payload could not be verified. No local mutation was attempted. Inspect openclaw gateway status. ${kGuidance}`;
+  const kApproveUnknown =
+    "Gateway owning /data/.openclaw on local port 18789 could not complete channels.pairing.approve for telegram pairing request: gateway closed (1006). The outcome may be partial; inspect openclaw pairing list --channel telegram and the target before retrying. No local fallback was attempted.";
+  const kApproveRefused = `Gateway owning /data/.openclaw on local port 18789 could not complete channels.pairing.approve for telegram pairing request: gateway closed (1012): service restart. No local mutation was attempted. ${kGuidance}`;
+
+  const telegramFs = () => ({
+    existsSync: vi.fn(() => false),
+    readFileSync: vi.fn((targetPath) => {
+      if (targetPath === "/tmp/openclaw/openclaw.json") {
+        return JSON.stringify({ channels: { telegram: { enabled: true } } });
+      }
+      throw new Error(`unexpected read: ${targetPath}`);
+    }),
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  });
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers an OWNER_UNAVAILABLE pairing list with a retryable 503 and does not cache it", async () => {
+    let refuse = true;
+    const clawCmd = vi.fn(async () =>
+      refuse
+        ? { ok: false, stdout: kJsonEnvelope(kListUnavailable), stderr: kListUnavailable }
+        : {
+            ok: true,
+            stdout: JSON.stringify({ channel: "telegram", requests: [{ id: "42", code: "ABCD1234" }] }),
+            stderr: "",
+          },
+    );
+    const app = createApp({ clawCmd, isOnboarded: () => true, fsModule: telegramFs() });
+
+    const refused = await request(app).get("/api/pairings");
+    expect(refused.status).toBe(503);
+    expect(refused.body).toEqual({
+      ok: false,
+      code: "gateway_state_owner_unavailable",
+      ownerCode: "OWNER_UNAVAILABLE",
+      retryable: true,
+      error: "The gateway is starting or restarting; try again in a few seconds.",
+    });
+
+    refuse = false;
+    const listed = await request(app).get("/api/pairings");
+    expect(listed.status).toBe(200);
+    expect(listed.body.pending.map((entry) => entry.code)).toEqual(["ABCD1234"]);
+    expect(clawCmd).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the CLI sweep while the gateway is not running and serves the file store", async () => {
+    const clawCmd = vi.fn();
+    const app = express();
+    app.use(express.json());
+    registerPairingRoutes({
+      app,
+      clawCmd,
+      isOnboarded: () => true,
+      fsModule: telegramFs(),
+      openclawDir: "/tmp/openclaw",
+      isGatewayRunning: async () => false,
+    });
+    const res = await request(app).get("/api/pairings");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ pending: [] });
+    expect(clawCmd).not.toHaveBeenCalled();
+  });
+
+  it("maps an OUTCOME_UNKNOWN approve to 409 with a re-list instruction (never retried)", async () => {
+    const clawCmd = vi.fn(async () => ({ ok: false, code: 1, stdout: "", stderr: kApproveUnknown }));
+    const app = createApp({ clawCmd, isOnboarded: () => true, fsModule: telegramFs() });
+    const res = await request(app)
+      .post("/api/pairings/ABCD1234/approve")
+      .send({ channel: "telegram" });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      ok: false,
+      code: "outcome_unknown",
+      ownerCode: "OUTCOME_UNKNOWN",
+      retryable: false,
+      error:
+        "The gateway may have applied this change but did not confirm it. Refresh the pairing requests to see whether it was approved before trying again.",
+    });
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps an OWNER_REFUSED approve to a retryable 503", async () => {
+    const clawCmd = vi.fn(async () => ({ ok: false, code: 1, stdout: "", stderr: kApproveRefused }));
+    const app = createApp({ clawCmd, isOnboarded: () => true, fsModule: telegramFs() });
+    const res = await request(app)
+      .post("/api/pairings/ABCD1234/approve")
+      .send({ channel: "telegram" });
+    expect(res.status).toBe(503);
+    expect(res.body.ownerCode).toBe("OWNER_REFUSED");
+    expect(res.body.retryable).toBe(true);
+  });
+});
+
 describe("server/routes/pairings removeAccountRequestsFromPairingStore", () => {
   it("removes only the matching account's requests", () => {
     const writes = [];

@@ -480,14 +480,19 @@ describe("server/doctor/model-drift", () => {
     expect(evidenceText).not.toContain("good-model");
   });
 
-  it("honors a provider-level contextWindow default (inheritance is valid config)", () => {
+  // 2026.10.2 `config validate` on models.providers.<id>.contextWindow:
+  //   { path: "models.providers.custom", message: "Unrecognized key: \"contextWindow\"" }
+  // (2026.9.8 accepted it with a migration warning), and a provider
+  // `defaults` block is "Unrecognized key: \"defaults\"" on both lines — so
+  // neither is inherited any more; only a per-model contextWindow counts.
+  it("flags a provider-level contextWindow as retired instead of inheriting it", () => {
     const cards = build({
       config: {
         models: {
           providers: {
             myprov: {
               contextWindow: 128000,
-              models: [{ id: "inherits" }],
+              models: [{ id: "inherits" }, { id: "explicit", contextWindow: 64000 }],
             },
             otherprov: {
               defaults: { contextWindow: 64000 },
@@ -497,7 +502,43 @@ describe("server/doctor/model-drift", () => {
         },
       },
     });
-    expect(findCard(cards, "det:model-drift:context-custom:")).toBeUndefined();
+    const card = findCard(cards, "det:model-drift:context-custom:");
+    expect(card).toBeTruthy();
+    expect(card.priority).toBe("P1");
+    const evidenceText = card.evidence.map((entry) => entry.text).join("\n");
+    expect(evidenceText).toContain("myprov: provider-level contextWindow is retired");
+    expect(evidenceText).toContain("otherprov: defaults.contextWindow is not a valid key");
+    expect(evidenceText).toContain("myprov/inherits: contextWindow is not set");
+    expect(evidenceText).toContain("otherprov/also-inherits: contextWindow is not set");
+    expect(evidenceText).not.toContain("explicit");
+    expect(card.recommendation).toContain("openclaw doctor --fix");
+    expect(card.recommendation).not.toContain("or one provider-level contextWindow");
+    expect(card.fixPrompt).toContain("Do not use a provider-level contextWindow");
+  });
+
+  it("flags a retired provider-level contextWindow even when every model sets its own", () => {
+    const cards = build({
+      config: {
+        models: {
+          providers: {
+            myprov: { contextWindow: 128000, models: [{ id: "good", contextWindow: 128000 }] },
+          },
+        },
+      },
+    });
+    const card = findCard(cards, "det:model-drift:context-custom:");
+    expect(card).toBeTruthy();
+    const evidenceText = card.evidence.map((entry) => entry.text).join("\n");
+    expect(evidenceText).toBe(
+      "myprov: provider-level contextWindow is retired — OpenClaw rejects it; move it onto each model entry",
+    );
+  });
+
+  it("keeps a missing per-model contextWindow at P2 when no retired key is present", () => {
+    const cards = build({
+      config: { models: { providers: { myprov: { models: [{ id: "no-context" }] } } } },
+    });
+    expect(findCard(cards, "det:model-drift:context-custom:").priority).toBe("P2");
   });
 
   it("flags skills referencing deprecated models with replacement guidance", () => {
@@ -851,7 +892,7 @@ describe("server/doctor/model-drift", () => {
     expect(card.recommendation).not.toContain("anthropic/claude-opus-5`");
   });
 
-  it("flags an explicit implausible per-model contextWindow despite a provider default", () => {
+  it("flags an explicit implausible per-model contextWindow alongside a retired provider default", () => {
     const cards = build({
       config: {
         models: {
@@ -867,8 +908,8 @@ describe("server/doctor/model-drift", () => {
     const card = findCard(cards, "det:model-drift:context-custom:");
     expect(card).toBeTruthy();
     const evidenceText = card.evidence.map((entry) => entry.text).join("\n");
-    expect(evidenceText).toContain("myprov/broken");
-    expect(evidenceText).not.toContain("inherits");
+    expect(evidenceText).toContain("myprov/broken: contextWindow is 3 (implausible)");
+    expect(evidenceText).toContain("myprov: provider-level contextWindow is retired");
   });
 
   it("checks the declared list even when a stale catalog still carries the key", () => {

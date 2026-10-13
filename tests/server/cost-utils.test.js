@@ -179,6 +179,107 @@ describe("server/cost-utils openclaw dist pricing scraper", () => {
     ).toBe(null);
   });
 
+  // Shape and rates copied from OpenClaw 2026.10.2
+  // dist/extensions/{anthropic,openai,github-copilot,opencode-go}/openclaw.plugin.json.
+  const writeManifest = (distDir, pluginId, providers) => {
+    fs.mkdirSync(path.join(distDir, "extensions", pluginId), { recursive: true });
+    fs.writeFileSync(
+      path.join(distDir, "extensions", pluginId, "openclaw.plugin.json"),
+      JSON.stringify({ id: pluginId, modelCatalog: { providers } }),
+    );
+  };
+
+  it("reads model prices from bundled plugin manifests (2026.9.x+ layout)", () => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-cost-utils-"));
+    const distDir = path.join(tmpRoot, "dist");
+    fs.mkdirSync(distDir);
+    writeManifest(distDir, "anthropic", {
+      anthropic: {
+        models: [
+          {
+            id: "claude-haiku-5-5",
+            cost: {
+              input: 0.1,
+              output: 0.5,
+              cacheRead: 0.01,
+              cacheWrite: 0.125,
+              tieredPricing: [
+                { range: [0, 100001], input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+                { range: [100001], input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
+              ],
+            },
+          },
+          { id: "claude-opus-5-5", cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 } },
+          { id: "claude-sonnet-5-5", cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 } },
+          { id: "no-cost-model" },
+        ],
+      },
+    });
+    writeManifest(distDir, "openai", {
+      openai: {
+        models: [
+          { id: "gpt-6-astra", cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 } },
+          { id: "gpt-5.6-luna", cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 } },
+        ],
+      },
+    });
+    writeManifest(distDir, "github-copilot", {
+      "github-copilot": {
+        models: [
+          { id: "claude-opus-5.5", cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 } },
+          { id: "gpt-5.6-luna", cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 } },
+        ],
+      },
+    });
+    writeManifest(distDir, "opencode-go", {
+      "opencode-go": {
+        models: [{ id: "gpt-5.6-luna", cost: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 } }],
+      },
+    });
+    fs.mkdirSync(path.join(distDir, "extensions", "broken"));
+    fs.writeFileSync(path.join(distDir, "extensions", "broken", "openclaw.plugin.json"), "{not json");
+    fs.writeFileSync(
+      path.join(distDir, "config-AbC123.mjs"),
+      'var a={id:"legacy/chunk-model",cost:{input:7,output:8}};',
+    );
+
+    patchOpenclawResolution(path.join(distDir, "index.js"));
+    const costUtils = loadFreshCostUtils();
+    const pricingMap = costUtils.loadOpenclawNodeModulesPricingMap();
+
+    const opus = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 };
+    expect(pricingMap.get("anthropic/claude-opus-5-5")).toEqual(opus);
+    expect(pricingMap.get("anthropic/claude-opus-5.5")).toEqual(opus);
+    expect(pricingMap.get("claude-opus-5-5")).toEqual(opus);
+    expect(pricingMap.get("claude-opus-5.5")).toEqual(opus);
+    expect(pricingMap.get("claude-haiku-5-5")).toEqual({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+    expect(pricingMap.get("gpt-6-astra")).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
+    expect(pricingMap.has("anthropic/no-cost-model")).toBe(false);
+    expect(pricingMap.get("legacy/chunk-model")).toEqual({ input: 7, output: 8, cacheRead: 0, cacheWrite: 0 });
+
+    expect(pricingMap.get("openai/gpt-5.6-luna")).toEqual({ input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 });
+    expect(pricingMap.get("opencode-go/gpt-5.6-luna")).toEqual({ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 });
+    expect(pricingMap.has("gpt-5.6-luna")).toBe(false);
+
+    const sonnet = costUtils.deriveCostBreakdown({
+      provider: "anthropic",
+      model: "claude-sonnet-5-5",
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+      cacheReadTokens: 1_000_000,
+      cacheWriteTokens: 1_000_000,
+    });
+    expect(sonnet.pricingFound).toBe(true);
+    expect(sonnet.totalCost).toBeCloseTo(2 + 10 + 0.2 + 2.5, 8);
+
+    const unqualifiedLuna = costUtils.deriveCostBreakdown({
+      model: "gpt-5.6-luna",
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+    });
+    expect(unqualifiedLuna.totalCost).toBeCloseTo(7, 8);
+  });
+
   it("falls back to the static pricing map when openclaw is not installed", () => {
     patchOpenclawResolution(null);
     const costUtils = loadFreshCostUtils();

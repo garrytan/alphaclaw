@@ -102,7 +102,10 @@ describe("server/agents clickclack channel (5.1)", () => {
     expect(result.account.envKey).toBeNull();
   });
 
-  it("URL-shaped values use --url (works on stable OpenClaw too)", async () => {
+  // `--url` never existed: 2026.9.8 and 2026.10.2 both answer
+  // `OpenClaw does not recognize option "--url".`, and `--code` is documented
+  // as "ClickClack one-time setup code or setup URL" on both.
+  it("URL-shaped values also go through --code (there is no --url flag)", async () => {
     const { service, runCalls } = buildHarness();
     await service.createChannelAccount({
       provider: "clickclack",
@@ -110,11 +113,35 @@ describe("server/agents clickclack channel (5.1)", () => {
       agentId: "main",
       name: "ClickClack",
     });
-    expect(runCalls[0].args).toContain("--url");
-    expect(runCalls[0].args).not.toContain("--code");
+    expect(runCalls[0].args.slice(-2)).toEqual([
+      "--code",
+      "https://ws.clickclack.dev/setup/abc123",
+    ]);
+    expect(runCalls[0].args).not.toContain("--url");
   });
 
-  it("a stable CLI rejecting --code gets the upgrade hint, never the code (E-C12)", async () => {
+  it("an OpenClaw build without the flag gets the manual-token hint (real 'does not recognize option' text)", async () => {
+    const { service } = buildHarness({
+      runResult: {
+        ok: false,
+        code: 1,
+        tail: 'OpenClaw does not recognize option "--code".\nTry: openclaw channels add --help\n',
+        timedOut: false,
+      },
+    });
+    await expect(
+      service.createChannelAccount({
+        provider: "clickclack",
+        setupValue: "abc123",
+        agentId: "main",
+        name: "ClickClack",
+      }),
+    ).rejects.toThrow(
+      "This OpenClaw build does not accept ClickClack setup codes. Use the manual token fields below.",
+    );
+  });
+
+  it("a CLI rejecting --code gets the manual-token hint, never the code (E-C12)", async () => {
     const secret = "super-secret-setup-code";
     const { service } = buildHarness({
       runResult: {
@@ -131,7 +158,7 @@ describe("server/agents clickclack channel (5.1)", () => {
         agentId: "main",
         name: "ClickClack",
       }),
-    ).rejects.toThrow(/OpenClaw 2026\.8/);
+    ).rejects.toThrow(/does not accept ClickClack setup codes/);
     try {
       await service.createChannelAccount({
         provider: "clickclack",

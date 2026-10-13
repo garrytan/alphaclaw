@@ -229,6 +229,28 @@ describe("server/chat gateway disconnect lifecycle", () => {
     errorSpy.mockRestore();
   });
 
+  it("classifies a gateway retryable refusal as gateway_busy ahead of the substring rules", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // 2026.10.2 agent-database-admission refusal text (reason + repair hint);
+    // the structured retryable flag decides, not the prose.
+    const refusal = new Error(
+      "Agent main has not completed startup inspection and preparation. token store locked\nSessions remain unavailable until background inspection and preparation finish. If they cannot complete, stop the Gateway, run \"openclaw doctor --fix\", and restart.",
+    );
+    refusal.gatewayResponded = true;
+    refusal.gatewayCode = "UNAVAILABLE";
+    refusal.gatewayRetryable = true;
+    refusal.gatewayRetryAfterMs = 250;
+    expect(classifyError(refusal)).toEqual({
+      code: "gateway_busy",
+      retryable: true,
+      message: "The gateway is still getting ready. Try again in a moment.",
+    });
+    const notRetryable = new Error(refusal.message);
+    notRetryable.gatewayResponded = true;
+    expect(classifyError(notRetryable).code).toBe("gateway_auth");
+    errorSpy.mockRestore();
+  });
+
   it("chaos: shuffled, duplicated, and dropped run events still produce exactly one terminal", async () => {
     const harness = await kit.startGatewayHarness();
     const service = kit.createService(harness);

@@ -5,6 +5,121 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.5] - 2026-10-12
+
+Pins OpenClaw **2026.10.2** (npm `latest` since 2026-10-12; 2026.9.9 and
+2026.10.1 shipped in between). Engines are unchanged
+(`>=24.16.0 <25 || >=26.1.0`), so the Node 24.16 floor, the `node:24-slim`
+image and the CI matrix stand. The bump comes with an audit of every OpenClaw
+contract AlphaClaw encodes (CLI flags and output, config keys, gateway
+lifecycle wording, readiness, state schemas, chat protocol, Control UI) against
+the 2026.9.8 and 2026.10.2 dists, and the fixes that audit turned up.
+
+### Changed
+
+- **Pin: `openclaw` 2026.9.8 → 2026.10.2.** 2026.10.1 moves the state
+  database to schema 20 (`openclaw.schemaVersions { state: 20, agent: 24 }`;
+  it adds `cron_run_receipts.delivery_attempt_state`). The seed table and the
+  live database fixture gain rows for 2026.9.9, 2026.10.1 and 2026.10.2. Going
+  back to 2026.9.x means restoring a verified backup, never reinstall-and-boot.
+- **Agent roster written in 2026.10's canonical shape.** 2026.10.1 makes
+  `agents.list` and every boolean `agents.entries.*.default` marker blocking
+  config errors (`default: false` included). A multi-agent roster must carry
+  `agents.ownership: "explicit"`. AlphaClaw stamped `default: true` on every
+  agent or channel save, so on 2026.10 each save left a config the gateway
+  refuses: exit 78 on the next start, every CLI command refusing, and the
+  watchdog looping on Doctor. The write boundary (`canonicalizeAgentsForWrite`)
+  now always writes keyed `agents.entries` without markers. `default` is an
+  in-memory marker only, derived from `agents.defaults.systemAgent.agentId`
+  (then the sole agent, then `main`). A roster that grows past one agent gets
+  what OpenClaw's own `agents add` and Doctor's legacy-owner materialization
+  write: explicit ownership, the prior agent as system agent, heartbeat and
+  Talk owner, and a channel-wide binding for every enabled channel that had
+  none. Inherited-auth and session-store owners are pinned where needed, so
+  existing channels keep their routing. "Set as default" moves the system
+  agent. Deleting an agent clears system-agent, heartbeat and Talk references
+  to it, and an agent that owns `authInheritance` or `sessionStore` cannot be
+  deleted. A file that still holds a legacy roster keeps it, so the boot
+  migration's `doctor --fix` can materialize owners from the marker.
+  Supersedes the explicit-fleet-only fix in #127.
+- **Readiness reads the phases 2026.x actually reports.** `/readyz` never
+  sends `status`. Startup and drain arrive as `{ready:false,
+  failing:["startup-sidecars"]}` and `{ready:false,
+  failing:["gateway-draining"]}`, and these now map to the starting and
+  draining phases instead of a component-failure degradation on every boot
+  and drain. 2026.10.2 reports ready while agent databases are still being
+  inspected, so that count is recorded as telemetry.
+- **Owner-lease timing follows 2026.10.2:** heartbeat 15 s (was 30 s) and
+  stale after 90 s, pinned explicitly.
+- **Model prices come from OpenClaw's plugin manifests.** The dist pricing
+  scraper matched only `.js` chunks and found nothing on 2026.9.x or 2026.10.x
+  (dist is `.mjs`, and prices moved to
+  `dist/extensions/*/openclaw.plugin.json` `modelCatalog`). Usage costs now
+  read those manifests: 86 priced models on 2026.10.2, including Claude
+  Haiku 5.5, Opus/Sonnet 5 and 5.5, and GPT-6. A bare model id that
+  aggregators price differently falls back to the static table.
+- **Operator shells inherit the supervisor contract.** The `openclaw` wrapper
+  exports `OPENCLAW_SUPERVISOR_MODE`, `OPENCLAW_SERVICE_REPAIR_POLICY` and
+  `OPENCLAW_NO_AUTO_UPDATE=1` like the gateway child. As a result,
+  `openclaw update` from `docker exec` refuses to replace the pinned package.
+
+### Fixed
+
+- **Shared auth store on state schema 20.** The main agent's auth store only
+  accepted state schemas 13–19, so on 2026.10.x every credential read reported
+  `AUTH_STORE_UNREADABLE` and Codex sign-in returned 500. The live tier caught
+  this. The `config_machine_state` layout and the `authProfiles.*` keys are
+  unchanged at 20.
+- **Cross-container ownership refusal.** 2026.10.2 refuses to verify an owner
+  in another PID namespace with a new message: "cannot verify Gateway
+  ownership from this process (different PID namespace) …". The bare form went
+  to the generic crash ladder, and the "failed to acquire gateway state
+  ownership | …" form was misread as a state-writer conflict. Both now
+  classify `owner_lease_held`, which waits out or reclaims the lease and
+  latches the "second container on the same volume?" notice. That holder pid
+  belongs to another namespace, so it is never treated as local. The
+  heartbeat-wait line streams as the `lock_wait` restart step, and "OpenClaw
+  state database is busy at" counts as state contention.
+- **Pairing and approvals through the gateway state owner.** On 2026.10,
+  `pairing list|approve` and `approvals get|set` run through the live gateway.
+  While it starts or restarts they fail with OpenClaw's "stop the Gateway
+  through its service owner" guidance, which is wrong inside AlphaClaw. Those
+  refusals are now a retryable 503 ("The gateway is starting or restarting;
+  try again in a few seconds."). An unconfirmed mutation is a 409 telling you
+  to re-read first, and it is never auto-retried, including by
+  `clawCmdWithRetry`. The background pairing sweep no longer runs the CLI
+  while the gateway is down, where 2026.10 would take offline ownership and
+  race a launch.
+- **Chat during gateway warm-up.** A gateway refusal marked `retryable: true`
+  (2026.10's `UNAVAILABLE` + `retryAfterMs` while agent databases are being
+  inspected) classifies as `gateway_busy` (retryable) instead of an unknown
+  failure. `chat.history` retries once after the delay, and `chat.send`
+  surfaces `notSubmitted` so the outbox resends with the same idempotency key.
+- **ClickClack setup URLs.** AlphaClaw passed `--url`, which no OpenClaw
+  release accepts. `--code` takes a code or a URL on 2026.9.8 and 2026.10.2.
+- **WhatsApp setup.** `channels add --channel whatsapp` was given `--token`,
+  which OpenClaw rejects. The owner number already persists through
+  `WHATSAPP_OWNER_NUMBER` and `allowFrom`.
+- **Doctor's context-window card** stopped recommending a provider-level
+  `contextWindow`. 2026.10.2 rejects that key ("Unrecognized key"), so only
+  per-model values count, and a provider-level value gets its own P1 evidence
+  line telling you to move it onto each model or run `openclaw doctor --fix`.
+- **Boot-migration failure notice** quotes OpenClaw's first failing check.
+  When 2026.10.2 refuses state that predates its July 2026 upgrade window, the
+  notice says to boot an AlphaClaw release pinned to OpenClaw 2026.9.5 first.
+- **Schema dist scan** accepts `.mjs` chunks.
+
+### Tests
+
+- New live test `openclaw-live-agents-roster.e2e.test.js` runs AlphaClaw's
+  agent create, set-default, update and delete, plus a save after the pinned
+  `doctor --fix`, through `openclaw config validate --json`. It fails on
+  v0.10.4.
+- The live memory-leak fixture leaks every 100 ms instead of every 250 ms.
+  2026.10.2 grows RSS at the nominal ~5.6 MB/s, which cannot reach the
+  gateway's unchanged 3 GiB critical threshold inside the stage budget.
+  Assertions are unchanged.
+
 ## [0.10.4] - 2026-10-12
 
 Issue #140, part 2 of 2: the dashboard surfaces move onto the 0.10.3 git-sync

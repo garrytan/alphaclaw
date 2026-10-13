@@ -5,6 +5,10 @@ const {
   agentsArrayToKeyed,
   normalizeAgentsShapeForRead,
   withAgentsShapeForWrite,
+  hasLegacyAgentsRoster,
+  resolveDefaultAgentId,
+  describeOnDiskAgents,
+  canonicalizeAgentsForWrite,
   getEnvVarsContainer,
   getThreadBindingsTarget,
 } = require("../../lib/server/openclaw-config-migrations");
@@ -212,5 +216,148 @@ describe("server/openclaw-config-migrations", () => {
 
     expect(migrateLegacyTelegramStreamingConfig(cfg)).toBe(false);
     expect(migrateLegacyTelegramStreamingConfig(cfg)).toBe(false);
+  });
+});
+
+// OpenClaw 2026.10.1+ refuses `agents.list` and every boolean
+// `agents.entries.*.default` marker (legacy-*.mjs LEGACY_AGENT_ROSTER_RULES),
+// and a multi-agent roster needs `agents.ownership: "explicit"`. These cases
+// mirror 10.2's own applyAgentConfig/pruneAgentConfig roster transitions.
+describe("server/openclaw-config-migrations canonical 2026.10 roster", () => {
+  const onDisk = (raw) => describeOnDiskAgents(raw);
+
+  it("detects legacy rosters the 2026.10 validator refuses", () => {
+    expect(hasLegacyAgentsRoster({ agents: { list: [] } })).toBe(true);
+    expect(hasLegacyAgentsRoster({ agents: { entries: { main: { default: false } } } })).toBe(true);
+    expect(hasLegacyAgentsRoster({ agents: { entries: { main: { default: true } } } })).toBe(true);
+    expect(hasLegacyAgentsRoster({ agents: { entries: { main: {} } } })).toBe(false);
+    expect(hasLegacyAgentsRoster({})).toBe(false);
+  });
+
+  it("resolves the default from a marker, then the recorded system agent, the sole agent, main, the first", () => {
+    expect(resolveDefaultAgentId({ agents: { list: [{ id: "main" }, { id: "ops", default: true }] } })).toBe("ops");
+    expect(resolveDefaultAgentId({ agents: { defaults: { systemAgent: { agentId: "ops" } }, list: [{ id: "main" }, { id: "ops" }] } })).toBe("ops");
+    expect(resolveDefaultAgentId({ agents: { defaults: { systemAgent: { agentId: "gone" } }, list: [{ id: "a" }, { id: "main" }] } })).toBe("main");
+    expect(resolveDefaultAgentId({ agents: { list: [{ id: "alex" }] } })).toBe("alex");
+    expect(resolveDefaultAgentId({ agents: { list: [{ id: "a" }, { id: "b" }] } })).toBe("a");
+    expect(resolveDefaultAgentId({})).toBe("main");
+  });
+
+  it("writes a single agent as keyed entries with no marker and no ownership", () => {
+    const out = canonicalizeAgentsForWrite(
+      { agents: { list: [{ id: "main", default: true, workspace: "/w" }] } },
+      onDisk({}),
+    );
+    expect(out.agents).toEqual({ entries: { main: { workspace: "/w" } } });
+  });
+
+  it("stamps explicit ownership and records the prior sole agent when a roster grows past one", () => {
+    const out = canonicalizeAgentsForWrite(
+      { agents: { list: [{ id: "main", default: true }, { id: "ops", default: false }] } },
+      onDisk({ agents: { entries: { main: {} } } }),
+    );
+    expect(out.agents).toEqual({
+      entries: { main: {}, ops: {} },
+      ownership: "explicit",
+      defaults: { systemAgent: { agentId: "main" }, heartbeat: { agentId: "main" } },
+    });
+    expect(out.talk).toEqual({ agentId: "main" });
+    expect(out.bindings).toBeUndefined();
+  });
+
+  it("hands the prior agent a channel-wide binding for each enabled unbound channel when a roster grows", () => {
+    const config = {
+      channels: {
+        defaults: { groupPolicy: "open" },
+        telegram: { botToken: "x" },
+        discord: { enabled: false },
+        slack: {},
+      },
+      bindings: [
+        { agentId: "main", match: { channel: "telegram", accountId: "work" } },
+        { agentId: "main", match: { channel: "slack", accountId: "*" } },
+      ],
+      session: { store: "/data/sessions.json" },
+      talk: { voice: "x" },
+      agents: {
+        defaults: { heartbeat: { every: "30m" } },
+        list: [{ id: "main", default: true }, { id: "ops" }],
+      },
+    };
+    const out = canonicalizeAgentsForWrite(config, onDisk({ agents: { entries: { main: {} } } }));
+    expect(out.bindings).toEqual([
+      ...config.bindings,
+      { agentId: "main", match: { channel: "telegram", accountId: "*" } },
+    ]);
+    expect(out.talk).toEqual({ voice: "x", agentId: "main" });
+    expect(out.agents.defaults).toEqual({
+      heartbeat: { every: "30m" },
+      systemAgent: { agentId: "main" },
+      sessionStore: { agentId: "main" },
+    });
+  });
+
+  it("pins the inherited-auth owner when a non-main sole agent becomes a fleet", () => {
+    const out = canonicalizeAgentsForWrite(
+      { agents: { list: [{ id: "alex", default: true }, { id: "main" }] } },
+      onDisk({ agents: { entries: { alex: {} } } }),
+    );
+    expect(out.agents.defaults).toEqual({
+      systemAgent: { agentId: "alex" },
+      heartbeat: { agentId: "alex" },
+      authInheritance: { agentId: "alex" },
+    });
+  });
+
+  it("moves the system agent on an explicit fleet only when the marker moved", () => {
+    const disk = { agents: { ownership: "explicit", defaults: { systemAgent: { agentId: "main" }, heartbeat: { agentId: "main" } }, entries: { main: {}, ops: {} } } };
+    const unchanged = canonicalizeAgentsForWrite(
+      { agents: { ...disk.agents, entries: undefined, list: [{ id: "main", default: true }, { id: "ops", default: false }] } },
+      onDisk(disk),
+    );
+    expect(unchanged.agents.defaults).toEqual(disk.agents.defaults);
+    expect(unchanged.agents.ownership).toBe("explicit");
+    const moved = canonicalizeAgentsForWrite(
+      { agents: { ...disk.agents, entries: undefined, list: [{ id: "main", default: false }, { id: "ops", default: true }] } },
+      onDisk(disk),
+    );
+    expect(moved.agents.defaults).toEqual({ systemAgent: { agentId: "ops" }, heartbeat: { agentId: "main" } });
+    expect(moved.agents.entries).toEqual({ main: {}, ops: {} });
+  });
+
+  it("leaves an explicit fleet's defaults alone when the caller carries no marker", () => {
+    const disk = { agents: { ownership: "explicit", defaults: { systemAgent: { agentId: "ops" } }, entries: { main: {}, ops: {} } } };
+    const out = canonicalizeAgentsForWrite({ agents: { ...disk.agents, entries: undefined, list: [{ id: "main" }, { id: "ops" }] } }, onDisk(disk));
+    expect(out.agents).toEqual(disk.agents);
+  });
+
+  it("drops ownership and pins the fleet's auth owner when a fleet collapses to one agent", () => {
+    const disk = { agents: { ownership: "explicit", entries: { main: {}, ops: {} } } };
+    const toMain = canonicalizeAgentsForWrite({ agents: { ownership: "explicit", list: [{ id: "main", default: true }] } }, onDisk(disk));
+    expect(toMain.agents).toEqual({ entries: { main: {} } });
+    const diskAlex = { agents: { ownership: "explicit", entries: { alex: {}, ops: {} } } };
+    const toAlex = canonicalizeAgentsForWrite({ agents: { ownership: "explicit", list: [{ id: "alex", default: true }] } }, onDisk(diskAlex));
+    expect(toAlex.agents).toEqual({ entries: { alex: {} }, defaults: { authInheritance: { agentId: "main" } } });
+  });
+
+  it("writes keyed entries even when the file has no roster yet", () => {
+    const out = canonicalizeAgentsForWrite({ agents: { list: [{ id: "main", default: true }] } }, onDisk({ gateway: {} }));
+    expect(out.agents).toEqual({ entries: { main: {} } });
+  });
+
+  it("keeps a not-yet-migrated legacy roster in its legacy shape for doctor --fix", () => {
+    const listInput = { agents: { list: [{ id: "main", default: true }, { id: "ops" }] } };
+    expect(canonicalizeAgentsForWrite(listInput, onDisk({ agents: { list: [{ id: "main", default: true }] } }))).toBe(listInput);
+    const entriesInput = { agents: { list: [{ id: "main", default: true }, { id: "ops", default: false }] } };
+    expect(canonicalizeAgentsForWrite(entriesInput, onDisk({ agents: { entries: { main: { default: true } } } })).agents).toEqual({
+      entries: { main: { default: true }, ops: { default: false } },
+    });
+  });
+
+  it("never mutates the caller's config", () => {
+    const input = { agents: { list: [{ id: "main", default: true }, { id: "ops" }] } };
+    const snapshot = structuredClone(input);
+    canonicalizeAgentsForWrite(input, onDisk({ agents: { entries: { main: {} } } }));
+    expect(input).toEqual(snapshot);
   });
 });

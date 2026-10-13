@@ -375,4 +375,15 @@ describe.each(kResolvers)("openclaw-schema-versions: resolveDeclaredSchemaVersio
     expect(kSchemaContractFilePattern.test("openclaw-agent-db-contract-CGTyjij4.js.map")).toBe(false);
     expect(kSchemaContractFilePattern.test("chunk-database-helpers.js")).toBe(false);
   });
+
+  it("accepts the .mjs contract chunks 2026.9.3+ emits", async () => {
+    expect(kSchemaContractFilePattern.test("openclaw-state-db-contract-Cm9fKF2T.mjs")).toBe(true);
+    expect(kSchemaContractFilePattern.test("openclaw-state-db-contract-Cm9fKF2T.mjs.map")).toBe(false);
+    expect(kSchemaContractFilePattern.test("openclaw-state-db-contract-Cm9fKF2T.cjs")).toBe(false);
+    writeDist(packageDir, {
+      "openclaw-state-db-contract-Cm9fKF2T.mjs": stateContract(17),
+      "openclaw-agent-db-contract-Q.mjs": agentContract(21),
+    });
+    await expect(resolve(packageDir)).resolves.toMatchObject({ state: 17, agent: 21 });
+  });
 });

@@ -7,6 +7,7 @@ const {
   kGatewayProcessPattern,
   kGatewayServingCmdlinePattern,
   kGatewayOwnershipConflictPattern,
+  kOwnerLeaseHeldPattern,
   classifyOwnershipConflict,
   parseProcStat,
   readProcStartTicks,
@@ -209,6 +210,15 @@ describe("describeLockContention", () => {
 });
 
 describe("looksLikeLockContention", () => {
+  it("matches 2026.10.2's state-owner contention refusal (GatewayStateOwnerContentionError, verbatim prefix) and not an unrelated busy text", () => {
+    const text =
+      "Gateway failed to start: failed to acquire gateway state ownership; waited 30012ms for Gateway state ownership: OpenClaw state database is busy at /data/.openclaw/openclaw.sqlite. holder 312 at gw-host, last renewed 2 s ago. The holder 312 is alive on this host, stop it first. Wait for the other OpenClaw process to finish, then retry.";
+    expect(looksLikeLockContention(text)).toBe(true);
+    expect(looksLikeLockContention("OpenClaw state database is busy at /tmp/x.sqlite.")).toBe(true);
+    expect(kStateContentionPattern.test("openclaw STATE DATABASE IS BUSY AT /x")).toBe(true);
+    expect(looksLikeLockContention("the build server is busy at the moment")).toBe(false);
+  });
+
   it("matches upstream's contention refusals and SQLite busy signatures", () => {
     expect(looksLikeLockContention("ERROR another OpenClaw process owns state-lifecycle")).toBe(true);
     expect(looksLikeLockContention("failed: another OpenClaw process owns gateway-lifecycle")).toBe(true);
@@ -304,6 +314,8 @@ describe("gateway process patterns (evidence vs serving)", () => {
 });
 
 describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contender)", () => {
+  const kNamespaceRefusal =
+    "cannot verify Gateway ownership from this process (different PID namespace); the owner heartbeat is fresh — run this command inside the Gateway container or with a shared PID namespace. If the previous Gateway stopped, wait up to 90 seconds after its last heartbeat. holder 41 at old-container/pid-ns 4026532201, last renewed 12 s ago. wait 79 s and retry.";
   // Wording table verified against the 2026.7.1-2 and 2026.9.1-beta.1 tarballs.
   const rows = [
     {
@@ -370,6 +382,46 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       holderPid: null,
       holderRole: null,
     },
+    // 2026.10.2 (dist/gateway-state-owner-*.mjs GatewayLockNamespaceError +
+    // describeGatewayLockHolder, verbatim): the holder's record is in another
+    // PID namespace with a fresh heartbeat. The ownership acquire retries it
+    // for 95 s and exits with the bare message.
+    {
+      text: `Gateway failed to start: ${kNamespaceRefusal}`,
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+    },
+    {
+      // Raised after acquisition (projection lock / owner-lease publish): the
+      // generic ownership failure wraps it through formatErrorMessage's
+      // " | " cause join — the lease family, never a state writer.
+      text: `[gateway] Gateway failed to start: failed to acquire gateway state ownership | ${kNamespaceRefusal}`,
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+    },
+    {
+      // 2026.10.2 appends the holder to the lease refusal.
+      text: "Gateway failed to start: failed to acquire gateway state ownership | Another Gateway owner lease is still active for this state directory: holder 88 at gw-host, last renewed 3 s ago. The holder 88 is alive on this host, stop it first.",
+      kind: "owner_lease_held",
+      holderPid: 88,
+      holderRole: null,
+    },
+    {
+      // 2026.10.2 state-owner contention (GatewayStateOwnerContentionError
+      // inside the ownership failure): a live writer, holder named.
+      text: "Gateway failed to start: failed to acquire gateway state ownership; waited 30012ms for Gateway state ownership: OpenClaw state database is busy at /data/.openclaw/openclaw.sqlite. holder 312 at gw-host, last renewed 2 s ago. The holder 312 is alive on this host, stop it first. Wait for the other OpenClaw process to finish, then retry.",
+      kind: "state_writer_conflict",
+      holderPid: 312,
+      holderRole: null,
+    },
+    {
+      text: "cannot verify Gateway ownership from this process (different PID namespace); the owner heartbeat is fresh — run this command inside the Gateway container or with a shared PID namespace. If the previous Gateway stopped, wait up to 90 seconds after its last heartbeat. holder unknown at unknown host, last renewed at an unknown time. wait 91 s and retry.",
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+    },
   ];
 
   it("names the transient kinds the watchdog gives backoff relaunches only (frozen set)", () => {
@@ -386,6 +438,46 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
   it.each(rows)("$text → $kind", ({ text, kind, holderPid, holderRole }) => {
     expect(kGatewayOwnershipConflictPattern.test(text)).toBe(true);
     expect(classifyOwnershipConflict(text)).toEqual({ kind, holderPid, holderRole });
+  });
+
+  it("2026.10.2: the namespace refusal outranks the generic state-ownership wording on its line, a separate state-writer line still outranks it, and the pre-wait warning line alone is never a conflict", () => {
+    // gateway-lock-*.mjs logs this once before retrying for up to 95 s.
+    const waitLine = `[gateway] Waiting for the previous Gateway's owner heartbeat to expire before reclaiming state (up to 95 seconds). ${kNamespaceRefusal}`;
+    expect(classifyOwnershipConflict(waitLine)).toBeNull();
+    // Waited, acquired, then died of something else: not an ownership conflict.
+    expect(
+      classifyOwnershipConflict(
+        [waitLine, "[gateway] Gateway state ownership acquired after 61.2 s", "TypeError: cannot read properties of undefined"].join("\n"),
+      ),
+    ).toBeNull();
+    // Waited out the 95 s and exited with the bare refusal.
+    expect(classifyOwnershipConflict([waitLine, `Gateway failed to start: ${kNamespaceRefusal}`].join("\n"))).toEqual({
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+    });
+    expect(
+      classifyOwnershipConflict(
+        [`Gateway failed to start: failed to acquire gateway state ownership | ${kNamespaceRefusal}`, "state directory is locked by agent-embedded (pid 5)"].join("\n"),
+      ),
+    ).toEqual({ kind: "state_writer_conflict", holderPid: 5, holderRole: "agent-embedded" });
+    expect(kOwnerLeaseHeldPattern.test(kNamespaceRefusal)).toBe(true);
+  });
+
+  it("never reports the namespace refusal's holder as holderPid (a pid from ANOTHER namespace); the same-namespace lease refusal keeps its holder pid", () => {
+    expect(kNamespaceRefusal).toContain("holder 41 at old-container/pid-ns 4026532201");
+    for (const text of [
+      kNamespaceRefusal,
+      `Gateway failed to start: failed to acquire gateway state ownership | ${kNamespaceRefusal}`,
+      [`[gateway] starting (pid 100)`, `Gateway failed to start: ${kNamespaceRefusal}`].join("\n"),
+    ]) {
+      expect(classifyOwnershipConflict(text)).toEqual({ kind: "owner_lease_held", holderPid: null, holderRole: null });
+    }
+    expect(
+      classifyOwnershipConflict(
+        "Another Gateway owner lease is still active for this state directory: holder 88 at gw-host, last renewed 3 s ago. The holder 88 is alive on this host, stop it first.",
+      ),
+    ).toEqual({ kind: "owner_lease_held", holderPid: 88, holderRole: null });
   });
 
   it("is case-insensitive and reads the wording out of a multi-line stderr tail", () => {

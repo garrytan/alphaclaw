@@ -35,9 +35,9 @@ describe("server/openclaw-owner-lease (2026.9.4+ gateway-owner lease, read-only)
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  it("pins the upstream constants the wait is derived from (STARTUP_MIGRATION_LEASE_TTL_MS = 300 s, heartbeat 30 s)", () => {
+  it("pins the upstream constants the wait is derived from (STARTUP_MIGRATION_LEASE_TTL_MS = 300 s, GATEWAY_OWNER_HEARTBEAT_MS = 15 s on 2026.10.2 — 30 s on 2026.9.x)", () => {
     expect(kGatewayOwnerLeaseTtlMs).toBe(300_000);
-    expect(kGatewayOwnerLeaseHeartbeatMs).toBe(30_000);
+    expect(kGatewayOwnerLeaseHeartbeatMs).toBe(15_000);
     expect(kGatewayOwnerLeaseScope).toBe("gateway-owner");
     expect(kGatewayOwnerLeaseKey).toBe("global");
   });
@@ -121,8 +121,9 @@ describe("server/openclaw-owner-lease (2026.9.4+ gateway-owner lease, read-only)
     };
     const rowCount = () => { const db = new DatabaseSync(dbPath, { readOnly: true }); try { return db.prepare("SELECT COUNT(*) AS n FROM state_leases").get().n; } finally { db.close(); } };
 
-    it("pins the staleness rule: three missed 30 s heartbeats", () => {
+    it("pins the staleness rule to upstream's GATEWAY_OWNER_HEARTBEAT_STALE_MS (90 s), not a multiple of the heartbeat", () => {
       expect(kGatewayOwnerLeaseStaleAfterMs).toBe(90_000);
+      expect(kGatewayOwnerLeaseStaleAfterMs).not.toBe(3 * kGatewayOwnerLeaseHeartbeatMs);
     });
 
     it("reclaims a FOREIGN-host row whose heartbeat is >= 90 s old and still inside its TTL; the row is gone", () => {

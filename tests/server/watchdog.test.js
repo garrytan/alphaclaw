@@ -2624,7 +2624,7 @@ describe("server/watchdog", () => {
         fetchImpl: async (url) => {
           if (!healthy) throw new Error("ECONNREFUSED");
           return { ok: true, status: 200, text: async () => JSON.stringify(
-            String(url).endsWith("/readyz") ? { ready: true, status: "started" } : { ok: true },
+            String(url).endsWith("/readyz") ? { ready: true, failing: [] } : { ok: true },
           ) };
         },
       });
@@ -4991,7 +4991,9 @@ describe("server/watchdog", () => {
     // Gateway fake: /health answers while control.healthy; /readyz reports
     // control.readyzFailing. #87 controls: eventLoopDegraded / eventLoopReasons
     // / eventLoopDelayP99Ms (the diagnostic block), ready (force the native
-    // flag), readyzStatus (started|starting|draining), readyzHttpStatus (503
+    // flag), readyzStatus (started|starting|draining — the classifier's
+    // `status` compat path; a real /readyz never sends it, its phases are a
+    // single failing[] entry: see 4b'), readyzHttpStatus (503
     // for a transitional body, 404 for an older gateway, 500 → unavailable),
     // readyzBody (raw override → malformed), readyzHang (hangs until the
     // watchdog's AbortController fires → timeout), readyzThrow (connection
@@ -7946,6 +7948,55 @@ describe("server/watchdog", () => {
         expect(rowsOfType(authoritative.insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
         expect(authoritative.notifier.notify).not.toHaveBeenCalled();
         authoritative.watchdog.stop();
+      });
+
+      it("#87 4b'. the REAL /readyz shape (2026.9.8/2026.10.2 send no `status`): 503 {ready:false, failing:['startup-sidecars']} and {ready:false, failing:['gateway-draining']} are transitional — never readiness_degraded, never a notice — and the real ready body ends the phase", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        control.ready = false;
+        control.readyzHttpStatus = 503;
+        control.readyzFailing = ["startup-sidecars"];
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 100 });
+        await tick();
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          degradedReason: null,
+          readiness: "not_ready",
+          readinessReason: "starting",
+          readinessStatus: "starting",
+          readyzFailing: ["startup-sidecars"],
+        });
+        expect(pendingRows(insertWatchdogEvent, "readinessPending")[0].details).toMatchObject({
+          readinessStatus: "starting",
+        });
+
+        control.readyzFailing = ["gateway-draining"];
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "not_ready",
+          readinessStatus: "draining",
+          readinessReason: "draining",
+        });
+
+        control.ready = null;
+        control.readyzHttpStatus = 200;
+        control.readyzFailing = [];
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          readiness: "ready",
+          readinessReason: null,
+          readinessStatus: null,
+        });
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
+        expect(notifier.notify).not.toHaveBeenCalled();
+        watchdog.stop();
       });
 
       it("#87 4c. a transitional gateway keeps a crash incident open (pending rows) and closes it within one 5s tick of `started`; the pending replacement is certified only by `started`", async () => {
