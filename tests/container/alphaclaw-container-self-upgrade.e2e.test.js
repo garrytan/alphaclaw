@@ -173,7 +173,7 @@ describeContainer("container E2E: immutable v0.9.76 → candidate self-upgrade r
       expect(report.openclaw.installedAtBoot).toBe(pin);
       expect(report.openclaw.installedDiverged).toBe(false);
       expect(report.openclaw.retiredChannel).toEqual({ channel: "stable", version: kRecordedVersion, sha: null });
-      expect(report.serverPhase.migration).toEqual({ status: "ok", reason: null, ran: true });
+      expect(report.serverPhase.migration).toMatchObject({ status: "ok", reason: null, ran: true, class: null, detail: null });
       expect(report.serverPhase.verdict).toEqual([]);
 
       // The old version switch is retired exactly once: shim gone, state file
