@@ -7,8 +7,11 @@ const path = require("path");
 
 const {
   kBootMigrationFileName,
+  kRememberedFailureRetryMs,
   readCompletedForVersion,
-  writeCompletedForVersion,
+  readMigrationRecord,
+  recordDoctorCompletedForPin,
+  recordDoctorOutcome,
   runBootMigration,
 } = require("../../lib/server/openclaw-boot-migration");
 
@@ -43,9 +46,9 @@ describe("server/openclaw-boot-migration", () => {
     const run = () =>
       runBootMigration({ ...box, installedVersion: "2026.9.8", runDoctorFix, operation, timeoutMs: 1234, nowFn: () => kNow, logger });
 
-    await expect(run()).resolves.toEqual({ status: "ok", ran: true });
+    await expect(run()).resolves.toMatchObject({ status: "ok", ran: true, captureUnavailable: null });
     expect(runDoctorFix).toHaveBeenCalledTimes(1);
-    expect(runDoctorFix).toHaveBeenCalledWith({ timeoutMs: 1234, operation });
+    expect(runDoctorFix).toHaveBeenCalledWith({ timeoutMs: 1234, operation, source: "boot" });
     expect(JSON.parse(fs.readFileSync(box.recordPath, "utf8"))).toEqual({ completedForVersion: "2026.9.8", at: kNow });
     expect(logger.log).toHaveBeenCalledWith("[alphaclaw] OpenClaw 2026.9.8: running doctor --fix before the gateway starts");
 
@@ -55,32 +58,35 @@ describe("server/openclaw-boot-migration", () => {
 
   it("a new pin runs doctor again and names the version it moves from", async () => {
     const box = newBox();
-    writeCompletedForVersion({ managedDir: box.managedDir, version: "2026.9.3", nowFn: () => kNow - 1 });
+    recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.9.3", nowFn: () => kNow - 1 });
     const runDoctorFix = vi.fn(async () => ({ ok: true }));
     const logger = silentLogger();
 
     await expect(
       runBootMigration({ ...box, installedVersion: "2026.9.8", runDoctorFix, nowFn: () => kNow, logger }),
-    ).resolves.toEqual({ status: "ok", ran: true });
+    ).resolves.toMatchObject({ status: "ok", ran: true });
     expect(runDoctorFix).toHaveBeenCalledTimes(1);
     expect(logger.log).toHaveBeenCalledWith("[alphaclaw] OpenClaw 2026.9.3 → 2026.9.8: running doctor --fix before the gateway starts");
     expect(readCompletedForVersion({ managedDir: box.managedDir })).toBe("2026.9.8");
   });
 
   it.each([
-    ["a failure code", { ok: false, code: "exit_1" }, "exit_1"],
-    ["a timeout", { ok: false, timedOut: true }, "timed out"],
+    ["an unexplained exit", { ok: false, code: 1 }, "exit_1"],
+    ["a timeout", { ok: false, timedOut: true }, "timed_out"],
+    ["a cancellation", { ok: false, cancelled: true }, "cancelled"],
+    ["no space", { ok: false, code: 1, stdout: "Error: ENOSPC: no space left on device, write\n" }, "no_space"],
     ["no result", null, "failed"],
-  ])("%s: notifies once, records nothing and still returns (the gateway starts anyway)", async (_label, result, reason) => {
+  ])("%s: transient — notifies once, remembers nothing and still returns (the gateway starts anyway)", async (_label, result, reason) => {
     const box = newBox();
-    writeCompletedForVersion({ managedDir: box.managedDir, version: "2026.9.3", nowFn: () => kNow - 1 });
+    recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.9.3", nowFn: () => kNow - 1 });
     const notify = vi.fn(async () => {});
     const logger = silentLogger();
 
     await expect(
       runBootMigration({ ...box, installedVersion: "2026.9.8", runDoctorFix: async () => result, notify, nowFn: () => kNow, logger }),
-    ).resolves.toEqual({ status: "failed", ran: true, reason });
+    ).resolves.toMatchObject({ status: "failed", ran: true, reason, class: "transient" });
     expect(readCompletedForVersion({ managedDir: box.managedDir })).toBe("2026.9.3");
+    expect(readMigrationRecord({ managedDir: box.managedDir }).failed).toBeUndefined();
     expect(notify).toHaveBeenCalledTimes(1);
     const [message, options] = notify.mock.calls[0];
     expect(message).toContain("OpenClaw 2026.9.8");
@@ -111,26 +117,28 @@ describe("server/openclaw-boot-migration", () => {
     "",
   ].join("\n");
 
-  const runFailed = async (result) => {
+  const runFailed = async (result, expected) => {
     const box = newBox();
     const notify = vi.fn(async () => {});
     await expect(
       runBootMigration({ ...box, installedVersion: "2026.10.2", runDoctorFix: async () => result, notify, logger: silentLogger() }),
-    ).resolves.toEqual({ status: "failed", ran: true, reason: result.code });
+    ).resolves.toMatchObject({ status: "failed", ran: true, ...expected });
     expect(notify).toHaveBeenCalledTimes(1);
     return notify.mock.calls[0][0];
   };
 
-  it("names the 2026.9.5 bridge release when doctor refuses pre-July-2026 state", async () => {
+  it("names the 2026.9.5 bridge release when doctor refuses pre-July-2026 state, and never points it at the live state", async () => {
     const message = await runFailed({
       ok: false,
-      code: "exit_1",
+      code: 1,
       stdout: kUpgradeWindowRefusalOutput,
       lastOutputLine: 'Failing check session-entry-state (blocked-by-prior-refusal): Migration step "session-entry-state" was not run',
-    });
-    expect(message).toContain("refused to migrate state that predates OpenClaw's July 2026 upgrade support window (exit_1)");
-    expect(message).toContain("deploy an AlphaClaw release pinned to OpenClaw 2026.9.5 (v0.9.88–v0.9.97)");
-    expect(message).toContain("then redeploy this release");
+    }, { reason: "upgrade_window_refused", class: "deterministic" });
+    expect(message).toContain("refused to migrate state that predates OpenClaw's July 2026 upgrade support window");
+    expect(message).toContain("Leave the current state directory untouched");
+    expect(message).toContain("restore it into a separate directory, run `openclaw doctor --fix` with OpenClaw 2026.9.5 there");
+    expect(message).toContain("Without such a backup OpenClaw cannot migrate this state automatically");
+    expect(message).not.toContain("redeploy");
     expect(message).toContain(
       'OpenClaw said: "Failing check plugin-install-index (unsupported-plugin-install-index): Plugin install index [redacted-path]"',
     );
@@ -140,28 +148,31 @@ describe("server/openclaw-boot-migration", () => {
   it("names the bridge version OpenClaw asks for when it is not 2026.9.5", async () => {
     const message = await runFailed({
       ok: false,
-      code: "exit_1",
+      code: 1,
       stdout:
         "Config contains retired pre-July-2026 settings: channels.discord.guilds.g1.channels.c1.allow. Doctor cannot remove these settings safely.\n" +
         'Install OpenClaw 2026.9.7, run "openclaw doctor --fix", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions.\n',
-    });
-    expect(message).toContain("run `openclaw doctor --fix` with OpenClaw 2026.9.7 against this state directory");
-    expect(message).not.toContain("v0.9.88");
+    }, { reason: "upgrade_window_refused" });
+    expect(message).toContain("with OpenClaw 2026.9.7 there");
+    expect(message).not.toContain("2026.9.5");
   });
 
   it("recognizes the session room refusal from its message alone", async () => {
     const message = await runFailed({
       ok: false,
-      code: "exit_1",
+      code: 1,
       lastOutputLine:
         'Session field "room" predates July 2026 and is no longer supported. Preserve the original state, install OpenClaw 2026.9.5 and run "openclaw doctor --fix", then upgrade again.',
-    });
+    }, { reason: "upgrade_window_refused" });
     expect(message).toContain("upgrade support window");
-    expect(message).toContain("OpenClaw 2026.9.5 (v0.9.88–v0.9.97)");
+    expect(message).toContain("with OpenClaw 2026.9.5 there");
   });
 
   it("quotes doctor's last output line in the generic failure notice", async () => {
-    const message = await runFailed({ ok: false, code: "exit_1", stdout: "boom\n", lastOutputLine: "Config invalid: gateway.port" });
+    const message = await runFailed(
+      { ok: false, code: 1, stdout: "", lastOutputLine: "Config invalid: gateway.port" },
+      { reason: "exit_1", class: "transient", detail: "Config invalid: gateway.port" },
+    );
     expect(message).toContain("did not complete (exit_1)");
     expect(message).toContain('OpenClaw said: "Config invalid: gateway.port"');
     expect(message).toContain("the watchdog repairs and reports it");
@@ -173,13 +184,13 @@ describe("server/openclaw-boot-migration", () => {
       runBootMigration({
         ...box,
         installedVersion: "2026.9.8",
-        runDoctorFix: async () => ({ ok: false, code: "exit_1" }),
+        runDoctorFix: async () => ({ ok: false, code: 1 }),
         notify: async () => {
           throw new Error("notifier down");
         },
         logger: silentLogger(),
       }),
-    ).resolves.toEqual({ status: "failed", ran: true, reason: "exit_1" });
+    ).resolves.toMatchObject({ status: "failed", ran: true, reason: "exit_1" });
   });
 
   it("skips without running doctor when the installed version is unknown or there is no openclaw.json yet", async () => {
@@ -211,8 +222,153 @@ describe("server/openclaw-boot-migration", () => {
     const runDoctorFix = vi.fn(async () => ({ ok: true }));
     await expect(
       runBootMigration({ ...box, installedVersion: "2026.9.8", runDoctorFix, nowFn: () => kNow, logger: silentLogger() }),
-    ).resolves.toEqual({ status: "ok", ran: true });
+    ).resolves.toMatchObject({ status: "ok", ran: true });
     expect(runDoctorFix).toHaveBeenCalledTimes(1);
     expect(readCompletedForVersion({ managedDir: box.managedDir })).toBe("2026.9.8");
+  });
+
+  // Real 2026.10.2 output on the #144 layout (/data/.openclaw a symlink,
+  // /data 2775 root:node), trimmed.
+  const kSymlinkedLayoutFailure = {
+    ok: false,
+    code: 1,
+    stdout: [
+      "┌  OpenClaw doctor",
+      "Original state capture was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data. Doctor will continue; inspect retained evidence manually before restoring state.",
+      "◇  Doctor warnings ────────────────────────────────────────╮",
+      "Doctor could not complete maintenance. Check the reported service state and resolve the failure.",
+      "Atomic replace parent must be a real directory: /data/.openclaw",
+      "",
+    ].join("\n"),
+  };
+
+  it("reports the atomic-replace refusal as deterministic, with the capture cause, and remembers it", async () => {
+    const box = newBox();
+    const notify = vi.fn(async () => {});
+    const result = await runBootMigration({
+      ...box,
+      installedVersion: "2026.10.4",
+      alphaclawVersion: "0.10.6",
+      runDoctorFix: async () => kSymlinkedLayoutFailure,
+      notify,
+      nowFn: () => kNow,
+      logger: silentLogger(),
+    });
+    expect(result).toEqual({
+      status: "failed",
+      ran: true,
+      reason: "atomic_replace_refused",
+      class: "deterministic",
+      detail: "Atomic replace parent must be a real directory: /data/.openclaw",
+      captureUnavailable: { cause: "SQLite staging ancestor must not allow another user to replace its child: /data" },
+    });
+    const failed = readMigrationRecord({ managedDir: box.managedDir }).failed;
+    expect(failed).toMatchObject({ reason: "atomic_replace_refused", attempts: 1, at: kNow });
+    expect(failed.key).toMatchObject({ openclawVersion: "2026.10.4", alphaclawVersion: "0.10.6" });
+    expect(failed.key.configSha).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(failed.key)).not.toMatch(/free|bytes/i);
+  });
+
+  describe("failure memory across boots", () => {
+    const boot = (box, overrides = {}) => {
+      const runDoctorFix = vi.fn(async () => kSymlinkedLayoutFailure);
+      const run = runBootMigration({
+        ...box,
+        installedVersion: "2026.10.4",
+        alphaclawVersion: "0.10.6",
+        runDoctorFix,
+        notify: async () => {},
+        nowFn: () => kNow,
+        logger: silentLogger(),
+        ...overrides,
+      });
+      return { run, runDoctorFix: overrides.runDoctorFix || runDoctorFix };
+    };
+
+    it("an unchanged deterministic failure is skipped on the next boot", async () => {
+      const box = newBox();
+      await boot(box).run;
+      const second = boot(box);
+      await expect(second.run).resolves.toEqual({
+        status: "skipped",
+        reason: "remembered_failure",
+        class: "deterministic",
+        detail: "Atomic replace parent must be a real directory: /data/.openclaw",
+        ran: false,
+      });
+      expect(second.runDoctorFix).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a config edit", (box) => fs.writeFileSync(path.join(box.openclawDir, "openclaw.json"), '{"edited":true}\n'), {}],
+      ["a permission change", (box) => fs.chmodSync(box.openclawDir, 0o1777), {}],
+      ["a new AlphaClaw version", () => {}, { alphaclawVersion: "0.10.7" }],
+      ["a new OpenClaw version", () => {}, { installedVersion: "2026.10.5" }],
+      ["24 hours passing", () => {}, { nowFn: () => kNow + kRememberedFailureRetryMs }],
+    ])("%s retries the Doctor", async (_label, change, overrides) => {
+      const box = newBox();
+      await boot(box).run;
+      change(box);
+      const second = boot(box, overrides);
+      await expect(second.run).resolves.toMatchObject({ status: "failed", ran: true });
+      expect(second.runDoctorFix).toHaveBeenCalledTimes(1);
+    });
+
+    it("OpenClaw's meta and wizard stamps and autotune's concurrency between boots do not defeat the memory", async () => {
+      const box = newBox();
+      const configPath = path.join(box.openclawDir, "openclaw.json");
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { port: 18789 }, meta: { lastTouchedAt: "2026-10-16T10:00:00Z" } }));
+      await boot(box).run;
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ meta: { lastTouchedAt: "2026-10-16T10:05:00Z", lastTouchedVersion: "2026.10.4" }, wizard: { lastRunAt: "2026-10-16T10:05:00Z", lastRunVersion: "2026.10.4" }, agents: { defaults: { maxConcurrent: 3 } }, gateway: { port: 18789 } }, null, 2),
+      );
+      const second = boot(box);
+      await expect(second.run).resolves.toMatchObject({ status: "skipped", reason: "remembered_failure" });
+      expect(second.runDoctorFix).not.toHaveBeenCalled();
+    });
+
+    it("a repeat failure on the same key counts attempts; a success clears the memory", async () => {
+      const box = newBox();
+      await boot(box).run;
+      await boot(box, { nowFn: () => kNow + kRememberedFailureRetryMs }).run;
+      expect(readMigrationRecord({ managedDir: box.managedDir }).failed.attempts).toBe(2);
+      recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.10.4", nowFn: () => kNow + 1 });
+      const record = readMigrationRecord({ managedDir: box.managedDir });
+      expect(record.failed).toBeUndefined();
+      expect(record.completedForVersion).toBe("2026.10.4");
+    });
+
+    it("a remembered failure survives a recorded outcome from another Doctor run", async () => {
+      const box = newBox();
+      await boot(box).run;
+      recordDoctorOutcome({ managedDir: box.managedDir, outcome: { status: "failed", source: "repair" } });
+      const record = readMigrationRecord({ managedDir: box.managedDir });
+      expect(record.failed.reason).toBe("atomic_replace_refused");
+      expect(record.lastOutcome).toEqual({ status: "failed", source: "repair" });
+    });
+  });
+
+  it("a success without a safety snapshot sends one plain notice naming the cause", async () => {
+    const box = newBox();
+    const notify = vi.fn(async () => {});
+    const result = await runBootMigration({
+      ...box,
+      installedVersion: "2026.10.4",
+      runDoctorFix: async () => ({
+        ok: true,
+        code: 0,
+        stdout: "Original state capture was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data. Doctor will continue.\nDoctor complete\n",
+      }),
+      notify,
+      nowFn: () => kNow,
+      logger: silentLogger(),
+    });
+    expect(result).toMatchObject({ status: "ok", captureUnavailable: { cause: "SQLite staging ancestor must not allow another user to replace its child: /data" } });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("OpenClaw's data upgrade to 2026.10.4 finished, but without a safety snapshot. OpenClaw said: SQLite staging ancestor must not allow another user to replace its child: /data. Nothing is broken."),
+      { eventType: "health", id: expect.stringMatching(/^boot-migration-no-snapshot-2026\.10\.4-[0-9a-f]{12}$/) },
+    );
   });
 });

@@ -1145,7 +1145,7 @@ describe("server/gateway-medic", () => {
       const start = serverSource.indexOf("const gatewayMedic = createGatewayMedic({");
       expect(start).toBeGreaterThan(-1);
       const block = serverSource.slice(start, serverSource.indexOf("\n});", start));
-      expect(block).toContain("runDoctorFix: runStreamedDoctorFix,");
+      expect(block).toContain('runDoctorFix: (options) => runStreamedDoctorFix({ ...options, source: "medic" }),');
       expect(block).toContain("getOpenclawInfo: () => openclawRuntime.getInfo(),");
       expect(block).not.toContain("resolveDoctorBin");
       expect(block).not.toContain("getChannelInfo");

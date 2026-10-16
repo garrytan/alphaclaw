@@ -246,7 +246,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(report.serverPhase).toEqual(
       expect.objectContaining({
         status: kServerPhaseStatuses.recorded,
-        migration: { status: "ok", reason: null, ran: true },
+        migration: { status: "ok", reason: null, ran: true, class: null, detail: null, captureUnavailable: null },
         gatewayHeld: false,
         config: {
           sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -390,16 +390,31 @@ describe("boot-report-steps: finalizeBootReport", () => {
     await steps.recordBootReportServerPhase();
     await steps.finalizeBootReport({ migration: { status: "failed", ran: true, reason: "timed out" }, gatewayHeld: false });
     let server = readJson(bootReport.reportPath).serverPhase;
-    expect(server.migration).toEqual({ status: "failed", reason: "timed out", ran: true });
+    expect(server.migration).toEqual({ status: "failed", reason: "timed out", ran: true, class: null, detail: null, captureUnavailable: null });
     expect(server.gatewayHeld).toBe(false);
 
     await steps.finalizeBootReport({ migration: { status: "error", reason: "doctor exploded" }, gatewayHeld: true });
     server = readJson(bootReport.reportPath).serverPhase;
-    expect(server.migration).toEqual({ status: "error", reason: "doctor exploded", ran: false });
+    expect(server.migration).toEqual({ status: "error", reason: "doctor exploded", ran: false, class: null, detail: null, captureUnavailable: null });
     expect(server.gatewayHeld).toBe(true);
 
     await steps.finalizeBootReport({ migration: null });
     expect(readJson(bootReport.reportPath).serverPhase.migration).toBeNull();
+  });
+
+  it("a deterministic doctor failure carries its class, detail and missing-snapshot cause into the report", async () => {
+    const { steps, bootReport } = createFixture();
+    await steps.recordBootReportServerPhase();
+    const migration = {
+      status: "failed",
+      ran: true,
+      reason: "atomic_replace_refused",
+      class: "deterministic",
+      detail: "Atomic replace parent must be a real directory: /data/.openclaw",
+      captureUnavailable: { cause: "SQLite staging ancestor must not allow another user to replace its child: /data" },
+    };
+    await steps.finalizeBootReport({ migration });
+    expect(readJson(bootReport.reportPath).serverPhase.migration).toEqual(migration);
   });
 
   it("with no bin phase, a genuinely mismatched box is still INCONSISTENT: the runtime's version snapshot feeds the verdict, the failed `boot` event and the watchdog latch", async () => {

@@ -69,6 +69,9 @@ const createHarness = ({
   discoverServingIdentity = null,
   readProcStartTicks = null,
   pidAlive = null,
+  // Hermetic default: "unknown" keeps the pre-hold liveness counting, so a
+  // real process that happens to own a fixture pid never changes a test.
+  resolvePidVerdict = () => "unknown",
   classifyOwnershipConflict = null,
   // 2026.9.4+ owner-lease seams (openclaw-owner-lease read / reclaim shapes).
   readGatewayOwnerLease = null,
@@ -148,6 +151,7 @@ const createHarness = ({
     ...(discoverServingIdentity ? { discoverServingIdentity } : {}),
     ...(readProcStartTicks ? { readProcStartTicks } : {}),
     ...(pidAlive ? { pidAlive } : {}),
+    resolvePidVerdict,
     ...(classifyOwnershipConflict ? { classifyOwnershipConflict } : {}),
     ...(readGatewayOwnerLease ? { readGatewayOwnerLease } : {}),
     ...(reclaimGatewayOwnerLease ? { reclaimGatewayOwnerLease } : {}),
@@ -2668,6 +2672,53 @@ describe("server/watchdog", () => {
         expect(gatewayState(watchdog, true).state).toBe("running");
         expect(launchGatewayProcess).not.toHaveBeenCalled();
         expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes");
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it("a slow boot with a live child inside its ready budget is not an incident, and the deadline still fails it", async () => {
+      vi.useFakeTimers();
+      setBootPhase("ready");
+      const { watchdog, clawCmd, insertWatchdogEvent } = createHarness({
+        resolvePidVerdict: (pid) => (pid === 4242 ? "alive" : "gone"),
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child: { pid: 4242, exitCode: null } });
+        await vi.advanceTimersByTimeAsync(90_000);
+        expect(watchdog.getStatus().health).not.toBe("degraded");
+        expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4242, source: "boot" });
+        expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes", expect.anything());
+        const rows = insertWatchdogEvent.mock.calls.map(([row]) => row);
+        expect(rows.some((row) => row.eventType === "health_check" && row.status === "failed")).toBe(false);
+        expect(rows).toContainEqual(expect.objectContaining({
+          eventType: "health_check", status: "ok",
+          details: expect.objectContaining({ skipped: true, replacementPending: true, startupInProgress: true }),
+        }));
+        await vi.advanceTimersByTimeAsync(kGatewayRestartReadyTimeoutMs);
+        await watchdog.runHealthCheck();
+        expect(insertWatchdogEvent.mock.calls.map(([row]) => row)).toContainEqual(expect.objectContaining({
+          eventType: "restart", status: "failed",
+          details: expect.objectContaining({ reason: "replacement_not_ready" }),
+        }));
+      } finally {
+        watchdog.stop();
+      }
+    });
+
+    it("an unknown child verdict during a slow boot counts liveness failures as before", async () => {
+      vi.useFakeTimers();
+      setBootPhase("ready");
+      const { watchdog } = createHarness({
+        autoRepair: false,
+        resolvePidVerdict: () => "unknown",
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child: { pid: 4242, exitCode: null } });
+        await vi.advanceTimersByTimeAsync(90_000);
+        expect(watchdog.getStatus().health).toBe("degraded");
       } finally {
         watchdog.stop();
       }

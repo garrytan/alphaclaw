@@ -406,4 +406,99 @@ describe("server/doctor-fix-runner heartbeat", () => {
     expect(okResult).not.toHaveProperty("lastOutputAgeMs");
     expect(okResult).not.toHaveProperty("lastOutputLine");
   });
+
+  describe("Doctor outcome recorded for every caller", () => {
+    const kCaptureLine =
+      "Original state capture was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data. Doctor will continue; inspect retained evidence manually before restoring state.\n";
+    const makeRunner = ({ chunks, exit, managedDir, version = "2026.10.4", now = () => 5_000 }) => {
+      const runStream = {
+        runStreamed: vi.fn(async ({ onOutput }) => {
+          let tail = "";
+          for (const [text, stream] of chunks) {
+            onOutput(text, stream);
+            tail = `${tail}${text}`.slice(-64 * 1024);
+          }
+          return { ok: exit === 0, code: exit, tail };
+        }),
+      };
+      return createDoctorFixRunner({
+        openclawDir: mkOpenclawDir(),
+        doctorGuard: passthroughGuard(),
+        runStream,
+        gatewayEnv: () => kGatewayEnv,
+        notifier: { notify: vi.fn() },
+        logger: kSilentLogger,
+        managedDir,
+        getOpenclawVersion: () => version,
+        nowFn: now,
+      });
+    };
+    const readRecord = (managedDir) => JSON.parse(fs.readFileSync(path.join(managedDir, "openclaw-boot-migration.json"), "utf8"));
+
+    it("latches capture and failure lines split across chunks on stderr, even after more than 64 KiB of later output", async () => {
+      const managedDir = mkOpenclawDir();
+      const later = `${"│  migrated row\n".repeat(6000)}`;
+      expect(later.length).toBeGreaterThan(64 * 1024);
+      const run = makeRunner({
+        managedDir,
+        exit: 1,
+        chunks: [
+          ["┌  OpenClaw doctor\n", "stdout"],
+          [kCaptureLine.slice(0, 40), "stderr"],
+          ["progress on the other stream\n", "stdout"],
+          [kCaptureLine.slice(40), "stderr"],
+          ["Atomic replace parent must be ", "stderr"],
+          ["a real directory: /data/.openclaw\n", "stderr"],
+          [later, "stdout"],
+        ],
+      });
+      const result = await run({ source: "medic" });
+      expect(result.stdout).not.toContain("Original state capture");
+      expect(result.facts).toMatchObject({
+        captureState: "unavailable",
+        captureCause: "SQLite staging ancestor must not allow another user to replace its child: /data",
+        atomicReplaceLine: "Atomic replace parent must be a real directory: /data/.openclaw",
+      });
+      expect(readRecord(managedDir).lastOutcome).toEqual({
+        status: "failed",
+        class: "deterministic",
+        reason: "atomic_replace_refused",
+        detail: "Atomic replace parent must be a real directory: /data/.openclaw",
+        captureState: "unavailable",
+        captureCause: "SQLite staging ancestor must not allow another user to replace its child: /data",
+        openclawVersion: "2026.10.4",
+        source: "medic",
+        durationMs: 0,
+        at: 5_000,
+      });
+    });
+
+    it("a success from any caller records the pin as completed and clears the boot's remembered failure", async () => {
+      const managedDir = mkOpenclawDir();
+      writeJson(managedDir, "openclaw-boot-migration.json", {
+        completedForVersion: "2026.10.2",
+        at: 1,
+        failed: { key: { openclawVersion: "2026.10.4" }, reason: "atomic_replace_refused", attempts: 1, at: 1 },
+      });
+      const run = makeRunner({
+        managedDir,
+        exit: 0,
+        chunks: [["Pre-repair state retained for manual recovery at /data/x.update-captures/doctor-1/manifest.json.\nDoctor complete\n", "stdout"]],
+      });
+      await run();
+      const record = readRecord(managedDir);
+      expect(record.completedForVersion).toBe("2026.10.4");
+      expect(record.failed).toBeUndefined();
+      expect(record.lastOutcome).toMatchObject({ status: "ok", class: null, captureState: "available", source: "repair" });
+    });
+
+    it("an unknown capture stays unknown, and a failed run never marks the pin completed", async () => {
+      const managedDir = mkOpenclawDir();
+      const run = makeRunner({ managedDir, exit: 1, chunks: [["Something odd happened\n", "stdout"]] });
+      await run({ source: "boot" });
+      const record = readRecord(managedDir);
+      expect(record.completedForVersion).toBeUndefined();
+      expect(record.lastOutcome).toMatchObject({ status: "failed", class: "transient", reason: "exit_1", captureState: "unknown", detail: "Something odd happened" });
+    });
+  });
 });

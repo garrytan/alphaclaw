@@ -5,6 +5,63 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.6] - 2026-10-16
+
+Fixes #144 (Doctor failing on a symlinked state directory) and pins OpenClaw
+**2026.10.4** (npm `latest` since 2026-10-15). Engines and state schemas are
+unchanged (`>=24.16.0 <25 || >=26.1.0`; `{ state: 20, agent: 24 }`). The pin
+ships with the #144 fix because every pin bump reruns `doctor --fix` on boot,
+and on 2026.10.x that Doctor fails on every symlinked install.
+
+### Fixed
+
+- **Doctor and `openclaw config set` on a symlinked state directory (#144).**
+  OpenClaw 2026.10's atomic file writer (`@openclaw/fs-safe` 0.24.2, still in
+  2026.10.4) refuses a parent directory that is a symlink, so with
+  `/data/.openclaw` linked elsewhere every Doctor and CLI config write failed
+  with "Atomic replace parent must be a real directory". AlphaClaw now resolves
+  only `OPENCLAW_CONFIG_PATH` to the symlink's target (gateway, Doctor, CLI,
+  system cron, auth store, operator shells). `OPENCLAW_STATE_DIR` and
+  `XDG_CONFIG_HOME` stay lexical so cron partitions do not move; this
+  supersedes the `OPENCLAW_CONFIG_PATH` part of #118. A guard test fails CI
+  on a new `OPENCLAW_CONFIG_PATH` assignment outside the resolver.
+- **A slow gateway boot is no longer an incident.** While the launch's
+  replacement is still inside its ready budget and the launched child is
+  alive, a failing `/health` is booked as `health_check/ok { startupInProgress }`
+  instead of opening `gateway_degraded` (a 41 s database admission opened an
+  incident and a rescue session in #144). The ready deadline and child exits
+  behave as before.
+
+### Changed
+
+- **Pin: `openclaw` 2026.10.2 → 2026.10.4.** It brings Doctor
+  data-preservation fixes (no OAuth-profile deletion on an unreadable legacy
+  auth store, no replacement characters in rewritten memory files, plugins
+  keep their enabled flag), gateway ownership that survives sleep and clock
+  jumps, bounded shutdown waits, manual `/compact` that settles the run instead
+  of aborting it, and Tlon group-DM owner checks. The seed table and the live
+  database fixture gain rows for 2026.10.3 and 2026.10.4. The CLI, readiness,
+  lifecycle and Doctor wording AlphaClaw parses is unchanged between the
+  2026.10.2 and 2026.10.4 dists.
+- **Every Doctor run is recorded.** The shared streamed runner reads Doctor's
+  output as it streams (both streams, split lines, before the 64 KiB tail
+  evicts it) and writes `lastOutcome` into `openclaw-boot-migration.json`: status,
+  `deterministic`/`transient` class, reason, the redacted failing line, whether
+  OpenClaw's pre-repair snapshot was taken and why not, the OpenClaw version,
+  the caller (`boot`/`repair`/`medic`) and the duration. The boot report's
+  `serverPhase.migration` and diagnose carry the same detail. A Doctor that
+  completes for the pin from any caller marks the pin migrated.
+- **Deterministic boot Doctor failures are remembered, briefly.** The next
+  boot on the same versions, Doctor-relevant config and directory layout
+  starts the gateway without rerunning a failure it already saw; any change,
+  or 24 hours, retries it. Transient failures are never remembered.
+- **Honest notices.** A Doctor that succeeds without OpenClaw's safety
+  snapshot says so once, with OpenClaw's reason. The July-2026
+  upgrade-window notice no longer suggests running an older OpenClaw against
+  the live state; it says to run the bridge release on a restored copy in a
+  separate directory and says plainly when that needs a backup that may not
+  exist.
+
 ## [0.10.5] - 2026-10-12
 
 Pins OpenClaw **2026.10.2** (npm `latest` since 2026-10-12; 2026.9.9 and

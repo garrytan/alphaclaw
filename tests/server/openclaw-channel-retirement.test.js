@@ -13,7 +13,7 @@ const {
   formatRetirementNotice,
   isRetiredChannelStripe,
 } = require("../../lib/server/openclaw-channel-retirement");
-const { kBootMigrationFileName, readCompletedForVersion, writeCompletedForVersion } = require("../../lib/server/openclaw-boot-migration");
+const { kBootMigrationFileName, readCompletedForVersion, recordDoctorCompletedForPin } = require("../../lib/server/openclaw-boot-migration");
 
 const kNow = 1_788_681_600_000;
 const kPin = "2026.9.8";
@@ -84,7 +84,7 @@ describe("server/openclaw-channel-retirement", () => {
 
     it("never overwrites a boot migration record that already exists", () => {
       const box = newBox({ state: kBetaState });
-      writeCompletedForVersion({ managedDir: box.managedDir, version: kPin, nowFn: () => kNow - 5 });
+      recordDoctorCompletedForPin({ managedDir: box.managedDir, version: kPin, nowFn: () => kNow - 5 });
       retire(box);
       expect(readJson(path.join(box.managedDir, kBootMigrationFileName))).toEqual({ completedForVersion: kPin, at: kNow - 5 });
     });

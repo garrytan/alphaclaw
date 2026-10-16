@@ -20,6 +20,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync, execSync } = require("child_process");
+const { resolveOpenclawChildConfigPath } = require("../lib/server/openclaw-config-path");
 
 // constants.js snapshots ALPHACLAW_ROOT_DIR at first require — the env MUST
 // be set before any ../lib require (v0.9.38 regression: helpers/
@@ -554,7 +555,7 @@ if (fs.existsSync(envFilePath)) {
 // five-var block for the server + its children.
 process.env.OPENCLAW_HOME = rootDir;
 process.env.OPENCLAW_STATE_DIR = openclawDir;
-process.env.OPENCLAW_CONFIG_PATH = path.join(openclawDir, "openclaw.json");
+process.env.OPENCLAW_CONFIG_PATH = resolveOpenclawChildConfigPath(openclawDir);
 
 // Defaults per trigger (issue #140): the scheduled run can wait for other
 // writers; dashboard/route callers sit behind a 30 s process timeout, so they
@@ -1221,7 +1222,7 @@ if (!kSetupPassword) {
 
 process.env.OPENCLAW_HOME = rootDir;
 process.env.HOME = rootDir;
-process.env.OPENCLAW_CONFIG_PATH = path.join(openclawDir, "openclaw.json");
+process.env.OPENCLAW_CONFIG_PATH = resolveOpenclawChildConfigPath(openclawDir);
 process.env.OPENCLAW_STATE_DIR = openclawDir;
 process.env.GOG_KEYRING_PASSWORD =
   process.env.GOG_KEYRING_PASSWORD || "alphaclaw";
@@ -1633,7 +1634,7 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
     `export OPENCLAW_HOME=${shQuote(rootDir)}`,
     `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
-    `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    `export OPENCLAW_CONFIG_PATH=${shQuote(resolveOpenclawChildConfigPath(openclawDir))}`,
     supervisorMode
       ? `export OPENCLAW_SUPERVISOR_MODE=${shQuote(supervisorMode)}`
       : "unset OPENCLAW_SUPERVISOR_MODE",
@@ -1687,7 +1688,7 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     `export ALPHACLAW_ROOT_DIR=${shQuote(rootDir)}`,
     `export OPENCLAW_HOME=${shQuote(rootDir)}`,
     `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
-    `export OPENCLAW_CONFIG_PATH=${shQuote(path.join(openclawDir, "openclaw.json"))}`,
+    `export OPENCLAW_CONFIG_PATH=${shQuote(resolveOpenclawChildConfigPath(openclawDir))}`,
     "",
   ].join("\n");
   try {

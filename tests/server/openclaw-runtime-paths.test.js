@@ -61,7 +61,25 @@ describe("configured OpenClaw runtime paths", () => {
     expect(JSON.parse(result.stdout)).toEqual(input);
   });
 
-  it("passes OPENCLAW_DIR verbatim through the actual gateway environment builder", () => {
+  it("resolves only the config file's directory for a symlinked state dir (#144)", () => {
+    const { resolveOpenclawChildConfigPath } = require("../../lib/server/openclaw-config-path");
+    const real = path.join(root, "repo", "agent");
+    const alias = path.join(root, ".openclaw");
+    fs.mkdirSync(real, { recursive: true });
+    fs.symlinkSync(real, alias);
+    expect(resolveOpenclawChildConfigPath(alias)).toBe(path.join(fs.realpathSync(real), "openclaw.json"));
+    const plain = path.join(root, "plain");
+    fs.mkdirSync(plain);
+    expect(resolveOpenclawChildConfigPath(plain)).toBe(path.join(plain, "openclaw.json"));
+    const missing = path.join(root, "missing");
+    expect(resolveOpenclawChildConfigPath(missing)).toBe(path.join(missing, "openclaw.json"));
+    const target = path.join(root, "external-config.json");
+    fs.writeFileSync(target, "{}\n");
+    fs.symlinkSync(target, path.join(real, "openclaw.json"));
+    expect(fs.lstatSync(resolveOpenclawChildConfigPath(alias)).isSymbolicLink()).toBe(true);
+  });
+
+  it("keeps the state dir lexical and resolves the config path through the actual gateway environment builder", () => {
     const real = path.join(root, "agent");
     const alias = path.join(root, ".openclaw");
     fs.mkdirSync(real);
@@ -70,6 +88,6 @@ describe("configured OpenClaw runtime paths", () => {
       const env = require(${JSON.stringify(require.resolve("../../lib/server/gateway"))}).gatewayEnv();
       console.log(JSON.stringify(Object.fromEntries(["OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "XDG_CONFIG_HOME"].map(key => [key, env[key]]))));
     `], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: root, ALPHACLAW_ROOT_DIR: root } });
-    expect(JSON.parse(output)).toEqual({ OPENCLAW_STATE_DIR: alias, OPENCLAW_CONFIG_PATH: path.join(alias, "openclaw.json"), XDG_CONFIG_HOME: alias });
+    expect(JSON.parse(output)).toEqual({ OPENCLAW_STATE_DIR: alias, OPENCLAW_CONFIG_PATH: path.join(fs.realpathSync(real), "openclaw.json"), XDG_CONFIG_HOME: alias });
   });
 });

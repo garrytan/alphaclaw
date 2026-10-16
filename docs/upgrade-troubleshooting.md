@@ -20,6 +20,43 @@ starts anyway; the watchdog's crash classifier and startup medic own whatever
 the build then rejects. To retry by hand, run `openclaw doctor --fix` from the
 Watchdog terminal, read its output, then restart the gateway.
 
+The same file keeps `lastOutcome` (the newest Doctor run from boot, watchdog
+repair or medic: status, failure class and reason, the line OpenClaw failed
+on, whether OpenClaw took its pre-repair safety snapshot and why not, and how
+long it ran). After a **deterministic** boot failure (a refusal OpenClaw would
+repeat on the same state) it also keeps `failed`. While `failed` matches the
+current state (both versions, the Doctor-relevant config, the state
+directory's layout and ancestor permissions), later boots skip the
+version-change Doctor and start the gateway at once instead of rerunning the
+same failure for minutes. Any change to those retries it, and an unchanged
+state still retries once every 24 hours. Timeouts, cancellations, a full disk
+and a busy state are never remembered. `alphaclaw diagnose` shows all of it
+under OpenClaw.
+
+## Symlinked state directory (`Atomic replace parent must be a real directory`)
+
+OpenClaw 2026.10's file writer refuses to replace a file whose parent
+directory is a symlink. On a layout where `/data/.openclaw` is a symlink (for
+example to `/data/<deployment>/<agent>`), every `doctor --fix` and
+`openclaw config set` failed with `Atomic replace parent must be a real
+directory: /data/.openclaw` (#144). From v0.10.6 AlphaClaw points
+`OPENCLAW_CONFIG_PATH` at the resolved directory (the symlink's target) for the
+gateway, Doctor, the CLI, cron and the Watchdog terminal. `OPENCLAW_STATE_DIR`
+and `XDG_CONFIG_HOME` stay on the symlink path on purpose: OpenClaw keys cron
+jobs by the state path, and resolving it would hide every existing job (#117,
+#118). Nothing to do on your side; the first boot of v0.10.6 reruns the Doctor.
+
+On the same layout OpenClaw also skips its pre-repair snapshot when a parent
+of the state directory is group- or world-writable without the sticky bit:
+`Original state capture was unavailable: SQLite staging ancestor must not
+allow another user to replace its child: /data`. Doctor continues without it,
+and AlphaClaw says so in a notification, the boot report's
+`captureUnavailable` and diagnose. To let OpenClaw take the snapshot, set the
+sticky bit on the directory it names (`chmod +t /data`). That keeps group
+write and only stops users from replacing each other's files. Snapshots are
+written next to the state directory (`<state>.update-captures/`), are not
+part of backups, and need free space about the size of the state databases.
+
 ## Configuration rejected
 
 A genuine configuration rejection names what OpenClaw rejected. On an
