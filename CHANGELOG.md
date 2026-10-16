@@ -5,6 +5,76 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.8] - 2026-10-16
+
+Honest boot status: while AlphaClaw boots, the dashboard says which stage the
+boot is in, how long it has run, and — only once it has learned — how long a
+comparable boot usually takes. Every fixed "usually under a minute" claim is
+gone.
+
+### Added
+
+- **Boot timeline** (`lib/server/boot-progress/`): one per process, four
+  stages — Preparing, Upgrading OpenClaw data (only when the version-change
+  Doctor runs), Starting the gateway, Connecting channels. Every startup step
+  maps to exactly one stage and stages never reopen. OpenClaw's
+  `startup phase:` trace becomes plain-word detail text; `http.bound` moves the
+  boot to Connecting channels. Boot kind: Upgrading OpenClaw (the
+  version-change Doctor started) beats Updating AlphaClaw (first boot of this
+  AlphaClaw version) beats AlphaClaw is restarting.
+- **Terminal outcomes.** Success is verified native readiness (healthy,
+  `/readyz` ready, the new gateway's identity confirmed) — never `bootPhase=ready`.
+  Failures: boot_failed, config_error, gateway exit / crash loop, failing
+  readiness, and the ready budget running out. A user Restart, Retry upgrade or
+  repair supersedes the boot; fail-open readiness ends "unverified"; a box
+  that is not onboarded gets no timeline.
+- **Boot history** (`boot-history.json`, last 20 boots): outcome, completeness, kind
+  and OpenClaw version. "Usually about X" needs three successful boots of the
+  same kind that reached verified readiness (an OpenClaw upgrade falls back to
+  upgrades of any version, still three); failed, aborted, superseded and
+  unverified boots never train it. Otherwise the card shows elapsed time only.
+- **Boot card** in the Gateway card: the stage list (done / in progress /
+  not started), elapsed time against the server clock, "Taking longer than
+  usual" past the estimate, a "No output for …" line after two quiet minutes,
+  "Ready in X" for ten seconds, and "Last boot stopped at <stage>: …" when the
+  Gateway card does not already name the failure. Details (steps, versions,
+  Doctor) sit in the supervision details. Stage changes are announced;
+  the clock is not.
+- **`GET /boot-progress.json`** beside `/health`, ahead of auth (not an `/api` route,
+  so not in the agent-admin manifest): a whitelisted public frame — opaque
+  bootId, kind label, stage ids/statuses/timestamps, an activity sequence that
+  advances only on genuine progress, stalled/stuck verdicts, the estimate. No
+  versions, paths, Doctor or trace text, or errors. The boot placeholder
+  answers the same path with `{ kind: "preparing", bootId, stuck }`. The agent
+  actor's `/api/status` and status stream get the same public shape.
+  `/health` adds `boot: { stage, since }` while the boot sequence runs.
+- **Reconnect while AlphaClaw restarts**: the dashboard probes
+  `/boot-progress.json` while the status feed is down and shows Preparing,
+  the stage, "stalled" (no genuine progress within the budget), "stuck" (the
+  responder says so), or unreachable. A placeholder → server handoff is one
+  boot; more than three fresh boots in ten minutes is "AlphaClaw keeps
+  restarting" with logs/diagnose guidance. Host-recovery advice appears only
+  for unreachable, stuck or the restart loop.
+
+### Changed
+
+- The boot placeholder shows "AlphaClaw is restarting" (or "AlphaClaw is
+  updating" while a self-update installs) with Preparing only, follows the
+  light theme (`prefers-color-scheme` and the saved theme), keeps the meta
+  refresh for no-JS clients only, and reloads into the app when the real
+  server answers `/boot-progress.json`.
+- While the boot timeline is live the Gateway card's headline is the boot
+  kind in booting/starting, and its reason is the stage; in running the
+  headline stays Running and the reason reads "Connecting channels." in place
+  of "Up — channels still starting.". Degraded, config_error, down, flapping,
+  boot_failed and any user operation keep their own headline and actions.
+
+### Removed
+
+- Fixed duration claims: "Normally under a minute", "usually under 30
+  seconds", "(usually under 2 min)" on the overseer card, and "It usually
+  takes a few minutes" in the upgrade alert.
+
 ## [0.10.7] - 2026-10-16
 
 OpenClaw's data upgrade gets a home on the dashboard: an alert that says

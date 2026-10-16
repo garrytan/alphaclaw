@@ -72,7 +72,7 @@ describe("boot-placeholder", () => {
     expect(parseJsonBody(res)).toEqual({ status: "updating", gateway: "starting" });
   });
 
-  it("serves browsers a 503 auto-refreshing HTML page with Retry-After", () => {
+  it("serves browsers a 503 self-reloading HTML page with Retry-After", () => {
     const handler = createBootPlaceholderHandler({
       startedAtMs: 1_000,
       maxUpdatingWindowMs: 60_000,
@@ -91,10 +91,13 @@ describe("boot-placeholder", () => {
     expect(res.writeHead).toHaveBeenCalledWith(503, {
       "Content-Type": "text/html; charset=utf-8",
       "Retry-After": "5",
+      "Cache-Control": "no-store",
     });
     const body = String(res.end.mock.calls[0][0]);
-    expect(body).toContain('<meta http-equiv="refresh" content="5">');
-    expect(body).toContain("AlphaClaw is updating");
+    // The meta refresh is the no-JS fallback only; with JS the probe reloads
+    // as soon as the real server answers /boot-progress.json.
+    expect(body).toContain('<noscript><meta http-equiv="refresh" content="5"></noscript>');
+    expect(body).toContain("AlphaClaw is restarting");
   });
 
   it("renders mobile-safe: viewport meta and min-height centering", () => {
@@ -133,7 +136,7 @@ describe("boot-placeholder", () => {
     });
     expect(parseJsonBody(res)).toEqual({
       ok: false,
-      error: "AlphaClaw is updating",
+      error: "AlphaClaw is restarting",
       status: "updating",
     });
   });
@@ -175,7 +178,8 @@ describe("boot-placeholder absolute cap", () => {
     handler(createFakeReq({ url: "/", headers: { accept: "text/html" } }), res);
 
     const body = String(res.end.mock.calls[0][0]);
-    expect(body).toContain("couple of minutes");
+    expect(body).toContain("Preparing");
+    expect(body).not.toMatch(/couple of minutes|usually|under a minute/i);
     expect(body).not.toContain("Updating to OpenClaw");
     expect(body).not.toContain("migration");
   });

@@ -384,6 +384,11 @@ const bootPlaceholder = (() => {
           // sampled-ppid fallback races a parent that exits before the
           // child's first sample (fatal PORT/password guards below).
           ALPHACLAW_PARENT_PID: String(process.pid),
+          // The headline says "updating" only for a pending self-update
+          // (the marker below); every other boot is a restart.
+          ALPHACLAW_PLACEHOLDER_KIND: fs.existsSync(path.join(rootDir, ".alphaclaw-update-pending"))
+            ? "updating"
+            : "restarting",
         },
         stdio: "ignore",
       },

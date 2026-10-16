@@ -399,7 +399,7 @@ describe("server/startup", () => {
     await runOnboardedBootSequence(deps);
 
     expect(callOrder).toEqual(["runBootMigration", "startGateway"]);
-    expect(deps.runBootMigration).toHaveBeenCalledWith({ operation: expect.objectContaining({ signal: expect.anything() }) });
+    expect(deps.runBootMigration).toHaveBeenCalledWith(expect.objectContaining({ operation: expect.objectContaining({ signal: expect.anything() }) }));
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 

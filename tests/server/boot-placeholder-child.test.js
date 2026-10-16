@@ -82,7 +82,11 @@ describe("bin boot placeholder child process", () => {
     const browser = await httpGet(port, { path: "/", headers: { accept: "text/html" } });
     expect(browser.status).toBe(503);
     expect(browser.headers["retry-after"]).toBe("5");
-    expect(browser.body).toContain("AlphaClaw is updating");
+    expect(browser.body).toContain("AlphaClaw is restarting");
+
+    const progress = await httpGet(port, { path: "/boot-progress.json" });
+    expect(progress.status).toBe(200);
+    expect(JSON.parse(progress.body)).toMatchObject({ source: "placeholder", kind: "preparing", stage: "preparing", stuck: false });
 
     const api = await httpGet(port, { path: "/api/status" });
     expect(api.status).toBe(503);

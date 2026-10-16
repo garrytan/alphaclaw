@@ -460,7 +460,7 @@ describe("buildWatchdogOverseerModel — status slot", () => {
     expect(m.statusLine).toMatchObject({
       tone: "muted",
       source: "server",
-      text: "Situation report running — reading status, recent logs and doctor output · started 45s ago (usually under 2 min)",
+      text: "Situation report running — reading status, recent logs and doctor output · started 45s ago",
     });
     expect(m.situationReport.headline).toBe("Probes flapping");
     expect(m.serverPending).toBe(true);

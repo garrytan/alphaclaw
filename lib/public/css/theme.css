@@ -687,6 +687,54 @@ textarea:focus {
   border: 2px solid var(--gateway-dot-gray);
 }
 
+/* Boot card stage list (honest boot status): one row per stage — mark,
+   label, then status/duration right-aligned. Wraps instead of overflowing
+   at 375px. */
+.ac-boot-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.ac-boot-stage {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.ac-boot-stage__mark {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 11px;
+}
+.ac-boot-stage__mark .ac-gateway-dot {
+  width: 8px;
+  height: 8px;
+}
+.ac-boot-stage__label {
+  overflow-wrap: anywhere;
+}
+.ac-boot-stage__status {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ac-boot-stage--running {
+  color: var(--text);
+}
+.ac-boot-stage--running .ac-boot-stage__label {
+  font-weight: 600;
+}
+.ac-boot-stage--done .ac-boot-stage__mark {
+  color: var(--status-success);
+}
+.ac-boot-stage--failed {
+  color: var(--status-error);
+}
+
 /* Minimum touch target for small operational controls (WCAG 2.5.8). Both
    axes: an icon-only dismiss button was 44px tall but ~18px wide. */
 .ac-touch {

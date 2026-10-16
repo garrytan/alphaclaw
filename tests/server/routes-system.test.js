@@ -4053,3 +4053,40 @@ describe("server/utils/swr-cache createSwrCache", () => {
     expect(compute).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("server/routes/system boot progress per actor", () => {
+  const { createBootTimeline } = require("../../lib/server/boot-progress/timeline");
+  const snapshot = (() => {
+    const timeline = createBootTimeline({
+      bootId: "555:1",
+      startedAtMs: Date.now() - 5_000,
+      readVersions: () => ({ alphaclaw: "0.10.8", openclaw: "2026.10.4" }),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    timeline.noteDoctorStart({ fromVersion: "2026.10.2", toVersion: "2026.10.4" });
+    return timeline.snapshot();
+  })();
+  const appFor = (actor) => {
+    const deps = createSystemDeps();
+    deps.getBootSnapshot = () => snapshot;
+    const app = express();
+    app.use(express.json());
+    if (actor) app.use((req, res, next) => { req.alphaclawActor = actor; next(); });
+    registerSystemRoutes({ app, agentSessionsCacheTtlMs: 0, ...deps });
+    return app;
+  };
+
+  it("gives a human session the detailed shape (versions, Doctor, steps)", async () => {
+    const res = await request(appFor(null)).get("/api/status");
+    expect(res.body.bootProgress).toMatchObject({ stage: "upgrading", headline: "Upgrading OpenClaw", versions: { openclaw: "2026.10.4" }, doctor: { toVersion: "2026.10.4" } });
+    expect(Array.isArray(res.body.bootProgress.steps)).toBe(true);
+  });
+
+  it("cuts the agent actor's bootProgress to the public whitelist", async () => {
+    const res = await request(appFor({ type: "agent" })).get("/api/status");
+    const { kPublicFrameKeys } = require("../../lib/server/boot-progress/projections");
+    expect(Object.keys(res.body.bootProgress).sort()).toEqual([...kPublicFrameKeys].sort());
+    expect(JSON.stringify(res.body.bootProgress)).not.toMatch(/2026\.10|0\.10\.8|doctor|steps/i);
+  });
+});
+
