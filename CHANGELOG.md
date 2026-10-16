@@ -5,6 +5,62 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.7] - 2026-10-16
+
+OpenClaw's data upgrade gets a home on the dashboard: an alert that says
+whether the installed pin's `doctor --fix` finished, a way to let it keep a
+safety snapshot, and a way to retry it without restarting AlphaClaw.
+
+### Added
+
+- **Upgrade alert** under the Gateway card (with a pointer line in the card,
+  a passive banner line and a member view). It shows only while the installed
+  pin's upgrade is unfinished (`completedForVersion` differs from the pin), so
+  a repair or medic Doctor that fails after a completed upgrade never raises
+  it. Rows: didn't finish (Retry upgrade), July-2026 window refusal (the
+  bridge-release steps, no Retry), interrupted (Retry upgrade now), and an
+  admin-only, dismissible "ran without a safety snapshot" notice keyed on
+  (OpenClaw version, failing path, rule). Each failure is one plain sentence;
+  OpenClaw's raw text is behind "What OpenClaw said". Members read "An
+  administrator needs to finish this upgrade." `GET /api/openclaw/upgrade-status`.
+- **Retry upgrade** (`POST /api/openclaw/boot-migration/retry`, admin,
+  dangerous tier): the restart pipeline with Doctor between the stop and the
+  relaunch. After Doctor it runs the same post-Doctor steps as a boot (native
+  maintenance, autotune, exec approvals, usage tracker, webhooks, prompt files,
+  env, channel sync, Control UI proxy config), then prepares the launch again.
+  The lifecycle lease and the operation record are sized for the boot
+  migration's 45 min. The Doctor heartbeat keeps the record alive and says
+  when Doctor has been quiet for 2 minutes. A Doctor failure still relaunches
+  and is booked as unfinished. The outcome remembers which step failed, so Try
+  again opens the Retry upgrade confirm after a stop or Doctor failure, and
+  restarts after a launch failure. It refuses with 409 when the gateway is busy
+  (no queueing), when the upgrade already completed, for a window refusal,
+  and asks for an explicit "Retry anyway" when nothing changed since the
+  remembered failure. The progress card, the banner and notifications name the
+  upgrade ("Upgrading OpenClaw data · 2m 10s", "OpenClaw data upgraded in
+  5m 30s").
+- **Snapshot preflight**: a read-only port of OpenClaw 2026.10.4's staging and
+  space checks answers "would the next Doctor keep a pre-repair snapshot?"
+  (`captureAvailable`, `failingPath`, `failingRule`, `fixable`, free and
+  needed bytes). It never changes anything and never blocks Doctor. Shown in
+  Backups ("Upgrade safety snapshots") and in Diagnose. A container leg checks
+  it against the real Doctor on the #144 layout.
+- **Enable snapshots** (`/api/openclaw/snapshots/proposal` and `/enable`,
+  admin, dangerous tier): `chmod +t` on exactly the directories the check
+  refuses. The confirm names each path, its old and new mode, the size of each
+  snapshot and the 30-day retention. The proposal is bound to each directory's
+  path, device/inode, owner and mode, and applying it re-checks all of them on
+  directories opened with `O_NOFOLLOW`. It applies only when the simulated
+  check passes and two snapshots fit, and rolls back through the same handles
+  on a failure. Success talks about future Doctor runs only.
+- **View Doctor output**: every Doctor run keeps a redacted transcript of its
+  last 256 KB in `doctor-last-run.log` (0600), served admin-only from
+  `/api/openclaw/doctor-output`.
+- Backups now remember the archive OpenClaw verified (path, size, mtime). The
+  alert calls a backup "verified" only while that archive is unchanged, says
+  whether it predates the upgrade, and labels every other file "verification
+  unknown".
+
 ## [0.10.6] - 2026-10-16
 
 Fixes #144 (Doctor failing on a symlinked state directory) and pins OpenClaw

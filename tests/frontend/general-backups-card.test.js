@@ -18,6 +18,10 @@ vi.mock("../../lib/public/js/hooks/usePolling.js", () => ({
 vi.mock("../../lib/public/js/lib/api.js", () => ({
   createOpenclawBackup: vi.fn(),
   fetchOpenclawBackupStatus: vi.fn(),
+  // The admin-only snapshot row shares the upgrade-status read.
+  fetchUpgradeStatus: vi.fn(async () => ({ ok: true, alert: null })),
+  fetchSnapshotProposal: vi.fn(),
+  enableSnapshots: vi.fn(),
 }));
 
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";

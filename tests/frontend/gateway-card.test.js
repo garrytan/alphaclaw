@@ -578,8 +578,10 @@ describe("frontend/gateway card (server-state matrix)", () => {
     expect(findButton(tree, "Repair")).toBeUndefined();
     // Server-projected secondary actions survive alongside the line.
     expect(findButton(tree, "Refresh")).toBeUndefined();
-    const live = collectNodes(tree).find((vnode) => vnode.props?.["aria-live"] === "polite" && String(vnode.props.class || "").includes("ac-restart-line"));
+    const line = collectNodes(tree).find((vnode) => String(vnode.props?.class || "").includes("ac-restart-line"));
+    const live = collectNodes(line).find((vnode) => vnode.props?.["aria-live"] === "polite");
     expect(live).toBeTruthy();
+    expect(collectText(live).join("")).not.toContain("·");
   });
 
   it("a failed restart renders the sentence with Try again (→ restart) and View logs (→ watchdog)", () => {

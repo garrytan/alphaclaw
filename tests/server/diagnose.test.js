@@ -381,7 +381,13 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
       installedDiverged: false,
       bootMigration: { completedForVersion: kPin, at: kNow - 10_000 },
       retiredChannel: expect.objectContaining({ previous: { channel: "beta", version: "2026.9.3-beta.1", sha: null }, notifiedAt: kNow - 15_000 }),
+      // The read-only snapshot preflight for the next doctor --fix.
+      capturePreflight: expect.objectContaining({
+        stateDir: ctx.openclawDir,
+        captureRoot: `${fs.realpathSync(ctx.openclawDir)}.update-captures`,
+      }),
     });
+    expect(typeof data.capturePreflight.captureAvailable === "boolean" || data.capturePreflight.captureAvailable === null).toBe(true);
   });
 
   it("pidfile: a fresh describeServerPidDecision record plus its one audit line, stamped live", () => {

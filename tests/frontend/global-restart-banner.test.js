@@ -302,4 +302,20 @@ describe("frontend/global-restart-banner (demoted)", () => {
     expect(textAfter({ name: "waiting_ready", status: "running" })).toBe("Restarting: checking readiness");
     expect(textAfter({ name: "ready", status: "done" })).toBe("Restarting: OpenClaw is ready");
   });
+
+  it("is kind-aware for Retry upgrade and points at the upgrade alert at the lowest precedence", () => {
+    const upgrade = { kind: "openclaw_upgrade", operationId: "u" };
+    expect(buildGlobalBannerModel({ shell: { restartOperation: { ...upgrade, phase: "running", steps: [{ name: "upgrading_data", status: "running" }] } } }).text).toBe(
+      "Upgrading OpenClaw data: running OpenClaw's doctor --fix (gateway stopped)",
+    );
+    expect(buildGlobalBannerModel({ shell: { restartOperation: { ...upgrade, phase: "failed" } } }).text).toBe("OpenClaw's data upgrade retry failed");
+    expect(buildGlobalBannerModel({ shell: { restartOperation: { ...upgrade, phase: "succeeded", upgrade: { doctor: "failed" } } } }).text).toBe(
+      "OpenClaw is running again, but its data upgrade didn't finish",
+    );
+    const alert = { kind: "failed", headline: "OpenClaw's data upgrade didn't finish" };
+    expect(buildGlobalBannerModel({ shell: { upgradeAlert: alert } })).toEqual({ kind: "upgrade", text: alert.headline, showView: true });
+    // Restart-required outranks it; the admin-only snapshot notice never shows.
+    expect(buildGlobalBannerModel({ shell: { upgradeAlert: alert, restartRequired: true } }).kind).toBe("required");
+    expect(buildGlobalBannerModel({ shell: { upgradeAlert: { kind: "snapshotless", headline: "x" } } })).toBeNull();
+  });
 });

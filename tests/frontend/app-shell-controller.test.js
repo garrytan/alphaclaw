@@ -110,6 +110,9 @@ vi.mock("preact/hooks", () => {
 });
 
 vi.mock("../../lib/public/js/lib/api.js", () => ({
+  // The OpenClaw data upgrade alert's shared read (no alert by default).
+  fetchUpgradeStatus: vi.fn(async () => ({ ok: true, alert: null })),
+  retryUpgradeAsync: vi.fn(),
   fetchStatus: vi.fn(),
   fetchOnboardStatus: vi.fn(),
   fetchAuthStatus: vi.fn(),

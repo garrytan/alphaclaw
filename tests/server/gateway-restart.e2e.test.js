@@ -1214,6 +1214,67 @@ describe("server/gateway restart drills (e2e)", () => {
   //          ├ new tree answers ─▶ requested {replace} … ok {verified: true}   (REPLACE DRILL)
   //          └ incumbent survives ─▶ failed {stop_failed}                      (REPLACE-STOP-FAILED)
   //   lock lease expires mid ready-wait ─▶ aborted_by_caller, poll ends       (LEASE-FENCE DRILL)
+  it("Retry upgrade runs Doctor between the real stop and the relaunch, re-prepares, and persists kind + verdict for a reload (UPGRADE DRILL)", async () => {
+    const fake = createFakeGateway({ portOpen: true });
+    const harness = createDrillHarness({ fake });
+    const seen = [];
+    const managedDir = mkStateDir();
+    harness.deps.runDoctorFix = vi.fn(async () => {
+      seen.push(`doctor after ${fake.spawnCalls.map((call) => call.args.slice(0, 2).join(" ")).join(", ")}`);
+      return { ok: false, code: 1, stdout: "Failing check plugins: broken\n", stderr: "" };
+    });
+    harness.deps.convergeAfterDoctor = vi.fn(async () => {
+      seen.push("converge");
+      return { held: false };
+    });
+    harness.deps.managedDir = managedDir;
+    harness.deps.getInstalledOpenclawVersion = () => "2026.10.4";
+    harness.deps.requireAdmin = (req, res, next) => next();
+    harness.deps.watchdog.onExpectedRestartSettled = vi.fn();
+    const app = createApp(harness.deps);
+    const sseHandler = captureOperationsSseHandler(harness.operationEvents);
+
+    const res = await request(app).post("/api/openclaw/boot-migration/retry").send({});
+    expect(res.status).toBe(202);
+    const client = openSseClient(sseHandler, res.body.operationId);
+    try {
+      await waitUntil(() => client.events().some((event) => event.event === "done"));
+      const steps = client.events().filter((e) => e.event === "step").map(stepTuple);
+      expect(steps).toEqual([
+        ["step", "Checking plugins", "running"],
+        ["step", "Checking plugins", "skipped"],
+        ["step", "Stopping gateway", "running"],
+        ["step", "Stopping gateway", "done"],
+        ["step", "Upgrading OpenClaw data", "running"],
+        ["step", "Upgrading OpenClaw data", "failed"],
+        ["step", "Re-applying AlphaClaw settings", "running"],
+        ["step", "Re-applying AlphaClaw settings", "done"],
+        ["step", "Checking plugins", "running"],
+        ["step", "Checking plugins", "skipped"],
+        ["step", "Starting gateway", "running"],
+        ["step", "Starting gateway", "done"],
+        ["step", "Waiting for health check", "running"],
+        ["step", "Ready", "done"],
+      ]);
+      // Doctor ran with the old gateway asked to stop and before the relaunch.
+      expect(seen).toEqual(["doctor after gateway restart", "converge"]);
+      expect(fake.spawnCalls.map((call) => call.args.slice(0, 2))).toEqual([["gateway", "restart"], ["gateway", "run"]]);
+      const done = client.events().find((event) => event.event === "done");
+      expect(done.data).toMatchObject({ ok: true, upgrade: { doctor: "failed", reason: "failing_check" }, retryTarget: "upgrade" });
+      // A reload reads the same story from the persisted record.
+      const status = await request(app).get("/api/restart-status");
+      expect(status.body.lastOperation).toMatchObject({
+        kind: "openclaw_upgrade",
+        status: "succeeded",
+        upgrade: { doctor: "failed", reason: "failing_check" },
+        retryTarget: "upgrade",
+      });
+      expect(harness.deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
+    } finally {
+      client.close();
+    }
+  });
+
   describe("watchdog repair `replace` through the real cold restart", () => {
     it("replaces a wedged incumbent after three failed probes: Doctor skipped, the stop ladder + `gateway run` on the fake, restart/repair/requested {intent: replace} then ok {verified: true} once the new child's tree answers (REPLACE DRILL)", async () => {
       const fake = createFakeGateway({

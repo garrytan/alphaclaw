@@ -50,6 +50,7 @@ import {
   kOptimisticStepName,
   restartStartedAtMs,
   describeRestartRecovered,
+  retryTargetFor,
 } from "../../lib/public/js/components/restart-progress-card.js";
 import { formatLocaleTime } from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
@@ -189,8 +190,12 @@ describe("frontend/restart-progress-card", () => {
     expect(findAllByType(tree, "li")).toEqual([]);
     expect(findAllByType(tree, ActionButton)).toEqual([]);
     const line = findAllByType(tree, "p")[0];
-    expect(line.props["aria-live"]).toBe("polite");
     expect(line.props.tabindex).toBe("-1");
+    // Only the phase is announced; the once-a-second clock stays outside
+    // the live region so screen readers don't read every tick.
+    expect(line.props["aria-live"]).toBeUndefined();
+    const live = collectNodes(line).find((vnode) => vnode.props?.["aria-live"] === "polite");
+    expect(treeText(live)).toBe("Restarting: starting OpenClaw");
     const dot = findAllByType(tree, "span").find((s) => String(s.props.class || "").includes("ac-gateway-dot"));
     expect(String(dot.props.class)).toContain("ac-gateway-dot--pulse");
     expect(String(dot.props.class)).toContain("ac-gateway-dot--cyan");
@@ -385,5 +390,74 @@ describe("frontend/restart-progress-card", () => {
   it("renders nothing without an operation", () => {
     harness.beginRender();
     expect(RestartProgressCard({ operation: null })).toBeNull();
+  });
+
+  describe("Retry upgrade (kind openclaw_upgrade)", () => {
+    const upgradeOp = (extra = {}) => ({ operationId: "op-u", kind: "openclaw_upgrade", startedAt: kNow - 130_000, ...extra });
+
+    it("running: 'Upgrading OpenClaw data' with the Doctor phase, and says so when Doctor goes quiet", () => {
+      const running = renderCard({
+        operation: upgradeOp({ phase: "running", steps: [step("upgrading_data", "running", { at: kNow - 130_000 })] }),
+      });
+      expect(treeText(running)).toContain("Upgrading OpenClaw data: running OpenClaw's doctor --fix (gateway stopped) · 2m 10s");
+      const quiet = renderCard({
+        operation: upgradeOp({
+          phase: "running",
+          steps: [
+            step("upgrading_data", "running", { at: kNow - 300_000 }),
+            step("upgrading_data", "running", { at: kNow - 10_000, detail: { sinceOutputMs: 150_000 } }),
+          ],
+        }),
+      });
+      expect(treeText(quiet)).toContain("no output for 2m 30s, still running");
+    });
+
+    it("succeeded with a completed Doctor: 'OpenClaw data upgraded in …'", () => {
+      const tree = renderCard({ operation: upgradeOp({ phase: "succeeded", durationMs: 330_000, upgrade: { doctor: "ok" } }) });
+      expect(treeText(tree)).toContain("OpenClaw data upgraded in 5m 30s");
+    });
+
+    it("unfinished: running again but the Doctor failed — yellow, Try again opens the Retry upgrade confirm", () => {
+      const onRetry = vi.fn();
+      const onRetryUpgrade = vi.fn();
+      const tree = renderCard({
+        operation: upgradeOp({ phase: "succeeded", upgrade: { doctor: "failed", sentence: "One of OpenClaw's upgrade checks failed: plugins." }, retryTarget: "upgrade" }),
+        onRetry,
+        onRetryUpgrade,
+      });
+      expect(treeText(tree)).toContain("OpenClaw is running again, but the data upgrade didn't finish: one of OpenClaw's upgrade checks failed: plugins.");
+      expect(String(findAllByType(tree, "span").find((s) => String(s.props.class || "").includes("ac-gateway-dot")).props.class)).toContain("yellow");
+      findButton(tree, "Try again").props.onClick();
+      expect(onRetryUpgrade).toHaveBeenCalledTimes(1);
+      expect(onRetry).not.toHaveBeenCalled();
+    });
+
+    it("failed after a completed Doctor: the server sentence, and the button is a plain Restart", () => {
+      const onRetry = vi.fn();
+      const onRetryUpgrade = vi.fn();
+      const tree = renderCard({
+        operation: upgradeOp({
+          phase: "failed",
+          upgrade: { doctor: "ok" },
+          retryTarget: "restart",
+          error: { code: "launch_failed", message: "Data upgraded, but OpenClaw didn't start.", recovery: { status: "will_check" } },
+        }),
+        onRetry,
+        onRetryUpgrade,
+      });
+      expect(treeText(tree)).toContain("Data upgraded, but OpenClaw didn't start. Automatic recovery is checking now.");
+      findButton(tree, "Restart").props.onClick();
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRetryUpgrade).not.toHaveBeenCalled();
+    });
+
+    it("retry routing comes from the persisted record after a reload, never from a guess about the card", () => {
+      // Shapes refreshRestartStatus revives from /api/restart-status lastOperation.
+      expect(retryTargetFor({ kind: "openclaw_upgrade", retryTarget: "restart" })).toBe("restart");
+      expect(retryTargetFor({ kind: "openclaw_upgrade", retryTarget: "upgrade" })).toBe("upgrade");
+      expect(retryTargetFor({ kind: "openclaw_upgrade", upgrade: { doctor: "not_run" } })).toBe("upgrade");
+      expect(retryTargetFor({ kind: "openclaw_upgrade", upgrade: { doctor: "ok" } })).toBe("restart");
+      expect(retryTargetFor({ kind: "gateway_restart", retryTarget: "upgrade" })).toBe("restart");
+    });
   });
 });
