@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.9] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `9cfa427c`): pasting into the Envars "add
+variable" row no longer rewrites the key you already typed.
+
+### Fixed
+
+- **Envars paste into the value field.** Pasting `KEY=VALUE` into the value
+  input replaced the key with `KEY`, and typing or pasting any value that
+  contained `=` (base64 padding, URLs with a query string, connection
+  strings) split it into a new key and a truncated value. The value field now
+  only ever sets the value: a pasted `KEY=VALUE` line contributes its value,
+  multi-line pastes still bulk-import, and anything whose left side is not an
+  env-var name (`[A-Z_][A-Z0-9_]*` for the value field, with an optional
+  `export ` prefix) is pasted as typed. The parser moved to
+  `lib/public/js/components/envars-paste.js` with unit tests.
+
 ## [0.10.8] - 2026-10-16
 
 Honest boot status: while AlphaClaw boots, the dashboard says which stage the
