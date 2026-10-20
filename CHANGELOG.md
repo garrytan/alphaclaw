@@ -5,6 +5,46 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.15] - 2026-10-21
+
+A signed-in admin can now open the Control UI by typing `/openclaw/...`
+straight into a tab. Before, the gateway token only reached a tab through the
+dashboard's Open button (`/gateway/launch`, `#token=`), and the sidebar logout
+clears browser storage, so a fresh tab, a new browser, or a log-out and log-in
+landed on "This Gateway expects its token". On 2026.10.5 and later a fresh
+`/openclaw/chat/<session>` showed a 404 "Conversation unavailable" page instead.
+
+### Fixed
+
+- **Direct Control UI open** (`lib/server/control-ui-attach.js`,
+  `routes/control-ui-attach.js`). The first top-level navigation of a signed-in
+  admin session to `/openclaw/*` on a token-mode gateway detours once through
+  `/gateway/attach`, a page outside the Control UI service worker's scope.
+  That page fetches the gateway token with a same-origin `POST` (custom header,
+  `no-store`) and puts it in the tab's session storage under the key the
+  Control UI reads, then returns to the requested URL. A cookie bound to the
+  session (a digest of it, `Path=/openclaw`) marks the session attached, so
+  reloads and later navigations go straight through, and a new login attaches
+  again once. The token never rides a URL, a redirect, a log line or a
+  cacheable response. Members, team mode (trusted-proxy), password mode, the
+  legacy mount, and signed-out requests are unchanged (a signed-out Control UI
+  resource still gets `401`; the attach `POST` answers `401`, never a
+  redirect). The agent actor cannot reach it: neither route is under `/api`.
+  `/gateway/launch` marks its session attached too, and the marker cookie is
+  stripped before anything is forwarded to the gateway.
+
+### Tests
+
+- `tests/live/control-ui-direct-open.e2e.test.js` (live tier, real Chromium and
+  gateway): a fresh browser typing `/openclaw/chat` connects, chats, and
+  survives a reload; a fresh tab on `/openclaw/chat/main` connects instead of
+  the public-share 404; logging out gives the login page and `401`s, and
+  logging back in connects directly. The gateway token never appears in a
+  requested URL, a `Location` header, or the server log. The shared live
+  install boot moved to `tests/live/control-ui-live.js`.
+- Unit and route coverage for the redirect decision, target sanitizing, the
+  attach page, and the token `POST`'s same-origin and admin gates.
+
 ## [0.10.14] - 2026-10-20
 
 The Control UI at `/openclaw` now connects on every hostname an install is
