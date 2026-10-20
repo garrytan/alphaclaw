@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.12] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `eeaa19e0` preinstall part, `6ef4a8f3`):
+installing on an unsupported Node now fails at install time instead of at
+first boot.
+
+### Added
+
+- **`preinstall` Node runtime check.** `lib/scripts/check-node-runtime.js`
+  runs `assertSupportedNodeVersion` (`>=24.16.0 <25 || >=26.1.0`, the same
+  range as `engines.node`) and exits 1 with an upgrade hint. npm only warns
+  on `engines`, so an install on Node 22 or 25 used to succeed and then fail
+  when the server started. `--ignore-scripts` installs skip it, and the
+  boot-time check stays.
+
+### Changed
+
+- `.env.local` is git-ignored like `.env`.
+
 ## [0.10.11] - 2026-10-20
 
 Upstream sync (chrysb/alphaclaw `4fc0be62`, the part the fork still lacked):
