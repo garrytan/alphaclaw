@@ -80,6 +80,24 @@ describe("server/model-catalog-cache", () => {
         key,
       ).toBe(true);
     }
+    // Upstream sync (043ac5de): the 2026.7.1-2 snapshot predates Claude 5.5,
+    // GPT-6.x and Gemini 3.1 Pro, and a 2026.10.4 box without a running
+    // gateway lists no provider models — onboarding renders from these rows.
+    for (const key of [
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-haiku-5-5",
+      "openai/gpt-6.1-sol",
+      "openai/gpt-6-astra",
+      "openai/gpt-6-sol",
+      "openai/gpt-6-luna",
+      "google/gemini-3.1-pro-preview",
+    ]) {
+      expect(
+        kFallbackOnboardingModels.some((model) => model.key === key),
+        key,
+      ).toBe(true);
+    }
     // Output stays localeCompare-sorted by key end to end.
     const keys = kFallbackOnboardingModels.map((model) => model.key);
     expect(keys).toEqual([...keys].sort((a, b) => a.localeCompare(b)));
@@ -564,5 +582,69 @@ describe("server/model-catalog-cache", () => {
         { key: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7" },
       ]),
     });
+  });
+  it("forces a fresh catalog load when requested", async () => {
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-model-catalog-force-refresh-"),
+    );
+    const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
+    let resolveRefresh;
+    const shellCmd = vi
+      .fn()
+      .mockResolvedValueOnce("{}")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          }),
+      );
+    const parseJsonFromNoisyOutput = vi
+      .fn()
+      .mockReturnValueOnce({
+        models: [{ key: "openai/gpt-cached", name: "Cached" }],
+      })
+      .mockReturnValueOnce({
+        models: [{ key: "moonshot/kimi-k2.5", name: "Kimi K2.5" }],
+      });
+    const cache = createModelCatalogCache({
+      cachePath,
+      shellCmd,
+      parseJsonFromNoisyOutput,
+      normalizeOnboardingModels: normalizeModels,
+      readOpenclawVersion: vi.fn(() => "2026.10.4"),
+    });
+
+    await cache.getCatalogResponse();
+    await flushPromises();
+    const initial = await cache.getCatalogResponse();
+    expect(initial).toEqual(
+      expect.objectContaining({ source: "openclaw", stale: false, refreshing: false }),
+    );
+    expect(shellCmd).toHaveBeenCalledTimes(1);
+
+    const refreshing = await cache.getCatalogResponse({ forceRefresh: true });
+    expect(refreshing).toEqual({
+      ok: true,
+      source: "cache",
+      fetchedAt: initial.fetchedAt,
+      stale: true,
+      refreshing: true,
+      models: initial.models,
+    });
+    await vi.waitFor(() => expect(shellCmd).toHaveBeenCalledTimes(2));
+
+    resolveRefresh("{}");
+    await flushPromises();
+
+    const refreshed = await cache.getCatalogResponse();
+    expect(refreshed).toEqual(
+      expect.objectContaining({
+        source: "openclaw",
+        stale: false,
+        refreshing: false,
+        models: normalizeModels([{ key: "moonshot/kimi-k2.5", name: "Kimi K2.5" }]),
+      }),
+    );
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 });

@@ -102,6 +102,24 @@ describe("onboarding/validation", () => {
     expect(res.data.selectedProvider).toBe("openai-codex");
   });
 
+  it("accepts the GPT-6 family with Codex OAuth only", () => {
+    for (const modelKey of [
+      "openai/gpt-6.1-sol",
+      "openai/gpt-6-astra",
+      "openai/gpt-6-sol",
+      "openai/gpt-6-luna",
+    ]) {
+      const res = validateOnboardingInput({
+        vars: kBaseVars(),
+        modelKey,
+        resolveModelProvider: kResolveProvider,
+        hasCodexOauthProfile: () => true,
+      });
+      expect(res.ok).toBe(true);
+      expect(res.data.selectedProvider).toBe("openai-codex");
+    }
+  });
+
   it("accepts GPT-5.6 Codex tiers with Codex OAuth", () => {
     for (const modelKey of [
       "openai/gpt-5.6-sol",

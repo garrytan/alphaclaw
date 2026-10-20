@@ -39,28 +39,53 @@ describe("frontend/model-config", () => {
     const modelConfig = await loadModelConfig();
     const featured = modelConfig.getFeaturedModels([
       { key: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
+      { key: "anthropic/claude-sonnet-5-5", label: "Sonnet 5.5" },
+      { key: "anthropic/claude-haiku-5-5", label: "Haiku 5.5" },
+      { key: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { key: "openai/gpt-6-luna", label: "GPT-6 Luna" },
+      { key: "openai-codex/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { key: "anthropic/claude-opus-5-5", label: "Opus 5.5" },
       { key: "anthropic/claude-opus-4-8", label: "Opus 4.8" },
-      { key: "anthropic/claude-opus-4-7", label: "Opus 4.7" },
-      { key: "anthropic/claude-opus-4-6", label: "Opus 4.6" },
       { key: "openai/gpt-5.5", label: "GPT-5.5" },
-      { key: "openai/gpt-5.6-sol", label: "GPT-5.6 Sol" },
-      { key: "openai-codex/gpt-5.4", label: "GPT-5.4" },
+      { key: "openai/gpt-6-astra", label: "GPT-6 Astra" },
+      { key: "openai/gpt-6-sol", label: "GPT-6 Sol" },
       { key: "openai-codex/gpt-5.5", label: "GPT-5.5" },
     ]);
 
     expect(featured.map((entry) => entry.key)).toEqual([
-      "anthropic/claude-opus-4-8",
-      "anthropic/claude-opus-4-7",
-      "anthropic/claude-opus-4-6",
-      "openai/gpt-5.6-sol",
-      "openai/gpt-5.5",
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-haiku-5-5",
+      "openai/gpt-6.1-sol",
+      "openai/gpt-6-astra",
+      "openai/gpt-6-luna",
       "google/gemini-3.1-pro-preview",
     ]);
-    expect(featured[0]?.featuredLabel).toBe("Opus 4.8");
-    expect(featured[1]?.featuredLabel).toBe("Opus 4.7");
-    expect(featured[3]?.featuredLabel).toBe("GPT-5.6 Sol");
-    expect(featured[4]?.featuredLabel).toBe("GPT-5.5");
-    expect(featured[5]?.featuredLabel).toBe("Gemini 3.1 Pro");
+    expect(featured.map((entry) => entry.featuredLabel)).toEqual([
+      "Opus 5.5",
+      "Sonnet 5.5",
+      "Haiku 5.5",
+      "GPT-6.1 Sol",
+      "GPT-6 Astra",
+      "GPT-6 Luna",
+      "Gemini 3.1 Pro",
+    ]);
+  });
+
+  it("routes the GPT-6 family through Codex OAuth with friendly labels", async () => {
+    const modelConfig = await loadModelConfig();
+    for (const [key, label] of [
+      ["openai/gpt-6.1-sol", "GPT-6.1 Sol"],
+      ["openai/gpt-6-astra", "GPT-6 Astra"],
+      ["openai/gpt-6-sol", "GPT-6 Sol"],
+      ["openai/gpt-6-luna", "GPT-6 Luna"],
+    ]) {
+      expect(modelConfig.getOnboardingModelProvider({ modelKey: key })).toBe("openai-codex");
+      expect(modelConfig.getFriendlyModelLabel(key)).toBe(label);
+      expect(
+        modelConfig.withAlwaysAvailableModels([]).find((model) => model.key === key),
+      ).toEqual(expect.objectContaining({ provider: "openai", agentRuntime: { id: "codex" } }));
+    }
   });
 
   it("removes deprecated Codex 5.3 models from onboarding", async () => {

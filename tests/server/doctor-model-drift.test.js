@@ -132,7 +132,7 @@ describe("server/doctor/model-registry", () => {
     ).toBeNull();
     // Unrestricted: the newest same-tier entry wins (declaration order, no
     // float version math).
-    expect(findNewerSameTierEntry(entry).id).toBe("claude-opus-5");
+    expect(findNewerSameTierEntry(entry).id).toBe("claude-opus-5-5");
     // A deprecated model is never offered as a successor.
     const opus45 = getAnthropicRegistryEntry("claude-opus-4-5");
     expect(
@@ -1154,9 +1154,9 @@ describe("server/doctor/model-drift catalog fallback", () => {
             row.sourceKey === "det:model-drift:binding-deprecated:claude-opus-4-6",
         );
       expect(card).toBeTruthy();
-      // The bundled bootstrap catalog carries opus-4-8 (not opus-5), so the
-      // fallback path is visible in the successor the card names.
-      expect(card.recommendation).toContain("anthropic/claude-opus-4-8");
+      // The bundled fallback carries opus-5-5 (a curated row) but not opus-5,
+      // so the fallback path is visible in the successor the card names.
+      expect(card.recommendation).toContain("anthropic/claude-opus-5-5");
       // And the catalog-miss hedge proves source === "bootstrap" flowed through.
       const missCard = doctorDb
         .getDoctorCardsByRunId(run.runId)

@@ -108,6 +108,32 @@ describe("server/routes/models", () => {
     expect(result.body).toMatchObject({ ok: true, authRuntimeRefreshed: false, restartRequired: true });
   });
 
+  it("POST /api/models/refresh starts a catalog load even when the cache is fresh", async () => {
+    const deps = createModelDeps();
+    deps.shellCmd.mockResolvedValue("noise");
+    deps.parseJsonFromNoisyOutput.mockReturnValue({
+      models: [{ key: "openai/gpt-6-astra", name: "GPT-6 Astra" }],
+    });
+    deps.normalizeOnboardingModels.mockReturnValue([
+      { key: "openai/gpt-6-astra", provider: "openai", label: "GPT-6 Astra" },
+    ]);
+    const app = createApp(deps);
+
+    await request(app).get("/api/models");
+    await flushPromises();
+    const fresh = await request(app).get("/api/models");
+    expect(fresh.body).toEqual(expect.objectContaining({ source: "openclaw", stale: false }));
+    expect(deps.shellCmd).toHaveBeenCalledTimes(1);
+
+    const res = await request(app).post("/api/models/refresh");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(
+      expect.objectContaining({ ok: true, source: "cache", stale: true, refreshing: true }),
+    );
+    await vi.waitFor(() => expect(deps.shellCmd).toHaveBeenCalledTimes(2));
+  });
+
   it("bootstraps with the bundled catalog, then returns normalized models from openclaw output", async () => {
     const deps = createModelDeps();
     deps.shellCmd.mockResolvedValue("noise");

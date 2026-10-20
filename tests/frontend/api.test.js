@@ -1167,6 +1167,7 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["logout", [], "/api/auth/logout", "POST"],
     ["fetchOnboardStatus", [], "/api/onboard/status", undefined],
     ["fetchModels", [], "/api/models", undefined],
+    ["refreshModels", [], "/api/models/refresh", "POST"],
     ["fetchModelStatus", [], "/api/models/status", undefined],
     [
       "fetchThinkingOptions",

@@ -1,6 +1,26 @@
 {
-  "comment": "Hand-curated catalog rows merged into kFallbackOnboardingModels at load (lib/server/constants.js). model-catalog-bootstrap.json is regenerated VERBATIM from the pinned CLI by scripts/refresh-model-bootstrap.mjs, which would erase hand edits — rows the pinned CLI does not emit live here instead. On a key collision the generated row wins (freshest-from-CLI beats hand-curated). Added for upstream PR #111: the 2026.7.1-2 CLI emits no direct minimax/minimax-cn rows.",
+  "comment": "Hand-curated catalog rows merged into kFallbackOnboardingModels at load (lib/server/constants.js). model-catalog-bootstrap.json is regenerated VERBATIM from the pinned CLI by scripts/refresh-model-bootstrap.mjs, which would erase hand edits \u2014 rows the pinned CLI does not emit live here instead. On a key collision the generated row wins (freshest-from-CLI beats hand-curated). Added for upstream PR #111: the 2026.7.1-2 CLI emits no direct minimax/minimax-cn rows. Claude 5.5, GPT-6.x and Gemini 3.1 Pro rows added for the upstream 043ac5de sync: the 2026.7.1-2 snapshot predates them, and on 2026.10.4 a box without a running gateway lists no provider models, so onboarding renders from this fallback.",
   "models": [
+    {
+      "key": "anthropic/claude-haiku-5-5",
+      "provider": "anthropic",
+      "label": "Claude Haiku 5.5"
+    },
+    {
+      "key": "anthropic/claude-opus-5-5",
+      "provider": "anthropic",
+      "label": "Claude Opus 5.5"
+    },
+    {
+      "key": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "label": "Claude Sonnet 5.5"
+    },
+    {
+      "key": "google/gemini-3.1-pro-preview",
+      "provider": "google",
+      "label": "Gemini 3.1 Pro Preview"
+    },
     {
       "key": "minimax-cn/MiniMax-M2.7",
       "provider": "minimax-cn",
@@ -30,6 +50,38 @@
       "key": "minimax/MiniMax-M3",
       "provider": "minimax",
       "label": "MiniMax-M3"
+    },
+    {
+      "key": "openai/gpt-6-astra",
+      "provider": "openai",
+      "label": "GPT-6 Astra",
+      "agentRuntime": {
+        "id": "codex"
+      }
+    },
+    {
+      "key": "openai/gpt-6-luna",
+      "provider": "openai",
+      "label": "GPT-6 Luna",
+      "agentRuntime": {
+        "id": "codex"
+      }
+    },
+    {
+      "key": "openai/gpt-6-sol",
+      "provider": "openai",
+      "label": "GPT-6 Sol",
+      "agentRuntime": {
+        "id": "codex"
+      }
+    },
+    {
+      "key": "openai/gpt-6.1-sol",
+      "provider": "openai",
+      "label": "GPT-6.1 Sol",
+      "agentRuntime": {
+        "id": "codex"
+      }
     }
   ]
 }

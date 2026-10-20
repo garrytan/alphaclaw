@@ -5,6 +5,51 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.10] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `043ac5de`, model parts of `3349d7b8` and
+`d19b2e53`, `81bcf5c7`): onboarding and the Models page catch up with the
+models OpenClaw 2026.10.4 actually ships.
+
+### Fixed
+
+- **Codex OAuth onboarding rejected the GPT-6 family.** With only a ChatGPT
+  (Codex OAuth) sign-in, choosing `openai/gpt-6-astra` — the pinned OpenClaw's
+  own OpenAI and Codex default — or `openai/gpt-6.1-sol` failed with
+  "Missing credentials for selected provider openai", because the Codex model
+  set stopped at GPT-5.6. GPT-6.1 Sol, GPT-6 Astra, GPT-6 Sol and GPT-6 Luna
+  are now Codex models on the server and in the picker (labels and
+  always-available rows).
+
+### Changed
+
+- **Onboarding defaults follow 2026.10.4.** The default model is Claude Opus
+  5.5 (`ANTHROPIC_API_DEFAULT_MODEL_REF`); a fresh OpenAI or Codex setup
+  preselects `openai/gpt-6-astra` when the catalog lists it, then falls back
+  to the GPT-5.6 defaults. Featured models: Opus 5.5, Sonnet 5.5, Haiku 5.5,
+  GPT-6.1 Sol, GPT-6 Astra, GPT-6 Luna, Gemini 3.1 Pro (upstream's Gemini 3.8
+  Flash is not in 2026.10.4's catalog).
+- **Drift Doctor knows the Claude 5.5 family and Fable 5.1.** The model
+  ontology (`doctor/model-registry.js`) gains Claude Opus 5.5, Sonnet 5.5,
+  Haiku 5.5 and Fable 5.1 as current models (1M context, 128K output, from the
+  pinned anthropic manifest). Without them every 2026.10.4 catalog that lists
+  them raised a "taxonomy has consistency gaps" card (unclassified anthropic
+  model); a deprecated binding now names the newest available same-tier
+  successor (Opus 4.6 → Opus 5.5). Existing statuses are unchanged, so no new
+  "newer model available" nudges.
+- **Fallback catalog rows** for Claude Opus/Sonnet/Haiku 5.5, the four GPT-6
+  models and Gemini 3.1 Pro, in `model-catalog-curated.json` and the minimal
+  fallback. The bundled snapshot is from 2026.7.1-2, and on 2026.10.4 a box
+  without a running gateway lists no provider models, so first-run onboarding
+  renders from this fallback.
+
+### Added
+
+- **The Models page re-reads the catalog when it opens.** New
+  `POST /api/models/refresh` skips the cache and the retry backoff and returns
+  the usual catalog payload (the existing poll picks up the fresh list).
+  Agent Administration op `models.catalog.refresh` (write tier).
+
 ## [0.10.9] - 2026-10-20
 
 Upstream sync (chrysb/alphaclaw `9cfa427c`): pasting into the Envars "add
