@@ -25,7 +25,7 @@ describe("frontend/model-catalog", () => {
     ).toBe("anthropic/claude-opus-4-6");
   });
 
-  it("defaults to Claude Opus 4.8 when it is in the catalog", async () => {
+  it("defaults to Claude Opus 5.5 when it is in the catalog", async () => {
     const { getInitialOnboardingModelKey } = await import(
       "../../lib/public/js/lib/model-catalog.js"
     );
@@ -34,14 +34,14 @@ describe("frontend/model-catalog", () => {
       getInitialOnboardingModelKey({
         catalog: [
           { key: "openai-codex/gpt-5.4", label: "GPT-5.4" },
-          { key: "anthropic/claude-opus-4-7", label: "Opus 4.7" },
-          { key: "anthropic/claude-opus-4-8", label: "Opus 4.8" },
+          { key: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+          { key: "anthropic/claude-opus-5-5", label: "Opus 5.5" },
         ],
       }),
-    ).toBe("anthropic/claude-opus-4-8");
+    ).toBe("anthropic/claude-opus-5-5");
   });
 
-  it("falls back to the first featured model when Opus 4.8 is unavailable", async () => {
+  it("falls back to the first featured model when Opus 5.5 is unavailable", async () => {
     const { getInitialOnboardingModelKey } = await import(
       "../../lib/public/js/lib/model-catalog.js"
     );
@@ -51,10 +51,10 @@ describe("frontend/model-catalog", () => {
         catalog: [
           { key: "openai-codex/gpt-5.4", label: "GPT-5.4" },
           { key: "anthropic/claude-opus-4-7", label: "Opus 4.7" },
-          { key: "anthropic/claude-opus-4-6", label: "Opus 4.6" },
+          { key: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol" },
         ],
       }),
-    ).toBe("anthropic/claude-opus-4-7");
+    ).toBe("openai/gpt-6.1-sol");
   });
 
   it("reports whether the catalog is still refreshing", async () => {
@@ -122,6 +122,17 @@ describe("frontend/model-catalog", () => {
           authProvider: "openai-codex",
         }),
       ).toBe("openai/gpt-5.6-sol");
+    });
+
+    it("prefers the pinned OpenClaw's gpt-6-astra default for both OpenAI auth paths", async () => {
+      const { resolveOnboardingModelDefault } = await load();
+      const withGpt6 = [...withGpt56, { key: "openai/gpt-6-astra" }];
+      expect(
+        resolveOnboardingModelDefault({ catalog: withGpt6, authProvider: "openai" }),
+      ).toBe("openai/gpt-6-astra");
+      expect(
+        resolveOnboardingModelDefault({ catalog: withGpt6, authProvider: "openai-codex" }),
+      ).toBe("openai/gpt-6-astra");
     });
 
     it("never preselects a beta-only default absent from the catalog", async () => {
