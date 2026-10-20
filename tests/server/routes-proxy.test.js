@@ -490,7 +490,7 @@ describe("server/routes/proxy gateway passthrough body handling", () => {
   // Same wiring as lib/server.js: the /v1 parser, then a global JSON parser
   // that SKIPS proxied paths (their raw stream is piped to the gateway), then
   // the proxy routes with a real http-proxy instance.
-  const createWiredApp = ({ gatewayUrl, setupApiPrefixes = [] }) => {
+  const createWiredApp = ({ gatewayUrl, setupApiPrefixes = [], trustedBrowserOrigin = "" }) => {
     const app = express();
     proxy = httpProxy.createProxyServer({
       target: gatewayUrl,
@@ -517,6 +517,7 @@ describe("server/routes/proxy gateway passthrough body handling", () => {
       requireAuth: (_req, _res, next) => next(),
       oauthCallbackMiddleware: (_req, res) => res.status(204).end(),
       webhookMiddleware: (_req, res) => res.status(204).end(),
+      getTrustedBrowserOrigin: () => trustedBrowserOrigin,
     });
     return app;
   };
@@ -575,6 +576,34 @@ describe("server/routes/proxy gateway passthrough body handling", () => {
     expect(gateway.seen.url).toBe("/api/foo");
     expect(gateway.seen.bodyText).toBe(payload);
     expect(gateway.seen.contentLength).toBe(String(Buffer.byteLength(payload)));
+  });
+
+  it("presents a same-origin Control UI request with the canonical allowlisted origin; a cross-origin one untouched", async () => {
+    const seenOrigins = [];
+    upstream = http.createServer((req, res) => {
+      seenOrigins.push({ origin: req.headers.origin, host: req.headers.host });
+      req.resume();
+      req.on("end", () => res.end("{}"));
+    });
+    const port = await listen(upstream);
+    const gatewayUrl = `http://127.0.0.1:${port}`;
+    const app = createWiredApp({ gatewayUrl, trustedBrowserOrigin: "https://myclaw.up.railway.app/" });
+
+    await request(app)
+      .post("/openclaw/api/thing")
+      .set("Host", "claw.example.com")
+      .set("Origin", "https://claw.example.com")
+      .send("{}");
+    await request(app)
+      .post("/openclaw/api/thing")
+      .set("Host", "claw.example.com")
+      .set("Origin", "https://evil.example")
+      .send("{}");
+
+    expect(seenOrigins).toEqual([
+      { origin: "https://myclaw.up.railway.app", host: `127.0.0.1:${port}` },
+      { origin: "https://evil.example", host: `127.0.0.1:${port}` },
+    ]);
   });
 
   it("passes >5MB JSON bodies through untouched (global parser limit skipped)", async () => {

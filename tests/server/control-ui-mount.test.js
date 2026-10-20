@@ -329,3 +329,55 @@ describe("control-ui-mount: auth response classifier", () => {
     expect(requestTargetPathname(undefined)).toBe("/");
   });
 });
+
+describe("control-ui-mount: resolveGatewayBrowserOrigin (same-origin Control UI from any hostname)", () => {
+  const { resolveGatewayBrowserOrigin } = mount;
+  const trustedOrigin = "https://myclaw.up.railway.app";
+  const resolve = (headers) => resolveGatewayBrowserOrigin({ headers, trustedOrigin });
+
+  it("vouches with the canonical origin when the Origin host is the host requested (custom domain, IP, second hostname)", () => {
+    expect(resolve({ origin: "https://claw.example.com", host: "claw.example.com" })).toBe(trustedOrigin);
+    expect(resolve({ origin: "http://203.0.113.9:3000", host: "203.0.113.9:3000" })).toBe(trustedOrigin);
+    expect(resolve({ origin: "https://Claw.Example.com", host: "claw.example.com" })).toBe(trustedOrigin);
+  });
+
+  it("presents only the canonical ORIGIN even when the configured URL carries a path or trailing slash", () => {
+    expect(
+      resolveGatewayBrowserOrigin({
+        headers: { origin: "https://claw.example.com", host: "claw.example.com" },
+        trustedOrigin: "https://setup.example.com/",
+      }),
+    ).toBe("https://setup.example.com");
+  });
+
+  it("matches the edge's X-Forwarded-Host when the edge rewrote Host", () => {
+    expect(
+      resolve({
+        origin: "https://claw.example.com",
+        host: "internal-svc:8080",
+        "x-forwarded-host": "claw.example.com, internal-svc:8080",
+      }),
+    ).toBe(trustedOrigin);
+  });
+
+  it("ignores an explicit default port on either side", () => {
+    expect(resolve({ origin: "https://claw.example.com", host: "claw.example.com:443" })).toBe(trustedOrigin);
+    expect(resolve({ origin: "http://claw.example.com:80", host: "claw.example.com" })).toBe(trustedOrigin);
+  });
+
+  it("leaves a cross-origin, missing or malformed Origin — or no canonical origin — to the gateway's allowlist", () => {
+    expect(resolve({ origin: "https://evil.example", host: "claw.example.com" })).toBeNull();
+    expect(resolve({ origin: "https://claw.example.com:8443", host: "claw.example.com" })).toBeNull();
+    expect(resolve({ host: "claw.example.com" })).toBeNull();
+    expect(resolve({ origin: "null", host: "claw.example.com" })).toBeNull();
+    expect(resolve({ origin: "https://claw.example.com/path", host: "claw.example.com" })).toBeNull();
+    expect(resolve({ origin: "https://user@claw.example.com", host: "claw.example.com" })).toBeNull();
+    expect(
+      resolveGatewayBrowserOrigin({ headers: { origin: "https://a.b", host: "a.b" }, trustedOrigin: "" }),
+    ).toBeNull();
+    expect(
+      resolveGatewayBrowserOrigin({ headers: { origin: "https://a.b", host: "a.b" }, trustedOrigin: "not a url" }),
+    ).toBeNull();
+    expect(resolveGatewayBrowserOrigin()).toBeNull();
+  });
+});

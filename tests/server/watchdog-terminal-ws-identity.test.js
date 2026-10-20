@@ -24,6 +24,7 @@ const createBridge = ({
     watchdogTerminal: { createOrReuseSession: () => null, subscribe: () => ({}) },
     chatWsService: null,
     resolveProxyIdentity,
+    getTrustedBrowserOrigin: () => "https://myclaw.up.railway.app",
   });
   return { server, proxy, proxied, isAuthorizedRequest };
 };
@@ -88,6 +89,37 @@ describe("server/watchdog-terminal-ws catch-all proxy identity", () => {
     );
     expect(proxied).toHaveLength(1);
     expect(proxied[0].headers[kIdentityUserHeader]).toBeUndefined();
+  });
+});
+
+describe("server/watchdog-terminal-ws catch-all browser Origin", () => {
+  const upgrade = (headers) => {
+    const { server, proxied } = createBridge({ resolveProxyIdentity: () => null });
+    server.emit("upgrade", { url: "/openclaw", headers }, createSocket(), Buffer.alloc(0));
+    expect(proxied).toHaveLength(1);
+    return proxied[0].headers;
+  };
+
+  it("presents a same-origin Control UI connect with the canonical allowlisted origin (any hostname works)", () => {
+    expect(upgrade({ host: "claw.example.com", origin: "https://claw.example.com" }).origin).toBe(
+      "https://myclaw.up.railway.app",
+    );
+  });
+
+  it("vouches via X-Forwarded-Host before the forwarded evidence is stripped", () => {
+    const headers = upgrade({
+      host: "internal-svc:8080",
+      "x-forwarded-host": "claw.example.com",
+      origin: "https://claw.example.com",
+    });
+    expect(headers.origin).toBe("https://myclaw.up.railway.app");
+    expect(headers["x-forwarded-host"]).toBeUndefined();
+  });
+
+  it("forwards a cross-origin Origin untouched for the gateway's allowlist to judge", () => {
+    expect(upgrade({ host: "claw.example.com", origin: "https://evil.example" }).origin).toBe(
+      "https://evil.example",
+    );
   });
 });
 
