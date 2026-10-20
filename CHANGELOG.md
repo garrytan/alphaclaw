@@ -5,6 +5,34 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.13] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `3349d7b8` preflight trigger): legacy
+OpenClaw files that show up after the pin's data upgrade are imported by the
+boot Doctor instead of blocking exec approvals or agent auth.
+
+### Fixed
+
+- **Legacy exec approvals and auth profiles after the pin's Doctor
+  completed.** On the SQLite-era OpenClaw (2026.9.1-beta.1+, pinned 2026.10.4)
+  a leftover `exec-approvals.json` makes every exec-approvals call fail
+  ("Legacy exec approvals exist at …. Run `openclaw doctor --fix` …") and an
+  agent's `agents/<id>/agent/auth-profiles.json` makes auth calls throw
+  `AUTH_PROFILE_MIGRATION_REQUIRED`, until `doctor --fix` imports them. The
+  boot Doctor ran only when the pin changed, so a file restored from a backup
+  or brought in by an import after that kept failing (and a structural repair
+  could rename the exec approvals aside instead of importing them). The boot
+  migration now also runs `doctor --fix` when, on a pin it already
+  completed, it finds `exec-approvals.json` with no SQLite
+  `exec_approvals_config` row, an agent `auth-profiles.json`, or either
+  file's `.doctor-importing` claim. Verified on the pinned 2026.10.4: Doctor
+  imports such a file (allowlist preserved) and removes it. A file next to an
+  existing row stays with the existing reaper (Doctor refuses that state as
+  "Conflicting legacy exec approvals"). File-era and dev versions never
+  trigger. The same unchanged files are not re-run within 24 h
+  (`legacyState` in `openclaw-boot-migration.json`); a failed import sends
+  one notice and the gateway starts anyway.
+
 ## [0.10.12] - 2026-10-20
 
 Upstream sync (chrysb/alphaclaw `eeaa19e0` preinstall part, `6ef4a8f3`):
