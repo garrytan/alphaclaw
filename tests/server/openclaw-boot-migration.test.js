@@ -269,6 +269,126 @@ describe("server/openclaw-boot-migration", () => {
     expect(JSON.stringify(failed.key)).not.toMatch(/free|bytes/i);
   });
 
+  describe("legacy state on a pin whose Doctor already completed (upstream 3349d7b8)", () => {
+    const kPin = "2026.10.4";
+    const completedBox = () => {
+      const box = newBox();
+      recordDoctorCompletedForPin({ managedDir: box.managedDir, version: kPin, nowFn: () => kNow - 1 });
+      return box;
+    };
+    const writeFile = (box, relativePath, content = "{}\n") => {
+      const filePath = path.join(box.openclawDir, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, content);
+      return filePath;
+    };
+    const boot = (box, overrides = {}) =>
+      runBootMigration({
+        ...box,
+        installedVersion: kPin,
+        runDoctorFix: vi.fn(async () => ({ ok: true })),
+        nowFn: () => kNow,
+        logger: silentLogger(),
+        hasExecApprovalsRow: () => false,
+        ...overrides,
+      });
+
+    it.each([
+      ["a legacy exec-approvals.json with no SQLite row", "exec-approvals.json"],
+      ["an interrupted exec-approvals import", "exec-approvals.json.doctor-importing"],
+      ["an agent's legacy auth-profiles.json", "agents/main/agent/auth-profiles.json"],
+      ["an interrupted auth-profiles import", "agents/ops/agent/auth-profiles.json.doctor-importing"],
+    ])("runs doctor --fix for %s and records it", async (_label, relativePath) => {
+      const box = completedBox();
+      writeFile(box, relativePath);
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      const onDoctorStart = vi.fn();
+      const logger = silentLogger();
+
+      await expect(boot(box, { runDoctorFix, onDoctorStart, logger })).resolves.toMatchObject({
+        status: "ok",
+        ran: true,
+        trigger: "legacy_state",
+      });
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+      expect(runDoctorFix).toHaveBeenCalledWith(expect.objectContaining({ source: "boot" }));
+      expect(onDoctorStart).toHaveBeenCalledWith({ fromVersion: kPin, toVersion: kPin });
+      expect(logger.log).toHaveBeenCalledWith(
+        `[alphaclaw] OpenClaw ${kPin}: legacy state awaits import (${relativePath}); running doctor --fix before the gateway starts`,
+      );
+      const record = readMigrationRecord({ managedDir: box.managedDir });
+      expect(record.completedForVersion).toBe(kPin);
+      expect(record.legacyState).toEqual({
+        files: [expect.objectContaining({ path: relativePath })],
+        status: "ok",
+        reason: null,
+        at: kNow,
+      });
+    });
+
+    it("leaves exec-approvals.json alone when a SQLite row exists (the reaper renames that stray)", async () => {
+      const box = completedBox();
+      writeFile(box, "exec-approvals.json");
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+
+      await expect(boot(box, { runDoctorFix, hasExecApprovalsRow: () => true })).resolves.toEqual({ status: "ok", ran: false });
+      expect(runDoctorFix).not.toHaveBeenCalled();
+    });
+
+    it.each(["2026.7.1-2", "2026.8.2", "a1b2c3d"])("never treats the files as legacy on a file-era or unknown version (%s)", async (version) => {
+      const box = newBox();
+      recordDoctorCompletedForPin({ managedDir: box.managedDir, version, nowFn: () => kNow - 1 });
+      writeFile(box, "exec-approvals.json");
+      writeFile(box, "agents/main/agent/auth-profiles.json");
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+
+      await expect(boot(box, { installedVersion: version, runDoctorFix })).resolves.toEqual({ status: "ok", ran: false });
+      expect(runDoctorFix).not.toHaveBeenCalled();
+    });
+
+    it("does not rerun for the same unchanged files within 24h, and retries when they change or the window passes", async () => {
+      const box = completedBox();
+      const filePath = writeFile(box, "exec-approvals.json");
+      const runDoctorFix = vi.fn(async () => ({ ok: true }));
+      await boot(box, { runDoctorFix });
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+
+      const logger = silentLogger();
+      await expect(boot(box, { runDoctorFix, logger, nowFn: () => kNow + 1000 })).resolves.toEqual({
+        status: "skipped",
+        reason: "legacy_state_unchanged",
+        ran: false,
+      });
+      expect(runDoctorFix).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("legacy OpenClaw state (exec-approvals.json) is unchanged"));
+
+      await boot(box, { runDoctorFix, nowFn: () => kNow + kRememberedFailureRetryMs });
+      expect(runDoctorFix).toHaveBeenCalledTimes(2);
+
+      fs.writeFileSync(filePath, '{"version":1,"agents":{}}\n');
+      await boot(box, { runDoctorFix, nowFn: () => kNow + kRememberedFailureRetryMs + 1000 });
+      expect(runDoctorFix).toHaveBeenCalledTimes(3);
+    });
+
+    it("a failed import notifies once, keeps the pin completed and still returns (the gateway starts anyway)", async () => {
+      const box = completedBox();
+      writeFile(box, "agents/main/agent/auth-profiles.json");
+      const notify = vi.fn(async () => {});
+      const runDoctorFix = vi.fn(async () => ({ ok: false, code: 1, stdout: "Error: something broke\n" }));
+
+      const result = await boot(box, { runDoctorFix, notify });
+
+      expect(result).toMatchObject({ status: "failed", ran: true, trigger: "legacy_state" });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][0]).toContain("could not import legacy state (agents/main/agent/auth-profiles.json)");
+      expect(notify.mock.calls[0][1]).toEqual({ eventType: "health", id: `boot-migration-legacy-state-${kPin}` });
+      const record = readMigrationRecord({ managedDir: box.managedDir });
+      expect(record.completedForVersion).toBe(kPin);
+      expect(record.failed).toBeUndefined();
+      expect(record.legacyState).toMatchObject({ status: "failed" });
+    });
+  });
+
   describe("failure memory across boots", () => {
     const boot = (box, overrides = {}) => {
       const runDoctorFix = vi.fn(async () => kSymlinkedLayoutFailure);
