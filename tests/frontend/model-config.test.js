@@ -88,6 +88,14 @@ describe("frontend/model-config", () => {
     }
   });
 
+  it("does not offer openai/gpt-5.6-ultra, which the pinned OpenClaw cannot route", async () => {
+    const modelConfig = await loadModelConfig();
+    const catalog = modelConfig.withAlwaysAvailableModels([]);
+    expect(catalog.map((model) => model.key)).not.toContain("openai/gpt-5.6-ultra");
+    expect(modelConfig.getFriendlyModelLabel("openai/gpt-5.6-ultra")).toBe("openai/gpt-5.6-ultra");
+    expect(modelConfig.getOnboardingModelProvider({ modelKey: "openai/gpt-5.6-ultra" })).toBe("openai");
+  });
+
   it("removes deprecated Codex 5.3 models from onboarding", async () => {
     const modelConfig = await loadModelConfig();
     const models = modelConfig.getOnboardingModels([

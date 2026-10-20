@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.17] - 2026-10-21
+
+Garry's call on the GPT-5.6 Ultra catalog row.
+
+### Removed
+
+- **`openai/gpt-5.6-ultra` is no longer offered.** It was an always-available
+  Codex OAuth row in the model picker, but the pinned OpenClaw 2026.10.4 has no
+  such model: its dist never mentions the id, and `openclaw models list --json`
+  returns no row for it, the same as for a made-up id, while
+  `openai/gpt-5.6-sol` and `openai/gpt-6-astra` come back as named rows.
+  `openclaw models set` accepts any id, so choosing it saved a model the
+  gateway could not route. "Ultra" is a Codex thinking level on this pin, not a
+  model. The row, its friendly label and its Codex OAuth mapping are gone. An
+  install that already saved it keeps the saved value. Pick a GPT-6 or GPT-5.6
+  model on the Models tab to replace it.
+
 ## [0.10.16] - 2026-10-21
 
 Garry's call on the upstream OpenClaw 2026.9.3 compatibility defaults
