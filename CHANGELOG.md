@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.11] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `4fc0be62`, the part the fork still lacked):
+status frames stop carrying the Doctor's per-file drift list.
+
+### Fixed
+
+- **Oversized status frames.** `slimDoctorStatus` passed the Doctor's
+  `changeSummary` through whole, so `changeSummary.changedPaths` — every
+  workspace file changed since the last Doctor run, bounded only by the
+  200,000-file fingerprint scan cap — rode in every `/api/events/status` frame
+  (resent at least every 10 s per tab and stringified every 2 s tick for change
+  detection) and every `/api/status` response. Nothing in the shell reads it;
+  the Doctor tab gets it from `/api/doctor/status`. Frames now keep
+  `changedFilesCount` and the flags and drop the array.
+
 ## [0.10.10] - 2026-10-20
 
 Upstream sync (chrysb/alphaclaw `043ac5de`, model parts of `3349d7b8` and
