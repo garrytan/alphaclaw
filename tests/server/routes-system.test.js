@@ -1643,6 +1643,12 @@ describe("server/routes/system", () => {
             activeTruncatedFiles: [{ path: "a.md", rawChars: 10, injectedChars: 5 }],
             activeNearLimitFiles: [],
           },
+          changeSummary: {
+            hasBaseline: true,
+            hasMeaningfulChanges: true,
+            changedFilesCount: 3,
+            changedPaths: ["a.md", "b.md", "c.md"],
+          },
         })),
       };
       const routes = captureRoutes(deps);
@@ -1678,6 +1684,13 @@ describe("server/routes/system", () => {
         hasActiveTruncation: true,
         activeTruncatedFiles: [{ path: "a.md", rawChars: 10, injectedChars: 5 }],
         activeNearLimitFiles: [],
+      });
+      // The per-file drift list stays on /api/doctor/status; frames keep the
+      // counts the shell reads (upstream 4fc0be62).
+      expect(parsed.doctorStatus.changeSummary).toEqual({
+        hasBaseline: true,
+        hasMeaningfulChanges: true,
+        changedFilesCount: 3,
       });
       expect(parsed.status.gateway).toBe("running");
 

@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.11] - 2026-10-20
+## [0.10.13] - 2026-10-20
 
 The Control UI at `/openclaw` now connects on every hostname an install is
 reached by. Before, it rendered but every gateway connect was refused with
@@ -36,6 +36,41 @@ by name or IP, and ingresses that rewrite `Host`.
   `CONTROL_UI_ORIGIN_NOT_ALLOWED`.
 - Unit and wiring coverage for the resolver, the WebSocket catch-all and the
   HTTP proxy.
+
+## [0.10.12] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `eeaa19e0` preinstall part, `6ef4a8f3`):
+installing on an unsupported Node now fails at install time instead of at
+first boot.
+
+### Added
+
+- **`preinstall` Node runtime check.** `lib/scripts/check-node-runtime.js`
+  runs `assertSupportedNodeVersion` (`>=24.16.0 <25 || >=26.1.0`, the same
+  range as `engines.node`) and exits 1 with an upgrade hint. npm only warns
+  on `engines`, so an install on Node 22 or 25 used to succeed and then fail
+  when the server started. `--ignore-scripts` installs skip it, and the
+  boot-time check stays.
+
+### Changed
+
+- `.env.local` is git-ignored like `.env`.
+
+## [0.10.11] - 2026-10-20
+
+Upstream sync (chrysb/alphaclaw `4fc0be62`, the part the fork still lacked):
+status frames stop carrying the Doctor's per-file drift list.
+
+### Fixed
+
+- **Oversized status frames.** `slimDoctorStatus` passed the Doctor's
+  `changeSummary` through whole, so `changeSummary.changedPaths` — every
+  workspace file changed since the last Doctor run, bounded only by the
+  200,000-file fingerprint scan cap — rode in every `/api/events/status` frame
+  (resent at least every 10 s per tab and stringified every 2 s tick for change
+  detection) and every `/api/status` response. Nothing in the shell reads it;
+  the Doctor tab gets it from `/api/doctor/status`. Frames now keep
+  `changedFilesCount` and the flags and drop the array.
 
 ## [0.10.10] - 2026-10-20
 
