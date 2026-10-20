@@ -5,6 +5,27 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.16] - 2026-10-21
+
+Garry's call on the upstream OpenClaw 2026.9.3 compatibility defaults
+(chrysb/alphaclaw `eeaa19e0`): AlphaClaw pins the narrower pre-9.3 behavior.
+
+### Changed
+
+- **Legacy compatibility defaults for session reach, Swarm, CLI agents and
+  sub-agent depth.** OpenClaw 2026.9.3 widened four defaults: session tools
+  reach every session on the Gateway (`tools.sessions.visibility: "all"`),
+  Swarm is on, the Control UI offers CLI agents with native CLI session
+  creation (`gateway.cliAgents.enabled`), and sub-agents nest five deep.
+  AlphaClaw now fills `tools.sessions.visibility: "tree"`, `tools.swarm:
+  false`, `gateway.cliAgents.enabled: false` and
+  `agents.defaults.subagents.maxSpawnDepth: 1` when they are absent: at
+  onboarding, and on every boot through the admitted boot normalization
+  (`updateOpenclawConfig`), so existing installs pick them up before the
+  gateway launches. Only absent keys are filled. An operator who set any of
+  them, including back to OpenClaw's wider default or a Swarm limits object,
+  keeps that value, and a boot with nothing to fill does not rewrite the file.
+
 ## [0.10.15] - 2026-10-21
 
 A signed-in admin can now open the Control UI by typing `/openclaw/...`

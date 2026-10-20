@@ -1,4 +1,5 @@
 const {
+  ensureLegacyCompatibilityDefaults,
   migrateLegacyTelegramStreamingConfig,
   detectAgentsShape,
   readAgentsEntries,
@@ -359,5 +360,59 @@ describe("server/openclaw-config-migrations canonical 2026.10 roster", () => {
     const snapshot = structuredClone(input);
     canonicalizeAgentsForWrite(input, onDisk({ agents: { entries: { main: {} } } }));
     expect(input).toEqual(snapshot);
+  });
+});
+
+describe("server/openclaw-config-migrations legacy compatibility defaults", () => {
+  it("fills the pre-2026.9.3 defaults into an empty config", () => {
+    const cfg = {};
+    expect(ensureLegacyCompatibilityDefaults(cfg)).toBe(true);
+    expect(cfg).toEqual({
+      tools: { sessions: { visibility: "tree" }, swarm: false },
+      gateway: { cliAgents: { enabled: false } },
+      agents: { defaults: { subagents: { maxSpawnDepth: 1 } } },
+    });
+    expect(ensureLegacyCompatibilityDefaults(cfg)).toBe(false);
+  });
+
+  it("never overrides a value the operator set, including OpenClaw's wider defaults", () => {
+    const cfg = {
+      tools: { sessions: { visibility: "all" }, swarm: true },
+      gateway: { cliAgents: { enabled: true } },
+      agents: { list: [{ id: "main" }], defaults: { subagents: { maxSpawnDepth: 5 } } },
+    };
+    const snapshot = structuredClone(cfg);
+    expect(ensureLegacyCompatibilityDefaults(cfg)).toBe(false);
+    expect(cfg).toEqual(snapshot);
+  });
+
+  it("treats a Swarm limits object as the operator's choice", () => {
+    const cfg = { tools: { swarm: { maxConcurrent: 4 } } };
+    ensureLegacyCompatibilityDefaults(cfg);
+    expect(cfg.tools.swarm).toEqual({ maxConcurrent: 4 });
+  });
+
+  it("fills only the missing keys beside existing siblings", () => {
+    const cfg = {
+      tools: { profile: "full", sessions: { visibility: "self" } },
+      gateway: { port: 18789, cliAgents: {} },
+      agents: { entries: { main: {} }, defaults: { model: { primary: "anthropic/claude-opus-5-5" } } },
+    };
+    expect(ensureLegacyCompatibilityDefaults(cfg)).toBe(true);
+    expect(cfg.tools).toEqual({ profile: "full", sessions: { visibility: "self" }, swarm: false });
+    expect(cfg.gateway).toEqual({ port: 18789, cliAgents: { enabled: false } });
+    expect(cfg.agents.defaults).toEqual({
+      model: { primary: "anthropic/claude-opus-5-5" },
+      subagents: { maxSpawnDepth: 1 },
+    });
+    expect(cfg.agents.entries).toEqual({ main: {} });
+  });
+
+  it("leaves a non-object value on the path for OpenClaw's validator", () => {
+    const cfg = { tools: { sessions: "broken" }, gateway: { cliAgents: true } };
+    ensureLegacyCompatibilityDefaults(cfg);
+    expect(cfg.tools.sessions).toBe("broken");
+    expect(cfg.gateway.cliAgents).toBe(true);
+    expect(cfg.tools.swarm).toBe(false);
   });
 });

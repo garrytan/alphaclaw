@@ -178,6 +178,24 @@ describe("server/onboarding/openclaw", () => {
     expect(next.gateway.http).toBeUndefined();
   });
 
+  it("pins the legacy compatibility defaults on onboarding without overriding imported values", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ channels: {}, tools: { sessions: { visibility: "agent" } } }),
+      "utf8",
+    );
+
+    writeSanitizedOpenclawConfig({ fs, openclawDir, varMap: {} });
+
+    const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(next.tools.sessions.visibility).toBe("agent");
+    expect(next.tools.swarm).toBe(false);
+    expect(next.gateway.cliAgents).toEqual({ enabled: false });
+    expect(next.agents.defaults.subagents.maxSpawnDepth).toBe(1);
+  });
+
   it("keeps the Codex runtime usable when onboarding creates a plugin allowlist", () => {
     const openclawDir = createTempOpenclawDir();
     const configPath = path.join(openclawDir, "openclaw.json");

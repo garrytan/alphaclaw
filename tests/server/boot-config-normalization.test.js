@@ -87,11 +87,40 @@ describe("admitted boot config normalization", () => {
       expect(normalizeBootConfig(deps)).toEqual({ changed: true });
       expect(deps.env.OPENCLAW_STATE_DIR).toBe(alias);
       const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      expect(cfg.agents).toEqual({ entries: { main: { name: "Main" } } });
+      expect(cfg.agents).toEqual({
+        entries: { main: { name: "Main" } },
+        defaults: { subagents: { maxSpawnDepth: 1 } },
+      });
       expect(cfg.plugins.load.paths).toContain(kUsageTrackerPluginPath);
     } finally {
       fs.unlinkSync(alias);
     }
+  });
+
+  it("pins the legacy compatibility defaults on an existing install that never set them", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ tools: { profile: "full" }, gateway: { port: 18789 } }));
+    expect(normalizeBootConfig(deps)).toEqual({ changed: true });
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(cfg.tools).toMatchObject({ profile: "full", sessions: { visibility: "tree" }, swarm: false });
+    expect(cfg.gateway).toEqual({ port: 18789, cliAgents: { enabled: false } });
+    expect(cfg.agents.defaults.subagents.maxSpawnDepth).toBe(1);
+  });
+
+  it("keeps operator-set values for the legacy compatibility keys and skips the write", () => {
+    const operatorConfig = {
+      tools: { sessions: { visibility: "all" }, swarm: { maxConcurrent: 4 } },
+      gateway: { cliAgents: { enabled: true } },
+      agents: { entries: { main: {} }, defaults: { subagents: { maxSpawnDepth: 3 } } },
+      plugins: {
+        allow: ["usage-tracker"],
+        load: { paths: [kUsageTrackerPluginPath] },
+        entries: { "usage-tracker": { enabled: true, hooks: { allowConversationAccess: true } } },
+      },
+    };
+    fs.writeFileSync(configPath, JSON.stringify(operatorConfig));
+    const bytes = fs.readFileSync(configPath);
+    expect(normalizeBootConfig(deps)).toEqual({ changed: false });
+    expect(fs.readFileSync(configPath)).toEqual(bytes);
   });
 
   it("does not manufacture a config when none exists", () => {
