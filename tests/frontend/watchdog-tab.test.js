@@ -52,7 +52,7 @@ import * as preactHooks from "preact/hooks";
 import { WatchdogTab } from "../../lib/public/js/components/watchdog-tab/index.js";
 import { useWatchdogTab } from "../../lib/public/js/components/watchdog-tab/use-watchdog-tab.js";
 import { WatchdogSafeModeBanner } from "../../lib/public/js/components/watchdog-tab/safe-mode-banner.js";
-import { WatchdogOverseerCard } from "../../lib/public/js/components/watchdog-tab/overseer-card.js";
+import { WatchdogOverseerCard } from "../../lib/public/js/components/watchdog-tab/overseer/index.js";
 import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-tab/incidents/index.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";

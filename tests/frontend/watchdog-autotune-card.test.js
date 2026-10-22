@@ -54,9 +54,9 @@ vi.mock("../../lib/public/js/lib/api.js", async (importOriginal) => {
 });
 
 import * as preactHooks from "preact/hooks";
+import { AutotuneCardView } from "../../lib/public/js/components/watchdog-tab/autotune/view.js";
+import { WatchdogAutotuneCard } from "../../lib/public/js/components/watchdog-tab/autotune/index.js";
 import {
-  AutotuneCardView,
-  WatchdogAutotuneCard,
   buildAutotuneCounts,
   buildAutotuneDisabledParagraph,
   buildAutotuneEnvironmentNote,
@@ -72,7 +72,7 @@ import {
   kAutotuneCacheKey,
   kAutotuneHeapContext,
   kAutotuneKillSwitchToast,
-} from "../../lib/public/js/components/watchdog-tab/autotune-card.js";
+} from "../../lib/public/js/components/watchdog-tab/autotune/model.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { updateAutotuneSettings } from "../../lib/public/js/lib/api.js";

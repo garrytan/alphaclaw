@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.36] - 2026-10-22
+
+The Watchdog tab's autotune and overseer cards are split into model and view modules (refactor plan PR 14a, ALPH-15). No logic changes.
+
+### Changed
+
+- **`watchdog-tab/autotune-card.js`** (959 lines) becomes `watchdog-tab/autotune/model.js` (copy constants and the pure `build*`, `format*` and `describe*` helpers), `autotune/view.js` (`AutotuneRow` and `AutotuneCardView`) and `autotune/index.js` (the `WatchdogAutotuneCard` container).
+- **`watchdog-tab/overseer-card.js`** (793 lines) becomes `overseer/model.js` (verdict and skip-reason copy, the incident and situation report builders and `buildWatchdogOverseerModel`) and `overseer/index.js` (`WatchdogOverseerCard` and its two small subcomponents).
+- Every line moved unchanged. The only edits are the import lists and four private helpers that gain `export` so the other half can import them: `pluralSettings`, `asRecord`, `toMs` and `describeAvailability`. `watchdog-tab/index.js`, `incidents/index.js`, three test files and two `TODOS.md` context lines point at the new paths. The Watchdog tab renders pixel-identical to the pre-split build.
+
 ## [0.10.35] - 2026-10-22
 
 The watchdog incident overseer's pure module-level code moves out of the factory file (refactor plan PR 11, ALPH-15). No logic changes.

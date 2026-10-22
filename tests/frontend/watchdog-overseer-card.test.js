@@ -48,8 +48,8 @@ import {
   kOverseerCardCopy,
   kOverseerSkipReasonCopy,
   kOverseerVerdictBadge,
-  WatchdogOverseerCard,
-} from "../../lib/public/js/components/watchdog-tab/overseer-card.js";
+} from "../../lib/public/js/components/watchdog-tab/overseer/model.js";
+import { WatchdogOverseerCard } from "../../lib/public/js/components/watchdog-tab/overseer/index.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";

@@ -284,7 +284,7 @@
 ## P3 — Rescue-session deep link on action_needed situation reports (2026-09-02, from the overseer-anytime wave)
 - **What:** When a situation report's verdict is `action_needed`, offer the "Open Claude Code" rescue session link inline on the overseer card's CTA row.
 - **Why:** The operator's next move after an actionable read is usually to get hands on the box; today the rescue card sits one card below, which is why this was deferred rather than built.
-- **Context:** lib/public/js/components/watchdog-tab/overseer-card.js (CTA row), lib/public/js/components/watchdog-tab/rescue-session-card.js (link source — reuse its capability-link handling, never the raw claude.ai URL).
+- **Context:** lib/public/js/components/watchdog-tab/overseer/index.js (CTA row), lib/public/js/components/watchdog-tab/rescue-session-card.js (link source — reuse its capability-link handling, never the raw claude.ai URL).
 - **Effort:** S. **Depends on:** demand.
 
 ## P3 — Unify incident and situation verdict storage (2026-09-02, from the overseer-anytime wave)
@@ -302,7 +302,7 @@
 ## P3 — Watchdog tab design-system pass via /design-consultation (2026-09-02, from the overseer-anytime wave)
 - **What:** Decide tab-wide: inset report blocks (`ac-surface-inset` nested inside cards — both overseer cards, degraded card) vs a `border-t` divider; a 16px-minimum body type scale for dense ops cards vs today's `text-xs`/`text-sm`; an explicit `--font-sans` on the app root.
 - **Why:** The v0.9.69 design review's outside voice hard-rejected the nested report card and the sub-16px body copy against universal app-UI rules; the independent designer accepted both as the house pattern. Kept for consistency in that PR — a one-card divergence is worse than either choice — but the system-level decision is still open.
-- **Context:** lib/public/js/components/watchdog-tab/overseer-card.js, lib/public/js/components/watchdog-tab/degraded-card.js, tailwind.config.cjs tokens.
+- **Context:** lib/public/js/components/watchdog-tab/overseer/index.js, lib/public/js/components/watchdog-tab/degraded-card.js, tailwind.config.cjs tokens.
 - **Effort:** M. **Depends on:** a /design-consultation session.
 
 ## P2 — File the two upstream openclaw reports from the 2026-09-01 incident (gateway-hardening wave)
@@ -421,7 +421,7 @@
 ## P3 — Resource-autotune ship-review follow-ups (2026-08-29, grouped)
 - **What:** (1) container-hook tests for `WatchdogAutotuneCard` (restartSignal/detectedAt refetch triggers, per-context save isolation, heap-input validation toast, reapply/dismiss flows — only the presentational view + builders are covered); (2) `launchGatewayProcess` spawn-stamp glue test (heap regex from childEnv, UV match) at the call site; (3) extract the copy-pasted cgroup fs-spy/containerFsModule test fixtures (×6 files) into a shared tests helper; (4) unify the three machine-summary assemblies (agent-admin/skill.js `gatherLiveState`, routes/system.js `buildMachineSummary`, onboarding/workspace.js `renderMachineProfileMarkdown`) on one summarizer with per-surface sanitization at call sites; (5) hoist the 3500ms post-restart settle-refetch literal (autotune-card, incidents hook, general tab) into a shared constant; (6) design pass items for /design-review: collapse the N-identical "Restart gateway now" per-row buttons into a single affordance, and move underlined text-button actions (Restart/Copy) onto ActionButton; (7) ~~downsize-specific urgent-toned resize notification~~ (DONE v0.9.54 — any shrinking dimension gets the ⚠️ OOM-pressure copy, tested); (8) apply the shared cache pragma at cron-store's TTL reopen (+ decide agent-admin/usage sites); (9) a `pruneBackups` advisory-budget warning test; (10) an explicit boot-order test (autotune apply completes before `doSyncPromptFiles`, machine line present in first-boot artifacts with a GPU fixture).
 - **Why:** All flagged by the /ship specialist review or plan-completion audit; each deferred as churn-vs-risk at ship time — none is user-visible today, and the risky logic beneath them is covered (82% diff coverage, regressions pinned).
-- **Context:** lib/public/js/components/watchdog-tab/autotune-card.js, lib/server/gateway.js (spawn stamp), lib/server/machine-summary.js (new shared prompt summarizer to extend), lib/server/cron-store.js, lib/server/openclaw-channel-sync.js (advisory block), lib/server/startup.js.
+- **Context:** lib/public/js/components/watchdog-tab/autotune/index.js, lib/server/gateway.js (spawn stamp), lib/server/machine-summary.js (new shared prompt summarizer to extend), lib/server/cron-store.js, lib/server/openclaw-channel-sync.js (advisory block), lib/server/startup.js.
 - **Effort:** S each. **Depends on:** nothing.
 
 ## P3 — Resource-autotune adversarial-review deferrals (2026-08-29, grouped)
