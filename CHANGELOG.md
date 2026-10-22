@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.55] - 2026-10-22
+
+The dashboard chat sends messages on a plain-HTTP origin, such as a VPS reached by IP (found by the ALPH-18 black-box pass on a real Ubicloud VPS).
+
+### Fixed
+- The chat composer, transcript store and history requests minted ids with `crypto.randomUUID()`, which browsers expose only in secure contexts (HTTPS or localhost). On `http://<ip>:<port>` every send threw `TypeError: crypto.randomUUID is not a function`, and the typed message never left the page. A new `lib/public/js/lib/random-uuid.js` uses `randomUUID` when it exists and otherwise builds the same v4 UUID from `crypto.getRandomValues`, which works everywhere.
+
+### Added (tests)
+- `tests/frontend/random-uuid.test.js`: the secure path, and v4-shaped unique ids without `randomUUID`.
+
 ## [0.10.54] - 2026-10-22
 
 A global npm install (`npm install -g alphaclaw && alphaclaw start`) starts its gateway (found by the ALPH-18 black-box pass on a real Ubicloud VPS).
