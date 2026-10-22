@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.33] - 2026-10-22
+
+Pure code moves out of four large server files (refactor plan PR 12, ALPH-15). No logic changes, and every old import path keeps working.
+
+### Changed
+
+- **`constants.js`** (975 → about 640 lines) gives up two blocks that read no env vars. The env-var registry (`kSystemVars`, `kKnownVars`, `kKnownKeys`) moves to `known-env-vars.js`. The onboarding model defaults (`kOnboardingModelProviders`, the minimal fallback list, `mergeCatalogModels`, `kFallbackOnboardingModels` and the two catalog JSON requires) move to `onboarding-model-defaults.js`. `constants.js` re-exports the same names, so its export set is unchanged.
+- **`claude-code-local/index.js`**: `composeOperatorPrompt` and its cause hints move to `claude-code-local/operator-prompt.js` and are re-exported.
+- **`doctor/service.js`**: `readFileSnippet`, `captureEvidenceSnippets` and the snippet bounds move to `doctor/evidence-snippets.js`.
+- **`bin/alphaclaw.js`** (about −380 lines): the `telegram topic add|create` and `telegram topics list` bodies move to `lib/cli/telegram-topics.js`, and `doctor finding complete` moves to `lib/cli/doctor-finding.js`. The dispatch `if`s stay at the same spot in bin, after the `.env` load, and load the new modules lazily.
+
 ## [0.10.32] - 2026-10-22
 
 Watchdog: one require cycle broken and the stateless code moved out of the closure (refactor plan PR 10, ALPH-15). No logic changes.
