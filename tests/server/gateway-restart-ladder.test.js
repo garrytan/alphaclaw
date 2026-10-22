@@ -50,9 +50,13 @@ const createWorld = () => {
   const world = {
     procs,
     signals: [],
+    signalLog: [],
     readyState: "ready", // what /readyz answers once a listener is up
     restartCli: "graceful", // graceful | refuse | ignored
     gracefulDelayMs: 500,
+    cliExitDelayMs: 300,
+    drainExitMs: null,
+    restartArgs: [],
     listenDelayMs: 200,
     lockWaitLine: false,
     spawned: [],
@@ -87,6 +91,11 @@ const createWorld = () => {
       proc.alive = false;
       proc.listens = false;
       proc.exitCode = code;
+      // A drain or a stall belongs to the gateway that just went away; the
+      // next one boots into the plain ready state.
+      if (world.listeners().length === 0 && (world.readyState === "draining" || world.readyState === "hang")) {
+        world.readyState = "ready";
+      }
       for (const p of procs.values()) if (p.alive && p.ppid === pid) world.exit(p.pid, code, signal);
       const child = proc.child;
       if (child) {
@@ -98,6 +107,7 @@ const createWorld = () => {
     },
     signal(pid, sig) {
       world.signals.push([pid, sig]);
+      world.signalLog.push({ pid, sig, at: Date.now() });
       const targets = pid < 0 ? [...procs.values()].filter((p) => p.alive && p.pgid === -pid).map((p) => p.pid) : [pid];
       if (sig === 0) {
         if (targets.some((t) => world.alive(t))) return true;
@@ -157,18 +167,56 @@ const createWorld = () => {
       return child;
     },
     // `gateway restart --wait`: the graceful ask.
-    spawnRestartCli() {
+    // restartCli is one mode for every attempt, or a list consumed one
+    // attempt at a time:
+    //   graceful          the gateway exits 0 after gracefulDelayMs
+    //   refuse            exit 1, no output, the gateway keeps admitting
+    //   rejected          exit 1 with an explicit OpenClaw refusal
+    //   ignored           the CLI never exits, the gateway never stops
+    //   unknown_draining  the request lands (the gateway drains, exits 0 at
+    //                     drainExitMs if set) but the ack is lost: exit 1
+    //                     with the CLI's "outcome is unknown" text
+    //   killed_draining   same, but the CLI dies by SIGKILL (OOM killer)
+    //   unknown_dropped   the ack is lost AND the request was rolled back:
+    //                     exit 1 "outcome is unknown", the gateway admits
+    spawnRestartCli(args = []) {
       const pid = nextPid++;
       const child = world.makeChild(pid);
       world.add(pid, { ppid: process.pid, child, openclaw: true });
+      world.restartArgs.push(args);
+      const mode = Array.isArray(world.restartCli) ? (world.restartCli.shift() ?? "graceful") : world.restartCli;
       const gateway = [...procs.values()].find((p) => p.alive && p.listens);
-      if (world.restartCli === "refuse" || !gateway) {
+      const exitGatewayRoot = () => {
+        if (!gateway?.alive) return;
+        const root = [...procs.values()].find((p) => p.alive && p.pid === gateway.ppid) || gateway;
+        world.exit(root.pid, 0);
+      };
+      const unknownText = "Gateway restart failed: GatewayTransportError: gateway timeout after 10000ms\nGateway target: ws://127.0.0.1:18789\nThe request was already sent to the gateway, so the operation may have been applied even though no response arrived; its outcome is unknown.\n";
+      if (mode === "refuse" || !gateway) {
         setTimeout(() => world.exit(pid, 1), 20);
-      } else if (world.restartCli === "graceful") {
+      } else if (mode === "rejected") {
         setTimeout(() => {
-          const root = [...procs.values()].find((p) => p.alive && p.pid === gateway.ppid) || gateway;
-          world.exit(root.pid, 0);
-        }, world.gracefulDelayMs);
+          child.stderr.emit("data", Buffer.from("Gateway restart failed: Error: target gateway no longer owns the active lock\n"));
+          world.exit(pid, 1);
+        }, 20);
+      } else if (mode === "graceful") {
+        setTimeout(exitGatewayRoot, world.gracefulDelayMs);
+      } else if (mode === "unknown_draining" || mode === "killed_draining") {
+        setTimeout(() => { world.readyState = "draining"; }, 50);
+        setTimeout(() => {
+          if (mode === "killed_draining") {
+            world.exit(pid, null, "SIGKILL");
+            return;
+          }
+          child.stderr.emit("data", Buffer.from(unknownText));
+          world.exit(pid, 1);
+        }, world.cliExitDelayMs);
+        if (world.drainExitMs != null) setTimeout(exitGatewayRoot, world.drainExitMs);
+      } else if (mode === "unknown_dropped") {
+        setTimeout(() => {
+          child.stderr.emit("data", Buffer.from(unknownText));
+          world.exit(pid, 1);
+        }, world.cliExitDelayMs);
       }
       world.spawned.push({ kind: "restart", pid, child });
       return child;
@@ -201,7 +249,7 @@ const installWorld = (world) => {
   vi.spyOn(process, "kill").mockImplementation((pid, sig) => world.signal(pid, sig));
   childProcess.spawn = vi.fn((file, args, options) => {
     if (args?.[0] === "gateway" && args?.[1] === "run") return world.spawnGateway(world.nextRunOptions || {});
-    if (args?.[0] === "gateway" && args?.[1] === "restart") return world.spawnRestartCli();
+    if (args?.[0] === "gateway" && args?.[1] === "restart") return world.spawnRestartCli(args);
     throw new Error(`unexpected spawn ${file} ${args?.join(" ")}`);
   });
   childProcess.execFile = vi.fn((file, args, opts, cb) => cb(null, "", ""));
@@ -212,7 +260,13 @@ const installWorld = (world) => {
       : originalReadFileSync(target, ...rest),
   );
   net.createConnection = vi.fn(() => createSocket(() => world.listeners().length > 0));
-  globalThis.fetch = vi.fn(async () => {
+  globalThis.fetch = vi.fn(async (url, options = {}) => {
+    if (world.readyState === "hang" && world.listeners().length > 0) {
+      // A stalled gateway: the probe only ends by its own abort.
+      return new Promise((resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      });
+    }
     if (world.listeners().length === 0) {
       throw Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } });
     }
@@ -348,7 +402,7 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     world.restartCli = "ignored";
     const onStep = vi.fn();
 
-    const { value, error } = await runRestart({ onStep }, 3000 + 5000 + 2000 + 1000 + 2000);
+    const { value, error } = await runRestart({ onStep }, gateway.gatewayStopAskBudgetMs(3000) + 2000 + 1000 + 2000);
     expect(error).toBeNull();
     expect(value.how).toBe("sigkill");
     expect(world.signals).toEqual(expect.arrayContaining([[-launcherPid, "SIGTERM"], [-launcherPid, "SIGKILL"]]));
@@ -417,7 +471,7 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       pid === root ? { verdict: "gone", reason: "pid_reused" } : world.verdict(pid),
     );
     world.restartCli = "ignored";
-    const { value, error } = await runRestart({}, 12000);
+    const { value, error } = await runRestart({}, gateway.gatewayStopAskBudgetMs(3000) + 2000 + 1000 + 2000);
     expect(error).toBeNull();
     expect(value.how).toBe("sigkill");
     const cliPids = new Set(world.spawned.filter((sp) => sp.kind === "restart").map((sp) => sp.pid));
@@ -435,7 +489,7 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       if (pid === workerPid) return;
       return realExit.call(world, pid, code, signal);
     };
-    const { error } = await runRestart({}, 15000);
+    const { error } = await runRestart({}, gateway.gatewayStopAskBudgetMs(3000) + 2000 + 1000 + 3000);
     expect(error).toBeInstanceOf(gateway.GatewayStopError);
     expect(error.code).toBe("stop_failed");
     expect(error.message).toContain(String(workerPid));
@@ -576,6 +630,120 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     expect(error).toBeInstanceOf(gateway.GatewayRestartError);
     expect(error.message).toContain("another process answered");
     expect(error.evidence).toMatchObject({ code: "launch_failed" });
+  });
+
+  describe("an ask CLI that exits non-zero: the gateway's state decides, not the exit code", () => {
+    const termsTo = (pgid) => world.signalLog.filter((entry) => entry.pid === -pgid && (entry.sig === "SIGTERM" || entry.sig === "SIGKILL"));
+    const logLines = () => console.log.mock.calls.map(([line]) => String(line));
+
+    it("the incident: the CLI exits 1 with 'outcome is unknown' while the gateway drains — no SIGTERM is sent, the drain finishes inside the grace and the stop is graceful", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "unknown_draining";
+      world.drainExitMs = 2500;
+      const askAt = Date.now();
+      const { value, error } = await runRestart({}, 8000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(termsTo(launcherPid)).toEqual([]);
+      expect(Date.now() - askAt).toBeGreaterThanOrEqual(2500);
+      const log = logLines();
+      expect(log.some((line) => /asking status=exited attempt=1 exit=1 class=unknown/.test(line))).toBe(true);
+      expect(log.some((line) => /asking status=probe attempt=1 gateway=draining/.test(line))).toBe(true);
+      expect(log.some((line) => /asking status=honoured attempts=1/.test(line))).toBe(true);
+    });
+
+    it("a draining gateway that outlives the grace is SIGTERMed only once the whole ask budget (grace + ack window + shutdown reserve) is spent, never at the CLI's exit", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "unknown_draining";
+      const askAt = Date.now();
+      const { value, error } = await runRestart({}, gateway.gatewayStopAskBudgetMs(3000) + 4000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("sigterm");
+      const [first] = termsTo(launcherPid);
+      expect(first.sig).toBe("SIGTERM");
+      expect(first.at - askAt).toBeGreaterThanOrEqual(gateway.gatewayStopAskBudgetMs(3000) - 500);
+      expect(value.stopEvidence.askAttempts).toEqual([{ attempt: 1, exit: 1, class: "unknown", gateway: "draining" }]);
+    });
+
+    it("a CLI killed by a signal (the OOM killer) while the gateway drains is waited out the same way", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "killed_draining";
+      world.drainExitMs = 2000;
+      const { value, error } = await runRestart({}, 8000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(termsTo(launcherPid)).toEqual([]);
+    });
+
+    it("'outcome is unknown' with the gateway confirmed admitting again (the request was dropped) re-asks once with the remaining grace; the second ask is honoured", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = ["unknown_dropped", "graceful"];
+      const { value, error } = await runRestart({}, 10000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(termsTo(launcherPid)).toEqual([]);
+      expect(world.restartArgs).toHaveLength(2);
+      expect(world.restartArgs[0]).toEqual(["gateway", "restart", "--wait", "3000ms"]);
+      const secondWait = Number(world.restartArgs[1][3].replace("ms", ""));
+      expect(secondWait).toBeGreaterThan(1500);
+      expect(secondWait).toBeLessThan(3000);
+    });
+
+    it("a second 'outcome unknown' against an admitting gateway escalates: one re-ask, never a loop", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = ["unknown_dropped", "unknown_dropped", "graceful"];
+      const { value, error } = await runRestart({}, 10000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("sigterm");
+      expect(world.restartArgs).toHaveLength(2);
+      expect(termsTo(launcherPid)[0].sig).toBe("SIGTERM");
+      const refused = logLines().find((line) => /asking status=refused/.test(line));
+      expect(refused).toMatch(/class=unknown gateway=admitting attempts=2/);
+    });
+
+    it("an explicit OpenClaw refusal against an admitting gateway escalates to SIGTERM within a second and a half", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "rejected";
+      const askAt = Date.now();
+      const { value, error } = await runRestart({}, 3000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("sigterm");
+      expect(termsTo(launcherPid)[0].at - askAt).toBeLessThan(1500);
+      expect(world.restartArgs).toHaveLength(1);
+    });
+
+    it("an explicit refusal while the gateway is visibly draining is still waited out: draining wins over the CLI's words", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "rejected";
+      world.readyState = "draining";
+      setTimeout(() => world.exit(launcherPid, 0), 2000);
+      const { value, error } = await runRestart({}, 8000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(termsTo(launcherPid)).toEqual([]);
+    });
+
+    it("probes that time out (a stalled gateway) are inconclusive: an 'outcome unknown' exit keeps waiting, and the stop is graceful once the gateway exits", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "unknown_dropped";
+      world.readyState = "hang";
+      setTimeout(() => world.exit(launcherPid, 0), 4000);
+      const { value, error } = await runRestart({}, 9000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(termsTo(launcherPid)).toEqual([]);
+      expect(world.restartArgs).toHaveLength(1);
+    });
+
+    it("the gateway's announced drain budget (min of --wait and its supervisor's stop budget) is recorded on the honoured line", async () => {
+      const { child } = await bootManaged(gateway, world);
+      world.restartCli = "graceful";
+      setTimeout(() => child.stderr.emit("data", Buffer.from("[gateway] largest observed model request timeout is 300000ms; shutdown drain budget remains with timeout 2930.5ms\n")), 100);
+      const { value, error } = await runRestart({}, 5000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(logLines().find((line) => /asking status=honoured/.test(line))).toMatch(/drainMs=2931/);
+    });
   });
 
   it("stopGatewayForShutdown never asks (no supervisor will relaunch): SIGTERM the group, SIGKILL inside its budget; killManagedGatewayChildNow SIGKILLs the group synchronously", async () => {

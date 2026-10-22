@@ -18,6 +18,19 @@ A tool process the gateway starts can no longer make the gateway look like it is
 ### Changed
 - When tool processes fill the container, the container alert says so and names the largest child by pid and RSS ("tool processes, not the gateway"); it never restarts the gateway. Memory notifications, the Doctor card and the Resources trend say "Gateway worker RSS" on the worker basis and show the worker/children split.
 
+## [0.10.49] - 2026-10-22
+
+A graceful restart whose ask CLI exits non-zero is no longer treated as refused: the gateway's own state decides (ALPH-17, PR 1 of the restart plan).
+
+### Fixed
+- `openclaw gateway restart --wait` waits only 10 s for the gateway to acknowledge `gateway.restart.request` (a hard timeout in 2026.10.4 through 2026.10.6). Under load the ack arrived late and the CLI exited 1 with "gateway timeout after 10000ms … its outcome is unknown" after the gateway had already closed admission and started draining. The stop ladder read any non-zero exit as a refusal and sent SIGTERM at once, then SIGKILL 10 s later, killing the agent's turn mid-run (Oct 22 incident). After a non-zero exit the ladder now probes `/readyz` every 500 ms (`lib/server/gateway-ask-outcome.js`): `draining`, `closed` (connection refused while the gateway pids still run) and `inconclusive` (probe timed out) keep waiting; it escalates only on an explicit OpenClaw rejection or when two consecutive probes find the gateway admitting work again. An "outcome unknown" exit against an admitting gateway (OpenClaw can roll a stalled request back; seen on 2026.10.4 and 2026.10.6) is re-asked once when at least half the grace remains. A CLI killed by a signal is treated like an unknown outcome.
+- The ask's wait now covers the grace plus the CLI's 10 s ack window plus OpenClaw's 15 s shutdown reserve, so an accepted drain and its cleanup finish before the ladder escalates (it had 5 s of slack).
+- SIGTERM gets 25 s before SIGKILL (was 10 s): 2026.10.6 drains a plain stop for up to 20 s.
+
+### Added
+- Ladder log lines `asking status=exited|probe|reasking`, `attempts=` and `drainMs=` (the drain OpenClaw announced: the smaller of `--wait` and its supervisor's stop budget, which systemd caps at `TimeoutStopUSec`), and `askAttempts`/`askDrainMs` on the admin-only stop evidence.
+- Live test `tests/live/gateway-restart-ask-outcome.e2e.test.js`: a real agent turn in flight; the ask CLI SIGKILLed after the request landed, and the incident's ack timeout reproduced by stalling the gateway worker for 11 s. Both stop gracefully with no SIGTERM.
+
 ## [0.10.48] - 2026-10-22
 
 Pin OpenClaw 2026.10.6 and raise the Node floor to the one it requires.
