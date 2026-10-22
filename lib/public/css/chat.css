@@ -28,12 +28,6 @@
   color: var(--text-muted);
 }
 
-.chat-route-warning {
-  margin-top: 8px;
-  font-size: 12px;
-  color: #fca5a5;
-}
-
 .chat-thread {
   flex: 1 1 auto;
   min-height: 0;
@@ -213,38 +207,6 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-}
-
-.chat-tool-call-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.chat-tool-call-row {
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  padding: 6px 8px;
-}
-
-.chat-tool-call-row summary {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.chat-tool-call-name {
-  color: var(--text);
-  font-size: 12px;
-}
-
-.chat-tool-call-status {
-  color: var(--text-muted);
-  font-size: 10px;
-  text-transform: lowercase;
 }
 
 .chat-tool-inline {

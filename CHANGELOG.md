@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.26] - 2026-10-22
+
+Dead Setup UI code and CSS are deleted (refactor plan PR 5, ALPH-15). One copy change.
+
+### Removed
+
+- **The unreachable Providers tab**: `components/providers.js` (809 lines), `routes/providers-route.js`, the `ProvidersRoute` re-export and its test. `/providers` already redirects to `/models`.
+- **Unused exports**: `More2FillIcon`, `FullscreenLineIcon`, `getToolsForSection`, `getAllToolIds`, `getCachedAt` and `kManagedUpdatePollMaxAttempts`.
+- **Five node exec-approval API wrappers the UI never called** (`fetchNodeExecConfig`, `saveNodeExecConfig`, `fetchNodeExecApprovals`, `addNodeExecAllowlistPattern`, `removeNodeExecAllowlistPattern`). The server routes stay for agent administration.
+- **The test-only duplicate cron token-tier algorithm** (`buildTokenTierByJobId`/`readAvgTokens`). The calendar's own `buildTierThresholds`/`classifyTokenTier` remains the only one.
+- ActionButton's identical `subtle` and `neutral` branches are merged, and two rename-only storage-key aliases are gone.
+- **About 320 lines of CSS** for 13 class families nothing renders: the old cron trend bars, `cron-list-separator`, the old chat tool-call rows, `chat-route-warning`, agents sub-tabs, `sidebar-update-btn`, `global-restart-banner__button`, the file-viewer view toggle, `file-viewer-sqlite-header`, `file-viewer-protected-banner-unlocked`, `ac-btn-cyan-ghost`, `ac-status-dot--healthy` and the light-theme `.text-cyan-300` override.
+
+### Changed
+
+- The Autotune card description no longer lists "backup retention", a setting Autotune does not have.
+
 ## [0.10.25] - 2026-10-22
 
 Dead server code is deleted (refactor plan PR 4, ALPH-15). One behavior change: the overseer no longer offers "rollback".

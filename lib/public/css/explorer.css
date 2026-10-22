@@ -809,13 +809,6 @@
   text-align: center;
 }
 
-.file-viewer-protected-banner-unlocked {
-  font-size: 11px;
-  color: #fde68a;
-  opacity: 0.95;
-  letter-spacing: 0.01em;
-}
-
 .file-viewer-diff-banner {
   background: rgba(59, 130, 246, 0.12);
 }
@@ -1025,41 +1018,6 @@
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-}
-
-.file-viewer-view-toggle {
-  display: flex;
-  align-items: center;
-  margin-right: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.02);
-  height: 28px;
-}
-
-.file-viewer-view-toggle-button {
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: inherit;
-  font-size: 12px;
-  text-transform: lowercase;
-  letter-spacing: 0.03em;
-  height: 100%;
-  line-height: 1;
-  padding: 0 10px;
-  cursor: pointer;
-}
-
-.file-viewer-view-toggle-button:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.file-viewer-view-toggle-button.active {
-  color: var(--accent);
-  background: var(--bg-active);
 }
 
 .file-viewer-editor-shell {
@@ -1454,12 +1412,6 @@
   height: 100%;
   overflow: auto;
   padding: 14px 16px 22px;
-}
-
-.file-viewer-sqlite-header {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-bottom: 10px;
 }
 
 .file-viewer-sqlite-footer {
@@ -1904,10 +1856,6 @@
 
 [data-theme="light"] .file-viewer-protected-banner-text {
   color: #92400e;
-}
-
-[data-theme="light"] .file-viewer-protected-banner-unlocked {
-  color: #a16207;
 }
 
 [data-theme="light"] .file-viewer-protected-banner.is-locked {

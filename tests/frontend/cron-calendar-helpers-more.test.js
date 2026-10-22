@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSlotKey,
-  buildTokenTierByJobId,
   classifyRepeatingJobs,
   expandJobsToRollingSlots,
   getRollingRange,
@@ -163,16 +162,6 @@ describe("frontend/cron-calendar-helpers (extended)", () => {
     expect(statusBySlotKey["far:1"]).toBeUndefined();
     expect(statusBySlotKey["none:1"]).toBeUndefined();
     expect(statusBySlotKey["future:1"]).toBeUndefined();
-  });
-
-  it("marks every job unknown or disabled when no usage exists", () => {
-    expect(
-      buildTokenTierByJobId({
-        jobs: [{ id: "a" }, { id: "b", enabled: false }],
-        usageByJobId: {},
-      }),
-    ).toEqual({ a: "unknown", b: "disabled" });
-    expect(buildTokenTierByJobId()).toEqual({});
   });
 
   it("falls back to defaults for junk rolling range inputs", () => {

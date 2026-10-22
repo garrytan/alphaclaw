@@ -334,22 +334,6 @@ textarea:focus {
   cursor: not-allowed;
 }
 
-.ac-btn-cyan-ghost {
-  border: 1px solid var(--accent-dim);
-  color: rgba(99, 235, 255, 0.75);
-  background: rgba(99, 235, 255, 0.04);
-  transition:
-    border-color 0.15s ease,
-    color 0.15s ease,
-    background 0.15s ease;
-}
-
-.ac-btn-cyan-ghost:hover {
-  border-color: rgba(99, 235, 255, 0.5);
-  color: #a4f3ff;
-  background: rgba(99, 235, 255, 0.08);
-}
-
 .ac-path-card {
   border: 1px solid var(--panel-border-contrast);
   background: rgba(0, 0, 0, 0.2);
@@ -601,18 +585,9 @@ textarea:focus {
   border-radius: 999px;
 }
 
-.ac-status-dot--healthy {
-  background: #22c55e;
-  animation: acStatusDotPulse 2.6s ease-in-out infinite;
-}
-
 .ac-status-dot--info {
   background: #22d3ee;
   animation: acStatusDotPulseInfo 2.6s ease-in-out infinite;
-}
-
-.ac-status-dot--healthy-offset {
-  animation-delay: 0.95s;
 }
 
 /* Gateway state dot: color/motion are server-sent ({color, motion}); these
@@ -807,7 +782,6 @@ textarea:focus {
     animation-timing-function: linear;
   }
 
-  .ac-status-dot--healthy,
   .ac-status-dot--info,
   .ac-step-pill-pulse,
   .ac-gateway-dot--pulse,
@@ -1014,18 +988,6 @@ textarea:focus {
   box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.15), 0 0 12px rgba(8, 145, 178, 0.1);
 }
 
-[data-theme="light"] .ac-btn-cyan-ghost {
-  border: 1px solid var(--accent-dim);
-  color: var(--accent);
-  background: rgba(8, 145, 178, 0.04);
-}
-
-[data-theme="light"] .ac-btn-cyan-ghost:hover {
-  border-color: rgba(8, 145, 178, 0.5);
-  color: #065666;
-  background: rgba(8, 145, 178, 0.08);
-}
-
 [data-theme="light"] .ac-btn-secondary {
   color: var(--text);
   background: rgba(0, 0, 0, 0.02);
@@ -1141,10 +1103,6 @@ textarea:focus {
 }
 
 [data-theme="light"] .text-cyan-400 {
-  color: #0e7490 !important;
-}
-
-[data-theme="light"] .text-cyan-300 {
   color: #0e7490 !important;
 }
 

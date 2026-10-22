@@ -68,28 +68,4 @@ describe("frontend/cron-calendar-helpers", () => {
     expect(result[0].jobId).toBe("b");
     expect(result[1].jobId).toBe("c");
   });
-
-  it("builds token tiers from usage averages", async () => {
-    const { buildTokenTierByJobId } = await loadCalendarHelpers();
-    const tierByJobId = buildTokenTierByJobId({
-      jobs: [
-        { id: "job-1", enabled: true },
-        { id: "job-2", enabled: true },
-        { id: "job-3", enabled: true },
-        { id: "job-4", enabled: true },
-        { id: "job-5", enabled: false },
-        { id: "job-6", enabled: true },
-      ],
-      usageByJobId: {
-        "job-1": { avgTokensPerRun: 10 },
-        "job-2": { avgTokensPerRun: 200 },
-        "job-3": { avgTokensPerRun: 400 },
-        "job-4": { avgTokensPerRun: 900 },
-      },
-    });
-    expect(tierByJobId["job-1"]).toBe("low");
-    expect(tierByJobId["job-4"]).toBe("very-high");
-    expect(tierByJobId["job-5"]).toBe("disabled");
-    expect(tierByJobId["job-6"]).toBe("unknown");
-  });
 });
