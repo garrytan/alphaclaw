@@ -5,7 +5,7 @@ import {
   kOnboardRetryDelaysMs,
   kReconnectBudgetMs,
   startOnboardStatusLoad,
-} from "../../lib/public/js/hooks/use-app-shell-controller.js";
+} from "../../lib/public/js/lib/shell-connectivity.js";
 import {
   buildGlobalBannerModel,
   kReconnectingBannerText,

@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.38] - 2026-10-22
+
+Pure helpers move out of the Envars tab, the cron calendar and the app-shell controller hook (refactor plan PR 14c, ALPH-15). No logic changes.
+
+### Changed
+
+- **`components/envars-hints.js`** now owns the per-key hint copy (`kHintByKey`, about 115 lines of markup) and `getHintContent`. `envars.js` keeps the rows, the banner and the tab.
+- **`cron-tab/cron-calendar-helpers.js`** gains the calendar's pure helpers from `cron-calendar.js`: `formatUpcomingTime`, `buildRunSummaryByJobId`, `mapRunsToSlots`, `buildTierThresholds`, `classifyTokenTier` and `buildJobTooltipText`, plus their window and tier constants. They are now importable for tests; `cron-calendar.js` keeps the legend, the cell helpers and the component.
+- **`lib/shell-connectivity.js`** now owns the app shell's pure factories: `startOnboardStatusLoad`, `createConnectivityMonitor`, `createReachabilityPoller` and their constants. `use-app-shell-controller.js` imports them. `app-shell-reconnect.test.js` and a comment in `chat/connection.js` point at the new module.
+- Every line moved unchanged; the only edits are import lists and `export` on helpers the component files now import.
+
 ## [0.10.37] - 2026-10-22
 
 The create-channel modal's pure helpers and the channel display metadata move out of component files (refactor plan PR 14b, ALPH-15). No logic changes.
