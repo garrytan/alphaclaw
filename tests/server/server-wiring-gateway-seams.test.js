@@ -233,7 +233,7 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     expect(systemSource).toContain('const { GatewayRestartError } = require("../gateway");');
     expect(systemSource).not.toContain("GatewayIncumbentRestartError");
     expect(systemSource).not.toContain("incumbent_gateway_still_running");
-    expect(systemSource).toContain("const classifyRestartFailure = (err) =>");
+    expect(readSource("lib", "server", "restart-failure-copy.js")).toContain("const classifyRestartFailure = (err) =>");
     const gatewaySource = readSource("lib", "server", "gateway.js");
     expect(gatewaySource).toContain("class GatewayStopError extends GatewayRestartError");
     expect(gatewaySource).toContain('throw new GatewayStopError(\n      "stop_refused"');

@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.34] - 2026-10-22
+
+Pure code moves out of `routes/system.js` and `agents/channels.js` (refactor plan PR 13, ALPH-15). No logic changes.
+
+### Changed
+
+- **`lib/server/restart-failure-copy.js`** now owns the user-facing restart failure vocabulary: the sentence and hint for each failure class, the upgrade-retry and stop-failed sentences, the human phase labels, the recovery clause and `classifyRestartFailure`. All of it moved out of `registerSystemRoutes`. This retargets one source pin in `server-wiring-gateway-seams.test.js`: it now checks for `const classifyRestartFailure = (err) =>` in the new file.
+- The session-picker label helpers (`getAgentLabelFromSessionKey`, `parseChannelFromSessionKey` and their helpers) move from `routes/system.js` into `utils/agent-session-lookup.js`, next to the shared session list.
+- **`agents/channels.js`** (1,482 → 1,120 lines) hands three channel-specific blocks to sub-factories that take the same dependencies: `agents/channels/clickclack.js` (guided setup), `agents/channels/whatsapp.js` (account creation and auth-file cleanup) and `agents/channels/pairing-cleanup.js` (pairing rows and files on delete). The create-in-progress flag stays in the parent.
+
 ## [0.10.33] - 2026-10-22
 
 Pure code moves out of four large server files (refactor plan PR 12, ALPH-15). No logic changes, and every old import path keeps working.
