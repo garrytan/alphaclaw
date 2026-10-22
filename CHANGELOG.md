@@ -5,6 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.23] - 2026-10-21
+
+The live tier now checks every OpenClaw CLI and plugin-sdk assumption AlphaClaw encodes from one typed table (refactor plan PR 3, ALPH-15). Test-only: no runtime code changes.
+
+### Added
+
+- **OpenClaw contract table** (`tests/live/openclaw-cli-contract-table.js`). Each row names the AlphaClaw code that relies on it, and the live CLI contract test runs every row as its own case:
+  - `help`: `<argv> --help` prints the help of that exact command (not a parent's help or "has no command"), defines every flag AlphaClaw passes, and lists the subcommands it calls. This covers backup, approvals, config, doctor, gateway, channels (per-channel token and ClickClack `--code` flags), agents, agent, message, pairing, devices, nodes, models, sessions, plugins, cron and onboard.
+  - `enum`: the option values AlphaClaw passes or gates on, such as `channels add --channel` including buzz and clickclack, `cron edit --wake`, and the onboard `--flow`, `--gateway-bind`, `--gateway-auth` and `--auth-choice` values.
+  - `hidden-verb`: `gateway restart-handoff capabilities` and `consume`, checked by their real exit status and JSON, since help does not list them.
+  - `json-shape`: `doctor --lint`, `sessions --all-agents`, `models status`, `models list --all`, `plugins list` and `pairing list`, each read through `runCliJson` and checked for the fields AlphaClaw reads.
+  - `config-path` for the trusted-proxy team probe, and `sdk-export` for `approveDevicePairing`, `coerceSecretRef` and `resolveSecretRefValues`.
+  - Two disabled-plugins configs (`plugins.allow=["telegram"]`, and ClickClack disabled) re-check the buzz/clickclack enum and ClickClack `--code`.
+- **`OPENCLAW_CONTRACT_INSTALL_DIR`** runs the table against a candidate OpenClaw (a directory holding `node_modules/openclaw`) before a pin bump. Without it, the table runs against the pin and asserts the pin's version.
+- `runCliJson` takes `exits` for commands whose JSON answer comes with a nonzero status (`doctor --lint` exits 1 with findings; `consume` exits 2 on an invalid pid).
+
+### Changed
+
+- The backup-flag and approvals-subcommand checks moved out of the lifecycle test and into the table. The approvals, exec-config and pairing round trips are unchanged.
+
 ## [0.10.21] - 2026-10-22
 
 Docs and comments match the code (refactor plan PR 1, ALPH-15). No runtime change.

@@ -89,6 +89,18 @@ describe("live-helpers CLI --json contract", () => {
       );
     });
 
+    it("`exits` admits a nonzero status that carries the JSON answer, and only that status", () => {
+      const bin = writeScript(
+        dir,
+        "lint.js",
+        'process.stdout.write(JSON.stringify({ findings: [] })); process.exit(1);',
+      );
+      expect(runCliJson(bin, ["doctor", "--lint", "--json"], { exits: [0, 1] })).toEqual({ findings: [] });
+      expect(() => runCliJson(bin, ["doctor", "--lint", "--json"], { exits: [0, 2] })).toThrow(
+        /exited with status 1/,
+      );
+    });
+
     it("a banner on stdout FAILS the contract even when the exit is 0", () => {
       const bin = writeScript(
         dir,

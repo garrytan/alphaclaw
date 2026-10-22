@@ -2,14 +2,16 @@
 // REAL pinned OpenClaw (package.json dependencies.openclaw, installed in
 // node_modules — the build production runs). The hermetic suites drive these
 // behaviors through mocks; this tier screams when a pin bump drifts:
-//   1. `backup create` names --output/--verify/--json (the "Back up now"
-//      button runs exactly that command).
-//   2. `approvals` lists `pending` and `get` in the PARENT help — the
-//      execApprovalsSqlite era-probe contract.
-//   3. `approvals get --json` wraps the document ({ path, exists, hash,
+//   1. Every row of the contract table (openclaw-cli-contract-table.js): the
+//      flags, subcommands, option values, hidden verbs, JSON shapes, config
+//      paths and plugin-sdk exports AlphaClaw passes or reads, each naming
+//      the code that relies on it. Set OPENCLAW_CONTRACT_INSTALL_DIR to a
+//      directory holding node_modules/openclaw to run the table against a
+//      candidate pin before bumping.
+//   2. `approvals get --json` wraps the document ({ path, exists, hash,
 //      file, effectivePolicy }) — the CLI-backed routes unwrap `.file` (a
 //      bare-doc assumption corrupted the round-trip).
-//   4. The exec-defaults era layer, the config set/get flow and the pairing
+//   3. The exec-defaults era layer, the config set/get flow and the pairing
 //      store behave as the routes assume against a real state dir.
 //
 // Requires: a supported Node; offline (no install). Runtime: ~1-3 min.
@@ -26,31 +28,146 @@ process.env.ALPHACLAW_ROOT_DIR = liveHelpers.mkTemp(
 );
 delete process.env.OPENCLAW_GIT_DIR;
 
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
+const { pathToFileURL } = require("url");
 
 const { describeExecutingBuild } = require("../../lib/server/openclaw-build");
+const { kCliContractRows } = require("./openclaw-cli-contract-table");
 const { kLiveEnabled, kSilentLogger, mkTemp, scrubTestRunnerEnv } = liveHelpers;
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
 const kTestTimeoutMs = 12 * 60 * 1000;
-const kUnknownCommandPattern =
-  /unknown command|unrecognized|unexpected argument|not a valid|no such (?:command|subcommand)/i;
+const kRowTimeoutMs = 2 * 60 * 1000;
+const kRepoRoot = path.resolve(__dirname, "../..");
+const kCandidateInstallDir = process.env.OPENCLAW_CONTRACT_INSTALL_DIR
+  ? path.resolve(process.env.OPENCLAW_CONTRACT_INSTALL_DIR)
+  : null;
 
-// Help probes exit nonzero on some builds — the TEXT is the contract.
-const helpText = (bin, args) => {
-  try {
-    return String(
-      execFileSync(process.execPath, [bin, ...args], {
-        timeout: 120_000,
-        stdio: "pipe",
-        env: scrubTestRunnerEnv(),
-      }),
-    );
-  } catch (error) {
-    return `${error?.stdout || ""}\n${error?.stderr || ""}\n${error?.message || ""}`;
-  }
+// A missing subcommand prints "OpenClaw <group> has no command" (no Usage
+// line), and an unknown flag prints "does not recognize option".
+const kHelpDriftPattern =
+  /has no command|does not know the command|does not recognize option|unknown command/i;
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const runCli = (bin, args, env) => {
+  const result = spawnSync(process.execPath, [bin, ...args], {
+    encoding: "utf8",
+    timeout: kRowTimeoutMs,
+    env: scrubTestRunnerEnv(env),
+  });
+  return { status: result.status, text: `${result.stdout || ""}\n${result.stderr || ""}` };
 };
+
+// Option definitions are the two-space-indented lines of the Options block;
+// examples and wrapped descriptions never start there.
+const definedFlags = (helpText) =>
+  new Set(
+    [...helpText.matchAll(/^ {2,4}(?:-[A-Za-z], )?(--[a-z0-9][\w-]*)/gm)].map((match) => match[1]),
+  );
+
+const listedSubcommands = (helpText) => {
+  const section = /^Commands:\s*$([\s\S]*?)(?=^\S|(?![\s\S]))/m.exec(helpText)?.[1] || "";
+  return new Set([...section.matchAll(/^ {2}([a-z][\w-]*)/gm)].map((match) => match[1]));
+};
+
+// The value list (a|b|c) in an option's description, wrapped lines included.
+const optionValues = (helpText, option) => {
+  const lines = helpText.split(/\r?\n/);
+  const definition = new RegExp(`^ {2,4}(?:-[A-Za-z], )?${escapeRegExp(option)}(?=[\\s,]|$)`);
+  const start = lines.findIndex((line) => definition.test(line));
+  if (start === -1) return null;
+  const block = [lines[start]];
+  for (let i = start + 1; i < lines.length && /^ {6,}\S/.test(lines[i]); i += 1) block.push(lines[i]);
+  return new Set(
+    [...block.join(" ").matchAll(/[\w.-]+(?:\|[\w.-]+)+/g)].flatMap((match) => match[0].split("|")),
+  );
+};
+
+const rowLabel = (row) =>
+  `${row.kind}: ${row.argv ? `openclaw ${row.argv.join(" ")}` : row.subpath || row.path}` +
+  (row.option ? ` ${row.option}` : "") +
+  (row.config ? ` with ${JSON.stringify(row.config)}` : "");
+
+const checkContractRow = async (row, build) => {
+  if (row.kind === "sdk-export") {
+    const pkg = JSON.parse(fs.readFileSync(path.join(build.packageDir, "package.json"), "utf8"));
+    const entry = pkg.exports?.[`./${row.subpath}`];
+    const target = typeof entry === "string" ? entry : entry?.import || entry?.default;
+    expect(target, `${row.site}: openclaw/${row.subpath} is not exported`).toBeTruthy();
+    const mod = await import(pathToFileURL(path.join(build.packageDir, target)).href);
+    for (const name of row.names) {
+      expect(typeof mod[name], `${row.site}: openclaw/${row.subpath} exports ${name}`).toBe("function");
+    }
+    return;
+  }
+  const stateDir = mkTemp("openclaw-live-contract-row-");
+  fs.writeFileSync(path.join(stateDir, "openclaw.json"), JSON.stringify(row.config || {}));
+  const env = {
+    ...scrubTestRunnerEnv(),
+    HOME: stateDir,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
+  };
+  if (row.kind === "hidden-verb" || row.kind === "json-shape") {
+    const doc = liveHelpers.runCliJson(build.bin, row.argv, {
+      env,
+      exits: row.exits,
+      timeoutMs: kRowTimeoutMs,
+      label: build.version,
+    });
+    row.check(doc);
+    return;
+  }
+  if (row.kind === "config-path") {
+    const { status, text } = runCli(build.bin, ["config", "get", row.path, "--json"], env);
+    expect(text, `${row.site}: the schema knows ${row.path}`).not.toMatch(/unknown config path/i);
+    expect(status === 0 || /valid but unset/i.test(text), `${row.site}: ${text.slice(0, 400)}`).toBe(true);
+    return;
+  }
+  const { text } = runCli(build.bin, [...row.argv, "--help"], env);
+  expect(text, `${row.site}: ${row.argv.join(" ")} exists`).not.toMatch(kHelpDriftPattern);
+  if (row.kind === "enum") {
+    const values = optionValues(text, row.option);
+    expect(values, `${row.site}: ${row.option} is defined with a value list`).not.toBeNull();
+    const missing = row.values.filter((value) => !values.has(value));
+    expect(missing, `${row.site}: ${row.option} values missing`).toEqual([]);
+    return;
+  }
+  // Commander prints an alias as `name|alias` in the Usage line.
+  const usage = (/^Usage: openclaw (.*)$/m.exec(text)?.[1]?.trim() || "").replace(/\|[\w-]+/g, "");
+  const expectedUsage = row.usage || row.argv.join(" ");
+  expect(
+    usage === expectedUsage || usage.startsWith(`${expectedUsage} `),
+    `${row.site}: help is for "openclaw ${expectedUsage}", got "Usage: openclaw ${usage}"`,
+  ).toBe(true);
+  const flags = definedFlags(text);
+  const missingFlags = (row.flags || []).filter((flag) => !flags.has(flag));
+  expect(missingFlags, `${row.site}: flags missing from help`).toEqual([]);
+  const subcommands = listedSubcommands(text);
+  const missingSubcommands = (row.subcommands || []).filter((name) => !subcommands.has(name));
+  expect(missingSubcommands, `${row.site}: subcommands missing from help`).toEqual([]);
+};
+
+describeLive("LIVE openclaw contract table", { retry: 1 }, () => {
+  const build = describeExecutingBuild({ installDir: kCandidateInstallDir || kRepoRoot });
+
+  it(`runs against openclaw ${build?.version || "(missing)"}${kCandidateInstallDir ? " (candidate)" : " (pin)"}`, () => {
+    expect(build?.bin, "no OpenClaw build found").toBeTruthy();
+    if (!kCandidateInstallDir) {
+      expect(build.version).toBe(require("../../package.json").dependencies.openclaw);
+    }
+  });
+
+  it.each(kCliContractRows.map((row) => [rowLabel(row), row]))(
+    "%s",
+    { timeout: kRowTimeoutMs },
+    async (_label, row) => {
+      await checkContractRow(row, build);
+    },
+  );
+});
 
 describeLive(
   "LIVE openclaw CLI contract against the pinned build",
@@ -60,25 +177,13 @@ describeLive(
       "the pin supports the backup, approvals, exec-config and pairing contracts",
       { timeout: kTestTimeoutMs },
       async () => {
-        const build = describeExecutingBuild({ installDir: path.resolve(__dirname, "../..") });
+        const build = describeExecutingBuild({ installDir: kRepoRoot });
         const pin = require("../../package.json").dependencies.openclaw;
         expect(build?.version).toBe(pin);
         const pinBin = build.bin;
 
-        // 1. The "Back up now" contract (openclaw-runtime.js startBackup):
-        // the CLI names every flag AlphaClaw passes. The end-to-end run
-        // against the real CLI lives in openclaw-live-backup.e2e.test.js.
-        const backupHelp = helpText(pinBin, ["backup", "create", "--help"]);
-        expect(backupHelp).not.toMatch(kUnknownCommandPattern);
-        for (const flag of ["--output", "--verify", "--json"]) expect(backupHelp).toContain(flag);
-        // 2. The era-probe contract: the sqlite era lists `pending` in the
-        // PARENT approvals help (probing `approvals pending --help` is
-        // useless — commander 15 prints the parent help and exits 0 for an
-        // unknown subcommand + --help, on both eras).
-        const approvalsHelp = helpText(pinBin, ["approvals", "--help"]);
-        expect(approvalsHelp).not.toMatch(kUnknownCommandPattern);
-        expect(approvalsHelp).toMatch(/^\s*pending\b/m);
-        expect(approvalsHelp).toMatch(/^\s*get\b/m);
+        // The flag and subcommand contracts (backup create, the approvals
+        // era probe) are rows of the contract table above.
         // 3. The get/set round-trip contract the CLI-backed routes encode:
         // the doc is wrapped under `file`, `set --file` accepts alphaclaw's
         // entry shape ({pattern, id, lastUsedAt}), a redacted get→set

@@ -191,7 +191,9 @@ const parseSingleJsonDocument = (stdout, { label = "cli", stderr = "" } = {}) =>
 // `env` is the caller's base env (defaults to the process env INSIDE
 // scrubTestRunnerEnv — never spread raw here; live-tier-conventions.test.js
 // scans for that).
-const runCliJson = (bin, args, { env = undefined, input = null, timeoutMs = 120_000, label = "openclaw" } = {}) => {
+// `exits` lists the statuses that still carry the JSON answer (doctor --lint
+// exits 1 with findings; restart-handoff consume exits 2 on a bad pid).
+const runCliJson = (bin, args, { env = undefined, input = null, timeoutMs = 120_000, label = "openclaw", exits = [0] } = {}) => {
   const result = spawnSync(process.execPath, [bin, ...args], {
     encoding: "utf8",
     timeout: timeoutMs,
@@ -202,7 +204,7 @@ const runCliJson = (bin, args, { env = undefined, input = null, timeoutMs = 120_
   if (result.error) {
     throw new Error(`${command} failed to spawn: ${result.error.message}`);
   }
-  if (result.status !== 0) {
+  if (!exits.includes(result.status)) {
     throw new Error(
       `${command} exited ${result.status === null ? `on signal ${result.signal}` : `with status ${result.status}`}.\n` +
         `stderr: ${JSON.stringify(quoteTail(result.stderr, kStderrQuoteBytes))}\n` +
