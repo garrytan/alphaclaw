@@ -14,6 +14,7 @@ process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 
 const systemResources = require("../../lib/server/system-resources");
 const collector = require("../../lib/server/gateway-memory/process-snapshot");
+const processCommand = require("../../lib/server/gateway-memory/process-command");
 const telemetry = require("../../lib/server/gateway-memory/telemetry");
 const autotune = require("../../lib/server/autotune");
 const { createWatchdog } = require("../../lib/server/watchdog");
@@ -110,6 +111,7 @@ describe("Oct 22 memory incident replay", () => {
   });
 
   it("a growing tool child with a flat verified worker: no leak verdict, no restart, one alert naming the child", async () => {
+    const readCommand = vi.spyOn(processCommand, "readProcessCommand").mockReturnValue("bun");
     const stack = createStack({ workerVerified: true });
     // Through 11:30Z: the group crosses 90% of the 8384 MB budget at ~11:23Z.
     const readProcess = await replay(stack, { untilMs: Date.parse("2026-10-22T11:30:00.000Z") });
@@ -127,9 +129,12 @@ describe("Oct 22 memory incident replay", () => {
 
     const alerts = stack.messages().filter((message) => message.includes("Container memory critical"));
     expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toContain("tool processes, not the gateway");
-    expect(alerts[0]).toMatch(new RegExp(`Gateway worker 38\\d\\d MB; tool children \\d+ MB across 1 process \\(largest: pid ${kChildPid}, \\d+ MB\\)`));
+    expect(alerts[0]).toContain("a tool process, not the gateway");
+    expect(alerts[0]).toMatch(/`bun`, a process the gateway started, is using \d+ MB\. The container working set is \d+ MB of its 8192 MB limit \(\d+%\), and the gateway worker is 38\d\d MB\./);
+    expect(alerts[0]).toContain("the kernel will kill it when the container runs out of memory");
     expect(alerts[0]).toContain("will not restart the gateway");
+    expect(alerts[0]).not.toContain(String(kChildPid));
+    expect(readCommand).toHaveBeenCalledWith(kChildPid);
     const critical = stack.events().find((event) => event.details.kind === "container_critical");
     expect(critical.details).toMatchObject({ childDriven: true, largestChild: { pid: kChildPid } });
   });

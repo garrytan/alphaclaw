@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.59] - 2026-10-22
+
+When a tool process fills the container, the owner's alert names its command and its memory against the limit, and says the kernel will kill it if it keeps growing (ALPH-17, PR 7 of the restart plan).
+
+### Changed
+- The child-driven `container_critical` notification (the container working set at 90% or more of its limit for two samples, with the growth in processes the gateway started) now names the largest child's command instead of its pid: the basename of its executable, else the kernel's short name, withheld unless it is a plain token (`lib/server/gateway-memory/process-command.js`). It says how many MB the child uses, the container's MB against its limit with the percentage, and the gateway worker's MB. It says that if the child keeps growing, the kernel will kill it when the container runs out of memory (OpenClaw makes its tool children the kernel's first choice), and that the watchdog will neither stop the process nor restart the gateway, because a restart would end the process too. It is still sent once per container episode through the existing notification path. The command name appears only in that notification, never in the `container_critical` event, the API or a prompt, and never as argv or a path.
+
 ## [0.10.57] - 2026-10-22
 
 A routine restart lets OpenClaw finish its active work for up to 3 minutes before stopping it, and the restart card offers Restart now (ALPH-17, PR 5 of the restart plan).

@@ -33,8 +33,13 @@ child by pid) and never enter the enforced series: a gateway restart cannot free
 a tool child's memory. On the worker basis, container pressure counts toward the
 verdict only while the worker holds at least half of a completely censused group
 and is itself growing at 64 MB/h or more. When the container goes critical
-because of tool processes, the container alert says so and names the largest
-child; it never restarts the gateway. `tests/server/gateway-memory-incident-replay.test.js`
+because of tool processes, the owner is told once per container episode which
+command the largest child runs (its executable's basename, else `/proc/<pid>/comm`,
+withheld unless it is a plain token; never argv, a path or the pid, and only in the
+notification) and how much it uses against the container limit, and that the kernel
+will kill it if it keeps growing. The watchdog neither kills the child nor restarts
+the gateway: the kernel picks the child anyway (OpenClaw sets its tool children's
+`oom_score_adj` to 1000), and a restart would end it too. `tests/server/gateway-memory-incident-replay.test.js`
 replays the Oct 22 incident (worker flat at 3837 MB, one child growing to 2754 MB
 at 2021 MB/h, group 7239 MB against an 8384 MB budget). Static process roles do not
 identify MCP sessions, activity, or orphaned children.
