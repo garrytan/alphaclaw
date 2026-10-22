@@ -336,7 +336,35 @@ const scanSecretCompares = (rawText, relPath) => {
   return hits;
 };
 
+// Guard (f): every gateway restart names who asked for it (ALPH-17). A call to
+// a restart primitive, or to a wrapper that forwards to one, must pass a
+// `source` in its arguments or forward its own caller's options/attribution
+// object unchanged. Without it the ladder logs `source=unattributed` and
+// nobody can tell which caller restarted the gateway (the Oct 22 `op=-`).
+const kRestartCallRe = /(^|[^\w.$])(restartGateway|coldRestartGateway|scopedRestart|restartSavedChannel|runGatewayColdStart|restartGatewayWithReload|restartGatewayColdStart|restartGatewayForMitigation)\s*\(/g;
+const kForwardedArgRe = /^(?:\w+\s*,\s*)?(?:\.\.\.)?(?:options|attribution)$/;
+const scanUnattributedRestarts = (rawText, relPath) => {
+  const text = stripComments(rawText);
+  const hits = [];
+  for (const m of text.matchAll(kRestartCallRe)) {
+    const nameStart = m.index + m[1].length;
+    if (/\bfunction\s*$/.test(text.slice(Math.max(0, nameStart - 20), nameStart))) continue;
+    let depth = 0;
+    let end = nameStart + m[0].length - m[1].length - 1;
+    const open = end;
+    for (; end < text.length; end += 1) {
+      if (text[end] === "(") depth += 1;
+      else if (text[end] === ")" && --depth === 0) break;
+    }
+    const args = text.slice(open + 1, end).replace(/\s+/g, " ").trim();
+    if (/\bsource\b/.test(args) || kForwardedArgRe.test(args) || /\.\.\.(?:options|attribution)\b/.test(args)) continue;
+    hits.push({ key: `${relPath}::${m[2]}(${args.slice(0, 60)})`, file: relPath, line: lineOf(text, nameStart) });
+  }
+  return hits;
+};
+
 module.exports = {
+  scanUnattributedRestarts,
   scanConfigWriters,
   scanShellStrings,
   scanUnwrappedAsyncRoutes,
