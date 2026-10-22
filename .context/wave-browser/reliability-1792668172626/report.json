@@ -1,0 +1,40 @@
+{
+  "checks": [
+    "managed acknowledgement remains pending across reload and version change without restart banner",
+    "admin confirms completed deployment without a follow-up update POST",
+    "unknown deployment restores and resolves only with explicit provider confirmation",
+    "member sees pending state without provider resolution controls",
+    "Gmail retains stale status honestly then restores local-disabled remote-failed state after reload",
+    "explicit Gmail retry reconciles remote stop without sending email"
+  ],
+  "pageErrors": [],
+  "consoleEvents": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+    }
+  ],
+  "httpFailures": [
+    {
+      "url": "http://127.0.0.1:39821/api/gmail/watch/stop",
+      "status": 503
+    },
+    {
+      "url": "http://127.0.0.1:39821/api/gmail/config",
+      "status": 503
+    },
+    {
+      "url": "http://127.0.0.1:39821/api/gmail/config",
+      "status": 503
+    }
+  ],
+  "failure": null
+}
