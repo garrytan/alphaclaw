@@ -757,6 +757,33 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       expect(logLines().find((line) => /asking status=running/.test(line))).toMatch(/graceMs=2500 graceReason=derived/);
     });
 
+    it("every ladder line carries a real operation id: the caller's, or one minted for it, opened by a requested line naming the source (ALPH-17)", async () => {
+      await bootManaged(gateway, world);
+      world.restartCli = "graceful";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const attributed = await runRestart({ source: "watchdog:memory_mitigation", reason: "episode 101-1" }, 5000);
+      expect(attributed.error).toBeNull();
+      const restartLines = () => logLines().filter((line) => line.startsWith("[alphaclaw] restart op="));
+      const firstOp = /op=(\S+)/.exec(restartLines()[0])[1];
+      expect(firstOp).toMatch(/^[0-9a-f]{8}$/);
+      expect(attributed.value.opId.slice(0, 8)).toBe(firstOp);
+      expect(restartLines()[0]).toBe(`[alphaclaw] restart op=${firstOp} requested source=watchdog:memory_mitigation reason=episode 101-1`);
+      expect(restartLines().every((line) => line.startsWith(`[alphaclaw] restart op=${firstOp} `))).toBe(true);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("has no source"));
+
+      console.log.mockClear();
+      world.restartCli = "graceful";
+      const bare = await runRestart({}, 5000);
+      expect(bare.error).toBeNull();
+      expect(restartLines()[0]).toMatch(/^\[alphaclaw\] restart op=[0-9a-f]{8} requested source=unattributed$/);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("has no source"));
+
+      console.log.mockClear();
+      await drive(gateway.stopGatewayForShutdown({ budgetMs: 2000 }), 3000);
+      expect(restartLines()[0]).toMatch(/^\[alphaclaw\] restart op=[0-9a-f]{8} requested source=shutdown$/);
+      expect(logLines().some((line) => /restart op=(-|shutdown) /.test(line))).toBe(false);
+    });
+
     it("a throwing resolver falls back to the default 30 s grace and says so", async () => {
       await bootManaged(gateway, world);
       world.restartCli = "graceful";

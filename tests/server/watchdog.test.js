@@ -5226,7 +5226,7 @@ describe("server/watchdog", () => {
       expect(doctorFixCalls(clawCmd)).toBe(1);
       expect(launchGatewayProcess).not.toHaveBeenCalled();
       expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
-      expect(restartGatewayColdStart).toHaveBeenCalledWith({ shouldAbort: expect.any(Function) });
+      expect(restartGatewayColdStart).toHaveBeenCalledWith({ shouldAbort: expect.any(Function), opId: expect.stringMatching(/^[0-9a-f-]{36}$/), source: "watchdog:repair_replace", reason: expect.any(String) });
       expect(restartRows(insertWatchdogEvent, { source: "repair", status: "requested" })).toEqual([
         expect.objectContaining({
           details: expect.objectContaining({
@@ -6946,7 +6946,7 @@ describe("server/watchdog", () => {
         expect.objectContaining({ details: expect.objectContaining({ reason: "gateway_running", pid: 800 }) }),
       ]);
       expect(restartGatewayColdStart).toHaveBeenCalledTimes(1);
-      expect(restartGatewayColdStart).toHaveBeenCalledWith({ shouldAbort: expect.any(Function) });
+      expect(restartGatewayColdStart).toHaveBeenCalledWith({ shouldAbort: expect.any(Function), opId: expect.stringMatching(/^[0-9a-f-]{36}$/), source: "watchdog:repair_replace", reason: expect.any(String) });
       expect(heldDuringRestart).toBe("repair");
       expect(launchGatewayProcess).not.toHaveBeenCalled();
       expect(restartRows(insertWatchdogEvent, { source: "repair", status: "requested" })).toEqual([
@@ -7060,7 +7060,7 @@ describe("server/watchdog", () => {
       const result = await watchdog.triggerRepair();
       await settle();
       expect(restartGatewayForMitigation).toHaveBeenCalledTimes(1);
-      expect(restartGatewayForMitigation).toHaveBeenCalledWith({ shouldAbort: expect.any(Function) });
+      expect(restartGatewayForMitigation).toHaveBeenCalledWith({ shouldAbort: expect.any(Function), opId: expect.any(String), source: "watchdog:repair_replace", reason: expect.any(String) });
       expect(result).toMatchObject({ ok: true, verdict: "replacement_ready", verifiedHealthy: true });
       expect(operationRows(insertWatchdogEvent).map((event) => event.details.trigger)).toEqual(["repair", "repair"]);
       watchdog.stop();

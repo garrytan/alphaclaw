@@ -2873,7 +2873,7 @@ describe("server/routes/system", () => {
     expect(h.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith({
       kind: "gateway_restart",
       status: "skipped",
-      details: { operationId: "op-queued", trigger: "manual", reason: "lease_expired" },
+      details: { operationId: "op-queued", restartSource: "api:restart", trigger: "manual", reason: "lease_expired" },
     });
     expect(h.deps.watchdog.recordOperationEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ status: "failed" }),
@@ -3339,6 +3339,7 @@ describe("server/routes/system", () => {
       status: "ok",
       details: {
         operationId: "op-ok",
+        restartSource: "api:restart",
         trigger: "manual",
         durationMs: 900,
         downtimeMs: 350,
@@ -3366,6 +3367,7 @@ describe("server/routes/system", () => {
         status: "failed",
         details: {
           operationId: "op-bad",
+          restartSource: "api:restart",
           trigger: "manual",
           error: "bind failed for token ***",
           code: "restart_failed",

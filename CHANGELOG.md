@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.56] - 2026-10-22
+
+Every gateway restart now says who asked for it and why (ALPH-17, PR 4 of the restart plan).
+
+### Fixed
+- Only the restart route passed an operation id, so every other restart logged `op=-`. On Oct 22 that hid which caller restarted the gateway and killed an agent turn (it was the watchdog's memory mitigation). Each restart now opens with `[alphaclaw] restart op=<id> requested source=<who> reason=<why>`, and every later ladder line carries the same id. The sources are `watchdog:memory_mitigation` (reason: the episode), `watchdog:repair_replace`, `api:restart` / `api:upgrade` (reason: the actor type), `channels:create|delete|whatsapp` (reason: provider/account), `team:enable|restore|disable`, and `shutdown`, which now gets a real id instead of the literal `shutdown`.
+- The caller mints the id at its own entry, so the watchdog's `gateway_restart` started/ok/failed rows and the restart route's ledger rows carry the same `opId` and `restartSource` as the log. When a caller passes none, the ladder mints one and warns `has no source`. Successful cold restarts return `opId`.
+
+### Added
+- Structural guard `tests/server/guards/restart-attribution.guard.test.js`: a call to a restart primitive or forwarding wrapper (`restartGateway`, `coldRestartGateway`, `scopedRestart`, `restartSavedChannel`, `runGatewayColdStart`, …) without `source` fails CI unless it forwards its caller's options.
+
 ## [0.10.55] - 2026-10-22
 
 The dashboard chat sends messages on a plain-HTTP origin, such as a VPS reached by IP (found by the ALPH-18 black-box pass on a real Ubicloud VPS).
