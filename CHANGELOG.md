@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.35] - 2026-10-22
+
+The watchdog incident overseer's pure module-level code moves out of the factory file (refactor plan PR 11, ALPH-15). No logic changes.
+
+### Changed
+
+- **`lib/server/watchdog-overseer.js`** (2,172 lines) keeps `createWatchdogOverseer` and the constants only it uses, and drops to 1,451 lines. The ~720 lines of closure-free code move into four flat modules:
+  - `watchdog-overseer-eligibility.js`: the critical-class predicate, `isActionableVerdict`, `classifyAutoReviewEligibility` and their skip-reason and age constants (#87).
+  - `watchdog-overseer-log-window.js`: `filterLogWindow`, `capLogWindow`, the coverage summary and description, and the situation log-window constants.
+  - `watchdog-overseer-trusted-projection.js`: the closed allowlists and `pickTrusted*` validators that feed the trusted prompt tier.
+  - `watchdog-overseer-prompts.js`: the verdict and action enums, `sanitizeVerdictText`, `buildIncidentPrompt`, `buildSituationPrompt` and `parseVerdict`.
+- `watchdog-overseer.js` re-exports everything it exported before, with identical values and function sources, so `lib/server.js` and the tests are unchanged. The one `verbose:` notification site stays in the factory, so the `notification-policy.js` registry is unchanged. AGENTS.md names the four modules.
+
 ## [0.10.34] - 2026-10-22
 
 Pure code moves out of `routes/system.js` and `agents/channels.js` (refactor plan PR 13, ALPH-15). No logic changes.
