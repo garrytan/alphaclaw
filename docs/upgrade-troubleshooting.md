@@ -235,7 +235,11 @@ as compact JSON, every string redacted. Events in order:
 restart op=9e1e29ab identity owner=managed rootPid=4200 workerPid=4201 pgid=4200 gateway=[4201] helpers=1 other=[4312]
 restart op=9e1e29ab asking status=skipped reason=no_lsof fix="install lsof (apt-get install -y lsof) — …"
 restart op=9e1e29ab asking status=running graceMs=30000 lsof=shim lsofPath=/…/lsof-shim/lsof
-restart op=9e1e29ab asking status=honoured|refused ms=… [exit=… line=…]
+restart op=9e1e29ab asking status=exited attempt=1 exit=1 class=unknown|rejected|failed ms=… line=…
+restart op=9e1e29ab asking status=probe attempt=1 gateway=draining|closed|admitting|inconclusive
+restart op=9e1e29ab asking status=reasking attempt=2 graceMs=…
+restart op=9e1e29ab asking status=honoured attempts=… ms=… drainMs=…
+restart op=9e1e29ab asking status=refused|expired exit=… class=… gateway=… attempts=… ms=… drainMs=… line=…
 restart op=9e1e29ab stopping signal=SIGTERM target=group pgid=4200
 restart op=9e1e29ab forcing signal=SIGKILL target=group pgid=4200
 restart op=9e1e29ab stopped how=graceful|sigterm|sigkill ms=… gateway=[…] observedExits={…}
@@ -246,6 +250,24 @@ restart op=9e1e29ab launch_failed reason=port_held|exited_before_ready|stranger_
 restart op=9e1e29ab ready_timeout budgetMs=300000 last=…
 restart op=9e1e29ab ready ms=… downMs=…
 ```
+
+**When the ask CLI exits non-zero (v0.10.49):** the exit code alone does not
+decide. `openclaw gateway restart` waits only 10 s for the gateway to
+acknowledge the request; under load that ack can arrive late, and the CLI
+exits 1 with "gateway timeout after 10000ms … its outcome is unknown" after
+the gateway already started draining. The ladder then probes `/readyz` every
+500 ms. While the gateway is `draining` (503 `gateway-draining`), `closed`
+(connection refused while its pids still run) or `inconclusive` (the probe
+timed out), it keeps waiting, for at most the grace plus a 10 s ack window
+plus OpenClaw's 15 s shutdown reserve. It escalates to SIGTERM only when
+OpenClaw explicitly refused (`class=rejected`, e.g. "target gateway no longer
+owns the active lock") or two probes in a row find the gateway `admitting`
+work again. An `unknown` outcome against an admitting gateway (the request was
+rolled back, as 2026.10.4 does after a stall) is re-asked once when at least
+half the grace remains. `drainMs` is the drain OpenClaw announced: the smaller
+of `--wait` and its supervisor's stop budget (under systemd,
+`TimeoutStopUSec`). SIGTERM then gets 25 s (2026.10.6 drains a plain stop for
+up to 20 s) before SIGKILL.
 
 `asking status=skipped reason=…` carries the fix: `no_lsof` → install `lsof`
 in the image (`apt-get install -y lsof`; the shim covers the ask until then),
