@@ -602,6 +602,51 @@ describe("server/routes/onboarding", () => {
     expect(deps.authProfiles.syncConfigAuthReferencesForAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("seeds API-key auth profiles only after openclaw onboard has stored its own credential", async () => {
+    // OpenClaw (2026.10.4 and 2026.10.6) refuses a provider that already holds a stored
+    // credential ("Replacement credential saved but inactive", exit 1), so a
+    // profile seeded before onboard failed every fresh API-key onboarding.
+    const deps = createBaseDeps();
+    const app = createApp(deps);
+    mockGithubVerifyAndCreate();
+
+    const res = await request(app).post("/api/onboard").send(makeValidBody());
+
+    expect(res.status).toBe(200);
+    const onboardIndex = deps.execFileCmd.mock.calls.findIndex(
+      ([file, args]) => file === "openclaw" && args[0] === "onboard",
+    );
+    const modelsSetIndex = deps.execFileCmd.mock.calls.findIndex(
+      ([file, args]) => file === "openclaw" && args[0] === "models" && args[1] === "set",
+    );
+    expect(onboardIndex).toBeGreaterThanOrEqual(0);
+    expect(deps.authProfiles.upsertApiKeyProfileForEnvVar).toHaveBeenCalledWith(
+      "openai",
+      "sk-test-123456789",
+    );
+    const seededAt = deps.authProfiles.upsertApiKeyProfileForEnvVar.mock.invocationCallOrder[0];
+    expect(seededAt).toBeGreaterThan(deps.execFileCmd.mock.invocationCallOrder[onboardIndex]);
+    expect(seededAt).toBeLessThan(deps.execFileCmd.mock.invocationCallOrder[modelsSetIndex]);
+  });
+
+  it("still seeds API-key auth profiles when an import skips openclaw onboard", async () => {
+    const deps = createBaseDeps();
+    mockGithubVerifyAndCreate();
+    deps.fs.existsSync.mockImplementation((targetPath) => targetPath === "/tmp/openclaw/openclaw.json");
+    const app = createApp(deps);
+
+    const res = await request(app).post("/api/onboard").send({ ...makeValidBody(), importMode: true });
+
+    expect(res.status).toBe(200);
+    expect(
+      deps.execFileCmd.mock.calls.some(([file, args]) => file === "openclaw" && args[0] === "onboard"),
+    ).toBe(false);
+    expect(deps.authProfiles.upsertApiKeyProfileForEnvVar).toHaveBeenCalledWith(
+      "openai",
+      "sk-test-123456789",
+    );
+  });
+
   it("removes stale anthropic token env state when onboarding with an api key", async () => {
     const deps = createBaseDeps();
     deps.readEnvFile.mockReturnValue([
