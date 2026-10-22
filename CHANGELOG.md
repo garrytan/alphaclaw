@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.20] - 2026-10-21
+## [0.10.21] - 2026-10-21
 
 The hermetic suite is green in Capy sandboxes and its two known flakes are
 fixed at the root (refactor plan PR 2, ALPH-15).
@@ -31,6 +31,18 @@ fixed at the root (refactor plan PR 2, ALPH-15).
   the gateway port, as the production worker does, so the ladder identifies it
   and waits for it; the shell worker writes its pidfile only after its `sleep`
   child has exec'd. Test-only.
+## [0.10.20] - 2026-10-22
+
+Port of #130 by @exGeni (fixes #128 and #129), onto current main with no changes to its scope.
+
+### Fixed
+
+- **Timed-out OpenClaw CLIs no longer survive as orphans (#128).** `clawCmd` ran `openclaw` through `exec` with its `timeout` option, which signals only the `/bin/sh -c` wrapper. With dash as `/bin/sh`, the `openclaw` process kept running under PID 1 and held OpenClaw's state lifecycle while AlphaClaw had already reported failure and started a rollback. Timed-out `pairing list` CLIs piled up behind the `/api/pairings` single-flight for the same reason.
+  - `clawCmd` now spawns the wrapper in its own process group. On timeout it signals the whole group, sends SIGKILL after a 5 s grace, and settles only once no group member can write.
+  - The WhatsApp QR login keeps the old leader-only kill (`killScope: "leader"`), because its CLI must finish linking after the call returns.
+  - Output is capped at 16 MiB (`exec` capped it at 1 MiB). An overflow still fails as `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`.
+- **Channel account creation survives slow OpenClaw CLIs (#128).** `channels add`, `agents bind` and `channels remove` now use a 180 s timeout instead of a hardcoded 30 s. `ALPHACLAW_CHANNEL_CMD_TIMEOUT_MS` overrides it.
+- **The channel token stays out of argv (#129).** `channels add` now receives the `${…}` env reference for Telegram, Discord and Slack tokens instead of the secret itself. Re-verified on the pinned OpenClaw 2026.10.4: the three plugins store the reference as-is.
 
 ## [0.10.19] - 2026-10-22
 
