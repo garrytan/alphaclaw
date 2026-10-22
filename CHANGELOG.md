@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.54] - 2026-10-22
+
+A global npm install (`npm install -g alphaclaw && alphaclaw start`) starts its gateway (found by the ALPH-18 black-box pass on a real Ubicloud VPS).
+
+### Fixed
+- A global install linked only AlphaClaw's own bin, so the pinned OpenClaw (a nested dependency) was not on `PATH`. The boot `doctor --fix` and every gateway launch failed with `spawn openclaw ENOENT`, the watchdog paused restarts after three tries, and the dashboard blamed it on "OpenClaw's data upgrade was interrupted … with an error it didn't explain". `alphaclaw start` now puts the pinned package's `node_modules/.bin` first on `PATH` when it holds an `openclaw` bin. Docker images and `npx` starts already had it there, so nothing changes for them except that the pin wins over any other `openclaw` on the host.
+
+### Added (tests)
+- `openclaw-build.test.js` covers `withPinnedOpenclawOnPath`: prepend, de-duplicate, and leave `PATH` alone without an installed bin.
+
 ## [0.10.53] - 2026-10-22
 
 The Doctor tab's run history loads again (found by the ALPH-18 black-box pass on a real Ubicloud deploy).
