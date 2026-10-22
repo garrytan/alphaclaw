@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.62] - 2026-10-22
+
+Typing a `/openclaw/…` address opens the Control UI signed in on a plain-HTTP origin too, such as a VPS reached by IP (ALPH-20, found by the black-box Control UI run on a real VM).
+
+### Fixed
+- A signed-in admin who typed `http://<ip>:<port>/openclaw/chat` (or opened a deep link, or reloaded) got "This Gateway expects its token", while the dashboard's **Open** button worked. The once-per-session `/gateway/attach` detour (v0.10.15) recognized a top-level navigation only by its Fetch Metadata headers, and browsers send Fetch Metadata only to secure origins. A request with no Fetch Metadata now counts as a document navigation when it carries what browsers send on navigations to any origin: `Upgrade-Insecure-Requests: 1` and an `Accept` that leads with `text/html`. Requests that do carry Fetch Metadata are judged exactly as before, and the token is still fetched only by the same-origin, custom-header `POST /gateway/attach`. Verified on a real deploy: direct open, reload and deep link by raw IP now connect and chat.
+
 ## [0.10.61] - 2026-10-22
 
 A freshly onboarded install can start chatting from the Chat tab: the sidebar offers the default agent's main session before any turn has run (ALPH-20, found by the black-box onboarding run on a real VM).
