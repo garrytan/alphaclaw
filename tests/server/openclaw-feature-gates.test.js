@@ -33,14 +33,11 @@ describe("server/openclaw-feature-gates", () => {
     expect(throwing.supportsFeature("supervisorMode")).toBe(false);
   });
 
-  it("versionFeatures() maps every declared gate", () => {
-    const { version, features } = gatesFor("2026.8.1-beta.2").versionFeatures();
-    expect(version).toBe("2026.8.1-beta.2");
-    expect(Object.keys(features).sort()).toEqual(
-      Object.keys(kFeatureMinVersions).sort(),
-    );
-    expect(features.supervisorMode).toBe(true);
-    expect(features.execApprovalsSqlite).toBe(false);
+  it("supportsFeature still compares each declared floor (Doctor context profile, until PR 16b-2)", () => {
+    const gates = gatesFor("2026.8.1-beta.2");
+    expect(gates.supportsFeature("supervisorMode")).toBe(true);
+    expect(gates.supportsFeature("bootstrapContractV2")).toBe(true);
+    expect(gates.supportsFeature("execApprovalsSqlite")).toBe(false);
   });
 
   it("features() answers every gate true on any version read, keeping the keys", () => {
@@ -60,6 +57,6 @@ describe("server/openclaw-feature-gates", () => {
       version: null,
       features: Object.fromEntries(Object.keys(kFeatureMinVersions).map((k) => [k, true])),
     });
-    expect(throwing.versionFeatures().features.sessionDashboards).toBe(false);
+    expect(throwing.supportsFeature("sessionDashboards")).toBe(false);
   });
 });

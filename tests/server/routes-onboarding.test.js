@@ -831,9 +831,9 @@ describe("server/routes/onboarding", () => {
     expect(files.get("/tmp/openclaw/openclaw.json")).not.toContain(
       '"transformsDir"',
     );
-    expect(files.get("/tmp/openclaw/exec-approvals.json")).toContain(
-      '"askFallback": "full"',
-    );
+    // Exec approvals live in SQLite on the pin: onboarding never creates the
+    // legacy file (issue #23).
+    expect(files.has("/tmp/openclaw/exec-approvals.json")).toBe(false);
     expect(gitCallsOf(deps)).toContain(
       "remote add origin https://github.com/owner/target-repo.git",
     );

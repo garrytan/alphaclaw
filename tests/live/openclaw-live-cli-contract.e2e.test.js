@@ -248,10 +248,7 @@ describeLive(
         } = require("../../lib/server/exec-defaults-config");
         const sqliteEra = createStateEra({
           openclawDir: stateDir,
-          gatesInfo: () => ({
-            version: pin,
-            features: { execApprovalsSqlite: true },
-          }),
+          getInstalledVersion: () => pin,
         });
         const seedResult = await ensureManagedExecDefaults({
           openclawDir: stateDir,
@@ -324,9 +321,9 @@ describeLive(
         expect(pendingAfter).not.toContain("LIVE1234");
 
         // The v0.9.43 regression case, against the same real pin: its state
-        // db eagerly creates exec_approvals_config EMPTY — a live legacy file
-        // must survive boot byte-identical (seeded, never renamed) when the
-        // gate reports the file era.
+        // db eagerly creates exec_approvals_config EMPTY — without a row a
+        // legacy file (awaiting doctor import) must survive boot byte-identical:
+        // never renamed, never rewritten.
         const pinStateDir = mkTemp("openclaw-live-pin-state-");
         const pinEnv = {
           ...scrubTestRunnerEnv(),
@@ -363,14 +360,14 @@ describeLive(
         fs.writeFileSync(path.join(pinStateDir, "exec-approvals.json"), liveDoc);
         const pinEra = createStateEra({
           openclawDir: pinStateDir,
-          gatesInfo: () => ({ version: pin, features: { execApprovalsSqlite: false } }),
+          getInstalledVersion: () => pin,
         });
         const pinResult = await ensureManagedExecDefaults({
           openclawDir: pinStateDir,
           resolveExecApprovalsBackend: pinEra.resolveExecApprovalsBackend,
           logger: kSilentLogger,
         });
-        expect(pinResult.approvalsBackend).toBe("file");
+        expect(pinResult.approvalsBackend).toBe("sqlite");
         expect(pinResult.reaped).toBe(false);
         expect(
           fs.readFileSync(path.join(pinStateDir, "exec-approvals.json"), "utf8"),

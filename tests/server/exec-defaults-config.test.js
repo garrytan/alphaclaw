@@ -5,11 +5,9 @@ const { DatabaseSync } = require("node:sqlite");
 
 const {
   ensureManagedExecDefaults,
-  ensureManagedExecApprovalsDefaults,
-  detectSqliteExecApprovals,
-  mergeStrayLegacyExecApprovals,
   reapStrayLegacyExecApprovals,
 } = require("../../lib/server/exec-defaults-config");
+const { createStateEra } = require("../../lib/server/openclaw-state-era");
 const { kOpenclawStateDbPath } = require("../../lib/server/openclaw-state-db");
 
 const createTempOpenclawDir = () =>
@@ -18,7 +16,7 @@ const createTempOpenclawDir = () =>
 // State-db fixture with the REAL exec_approvals_config shape. Crucial nuance
 // (the v0.9.43 regression): the pinned 2026.7.1-2 eagerly creates this table
 // EMPTY in every state db — only the sqlite era (>= 2026.9.1-beta.1) ever
-// writes a row. `withRow: false` therefore models a pinned-version box.
+// writes a row. `withRow: false` therefore models that empty table.
 const createExecApprovalsStateDb = (openclawDir, { withRow = false } = {}) => {
   const databasePath = path.join(openclawDir, kOpenclawStateDbPath);
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -42,7 +40,7 @@ const backendResolver = (backend, { reapAllowed = false, signal = "test" } = {})
 const quietLogger = () => ({ log: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
 describe("server/exec-defaults-config", () => {
-  it("fills missing managed exec defaults for openclaw.json and exec-approvals.json on a file-era box", async () => {
+  it("fills missing openclaw.json exec defaults and never creates exec-approvals.json", async () => {
     const openclawDir = createTempOpenclawDir();
     fs.writeFileSync(
       path.join(openclawDir, "openclaw.json"),
@@ -64,15 +62,15 @@ describe("server/exec-defaults-config", () => {
     const result = await ensureManagedExecDefaults({
       fsModule: fs,
       openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
+      resolveExecApprovalsBackend: backendResolver("sqlite"),
       logger: quietLogger(),
     });
 
     expect(result).toMatchObject({
       changed: true,
       openclawChanged: true,
-      approvalsChanged: true,
-      approvalsBackend: "file",
+      approvalsBackend: "sqlite",
+      reaped: false,
     });
 
     const openclawConfig = JSON.parse(
@@ -89,18 +87,7 @@ describe("server/exec-defaults-config", () => {
     });
     expect(openclawConfig.channels.telegram).toEqual({ enabled: true });
 
-    const approvals = JSON.parse(
-      fs.readFileSync(path.join(openclawDir, "exec-approvals.json"), "utf8"),
-    );
-    expect(approvals).toEqual({
-      version: 1,
-      defaults: {
-        security: "full",
-        ask: "off",
-        askFallback: "full",
-      },
-      agents: {},
-    });
+    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json"))).toBe(false);
   });
 
   it("preserves existing exec settings when they are already configured", async () => {
@@ -147,14 +134,14 @@ describe("server/exec-defaults-config", () => {
     const result = await ensureManagedExecDefaults({
       fsModule: fs,
       openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
+      resolveExecApprovalsBackend: backendResolver("sqlite"),
       logger: quietLogger(),
     });
 
     expect(result).toMatchObject({
       changed: false,
       openclawChanged: false,
-      approvalsChanged: false,
+      reaped: false,
     });
     expect(fs.readFileSync(openclawPath, "utf8")).toBe(openclawContent);
     expect(fs.readFileSync(approvalsPath, "utf8")).toBe(approvalsContent);
@@ -183,15 +170,15 @@ describe("server/exec-defaults-config", () => {
     const result = await ensureManagedExecDefaults({
       fsModule: fs,
       openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
+      resolveExecApprovalsBackend: backendResolver("sqlite"),
       logger: quietLogger(),
     });
 
     expect(result).toMatchObject({
-      changed: true,
+      changed: false,
       openclawChanged: false,
-      approvalsChanged: true,
     });
+    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json"))).toBe(false);
 
     const openclawConfig = JSON.parse(
       fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8"),
@@ -200,67 +187,6 @@ describe("server/exec-defaults-config", () => {
       host: "gateway",
       ask: "off",
     });
-  });
-
-  it("does not add or change exec approvals defaults when defaults is a non-empty object", async () => {
-    const openclawDir = createTempOpenclawDir();
-    const openclawPath = path.join(openclawDir, "openclaw.json");
-    const approvalsPath = path.join(openclawDir, "exec-approvals.json");
-    const openclawContent = JSON.stringify(
-      {
-        tools: {
-          profile: "full",
-          exec: {
-            host: "gateway",
-          },
-        },
-      },
-      null,
-      2,
-    );
-    const approvalsContent =
-      JSON.stringify(
-        {
-          socket: {
-            path: "/data/.openclaw/exec-approvals.sock",
-            token: "",
-          },
-          defaults: {
-            ask: "always",
-          },
-        },
-        null,
-        2,
-      ) + "\n";
-    fs.writeFileSync(openclawPath, openclawContent, "utf8");
-    fs.writeFileSync(approvalsPath, approvalsContent, "utf8");
-
-    const result = await ensureManagedExecDefaults({
-      fsModule: fs,
-      openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
-      logger: quietLogger(),
-    });
-
-    expect(result).toMatchObject({
-      changed: false,
-      openclawChanged: false,
-      approvalsChanged: false,
-    });
-    expect(fs.readFileSync(approvalsPath, "utf8")).toBe(approvalsContent);
-  });
-
-  it("guarantees the agents shape on the returned file without marking it changed", () => {
-    // Non-empty defaults skip the seed branch, which used to be the only
-    // place that normalized `agents` — the returned document could carry a
-    // missing/array agents field. Shape-normalization alone must never flag
-    // `changed` (that would rewrite byte-identical files on every boot).
-    const ensured = ensureManagedExecApprovalsDefaults({
-      version: 1,
-      defaults: { ask: "always" },
-    });
-    expect(ensured.changed).toBe(false);
-    expect(ensured.file.agents).toEqual({});
   });
 
   it("never creates exec-approvals.json on a sqlite-era box", async () => {
@@ -284,7 +210,6 @@ describe("server/exec-defaults-config", () => {
     expect(result).toMatchObject({
       changed: true,
       openclawChanged: true,
-      approvalsChanged: false,
       approvalsBackend: "sqlite",
     });
     expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json"))).toBe(
@@ -334,44 +259,6 @@ describe("server/exec-defaults-config", () => {
     );
   });
 
-  it("announces a stray-file merge with a stray/entry-count id", async () => {
-    const openclawDir = createTempOpenclawDir();
-    fs.writeFileSync(
-      path.join(openclawDir, "openclaw.json"),
-      JSON.stringify({ tools: { profile: "full" } }, null, 2),
-      "utf8",
-    );
-    // One stray a buggy earlier reaper renamed away, with one recoverable
-    // allowlist entry.
-    fs.writeFileSync(
-      path.join(openclawDir, "exec-approvals.json.stray-1712345678901"),
-      JSON.stringify({
-        version: 1,
-        agents: { main: { allowlist: [{ pattern: "npm test" }] } },
-      }),
-      "utf8",
-    );
-    const notify = vi.fn(async () => ({ ok: true }));
-
-    await ensureManagedExecDefaults({
-      fsModule: fs,
-      openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
-      logger: quietLogger(),
-      notify,
-    });
-
-    const mergeCall = notify.mock.calls.find(([message]) =>
-      String(message).includes("Merged"),
-    );
-    expect(mergeCall).toBeTruthy();
-    expect(mergeCall[0]).toContain("1 approval entry recovered");
-    expect(mergeCall[1].eventType).toBe("recovery");
-    // Day-bucketed: a genuinely new merge months later must not dedupe
-    // against a stale count-keyed entry.
-    expect(mergeCall[1].id).toMatch(/^exec-approvals-merged-1-1-\d{8}$/);
-  });
-
   it("a throwing notify hook never breaks the ensure step", async () => {
     const openclawDir = createTempOpenclawDir();
     createExecApprovalsStateDb(openclawDir, { withRow: true });
@@ -406,27 +293,32 @@ describe("server/exec-defaults-config", () => {
     );
   });
 
-  it("fails closed on file creation when the era is indeterminate", async () => {
-    // A broken/timed-out probe on a possibly-beta box must not write the
-    // legacy file (creating it there is the outage). Skipping the seed on a
-    // real file-era box is harmless — old openclaw self-seeds.
-    const openclawDir = createTempOpenclawDir();
-    const result = await ensureManagedExecDefaults({
-      fsModule: fs,
-      openclawDir,
-      resolveExecApprovalsBackend: backendResolver("indeterminate"),
-      logger: quietLogger(),
-    });
-    expect(result.approvalsChanged).toBe(false);
-    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json"))).toBe(
-      false,
-    );
+  it("a throwing or missing era resolver neither reaps nor writes the legacy file", async () => {
+    for (const resolveExecApprovalsBackend of [
+      async () => {
+        throw new Error("state db locked");
+      },
+      null,
+    ]) {
+      const openclawDir = createTempOpenclawDir();
+      createExecApprovalsStateDb(openclawDir, { withRow: true });
+      const legacyPath = path.join(openclawDir, "exec-approvals.json");
+      fs.writeFileSync(legacyPath, JSON.stringify({ version: 1 }), "utf8");
+      const result = await ensureManagedExecDefaults({
+        fsModule: fs,
+        openclawDir,
+        resolveExecApprovalsBackend,
+        logger: quietLogger(),
+      });
+      expect(result.reaped).toBe(false);
+      expect(fs.readFileSync(legacyPath, "utf8")).toBe(JSON.stringify({ version: 1 }));
+    }
   });
 
-  it("[REG v0.9.43] a pinned-version box (table without rows) is FILE-era: seeds normally, never reaps", async () => {
-    // The v0.9.43 detector keyed on table EXISTENCE and misclassified every
-    // pinned box as sqlite-era — skipping the seeding and renaming away the
-    // LIVE approvals file each boot. Table-without-row must mean file era.
+  it("[REG v0.9.43] a table without rows never authorizes reaping the legacy file", async () => {
+    // The v0.9.43 detector keyed on table EXISTENCE (2026.7.1-2 creates the
+    // table empty) and renamed away the LIVE approvals file each boot. Only a
+    // ROW is sqlite-era evidence; without one the file awaits doctor import.
     const openclawDir = createTempOpenclawDir();
     createExecApprovalsStateDb(openclawDir, { withRow: false });
     const legacyPath = path.join(openclawDir, "exec-approvals.json");
@@ -443,31 +335,18 @@ describe("server/exec-defaults-config", () => {
       ) + "\n";
     fs.writeFileSync(legacyPath, liveContent, "utf8");
 
-    expect(detectSqliteExecApprovals({ fsModule: fs, openclawDir })).toBe(false);
-
+    const era = createStateEra({ openclawDir, getInstalledVersion: () => "2026.10.4" });
     const result = await ensureManagedExecDefaults({
       fsModule: fs,
       openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
+      resolveExecApprovalsBackend: era.resolveExecApprovalsBackend,
       logger: quietLogger(),
     });
     expect(result.reaped).toBe(false);
-    // The live file survives byte-identical — defaults already managed.
+    // The file survives byte-identical.
     expect(fs.readFileSync(legacyPath, "utf8")).toBe(liveContent);
   });
 
-  it("detects the sqlite era by ROW presence, not table presence", () => {
-    const tableOnly = createTempOpenclawDir();
-    createExecApprovalsStateDb(tableOnly, { withRow: false });
-    expect(detectSqliteExecApprovals({ fsModule: fs, openclawDir: tableOnly })).toBe(false);
-
-    const withRow = createTempOpenclawDir();
-    createExecApprovalsStateDb(withRow, { withRow: true });
-    expect(detectSqliteExecApprovals({ fsModule: fs, openclawDir: withRow })).toBe(true);
-
-    const noDb = createTempOpenclawDir();
-    expect(detectSqliteExecApprovals({ fsModule: fs, openclawDir: noDb })).toBe(false);
-  });
 });
 
 describe("server/exec-defaults-config stray reaper", () => {
@@ -500,7 +379,7 @@ describe("server/exec-defaults-config stray reaper", () => {
 
   it("never reaps without an explicit era decision — row presence alone is historical state", () => {
     // A restored backup or a forced downgrade can leave a sqlite row next to
-    // a live file the old runtime still needs; only row + sqlite-era hint
+    // a live file the old runtime still needs; only row + SQLite-era runtime
     // (the caller's reapAllowed) may rename it.
     const openclawDir = createTempOpenclawDir();
     createExecApprovalsStateDb(openclawDir, { withRow: true });
@@ -554,12 +433,11 @@ describe("server/exec-defaults-config stray reaper", () => {
     });
 
     expect(result.reaped).toBe(true);
-    expect(result.approvalsChanged).toBe(false);
     expect(fs.existsSync(legacyPath)).toBe(false);
     expect(fs.existsSync(`${legacyPath}.stray-42`)).toBe(true);
   });
 
-  it("sqlite-era boot with an INDETERMINATE hint neither reaps nor writes", async () => {
+  it("a row without the resolver's reap decision neither reaps nor writes", async () => {
     const openclawDir = createTempOpenclawDir();
     createExecApprovalsStateDb(openclawDir, { withRow: true });
     const legacyPath = path.join(openclawDir, "exec-approvals.json");
@@ -568,191 +446,60 @@ describe("server/exec-defaults-config stray reaper", () => {
     const result = await ensureManagedExecDefaults({
       fsModule: fs,
       openclawDir,
-      // Row present but the version hint could not be resolved this boot.
+      // Row present but the runtime is not known to be on the SQLite era.
       resolveExecApprovalsBackend: backendResolver("sqlite", { reapAllowed: false }),
       logger: quietLogger(),
     });
 
     expect(result.reaped).toBe(false);
-    expect(result.approvalsChanged).toBe(false);
     expect(fs.existsSync(legacyPath)).toBe(true);
   });
 });
 
-describe("server/exec-defaults-config stray-merge remediation", () => {
-  it("recovers allowlists across ALL strays (oldest carries the original) and the oldest socket token", () => {
-    // v0.9.43 boots stacked strays: boot 1 renamed the ORIGINAL file, openclaw
-    // re-seeded a default, boot 2 renamed THAT. Newest-only recovery would
-    // recover nothing.
+describe("server/exec-defaults-config with the real era resolver (refactor plan PR 16b)", () => {
+  const legacyContent = JSON.stringify({ version: 1, agents: { "*": { allowlist: [{ pattern: "ls *" }] } } }, null, 2) + "\n";
+  const bootFor = async ({ withRow, version, logger = quietLogger() }) => {
     const openclawDir = createTempOpenclawDir();
-    const original = {
-      version: 1,
-      socket: { path: "/x.sock", token: "original-token" },
-      defaults: { security: "full", ask: "off", askFallback: "full" },
-      agents: {
-        "*": {
-          allowlist: [
-            { pattern: "ls *", id: "a", lastUsedAt: 1 },
-            { pattern: "git status", id: "b" },
-          ],
-        },
-      },
-    };
-    const reseededDefault = {
-      version: 1,
-      defaults: { security: "full", ask: "off", askFallback: "deny" },
-      agents: {},
-    };
-    fs.writeFileSync(
-      path.join(openclawDir, "exec-approvals.json.stray-100"),
-      JSON.stringify(original, null, 2),
-      "utf8",
-    );
-    fs.writeFileSync(
-      path.join(openclawDir, "exec-approvals.json.stray-200"),
-      JSON.stringify(reseededDefault, null, 2),
-      "utf8",
-    );
-    const logger = quietLogger();
-
-    const result = mergeStrayLegacyExecApprovals({
-      fsModule: fs,
-      openclawDir,
-      logger,
-    });
-
-    expect(result.merged).toBe(true);
-    expect(result.recoveredEntries).toBe(2);
-    const live = JSON.parse(
-      fs.readFileSync(path.join(openclawDir, "exec-approvals.json"), "utf8"),
-    );
-    expect(live.socket).toEqual({ path: "/x.sock", token: "original-token" });
-    expect(live.agents["*"].allowlist.map((e) => e.pattern)).toEqual([
-      "ls *",
-      "git status",
-    ]);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Recovered 2"));
-    // Strays are marked processed (renamed, never deleted) — idempotent boots.
-    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json.stray-100"))).toBe(false);
-    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json.stray-100.merged"))).toBe(true);
-    expect(fs.existsSync(path.join(openclawDir, "exec-approvals.json.stray-200.merged"))).toBe(true);
-
-    // Second run: nothing left to merge.
-    const again = mergeStrayLegacyExecApprovals({ fsModule: fs, openclawDir, logger });
-    expect(again).toEqual({ merged: false, strays: 0 });
-  });
-
-  it("merges into an existing live file without duplicating entries or clobbering its socket", () => {
-    const openclawDir = createTempOpenclawDir();
-    fs.writeFileSync(
-      path.join(openclawDir, "exec-approvals.json"),
-      JSON.stringify({
-        version: 1,
-        socket: { path: "/live.sock", token: "live-token" },
-        defaults: { security: "full", ask: "off", askFallback: "full" },
-        agents: { "*": { allowlist: [{ pattern: "ls *", id: "live" }] } },
-      }),
-      "utf8",
-    );
-    fs.writeFileSync(
-      path.join(openclawDir, "exec-approvals.json.stray-100"),
-      JSON.stringify({
-        version: 1,
-        socket: { path: "/stray.sock", token: "stray-token" },
-        agents: {
-          "*": { allowlist: [{ pattern: "ls *", id: "dup" }, { pattern: "cat *", id: "new" }] },
-        },
-      }),
-      "utf8",
-    );
-
-    const result = mergeStrayLegacyExecApprovals({
-      fsModule: fs,
-      openclawDir,
-      logger: quietLogger(),
-    });
-
-    expect(result.merged).toBe(true);
-    expect(result.recoveredEntries).toBe(1);
-    const live = JSON.parse(
-      fs.readFileSync(path.join(openclawDir, "exec-approvals.json"), "utf8"),
-    );
-    expect(live.socket.token).toBe("live-token");
-    expect(live.agents["*"].allowlist.map((e) => e.pattern)).toEqual(["ls *", "cat *"]);
-  });
-
-  it("file-era boot runs the remediation before seeding", async () => {
-    const openclawDir = createTempOpenclawDir();
-    fs.writeFileSync(
-      path.join(openclawDir, "exec-approvals.json.stray-7"),
-      JSON.stringify({
-        version: 1,
-        agents: { "*": { allowlist: [{ pattern: "make *", id: "m" }] } },
-      }),
-      "utf8",
-    );
-
+    if (withRow !== null) createExecApprovalsStateDb(openclawDir, { withRow });
+    const legacyPath = path.join(openclawDir, "exec-approvals.json");
+    fs.writeFileSync(legacyPath, legacyContent, "utf8");
+    const era = createStateEra({ openclawDir, getInstalledVersion: () => version, logger });
     const result = await ensureManagedExecDefaults({
       fsModule: fs,
       openclawDir,
-      resolveExecApprovalsBackend: backendResolver("file"),
-      logger: quietLogger(),
+      resolveExecApprovalsBackend: era.resolveExecApprovalsBackend,
+      logger,
+      nowFn: () => 7,
     });
+    return { result, legacyPath };
+  };
 
-    expect(result.approvalsBackend).toBe("file");
-    const live = JSON.parse(
-      fs.readFileSync(path.join(openclawDir, "exec-approvals.json"), "utf8"),
-    );
-    expect(live.agents["*"].allowlist.map((e) => e.pattern)).toEqual(["make *"]);
-    // Seeding still applied the managed defaults after the merge.
-    expect(live.defaults).toEqual({ security: "full", ask: "off", askFallback: "full" });
+  it("row + the pinned SQLite-era runtime: the stray legacy file is renamed away", async () => {
+    const { result, legacyPath } = await bootFor({ withRow: true, version: "2026.10.4" });
+    expect(result).toMatchObject({ approvalsBackend: "sqlite", approvalsBackendSignal: "row", reaped: true });
+    expect(fs.existsSync(legacyPath)).toBe(false);
+    expect(fs.readFileSync(`${legacyPath}.stray-7`, "utf8")).toBe(legacyContent);
   });
-});
 
-describe("server/exec-defaults-config strict reader + atomic writer (fix wave F215/F051)", () => {
-  const {
-    readExecApprovalsConfig,
-    readExecApprovalsConfigForWrite,
-    writeExecApprovalsConfig,
-    ExecApprovalsReadError,
-  } = require("../../lib/server/exec-defaults-config");
+  it("row + an OLDER runtime (restored backup / forced downgrade): the live file survives byte-identical", async () => {
+    const { result, legacyPath } = await bootFor({ withRow: true, version: "2026.7.1-2" });
+    expect(result.reaped).toBe(false);
+    expect(fs.readFileSync(legacyPath, "utf8")).toBe(legacyContent);
+  });
 
-  it("readExecApprovalsConfigForWrite: missing file → fallback, unparseable existing file → refusal", () => {
-    const openclawDir = createTempOpenclawDir();
-    expect(readExecApprovalsConfigForWrite({ openclawDir })).toEqual({ version: 1 });
-    expect(readExecApprovalsConfigForWrite({ openclawDir, fallback: { version: 1, agents: {} } })).toEqual({
-      version: 1,
-      agents: {},
-    });
-
-    const filePath = path.join(openclawDir, "exec-approvals.json");
-    fs.writeFileSync(filePath, '{"version":1,"agents":{"*":{"allowlist":[{"pattern":"ls *"');
-    expect(() => readExecApprovalsConfigForWrite({ openclawDir })).toThrow(ExecApprovalsReadError);
-    try {
-      readExecApprovalsConfigForWrite({ openclawDir });
-    } catch (error) {
-      expect(error.code).toBe("EXEC_APPROVALS_UNREADABLE");
-      expect(error.filePath).toBe(filePath);
+  it("row + an UNKNOWN runtime (dev sha or unreadable version): the file survives byte-identical", async () => {
+    for (const version of [null, "a1b2c3d"]) {
+      const { result, legacyPath } = await bootFor({ withRow: true, version });
+      expect(result.reaped).toBe(false);
+      expect(fs.readFileSync(legacyPath, "utf8")).toBe(legacyContent);
     }
-    // The lenient reader keeps its documented fallback for display paths.
-    expect(readExecApprovalsConfig({ openclawDir })).toEqual({ version: 1 });
-
-    fs.writeFileSync(filePath, "[1,2]");
-    expect(() => readExecApprovalsConfigForWrite({ openclawDir })).toThrow(/root is not an object/);
-    fs.rmSync(openclawDir, { recursive: true, force: true });
   });
 
-  it("writeExecApprovalsConfig writes atomically (no temp file left, content exact)", () => {
-    const openclawDir = createTempOpenclawDir();
-    const filePath = writeExecApprovalsConfig({
-      openclawDir,
-      file: { version: 1, agents: { "*": { allowlist: [] } } },
-    });
-    expect(JSON.parse(fs.readFileSync(filePath, "utf8"))).toEqual({
-      version: 1,
-      agents: { "*": { allowlist: [] } },
-    });
-    expect(fs.readdirSync(openclawDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
-    fs.rmSync(openclawDir, { recursive: true, force: true });
+  it("no row (a legacy file awaiting doctor import, or the empty eagerly-created table): never reaped", async () => {
+    for (const withRow of [false, null]) {
+      const { result, legacyPath } = await bootFor({ withRow, version: "2026.10.4" });
+      expect(result).toMatchObject({ approvalsBackend: "sqlite", approvalsBackendSignal: "pin", reaped: false });
+      expect(fs.readFileSync(legacyPath, "utf8")).toBe(legacyContent);
+    }
   });
 });

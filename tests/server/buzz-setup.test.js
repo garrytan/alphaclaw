@@ -19,7 +19,6 @@ describe("server/buzz-setup (5.2)", () => {
   let runResult;
   let clawOutput;
   let restartReasons;
-  let invalidated;
 
   const makeService = () =>
     createBuzzSetup({
@@ -42,11 +41,6 @@ describe("server/buzz-setup (5.2)", () => {
       restartRequiredState: {
         markRequired: (reason) => restartReasons.push(reason),
       },
-      openclawCapabilities: {
-        invalidate: () => {
-          invalidated += 1;
-        },
-      },
       nowFn: () => 1_000_000,
     });
 
@@ -63,7 +57,6 @@ describe("server/buzz-setup (5.2)", () => {
     runResult = { ok: true, code: 0, tail: "", timedOut: false };
     clawOutput = "";
     restartReasons = [];
-    invalidated = 0;
   });
 
   afterEach(() => {
@@ -99,7 +92,6 @@ describe("server/buzz-setup (5.2)", () => {
     }
     expect(service.getState().status).toBe("installed");
     expect(restartReasons).toContain("buzz_plugin_installed");
-    expect(invalidated).toBe(1);
   });
 
   it("removes the isolated install HOME after the run (no scratch left on disk)", async () => {

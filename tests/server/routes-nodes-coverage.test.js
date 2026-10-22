@@ -73,8 +73,6 @@ const approvalsPath = path.join(openclawDir, "exec-approvals.json");
 const createApp = ({
   clawCmd,
   clawCmdWithRetry = null,
-  openclawCapabilities = null,
-  resolveExecApprovalsBackend = null,
   fsModule,
   gatewayToken = "",
   getGatewayToken = null,
@@ -86,9 +84,6 @@ const createApp = ({
     app,
     clawCmd: clawCmd || vi.fn(async () => ({ ok: true, stdout: "{}", stderr: "" })),
     clawCmdWithRetry,
-    openclawCapabilities,
-    resolveExecApprovalsBackend,
-    openclawDir,
     gatewayToken,
     getGatewayToken,
     getGatewayAuthMode,
@@ -96,10 +91,6 @@ const createApp = ({
   });
   return app;
 };
-
-// SQLite-era openclaw (issue #23): the `approvals` CLI exists and the legacy
-// exec-approvals.json must never be created by these routes.
-const sqliteEraCapabilities = { get: async (key) => key === "execApprovalsCli" };
 
 // Real-socket proxy tests are timing-sensitive under parallel machine
 // load; one retry absorbs transient connect races without masking
@@ -948,35 +939,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
   });
 
   describe("exec approvals endpoints", () => {
-    it("returns wildcard allowlist from approvals config", async () => {
-      const fsModule = createMemoryFs({
-        [approvalsPath]: JSON.stringify({
-          version: 1,
-          agents: {
-            "*": {
-              allowlist: [{ pattern: "git *", id: "id-1" }],
-            },
-          },
-        }),
-      });
-      const app = createApp({ fsModule });
-      const res = await request(app).get("/api/nodes/exec-approvals");
-      expect(res.status).toBe(200);
-      expect(res.body.allowlist).toEqual([{ pattern: "git *", id: "id-1" }]);
-      expect(res.body.file.agents["*"].allowlist).toHaveLength(1);
-    });
-
-    it("builds wildcard defaults when approvals file is missing", async () => {
-      const app = createApp({ fsModule: createMemoryFs() });
-      const res = await request(app).get("/api/nodes/exec-approvals");
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        ok: true,
-        file: { version: 1, agents: { "*": { allowlist: [] } } },
-        allowlist: [],
-      });
-    });
-
     it("requires a pattern when adding allowlist entries", async () => {
       const app = createApp();
       const res = await request(app)
@@ -984,42 +946,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
         .send({ pattern: "  " });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("pattern is required");
-    });
-
-    it("returns unchanged when pattern already exists", async () => {
-      const fsModule = createMemoryFs({
-        [approvalsPath]: JSON.stringify({
-          version: 1,
-          agents: { "*": { allowlist: [{ pattern: "npm *", id: "id-npm" }] } },
-        }),
-      });
-      const app = createApp({ fsModule });
-      const res = await request(app)
-        .post("/api/nodes/exec-approvals/allowlist")
-        .send({ pattern: " npm * " });
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        ok: true,
-        entry: { pattern: "npm *", id: "id-npm" },
-        unchanged: true,
-      });
-      expect(fsModule.files.get(approvalsPath)).toContain("id-npm");
-    });
-
-    it("adds new allowlist entries and persists them", async () => {
-      const fsModule = createMemoryFs();
-      const app = createApp({ fsModule });
-      const res = await request(app)
-        .post("/api/nodes/exec-approvals/allowlist")
-        .send({ pattern: "ls *" });
-      expect(res.status).toBe(200);
-      expect(res.body.ok).toBe(true);
-      expect(res.body.entry.pattern).toBe("ls *");
-      expect(res.body.entry.id).toMatch(/^[0-9a-f-]{36}$/);
-      expect(typeof res.body.entry.lastUsedAt).toBe("number");
-      const stored = JSON.parse(fsModule.files.get(approvalsPath));
-      expect(stored.agents["*"].allowlist).toHaveLength(1);
-      expect(stored.agents["*"].allowlist[0].pattern).toBe("ls *");
     });
 
     it("rejects blank allowlist entry ids on delete", async () => {
@@ -1031,44 +957,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body.error).toBe("id is required");
     });
 
-    it("returns 404 when allowlist entry does not exist", async () => {
-      const fsModule = createMemoryFs({
-        [approvalsPath]: JSON.stringify({
-          version: 1,
-          agents: { "*": { allowlist: [{ pattern: "a", id: "keep" }] } },
-        }),
-      });
-      const app = createApp({ fsModule });
-      const res = await request(app).delete(
-        "/api/nodes/exec-approvals/allowlist/missing",
-      );
-      expect(res.status).toBe(404);
-      expect(res.body.error).toBe("Allowlist entry not found");
-    });
-
-    it("removes allowlist entries by id", async () => {
-      const fsModule = createMemoryFs({
-        [approvalsPath]: JSON.stringify({
-          version: 1,
-          agents: {
-            "*": {
-              allowlist: [
-                { pattern: "a", id: "keep" },
-                { pattern: "b", id: "remove-me" },
-              ],
-            },
-          },
-        }),
-      });
-      const app = createApp({ fsModule });
-      const res = await request(app).delete(
-        "/api/nodes/exec-approvals/allowlist/remove-me",
-      );
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ok: true });
-      const stored = JSON.parse(fsModule.files.get(approvalsPath));
-      expect(stored.agents["*"].allowlist).toEqual([{ pattern: "a", id: "keep" }]);
-    });
   });
 
   describe("exec approvals endpoints (sqlite-era, approvals CLI)", () => {
@@ -1119,11 +1007,23 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       const app = createApp({
         clawCmd,
         clawCmdWithRetry,
-        openclawCapabilities: sqliteEraCapabilities,
         fsModule,
       });
       return { app, clawCmd, clawCmdWithRetry, fsModule, setCalls };
     };
+
+    it("never reads or rewrites a legacy exec-approvals.json, even when one exists (issue #23)", async () => {
+      const legacy = JSON.stringify({ version: 1, agents: { "*": { allowlist: [{ pattern: "rm *", id: "old" }] } } });
+      const { app, fsModule } = createCliHarness();
+      fsModule.files.set(approvalsPath, legacy);
+      const read = await request(app).get("/api/nodes/exec-approvals");
+      expect(read.body.allowlist).toEqual([{ pattern: "git *", id: "id-1" }]);
+      const added = await request(app).post("/api/nodes/exec-approvals/allowlist").send({ pattern: "ls *" });
+      expect(added.status).toBe(200);
+      const removed = await request(app).delete("/api/nodes/exec-approvals/allowlist/id-1");
+      expect(removed.status).toBe(200);
+      expect(fsModule.files.get(approvalsPath)).toBe(legacy);
+    });
 
     it("reads approvals via `approvals get --json` without touching the legacy file", async () => {
       const { app, clawCmd, fsModule } = createCliHarness();
@@ -1224,7 +1124,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       const app = createApp({
         clawCmd,
         clawCmdWithRetry,
-        openclawCapabilities: sqliteEraCapabilities,
         fsModule,
       });
       const res = await request(app)
@@ -1300,7 +1199,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
         const app = createApp({
           clawCmd,
           clawCmdWithRetry,
-          openclawCapabilities: sqliteEraCapabilities,
           fsModule,
         });
         const res = await request(app).delete("/api/nodes/exec-approvals/allowlist/id-1");
@@ -1330,7 +1228,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
             stdout: "",
             stderr: kOwnerUnavailable.replace("exec.approvals.get", "exec.approvals.set"),
           })),
-          openclawCapabilities: sqliteEraCapabilities,
           fsModule: createMemoryFs(),
         });
         const res = await request(app)
@@ -1341,98 +1238,6 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       });
     });
 
-    it("fails legacy WRITES closed (503) when the era is indeterminate and the CLI is unavailable", async () => {
-      // A capability-probe failure on a beta box must not let a dashboard
-      // allowlist edit CREATE exec-approvals.json — the file whose existence
-      // takes the gateway down (issue #23 fail-closed rule).
-      const fsModule = createMemoryFs();
-      const app = createApp({
-        fsModule,
-        openclawCapabilities: { get: async () => false }, // CLI "unavailable"
-        resolveExecApprovalsBackend: async () => ({
-          backend: "indeterminate",
-          signal: "indeterminate",
-          reapAllowed: false,
-        }),
-      });
-      const res = await request(app)
-        .post("/api/nodes/exec-approvals/allowlist")
-        .send({ pattern: "ls *" });
-      expect(res.status).toBe(503);
-      expect(res.body.error).toMatch(/retry/i);
-      // The legacy file was never created.
-      expect(fsModule.files.has(approvalsPath)).toBe(false);
-    });
-
-    it("still allows legacy writes on a determinate file era", async () => {
-      const fsModule = createMemoryFs();
-      const app = createApp({
-        fsModule,
-        openclawCapabilities: { get: async () => false },
-        resolveExecApprovalsBackend: async () => ({
-          backend: "file",
-          signal: "gate",
-          reapAllowed: false,
-        }),
-      });
-      const res = await request(app)
-        .post("/api/nodes/exec-approvals/allowlist")
-        .send({ pattern: "ls *" });
-      expect(res.status).toBe(200);
-      expect(fsModule.files.has(approvalsPath)).toBe(true);
-    });
-
-    it("falls back to the legacy file path when the capability probe throws", async () => {
-      const fsModule = createMemoryFs();
-      const app = createApp({
-        openclawCapabilities: {
-          get: async () => {
-            throw new Error("probe exploded");
-          },
-        },
-        fsModule,
-      });
-      const res = await request(app).get("/api/nodes/exec-approvals");
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        ok: true,
-        file: { version: 1, agents: { "*": { allowlist: [] } } },
-        allowlist: [],
-      });
-    });
   });
 
-  describe("exec approvals file fallback fails closed on an unparseable file (fix wave F215)", () => {
-    const torn = '{"version":1,"agents":{"*":{"allowlist":[{"pattern":"rm -rf *","id":"keep-me"';
-
-    it("POST answers 409 config_unreadable and leaves the file byte-identical", async () => {
-      const fsModule = createMemoryFs({ [approvalsPath]: torn });
-      const app = createApp({ fsModule });
-      const res = await request(app)
-        .post("/api/nodes/exec-approvals/allowlist")
-        .send({ pattern: "ls *" });
-      expect(res.status).toBe(409);
-      expect(res.body).toMatchObject({ ok: false, code: "config_unreadable", file: "exec-approvals.json" });
-      expect(res.body.error).toMatch(/will not rewrite exec-approvals\.json/);
-      expect(fsModule.files.get(approvalsPath)).toBe(torn);
-    });
-
-    it("DELETE answers 409 config_unreadable and leaves the file byte-identical", async () => {
-      const fsModule = createMemoryFs({ [approvalsPath]: torn });
-      const app = createApp({ fsModule });
-      const res = await request(app).delete("/api/nodes/exec-approvals/allowlist/keep-me");
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("config_unreadable");
-      expect(fsModule.files.get(approvalsPath)).toBe(torn);
-    });
-
-    it("GET stays lenient (display) — wildcard defaults, no write", async () => {
-      const fsModule = createMemoryFs({ [approvalsPath]: torn });
-      const app = createApp({ fsModule });
-      const res = await request(app).get("/api/nodes/exec-approvals");
-      expect(res.status).toBe(200);
-      expect(res.body.allowlist).toEqual([]);
-      expect(fsModule.files.get(approvalsPath)).toBe(torn);
-    });
-  });
 });

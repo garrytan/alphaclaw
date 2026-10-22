@@ -20,7 +20,6 @@ const {
   kNotOnboardedReason,
   createBootReportSteps,
 } = require("../../lib/server/boot-report-steps");
-const { kSqliteEra, kFileEra, kIndeterminate } = require("../../lib/server/openclaw-state-era");
 const { utcDayBucket } = require("../../lib/server/notification-policy");
 
 const kBootId = "40:1700000000000";
@@ -74,7 +73,6 @@ const createFixture = ({
   runtimeInfo = { installedVersion: "2026.9.2", pinnedVersion: "2026.9.2", installedDiverged: false },
   config = { agents: { list: [] }, meta: { lastTouchedVersion: "2026.9.2" } },
   legacyApprovalsFile = false,
-  eraHint = kSqliteEra,
   withWriter = true,
   withWatchdogVerdict = true,
   notify = vi.fn(async () => ({ ok: true })),
@@ -112,7 +110,6 @@ const createFixture = ({
     postBootWebhook,
     openclawDir,
     readOpenclawConfig: require("../../lib/server/openclaw-config").readOpenclawConfig,
-    resolveEraHint: vi.fn(async () => ({ hint: eraHint, signal: "gate" })),
     nowFn: () => kNow,
     logger,
   });
@@ -179,12 +176,10 @@ describe("boot-report-steps: recordBootReportServerPhase", () => {
     expect((await schemaWins.steps.recordBootReportServerPhase()).serverPhase.installedVersion).toBe("2026.9.2");
   });
 
-  it("legacyExecApprovalsPresent: true on a sqlite-era box with the file, false on a file-era box, null when the era is indeterminate, false with no file", async () => {
+  it("legacyExecApprovalsPresent: true whenever the legacy file exists (the pinned OpenClaw is SQLite-era), false with no file", async () => {
     const cases = [
-      [{ legacyApprovalsFile: true, eraHint: kSqliteEra }, true],
-      [{ legacyApprovalsFile: true, eraHint: kFileEra }, false],
-      [{ legacyApprovalsFile: true, eraHint: kIndeterminate }, null],
-      [{ legacyApprovalsFile: false, eraHint: kSqliteEra }, false],
+      [{ legacyApprovalsFile: true }, true],
+      [{ legacyApprovalsFile: false }, false],
     ];
     for (const [options, expected] of cases) {
       const { steps } = createFixture(options);
@@ -330,7 +325,6 @@ describe("boot-report-steps: finalizeBootReport", () => {
   it("a legacy exec-approvals.json reaped between the record step and finalize (ensureManagedExecDefaults) is a self-healed boot: consistent, `legacyExecApprovalsReaped: true`", async () => {
     const { steps, bootReport, openclawDir, insertWatchdogEvent, notify, postBootWebhook } = createFixture({
       legacyApprovalsFile: true,
-      eraHint: kSqliteEra,
     });
     const recorded = await steps.recordBootReportServerPhase();
     // The record step saw the finding…
@@ -351,10 +345,9 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(bootEvents(insertWatchdogEvent)).toEqual([expect.objectContaining({ status: "ok", details: expect.objectContaining({ verdict: [] }) })]);
   });
 
-  it("legacyExecApprovalsReaped is false unless the record step saw the sqlite-era finding (an indeterminate era that resolves is not a reap)", async () => {
-    const { steps, bootReport, openclawDir } = createFixture({ legacyApprovalsFile: true, eraHint: kIndeterminate });
-    expect((await steps.recordBootReportServerPhase()).serverPhase.legacyExecApprovalsPresent).toBeNull();
-    fs.rmSync(path.join(openclawDir, "exec-approvals.json"));
+  it("legacyExecApprovalsReaped is false unless the record step saw the legacy file", async () => {
+    const { steps, bootReport } = createFixture({ legacyApprovalsFile: false });
+    expect((await steps.recordBootReportServerPhase()).serverPhase.legacyExecApprovalsPresent).toBe(false);
     await steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
     expect(readJson(bootReport.reportPath).serverPhase).toEqual(
       expect.objectContaining({ legacyExecApprovalsPresent: false, legacyExecApprovalsReaped: false }),
