@@ -7,10 +7,10 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.60] - 2026-10-22
 
-The onboarding wizard finishes again with a model API key on OpenClaw 2026.10.6 (ALPH-20, found by the black-box wizard run on a real VM).
+The onboarding wizard finishes with a model API key (ALPH-20, found by the black-box wizard run on a real VM).
 
 ### Fixed
-- Fresh onboarding with an API key (OpenAI, Anthropic, Gemini, any provider whose key the wizard collects) stopped at "Running openclaw onboard" with "Onboarding command failed. Please verify credentials and try again." AlphaClaw seeded the key's auth profile (`<provider>:default`) before running `openclaw onboard`, and OpenClaw 2026.10.6 treats a provider that already holds a stored credential as a replacement: it saves the onboarded key inactive ("Replacement credential saved but inactive") and exits 1. The profiles are now seeded right after `openclaw onboard` (and still when an import skips it), before `openclaw models set`. Verified on a real deploy: the wizard completes in real Chrome, the workspace repo is created and pushed, and the first agent turn answers.
+- Fresh onboarding with an API key (OpenAI, Anthropic, Gemini, any provider whose key the wizard collects) stopped at "Running openclaw onboard" with "Onboarding command failed. Please verify credentials and try again." AlphaClaw seeded the key's auth profile (`<provider>:default`) before running `openclaw onboard`, and OpenClaw treats a provider that already holds a stored credential as a replacement: it saves the onboarded key inactive ("Replacement credential saved but inactive") and exits 1. The profiles are now seeded right after `openclaw onboard` (and still when an import skips it), before `openclaw models set`. The same failure reproduces on 0.10.7 with OpenClaw 2026.10.4, so it predates the 2026.10.6 pin. Verified on a real deploy: the wizard completes in real Chrome, the workspace repo is created and pushed, and the first agent turn answers.
 
 ## [0.10.59] - 2026-10-22
 

@@ -603,7 +603,7 @@ describe("server/routes/onboarding", () => {
   });
 
   it("seeds API-key auth profiles only after openclaw onboard has stored its own credential", async () => {
-    // OpenClaw 2026.10.6 refuses a provider that already holds a stored
+    // OpenClaw (2026.10.4 and 2026.10.6) refuses a provider that already holds a stored
     // credential ("Replacement credential saved but inactive", exit 1), so a
     // profile seeded before onboard failed every fresh API-key onboarding.
     const deps = createBaseDeps();
