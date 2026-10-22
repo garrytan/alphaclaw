@@ -109,11 +109,13 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
   });
 
   it("installs the prelaunch-hook handler next to the exit/launch handlers, composed from the watchdog and the outbox-backed upgradeNotifier", () => {
-    const launchHandler = serverSource.indexOf(
-      "setGatewayLaunchHandler((payload) => watchdog.onGatewayLaunch(payload));",
-    );
+    const launchHandler = serverSource.indexOf("setGatewayLaunchHandler((payload) => {");
     const hookHandler = serverSource.indexOf("setGatewayPrelaunchHookHandler(");
     expect(launchHandler).toBeGreaterThan(-1);
+    // The launch handler feeds the watchdog first, then the wedge sweep (ALPH-17 PR 6).
+    expect(serverSource.slice(launchHandler, launchHandler + 160)).toMatch(
+      /watchdog\.onGatewayLaunch\(payload\);\s+void sessionWedgeSweep\.onGatewayLaunch\(payload\);/,
+    );
     expect(hookHandler).toBeGreaterThan(launchHandler);
     const block = serverSource.slice(hookHandler, hookHandler + 400);
     expect(block).toContain("createGatewayPrelaunchHookHandler({");

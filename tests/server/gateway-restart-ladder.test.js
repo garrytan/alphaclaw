@@ -845,6 +845,24 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     });
   });
 
+  it("a requested restart hands the wedge sweep its op id and source without waiting on it; shutdown never does (ALPH-17 PR 6)", async () => {
+    await bootManaged(gateway, world);
+    world.restartCli = "graceful";
+    const handler = vi.fn(() => new Promise(() => {}));
+    gateway.setGatewayRestartRequestedHandler(handler);
+    try {
+      const { value, error } = await runRestart({ source: "api:restart", opId: "1234abcd-op" }, 5000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler).toHaveBeenCalledWith({ opId: "1234abcd-op", source: "api:restart" });
+      await drive(gateway.stopGatewayForShutdown({ budgetMs: 2000 }), 3000);
+      expect(handler).toHaveBeenCalledTimes(1);
+    } finally {
+      gateway.setGatewayRestartRequestedHandler(null);
+    }
+  });
+
   it("stopGatewayForShutdown never asks (no supervisor will relaunch): SIGTERM the group, SIGKILL inside its budget; killManagedGatewayChildNow SIGKILLs the group synchronously", async () => {
     world.nextRunOptions = { ignoreSigterm: true };
     const { launcherPid, workerPid } = await bootManaged(gateway, world);

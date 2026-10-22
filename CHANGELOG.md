@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.55] - 2026-10-22
+
+After every gateway relaunch, AlphaClaw checks that no session was left stuck, resumes one through OpenClaw when OpenClaw says it qualifies, and alerts the admin targets otherwise (ALPH-17, PR 6 of the restart plan).
+
+### Added
+- Post-relaunch wedge sweep (`lib/server/session-wedge-sweep.js`). When a cold restart is requested, AlphaClaw records which sessions OpenClaw reports running (`sessions.list` `activeOnly`, read while the gateway still admits work, never awaited by the restart). After every launch (restart, crash or OOM relaunch, boot), once `/readyz` is ready + 90 s, it checks those sessions (or, with nothing recorded, sessions active in the 15 minutes before the launch). A session with live work is never touched. An idle recorded session goes to `sessions.recover`, where OpenClaw decides whether it holds an orphaned claim; "nothing to recover" stays silent. A session still marked interrupted (`abortedLastRun`) or whose recovery gave up (`restartRecoveryStatus: tombstoned`) is alerted once to the admin targets. It uses only OpenClaw's supported reads, never resets a session and never posts into the session's own chat. Each outcome is one `[alphaclaw] wedge-sweep …` line and one `session_wedge` watchdog event (`recovered | alerted | failed`). A newer launch supersedes a pending sweep.
+- Live test `tests/live/session-wedge-sweep.e2e.test.js`: the sweep's reads and `sessions.recover` against the real pin, with the gateway SIGKILLed mid-turn and relaunched.
+
 ## [0.10.53] - 2026-10-22
 
 A routine restart lets OpenClaw finish its active work for up to 3 minutes before stopping it, and the restart card offers Restart now (ALPH-17, PR 5 of the restart plan).
