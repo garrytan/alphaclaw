@@ -590,6 +590,18 @@ describe("server/routes/system", () => {
     );
   });
 
+  it("reports the installed OpenClaw against the pin as openclawPin on GET /api/status", async () => {
+    const deps = createSystemDeps();
+    deps.fs.existsSync.mockReturnValue(true);
+    deps.getOpenclawInfo = vi.fn(() => ({ installedVersion: "2026.10.2", pinnedVersion: "2026.10.4", installedDiverged: true }));
+    const res = await request(createApp(deps)).get("/api/status");
+    expect(res.status).toBe(200);
+    expect(res.body.openclawPin).toEqual({ state: "diverged", installed: "2026.10.2", pinned: "2026.10.4" });
+
+    const unwired = await request(createApp(createSystemDeps())).get("/api/status");
+    expect(unwired.body.openclawPin).toEqual({ state: "unknown", installed: null, pinned: null });
+  });
+
   it("returns tokenized dashboard URL when OpenClaw CLI prints a token", async () => {
     const previousEnvToken = process.env.OPENCLAW_GATEWAY_TOKEN;
     delete process.env.OPENCLAW_GATEWAY_TOKEN;

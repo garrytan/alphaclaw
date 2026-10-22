@@ -2646,6 +2646,7 @@ describe("server/doctor-service", () => {
       readOpenclawConfig = null,
       getGatewayMemoryTrend = null,
       getDoctorAvailability = null,
+      getOpenclawInfo = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
@@ -2695,6 +2696,7 @@ describe("server/doctor-service", () => {
         ...(readOpenclawConfig ? { readOpenclawConfig } : {}),
         ...(getGatewayMemoryTrend ? { getGatewayMemoryTrend } : {}),
         ...(getDoctorAvailability ? { getDoctorAvailability } : {}),
+        ...(getOpenclawInfo ? { getOpenclawInfo } : {}),
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2875,6 +2877,29 @@ describe("server/doctor-service", () => {
       const critical = await signatureForTrend("critical");
       expect(critical).not.toBe(healthy);
       expect(critical).not.toBe(suspected);
+    });
+
+    it("adds the pin-boundary card from openclawRuntime.getInfo() on every run, and none when the getter throws", async () => {
+      const cardsFor = async (getOpenclawInfo) => {
+        const { service, runsByIdCards } = makeService({ getOpenclawInfo });
+        try {
+          const result = await service.runDoctor();
+          await settle();
+          return (runsByIdCards.get(result.runId) || []).map((card) => card.sourceKey);
+        } finally {
+          service.dispose();
+        }
+      };
+      expect(await cardsFor(() => ({ installedVersion: "2026.10.2", pinnedVersion: "2026.10.4" }))).toContain(
+        "det:openclaw-pin-diverged:2026.10.2",
+      );
+      expect(await cardsFor(() => ({ installedVersion: null, pinnedVersion: "2026.10.4" }))).toContain(
+        "det:openclaw-version-unreadable",
+      );
+      const fromThrow = await cardsFor(() => {
+        throw new Error("fs hiccup");
+      });
+      expect(fromThrow.filter((key) => /^det:openclaw-(pin|version)/.test(String(key)))).toEqual([]);
     });
 
     it("rejects card fixes with a gatewayUnavailable error while degraded", async () => {

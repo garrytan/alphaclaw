@@ -1084,6 +1084,58 @@ describe("server/doctor/deterministic-checks det:config-unreadable cards (fix wa
   });
 });
 
+describe("server/doctor/deterministic-checks det:openclaw-pin-* (the pin boundary)", () => {
+  let workspaceRoot;
+  let managedRoot;
+  beforeEach(() => {
+    workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-pin-ws-"));
+    managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-det-pin-managed-"));
+  });
+  afterEach(() => {
+    fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    fs.rmSync(managedRoot, { recursive: true, force: true });
+  });
+  const pinCards = (openclawPin) =>
+    buildDeterministicCards({
+      workspaceRoot,
+      managedRoot,
+      profile: kStableProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      onboarded: true,
+      readLatestDoctorRun: () => null,
+      openclawPin,
+    }).filter((card) => /^det:openclaw-(pin|version)/.test(String(card.sourceKey)));
+
+  it("emits one P1 card keyed by the installed version when the install diverged from the pin", () => {
+    const cards = pinCards({ state: "diverged", installed: "2026.10.2", pinned: "2026.10.4" });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      sourceKey: "det:openclaw-pin-diverged:2026.10.2",
+      priority: "P1",
+      category: "config",
+      status: "open",
+      source: "deterministic",
+      targetPaths: [],
+    });
+    expect(cards[0].summary).toContain("OpenClaw 2026.10.2 is installed");
+    expect(cards[0].summary).toContain("pins 2026.10.4");
+    expect(cards[0].fixPrompt).toMatch(/^Do not edit workspace files/);
+  });
+
+  it("emits one P1 card when the installed version cannot be read", () => {
+    const cards = pinCards({ state: "unreadable", installed: null, pinned: "2026.10.4" });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ sourceKey: "det:openclaw-version-unreadable", priority: "P1" });
+    expect(cards[0].summary).toContain("pins OpenClaw 2026.10.4");
+  });
+
+  it("emits nothing for a matching install, an undeclared pin, or no runtime info", () => {
+    expect(pinCards({ state: "match", installed: "2026.10.4", pinned: "2026.10.4" })).toEqual([]);
+    expect(pinCards({ state: "unknown", installed: "2026.10.4", pinned: null })).toEqual([]);
+    expect(pinCards(null)).toEqual([]);
+  });
+});
+
 describe("server/doctor/deterministic-checks det:plugin-api-mismatch (issue #76 A4 doctor evidence)", () => {
   const { detectPluginApiMismatch, kPluginApiMismatchPattern } = require(
     "../../lib/server/doctor/deterministic-checks",

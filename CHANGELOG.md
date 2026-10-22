@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.27] - 2026-10-22
+
+The pin boundary is visible (refactor plan PR 5b, ALPH-15, gate_rev=2 d1). AlphaClaw only runs the OpenClaw its `package.json` pins. An install that differs from the pin, or whose version cannot be read, now warns the operator. Before, it showed up only in diagnose output, the boot report and crash evidence. Nothing about what runs changes.
+
+### Added
+
+- **`openclawPin` on `/api/status`** (and on every status SSE frame): `{ state, installed, pinned }`, where `state` is `match`, `diverged`, `unreadable` (the pin is declared but `node_modules/openclaw` is missing or its `package.json` is unreadable or has no version) or `unknown` (no pin declared, as in a dev checkout). It is computed from `openclawRuntime.getInfo()` in `lib/server/openclaw-pin-state.js` and cached like the other status readers.
+- **A General-tab warning** when the install diverged from the pin or its version is unreadable. It names both versions and says to redeploy or reinstall AlphaClaw.
+- **Doctor deterministic cards** (P1, `config`): `det:openclaw-pin-diverged:<installed>`, keyed by the installed version so dismissing one divergence never hides the next, and `det:openclaw-version-unreadable`. They are recomputed on every run, reuse and scheduled runs included. A throwing runtime read produces no card instead of failing the scan.
+
 ## [0.10.26] - 2026-10-22
 
 Dead Setup UI code and CSS are deleted (refactor plan PR 5, ALPH-15). One copy change.
