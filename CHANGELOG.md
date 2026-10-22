@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.53] - 2026-10-22
+
+A routine restart lets OpenClaw finish its active work for up to 3 minutes before stopping it, and the restart card offers Restart now (ALPH-17, PR 5 of the restart plan).
+
+### Changed
+- The ask grace now follows the restart class, which comes from the attributed source: routine restarts (`api:*`, `channels:*`, `team:*`) wait `ALPHACLAW_GATEWAY_RESTART_GRACE_SECONDS` (default 180 s, clamped 30–300, deployment env only); a watchdog repair and an unattributed caller keep 30 s; the memory mitigation keeps its derived budget. An explicit ladder grace still wins. The first ladder line names the class (`requested source=… class=routine`). The 300 s ceiling is OpenClaw's own deferral cap, so the restart operation budget (925 s) already covers it.
+- The restart card's ask line says how long OpenClaw may take ("asking OpenClaw to finish its current work (up to 3 min)").
+
+### Added
+- **Restart now** on the restart card while OpenClaw drains for the ask: `POST /api/gateway/restart/expedite {operationId}` cuts that drain short and the ladder moves on to SIGTERM (`asking status=expedited`). Only the running operation can be expedited (otherwise `409 no_matching_restart`). Human-only: the agent-admin manifest denies it. The stop evidence reads "cut short" rather than "OpenClaw refused".
+
 ## [0.10.52] - 2026-10-22
 
 Every gateway restart now says who asked for it and why (ALPH-17, PR 4 of the restart plan).

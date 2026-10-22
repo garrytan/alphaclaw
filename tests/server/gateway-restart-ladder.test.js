@@ -767,7 +767,7 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       const firstOp = /op=(\S+)/.exec(restartLines()[0])[1];
       expect(firstOp).toMatch(/^[0-9a-f]{8}$/);
       expect(attributed.value.opId.slice(0, 8)).toBe(firstOp);
-      expect(restartLines()[0]).toBe(`[alphaclaw] restart op=${firstOp} requested source=watchdog:memory_mitigation reason=episode 101-1`);
+      expect(restartLines()[0]).toBe(`[alphaclaw] restart op=${firstOp} requested source=watchdog:memory_mitigation reason=episode 101-1 class=memory`);
       expect(restartLines().every((line) => line.startsWith(`[alphaclaw] restart op=${firstOp} `))).toBe(true);
       expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("has no source"));
 
@@ -775,7 +775,7 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       world.restartCli = "graceful";
       const bare = await runRestart({}, 5000);
       expect(bare.error).toBeNull();
-      expect(restartLines()[0]).toMatch(/^\[alphaclaw\] restart op=[0-9a-f]{8} requested source=unattributed$/);
+      expect(restartLines()[0]).toMatch(/^\[alphaclaw\] restart op=[0-9a-f]{8} requested source=unattributed class=repair$/);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("has no source"));
 
       console.log.mockClear();
@@ -791,6 +791,57 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       expect(error).toBeNull();
       expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "30000ms"]);
       expect(logLines().find((line) => /asking status=running/.test(line))).toMatch(/graceMs=30000 graceReason=resolver_failed/);
+    });
+  });
+
+  describe("the ask grace follows the restart class (ALPH-17 PR 5)", () => {
+    const logLines = () => console.log.mock.calls.map(([line]) => String(line));
+    const noAskGrace = { termGraceMs: 2000, killGraceMs: 1000 };
+
+    it("a routine restart (operator, channel, team) asks with the routine grace, 180 s by default", async () => {
+      expect(gateway.kRestartClasses).toEqual({ ROUTINE: "routine", REPAIR: "repair", MEMORY: "memory" });
+      await bootManaged(gateway, world);
+      for (const source of ["api:restart", "api:upgrade", "channels:create", "team:enable"]) {
+        world.restartCli = "graceful";
+        const { error } = await runRestart({ source, ladder: noAskGrace }, 5000);
+        expect(error).toBeNull();
+        expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "180000ms"]);
+        expect(logLines().find((line) => line.includes("requested source=" + source))).toMatch(/ class=routine$/);
+      }
+    });
+
+    it("a watchdog repair and an unattributed caller keep the short 30 s grace; an explicit ladder grace always wins", async () => {
+      await bootManaged(gateway, world);
+      world.restartCli = "graceful";
+      expect((await runRestart({ source: "watchdog:repair_replace", reason: "x", ladder: noAskGrace }, 5000)).error).toBeNull();
+      expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "30000ms"]);
+      expect(logLines().find((line) => line.includes("requested source=watchdog:repair_replace"))).toMatch(/ class=repair$/);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      world.restartCli = "graceful";
+      expect((await runRestart({ ladder: noAskGrace }, 5000)).error).toBeNull();
+      expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "30000ms"]);
+      world.restartCli = "graceful";
+      expect((await runRestart({ source: "api:restart" }, 5000)).error).toBeNull();
+      expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "3000ms"]);
+    });
+
+    it("Restart now: an expedite between ask polls ends the drain and SIGTERMs at once; the evidence says it was cut short, not refused", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "unknown_draining";
+      let expedite = false;
+      const askAt = Date.now();
+      setTimeout(() => { expedite = true; }, 1000);
+      const { value, error } = await runRestart({ source: "api:restart", ladder: { ...ladder, askGraceMs: 60_000 }, shouldExpedite: () => expedite }, 6000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("sigterm");
+      const [first] = world.signalLog.filter((entry) => entry.pid === -launcherPid && entry.sig === "SIGTERM");
+      expect(first.at - askAt).toBeGreaterThanOrEqual(1000);
+      expect(first.at - askAt).toBeLessThan(2000);
+      expect(value.stopEvidence.askExit).toBe("expedited");
+      expect(value.stopEvidence.askExpedited).toBe(true);
+      expect(value.stopEvidence.askRefusedLine).toBeNull();
+      expect(logLines().some((line) => /asking status=expedited ms=\d+/.test(line))).toBe(true);
+      expect(logLines().some((line) => /asking status=(refused|expired)/.test(line))).toBe(false);
     });
   });
 

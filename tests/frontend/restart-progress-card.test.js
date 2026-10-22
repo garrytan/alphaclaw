@@ -51,6 +51,7 @@ import {
   restartStartedAtMs,
   describeRestartRecovered,
   retryTargetFor,
+  isAskingPhase,
 } from "../../lib/public/js/components/restart-progress-card.js";
 import { formatLocaleTime } from "../../lib/public/js/lib/format.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
@@ -151,6 +152,8 @@ describe("frontend/restart-progress-card", () => {
     [[step("stopping", "running", { detail: { phase: "asking" } })], "asking OpenClaw to finish its current work"],
     [[step("stopping", "running", { detail: { phase: "asking", activeWork: 3 } })], "asking OpenClaw to finish its current work (3 tasks)"],
     [[step("stopping", "running", { detail: { phase: "asking", activeWork: 1 } })], "asking OpenClaw to finish its current work (1 task)"],
+    [[step("stopping", "running", { detail: { phase: "asking", graceSeconds: 180 } })], "asking OpenClaw to finish its current work (up to 3 min)"],
+    [[step("stopping", "running", { detail: { phase: "asking", graceSeconds: 30, activeWork: 2 } })], "asking OpenClaw to finish its current work (2 tasks, up to 30s)"],
     [[step("stopping", "running", { detail: { phase: "terminating" } })], "stopping OpenClaw"],
     [[step("stopping", "running")], "stopping OpenClaw"],
     [[step("stopping", "running", { detail: { phase: "forcing", graceSeconds: 10 } })], "OpenClaw didn't stop in 10s, forcing it (active work may be interrupted)"],
@@ -163,6 +166,24 @@ describe("frontend/restart-progress-card", () => {
     [[{ name: "custom_step", label: "Doing a thing", status: "running" }], "doing a thing"],
   ])("describeRestartPhase(%j) → %j", (steps, expected) => {
     expect(describeRestartPhase(steps)).toBe(expected);
+  });
+
+  it("Restart now is offered only while OpenClaw drains for the ask, and expedites that operation (ALPH-17 PR 5)", () => {
+    const asking = step("stopping", "running", { at: kNow - 5000, detail: { phase: "asking", graceSeconds: 180 } });
+    const onExpedite = vi.fn();
+    const operation = { ...kRunningOperation, steps: [...kRunningOperation.steps.slice(0, 2), asking] };
+    const tree = renderCard({ operation, onExpedite });
+    expect(treeText(tree)).toContain("asking OpenClaw to finish its current work (up to 3 min)");
+    const button = findButton(tree, "Restart now");
+    expect(button.props.tone).toBe("secondary");
+    button.props.onClick();
+    expect(onExpedite).toHaveBeenCalledWith("op-1");
+
+    expect(isAskingPhase([asking])).toBe(true);
+    expect(isAskingPhase([step("stopping", "running", { detail: { phase: "asking", status: "skipped" } })])).toBe(false);
+    expect(isAskingPhase([asking, step("stopping", "running", { detail: { phase: "terminating" } })])).toBe(false);
+    expect(findButton(renderCard({ operation: kRunningOperation, onExpedite }), "Restart now")).toBeUndefined();
+    expect(findButton(renderCard({ operation }), "Restart now")).toBeUndefined();
   });
 
   it("the latest step with copy wins; terminal statuses keep the previous line", () => {

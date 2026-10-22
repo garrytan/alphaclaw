@@ -178,6 +178,34 @@ extracts it into a fresh staging directory (see `openclaw backup --help` and
 files into place, and keep the current state directory until the restored
 gateway is verified healthy.
 
+## Why a restart waits before stopping OpenClaw (restart classes)
+
+Every restart first asks OpenClaw to finish its active work
+(`openclaw gateway restart --wait <grace>`), then stops it. How long that
+grace is depends on who asked (v0.10.53, logged on the first ladder line as
+`restart op=<id> requested source=… class=…`):
+
+| class | who | grace |
+| --- | --- | --- |
+| `routine` | the Restart button, Retry upgrade, a channel or team change (`api:*`, `channels:*`, `team:*`) | `ALPHACLAW_GATEWAY_RESTART_GRACE_SECONDS` — default 180 s, clamped 30–300 |
+| `repair` | the watchdog replacing an unhealthy gateway (`watchdog:repair_replace`), or a caller with no source | 30 s |
+| `memory` | the pre-OOM memory mitigation (`watchdog:memory_mitigation`) | derived from time to exhaustion (see `drainBudget` on the event) |
+
+The grace is a ceiling, not a delay: an idle gateway stops in about a second.
+A routine restart waits because an agent turn that is mid-run when the
+gateway stops is lost, and on Oct 22 a 30 s grace cut one short. While a
+routine restart waits, the restart card reads "asking OpenClaw to finish its
+current work (up to 3 min)" and shows **Restart now**: it ends the wait and
+stops OpenClaw at once (SIGTERM), interrupting whatever is still running. The
+log says `restart op=<id> expedite requested=true actor=…` then
+`asking status=expedited`, and the stop evidence reads "cut short" instead
+of "refused". The agent cannot press it (`/api/gateway/restart/expedite` is
+human-only).
+
+To change the grace, set `ALPHACLAW_GATEWAY_RESTART_GRACE_SECONDS` in the
+deployment environment and restart AlphaClaw (it is read at process start and
+never from `.env`). Values outside 30–300 are clamped with one warning line.
+
 ## Restart failed: couldn't stop the old gateway
 
 **What it means:** a gateway restart (manual, API, agent-admin, env save,

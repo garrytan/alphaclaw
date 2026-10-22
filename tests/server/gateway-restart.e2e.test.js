@@ -648,7 +648,7 @@ describe("server/gateway restart drills (e2e)", () => {
       // Structured details for the card: the ask phase, then how the old
       // gateway went away; every step stamped with the server clock.
       const stopping = events.filter((e) => e.data?.name === "stopping").map((e) => e.data);
-      expect(stopping[0]).toMatchObject({ status: "running", at: expect.any(Number), detail: { phase: "asking", graceSeconds: 30 } });
+      expect(stopping[0]).toMatchObject({ status: "running", at: expect.any(Number), detail: { phase: "asking", graceSeconds: 180 } });
       expect(stopping.at(-1)).toMatchObject({ status: "done", detail: { how: "graceful" } });
       const waiting = events.find((e) => e.data?.name === "waiting_ready");
       expect(waiting.data.budgetMs).toBe(120000);
@@ -687,7 +687,7 @@ describe("server/gateway restart drills (e2e)", () => {
       // graceful ask (honoured, so no signal reached the gateway), then one
       // managed `gateway run` — never `--force`, never a CLI stop.
       expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-        ["gateway", "restart", "--wait", "30000ms"],
+        ["gateway", "restart", "--wait", "180000ms"],
         ["gateway", "run"],
       ]);
       expect(fake.signals.filter(([pid, signal]) => signal !== 0 && pid === kIncumbentPid)).toEqual([]);
@@ -750,9 +750,9 @@ describe("server/gateway restart drills (e2e)", () => {
         ["step", "Stopping gateway", "running"],
       ]);
       expect(events.filter((e) => e.data?.name === "stopping").map((e) => e.data.detail)).toEqual([
-        { phase: "asking", graceSeconds: 30 },
+        { phase: "asking", graceSeconds: 180 },
         { phase: "terminating" },
-        { phase: "forcing", graceSeconds: 30 },
+        { phase: "forcing", graceSeconds: 180 },
       ]);
       const terminal = events[events.length - 1];
       expect(terminal.event).toBe("error");
@@ -772,7 +772,7 @@ describe("server/gateway restart drills (e2e)", () => {
       // The ask went out, then SIGTERM and SIGKILL to the identified pid —
       // and no `gateway run` was spawned on top of the survivor.
       expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-        ["gateway", "restart", "--wait", "30000ms"],
+        ["gateway", "restart", "--wait", "180000ms"],
       ]);
       expect(fake.signals.filter(([pid]) => pid === kIncumbentPid)).toEqual([
         [kIncumbentPid, "SIGTERM"],
@@ -998,7 +998,7 @@ describe("server/gateway restart drills (e2e)", () => {
 
     // One restart execution total, despite three POSTs.
     expect(fake.spawnCalls.map((call) => call.args)).toEqual([
-      ["gateway", "restart", "--wait", "30000ms"],
+      ["gateway", "restart", "--wait", "180000ms"],
       ["gateway", "run"],
     ]);
     // The lock is free again once the operation completes.

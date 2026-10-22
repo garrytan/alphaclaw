@@ -2808,6 +2808,42 @@ describe("server/routes/system", () => {
     resolveRestart();
   });
 
+  it("Restart now: expedites only the running restart; the ladder sees it through shouldExpedite (ALPH-17 PR 5)", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId: "op-now", reasonsSnapshot: [] }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    let resolveRestart;
+    let options = null;
+    deps.restartGateway = vi.fn((opts) => {
+      options = opts;
+      return new Promise((resolve) => {
+        resolveRestart = () => resolve({ durationMs: 5 });
+      });
+    });
+    const app = createApp(deps);
+
+    const idle = await request(app).post("/api/gateway/restart/expedite").send({ operationId: "op-now" });
+    expect(idle.status).toBe(409);
+    expect(idle.body.code).toBe("no_matching_restart");
+
+    expect((await request(app).post("/api/gateway/restart?async=1")).status).toBe(202);
+    await vi.waitFor(() => expect(deps.restartGateway).toHaveBeenCalledTimes(1));
+    expect(options.source).toBe("api:restart");
+    expect(options.shouldExpedite()).toBe(false);
+
+    const wrong = await request(app).post("/api/gateway/restart/expedite").send({ operationId: "op-other" });
+    expect(wrong.status).toBe(409);
+    expect(options.shouldExpedite()).toBe(false);
+
+    const log = vi.spyOn(console, "log");
+    const ok = await request(app).post("/api/gateway/restart/expedite").send({ operationId: "op-now" });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ ok: true, operationId: "op-now" });
+    expect(options.shouldExpedite()).toBe(true);
+    expect(log.mock.calls.map(([line]) => String(line))).toContainEqual(expect.stringMatching(/^\[alphaclaw\] restart op=op-now expedite requested=true actor=/));
+    resolveRestart();
+  });
+
   const createQueuedRestartHarness = () => {
     const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
     const deps = createSystemDeps();
