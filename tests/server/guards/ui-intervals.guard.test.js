@@ -3,12 +3,12 @@
 // (shared 1s ticker) per AGENTS.md "Networking and Fetching". Raw intervals
 // keep spawning git/openclaw CLIs and TCP probes from backgrounded tabs
 // (audit F143/F159/F160/F170/F202). Counted per file so a moved line does
-// not churn the list; PR 11 drives every count to zero.
+// not churn the list. The list is empty; keep it empty.
 const { auditTree, formatHits } = require("./guard-utils");
 const { scanUiIntervals } = require("./scanners");
 
-// file → number of raw intervals still allowed. PR 11 (polling sweep) drives
-// every count to zero; an ADDED interval changes the key and goes red.
+// file → number of raw intervals still allowed. The polling sweep emptied it;
+// an ADDED interval changes the key and goes red.
 const kKnownOffenders = {};
 
 describe("guard: the UI polls through usePolling/useNowMs, never raw setInterval", () => {
@@ -24,7 +24,7 @@ describe("guard: the UI polls through usePolling/useNowMs, never raw setInterval
     expect(hits[0].key).toBe("lib/public/js/components/planted.js::3");
   });
 
-  it("exempts the two polling primitives (self-test)", () => {
+  it("exempts the polling primitives (self-test)", () => {
     expect(scanUiIntervals("setInterval(x, 1)", "lib/public/js/hooks/usePolling.js")).toEqual([]);
   });
 

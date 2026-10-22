@@ -5,6 +5,31 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.21] - 2026-10-22
+
+Docs and comments match the code (refactor plan PR 1, ALPH-15). No runtime change.
+
+### Changed
+
+- **AGENTS.md** no longer documents things that were removed: the
+  `doctorFixSuppressed` / `channelRollbackEligible` status fields and rollback
+  timestamps, the deleted `openclaw-restart-handoff.js` stub, the
+  `gateway stop --help` live contract, and "#59's incumbent verdict" /
+  "before `gateway stop`" (both replaced by the v0.10.0 stop ladder). The Team
+  tab copy, the ClickClack and Buzz requirements and the feature-gate summary
+  now describe the pinned build. `providers.js` is no longer cited as a live
+  reference.
+- **CONTRIBUTING.md** names the restart-ladder live test instead of the deleted
+  `gateway stop --force` contract test. The context-contract design doc stops
+  citing the deleted restore-drill test.
+- **TODOS.md** marks the `--force`-supervisor and `openclaw-channel-*` suite
+  items obsolete and points the lifecycle-controller item at the stop ladder.
+- **Code comments** in `gateway.js`, `openclaw-runtime-env.js`,
+  `doctor/availability.js`, `gateway-crash-cause.js` and `alphaclaw-config.js`
+  describe the single pinned build instead of the removed release-channel
+  overlay; the route-async-wrap and ui-intervals guards drop their stale
+  "drives the list to zero" notes.
+
 ## [0.10.20] - 2026-10-22
 
 Port of #130 by @exGeni (fixes #128 and #129), onto current main with no changes to its scope.

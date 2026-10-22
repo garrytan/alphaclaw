@@ -471,8 +471,7 @@ Run this on EVERY upstream release adoption (stable pin bump, beta adoption, cha
    flag naming, `database preflight` presence and the `approvals` help/`get --json` shape on
    the pin and the newest beta (`tests/live/openclaw-live-cli-contract.e2e.test.js`); and
    `backup create --output … --verify` archives
-   (`tests/live/openclaw-live-backup.e2e.test.js`,
-   `tests/live/openclaw-live-restore-drill.e2e.test.js`). The `doctor --lint --json` payload
+   (`tests/live/openclaw-live-backup.e2e.test.js`). The `doctor --lint --json` payload
    shape is exercised hermetically only, against a mocked document
    (`tests/server/doctor-openclaw-doctor.test.js`); no live test drives
    `doctor --lint --json` or the `backup sqlite create → verify` cycle yet.
