@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.43] - 2026-10-22
+
+Test-only: three checks that were failing on `main` now match the shipped behavior. No product code changed.
+
+### Tests
+
+- `tests/live/control-ui-styles.e2e.test.js` step 2 follows the launcher the way a browser does. `/gateway/launch` sets the `alphaclaw_control_ui` attach marker (`Path=/openclaw`, since 0.10.15), and the step now asserts that cookie and carries it into the Chromium context. Before, the context held only the session cookie, so the page was detoured through `/gateway/attach`, which drops the `#token=` fragment. The canary context carries the marker too. The style assertions are unchanged.
+- `tests/browser/reliability-fixture.mjs` serves `/api/openclaw/upgrade-status`. The Gateway card has polled that endpoint since 0.10.7, and it still exists; the fixture was simply missing it. It now answers the "data upgrade finished, no alert" shape, so the smoke no longer collects 404s.
+- `tests/browser/gateway-recovery-smoke.mjs` matches the restart line as shipped:
+  - Since 0.10.7, `aria-live="polite"` sits on the phase text only, so screen readers don't announce the ticking clock. The smoke now checks that the inner live region holds only the phase.
+  - The `stop_refused` sentence changed in 0.10.1 and no longer says "restart the container". The smoke now expects the current sentence.
+
 ## [0.10.42] - 2026-10-22
 
 Capabilities and features API answers become constants on the pinned OpenClaw (refactor plan PR 16a, ALPH-15).

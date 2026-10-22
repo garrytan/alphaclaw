@@ -291,6 +291,7 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
   let observed = null;
   let cookieValue = null;
   let launchLocation = null;
+  let attachMarkerValue = null;
   let token = null;
 
   const readOpenclawJson = () => JSON.parse(fs.readFileSync(openclawConfigPath, "utf8"));
@@ -375,6 +376,26 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
     name: "setup_token",
     value,
     url: baseUrl,
+    httpOnly: true,
+    sameSite: "Lax",
+  });
+
+  // /gateway/launch marks its session attached (v0.10.15,
+  // lib/server/control-ui-attach.js) so the browser it hands #token= to is
+  // not detoured through /gateway/attach. A context fed only the session
+  // cookie would be detoured, and the attach page drops the fragment.
+  const kAttachCookieName = "alphaclaw_control_ui";
+  const attachMarkerOf = (res) => {
+    const line = res.headers.getSetCookie().find((c) => c.startsWith(`${kAttachCookieName}=`));
+    if (!line) return null;
+    const [pair, ...attributes] = line.split(";");
+    return { value: pair.slice(pair.indexOf("=") + 1), attributes: attributes.join(";") };
+  };
+  const attachMarkerCookie = (value) => ({
+    name: kAttachCookieName,
+    value,
+    domain: new URL(baseUrl).hostname,
+    path: kMountPath,
     httpOnly: true,
     sameSite: "Lax",
   });
@@ -543,13 +564,18 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       expect(launchLocation).toMatch(new RegExp(`^${kMountPath}/#token=`));
       token = decodeURIComponent(launchLocation.split("#token=")[1] || "");
       expect(token).toBe(gatewayToken);
+      const marker = attachMarkerOf(launch);
+      expect(marker, `launch Set-Cookie: ${launch.headers.get("set-cookie")}`).not.toBeNull();
+      expect(marker.attributes).toMatch(new RegExp(`Path=${kMountPath}(?:;|$)`, "i"));
+      attachMarkerValue = marker.value;
 
       // vitest.config.js retries a failed test once: a re-run must not leak
       // the previous attempt's context (its worker would stay registered).
       if (context) await context.close().catch(() => {});
       context = await browser.newContext();
       await installPageProbes(context);
-      await context.addCookies([browserCookie(cookieValue)]);
+      // What a browser that followed /gateway/launch itself would hold.
+      await context.addCookies([browserCookie(cookieValue), attachMarkerCookie(attachMarkerValue)]);
 
       // Service workers ENABLED (real behavior). The very first load is fully
       // visible to page.on("response") because no worker controls it yet.
@@ -808,7 +834,7 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       const canaryContext = await browser.newContext({ serviceWorkers: "block" });
       try {
         await installPageProbes(canaryContext);
-        await canaryContext.addCookies([browserCookie(cookieValue)]);
+        await canaryContext.addCookies([browserCookie(cookieValue), attachMarkerCookie(attachMarkerValue)]);
         const canaryPage = await canaryContext.newPage();
         const canaryObserved = observePage(canaryPage);
         await canaryPage.route(`**${kMountPath}/fonts/**`, (route) => route.abort());

@@ -257,7 +257,11 @@ try {
     const line = (tab = page) => tab.locator(".ac-restart-line");
     const expectLine = async (pattern) => { for (const tab of [page, secondTab]) await line(tab).getByText(pattern).waitFor(); };
     step("preparing_plugins", "running"); await expectLine(/^Restarting: checking plugins \(gateway still running\) · \d+s$/); await shot("progress-plugins");
-    assert.equal(await line().getAttribute("aria-live"), "polite");
+    // Since v0.10.7 only the phase is a live region: the ticking " · Ns" clock
+    // sits outside it so screen readers do not read every second.
+    const liveRegion = line().locator('[aria-live="polite"]');
+    assert.equal(await liveRegion.count(), 1);
+    assert.match(await liveRegion.innerText(), /^Restarting: checking plugins \(gateway still running\)$/);
     assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("ac-restart-line")), true, "focus lands on the status line");
     step("preparing_plugins", "skipped");
     step("stopping", "running", { detail: { phase: "asking", activeWork: 2 } }); await expectLine(/^Restarting: asking OpenClaw to finish its current work \(2 tasks\) · \d+s$/); await shot("progress-asking");
@@ -311,7 +315,8 @@ try {
     assert.equal(posts().length, beforeRetry + 1);
     step("stopping", "running");
     emit("error", { code: "stop_refused", error: "could not identify the serving process", hint: null });
-    await page.getByText("Couldn't safely identify the running gateway. Restart the container, or open View logs.", { exact: true }).waitFor();
+    // v0.10.1: the sentence names what happened and never says "restart the container".
+    await page.getByText("Couldn't safely identify the running gateway, so nothing was stopped. Open View logs to see what holds the gateway port.", { exact: true }).waitFor();
     assert.equal(await button("Try again").count(), 0);
     await button("View logs").waitFor();
     await shot("failure-stop-refused");

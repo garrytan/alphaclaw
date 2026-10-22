@@ -92,6 +92,8 @@ export async function createReliabilityFixture() {
     }
     if (route === "/api/status") return json({ gateway: "running", alphaclawVersion: state.currentVersion });
     if (route === "/api/watchdog/status" || route === "/api/doctor/status") return json({ status: { health: "healthy" } });
+    // The Gateway card's upgrade alert (v0.10.7): data upgrade finished, nothing to show.
+    if (route === "/api/openclaw/upgrade-status") return json({ ok: true, installedVersion: "2026.9.3", completedForVersion: "2026.9.3", alert: null, retry: { available: false, unchanged: false, unchangedSince: null, lastSuccessDurationMs: null }, busy: null, preflight: null, backup: null });
     return json({ ok: false, error: `Unimplemented fixture route ${route}` }, 404);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
