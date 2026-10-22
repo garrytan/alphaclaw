@@ -10,8 +10,6 @@ const {
   resolveDefaultAgentId,
   describeOnDiskAgents,
   canonicalizeAgentsForWrite,
-  getEnvVarsContainer,
-  getThreadBindingsTarget,
 } = require("../../lib/server/openclaw-config-migrations");
 
 describe("server/openclaw-config-migrations agents shape adapters", () => {
@@ -113,22 +111,6 @@ describe("server/openclaw-config-migrations agents shape adapters", () => {
     normalized.agents.entries = agentsArrayToKeyed(normalized.agents.list);
     delete normalized.agents.list;
     expect(withAgentsShapeForWrite(normalized, "entries")).toEqual(input);
-  });
-
-  it("resolves the env vars container across the beta rename", () => {
-    expect(getEnvVarsContainer({ env: { vars: { A: "1" } } })).toEqual({ A: "1" });
-    expect(getEnvVarsContainer({ env: { A: "1" } })).toEqual({ A: "1" });
-    expect(getEnvVarsContainer({})).toBe(null);
-  });
-
-  it("targets the canonical thread-bindings key under beta shapes", () => {
-    expect(getThreadBindingsTarget({ agents: { entries: {} } })).toBe(
-      "session.threadBindings",
-    );
-    expect(getThreadBindingsTarget({ session: {} })).toBe("session.threadBindings");
-    expect(getThreadBindingsTarget({ agents: { list: [] } })).toBe(
-      "channels.discord.threadBindings",
-    );
   });
 });
 

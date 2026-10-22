@@ -3,7 +3,6 @@ const request = require("supertest");
 
 const {
   registerPairingRoutes,
-  removeAccountRequestsFromPairingStore,
 } = require("../../lib/server/routes/pairings");
 
 const createApp = ({ clawCmd, isOnboarded, fsModule, approveDevicePairingDirect }) => {
@@ -1588,109 +1587,6 @@ describe("server/routes/pairings OpenClaw 2026.10.2 state-owner routing", () => 
     expect(res.status).toBe(503);
     expect(res.body.ownerCode).toBe("OWNER_REFUSED");
     expect(res.body.retryable).toBe(true);
-  });
-});
-
-describe("server/routes/pairings removeAccountRequestsFromPairingStore", () => {
-  it("removes only the matching account's requests", () => {
-    const writes = [];
-    const fsModule = {
-      readFileSync: vi.fn(() =>
-        JSON.stringify({
-          version: 1,
-          requests: [
-            { code: "AAA", meta: { accountId: "Tester" } },
-            { code: "BBB", meta: {} },
-            { code: "CCC", meta: { accountId: "other" } },
-          ],
-        }),
-      ),
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn((targetPath, data) => writes.push(JSON.parse(data))),
-    };
-
-    removeAccountRequestsFromPairingStore({
-      fsModule,
-      openclawDir: "/tmp/openclaw",
-      channel: "telegram",
-      accountId: "tester",
-    });
-
-    expect(writes).toEqual([
-      {
-        version: 1,
-        requests: [
-          { code: "BBB", meta: {} },
-          { code: "CCC", meta: { accountId: "other" } },
-        ],
-      },
-    ]);
-  });
-
-  it("treats a missing account id as the default account", () => {
-    const writes = [];
-    const fsModule = {
-      readFileSync: vi.fn(() =>
-        JSON.stringify({
-          version: 1,
-          requests: [
-            { code: "AAA", meta: {} },
-            { code: "BBB", meta: { accountId: "other" } },
-          ],
-        }),
-      ),
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn((targetPath, data) => writes.push(JSON.parse(data))),
-    };
-
-    removeAccountRequestsFromPairingStore({
-      fsModule,
-      openclawDir: "/tmp/openclaw",
-      channel: "telegram",
-      accountId: "",
-    });
-
-    expect(writes).toEqual([
-      {
-        version: 1,
-        requests: [{ code: "BBB", meta: { accountId: "other" } }],
-      },
-    ]);
-  });
-
-  it("does nothing when the store is empty or unchanged", () => {
-    const emptyFs = {
-      readFileSync: vi.fn(() => {
-        throw new Error("ENOENT");
-      }),
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn(),
-    };
-    removeAccountRequestsFromPairingStore({
-      fsModule: emptyFs,
-      openclawDir: "/tmp/openclaw",
-      channel: "telegram",
-      accountId: "tester",
-    });
-    expect(emptyFs.writeFileSync).not.toHaveBeenCalled();
-
-    const unchangedFs = {
-      readFileSync: vi.fn(() =>
-        JSON.stringify({
-          version: 1,
-          requests: [{ code: "AAA", meta: { accountId: "other" } }],
-        }),
-      ),
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn(),
-    };
-    removeAccountRequestsFromPairingStore({
-      fsModule: unchangedFs,
-      openclawDir: "/tmp/openclaw",
-      channel: "telegram",
-      accountId: "tester",
-    });
-    expect(unchangedFs.writeFileSync).not.toHaveBeenCalled();
   });
 });
 

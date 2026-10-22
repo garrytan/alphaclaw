@@ -16,14 +16,12 @@ const {
   getGoogleAccountByEmail,
   upsertGoogleAccount,
   removeGoogleAccount,
-  hasPersonalGoogleAccount,
   getGmailPushConfig,
   setGmailPushConfig,
   getAccountGmailWatch,
   setAccountGmailWatch,
   listWatchEnabledAccounts,
   generatePushToken,
-  allocateServePort,
 } = require("../../lib/server/google-state");
 
 describe("Gmail remote operation state", () => {
@@ -413,14 +411,6 @@ describe("server/google-state account queries", () => {
     expect(getGoogleAccountByEmail(state, "nobody@example.com")).toBeNull();
     expect(getGoogleAccountByEmail()).toBeNull();
   });
-
-  it("detects personal accounts", () => {
-    expect(hasPersonalGoogleAccount(state)).toBe(false);
-    expect(
-      hasPersonalGoogleAccount({ accounts: [{ personal: true }] }),
-    ).toBe(true);
-    expect(hasPersonalGoogleAccount()).toBe(false);
-  });
 });
 
 describe("server/google-state mutations", () => {
@@ -485,40 +475,6 @@ describe("server/google-state mutations", () => {
     };
     expect(listWatchEnabledAccounts(state).map((a) => a.id)).toEqual(["acct-1"]);
     expect(listWatchEnabledAccounts()).toEqual([]);
-  });
-});
-
-describe("server/google-state allocateServePort", () => {
-  it("returns the first free port", () => {
-    expect(allocateServePort({ state: { accounts: [] } })).toBe(18801);
-    expect(
-      allocateServePort({
-        state: {
-          accounts: [
-            { gmailWatch: { port: 18801 } },
-            { gmailWatch: { port: 18802 } },
-            {},
-          ],
-        },
-      }),
-    ).toBe(18803);
-  });
-
-  it("returns null when all ports are used", () => {
-    expect(
-      allocateServePort({
-        state: {
-          accounts: [
-            { gmailWatch: { port: 20001 } },
-            { gmailWatch: { port: 20002 } },
-          ],
-        },
-        basePort: 20001,
-        maxAccounts: 2,
-      }),
-    ).toBeNull();
-    expect(allocateServePort({ state: {}, maxAccounts: 0 })).toBeNull();
-    expect(allocateServePort({})).toBe(18801);
   });
 });
 

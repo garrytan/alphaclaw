@@ -4,7 +4,6 @@ const path = require("path");
 const { DatabaseSync } = require("node:sqlite");
 
 const shared = require("../../lib/server/db/usage/shared");
-const pricing = require("../../lib/server/db/usage/pricing");
 
 const loadUsageDb = () => {
   const modulePath = require.resolve("../../lib/server/db/usage");
@@ -87,10 +86,6 @@ afterEach(() => {
 });
 
 describe("server/db/usage/shared", () => {
-  it("re-exports pricing helpers from cost-utils", () => {
-    expect(typeof pricing.deriveCostBreakdown).toBe("function");
-  });
-
   it("coerces and clamps integers with fallbacks", () => {
     expect(shared.coerceInt("42")).toBe(42);
     expect(shared.coerceInt("nope", 7)).toBe(7);

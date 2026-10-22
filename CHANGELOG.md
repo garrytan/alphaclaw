@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.25] - 2026-10-22
+
+Dead server code is deleted (refactor plan PR 4, ALPH-15). One behavior change: the overseer no longer offers "rollback".
+
+### Removed
+
+- **Unused modules**: `lib/server/output-line-ring.js`, `lib/server/utils/lifecycle-lock.js` (each with its test) and the `lib/server/db/usage/pricing.js` re-export shim. `usage-db-coverage` no longer checks the shim.
+- **The OpenClaw overlay installer** in `openclaw-version.js`: `installOpenclawVersionToTempDir`, `verifyStagedLifecycle` and `kInstallGuardRelPath`, with their tests. The in-app version switch that used them was retired earlier. The container self-upgrade journey still seeds through the v0.9.76 image's own copy. `createOpenclawVersionService` now takes only `gatewayEnv`, since `restartGateway`, `isOnboarded` and `execImpl` were never read.
+- `readOpenclawConfig`'s `onReadSource` callback, which had no caller.
+- **Unreferenced exports**: `isPrereleaseVersion`, `kDefaultGatewayUrl`, `AUTH_PROFILES_PATH`, `kAppDir`, `stopLoopLagMonitor`, `projectBootProgressForActor`, `waitForGatewayRunning` and `readSchemaMetadata`.
+- **Features only tests called**: `hasPersonalGoogleAccount`, `allocateServePort`, `removeAccountRequestsFromPairingStore`, `getEnvVarsContainer`, `getThreadBindingsTarget` and `getTopicsForAgent`, with their tests.
+
+### Changed
+
+- **The watchdog overseer's action list drops `rollback`**, an action AlphaClaw no longer has. A model verdict that still names it keeps its verdict and text, and its action parses as `none` instead of offering a button for a removed action. A test covers this.
+
 ## [0.10.24] - 2026-10-21
 
 ### Fixed

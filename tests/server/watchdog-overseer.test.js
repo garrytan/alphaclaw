@@ -371,6 +371,15 @@ describe("parseVerdict", () => {
     expect(parseVerdict("total garbage")).toBe(null);
   });
 
+  it("parses a verdict naming the removed rollback action with action none, keeping the verdict", () => {
+    const parsed = parseVerdict(
+      JSON.stringify({ verdict: "action_needed", action: "rollback", headline: "Bad release" }),
+    );
+    expect(parsed.verdict).toBe("action_needed");
+    expect(parsed.action).toBe("none");
+    expect(parsed.headline).toBe("Bad release");
+  });
+
   it("validates against the caller's verdict set — a situation report rejects incident verdicts", () => {
     const opts = { verdicts: kSituationVerdicts };
     expect(parseVerdict(JSON.stringify({ verdict: "resolved", action: "none" }), opts)).toBe(null);
