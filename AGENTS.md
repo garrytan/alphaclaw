@@ -27,7 +27,7 @@ Runtime model:
 
 ### Key Technologies
 
-- Node.js 24.16.0+ runtime (or Node 26.1.0+). Node 22 and 25 are no longer supported: OpenClaw 2026.9.3 requires `>=24.16.0 <25 || >=26.1.0` and older runtimes truncate SQLite text. `package.json` `engines.node`, `lib/node-runtime.js` (`kAlphaclawNodeEngines`) and the `node:24-slim` image move together.
+- Node.js 24.22.1+ runtime (or Node 26.12.1+). OpenClaw 2026.10.6 requires `>=24.22.1 <25 || >=26.12.1` (the October 2026 Node.js security releases) and its `gateway run` / `doctor --fix` exit 1 on anything older; Node 22 and 25 have been unsupported since 2026.9.3 (older runtimes truncate SQLite text). `package.json` `engines.node`, `lib/node-runtime.js` (`kAlphaclawNodeEngines`) the `node:24-slim` image and CI's `check-latest` setup-node lanes move together.
 - Express-based HTTP API server.
 - `http-proxy-3` (pinned in `package.json`) for gateway proxy behavior, with `lil-http-terminator` for graceful HTTP drain on shutdown.
 - OpenClaw CLI/gateway process orchestration.
@@ -58,7 +58,7 @@ Docker is usable in the Conductor Amazon Linux VM. Follow [the cloud testing run
 - Preserve Conductor's CPU quotas, weights, and thread assignments. The working layout has a **domain root**, a **domain-threaded `/conductor`** with its existing threaded children, and separate **`/alphaclaw-host`** and **`/alphaclaw-docker`** domains. The guarded, manual helper is [scripts/dev/prepare-cloud-cgroups.py](scripts/dev/prepare-cloud-cgroups.py); inspect first and use the runbook's commands. A threaded cgroup cannot be changed back to a domain in place. Do this before starting Docker or long test jobs, and never remove memory limits to make a test pass.
 - Launch `dockerd` itself inside `/alphaclaw-host`, with `--cgroup-parent=/alphaclaw-docker` and the isolated socket/data directories in `.context/docker`. Both placements matter for swap detection. Keep bridge networking and port publishing enabled: the container journeys reach the server through published ports. Export `DOCKER_HOST` in the test terminal.
 - Prove enforcement with a real `--memory=512m --memory-swap=512m` container: `memory.max` must be `536870912` and `memory.swap.max` must be `0`. Also check outbound HTTPS and the container's supported Node version. The runbook includes the probe and daemon command.
-- Put supported Node **24.16+ or 26.1+** first on `PATH` for dependencies and all test runs. The container tier no longer drives a browser; the live Control UI test and the browser smokes still need the repository's exact Playwright browser revision (see the runbook for the Node 24.16 browser-extraction workaround).
+- Put supported Node **24.22.1+ or 26.12.1+** first on `PATH` for dependencies and all test runs. The container tier no longer drives a browser; the live Control UI test and the browser smokes still need the repository's exact Playwright browser revision (see the runbook for the Node 24.16 browser-extraction workaround).
 - Run the two real autotune cases, then the full container tier serially. Preserve failures and inspect test-owned artifacts; do not skip steps or use host-wide Docker pruning.
 
 ```bash

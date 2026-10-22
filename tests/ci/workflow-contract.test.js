@@ -28,13 +28,22 @@ describe("ci/merge-gate workflow contract", () => {
     expect(ci).toMatch(/if:\s*github\.event_name == 'pull_request' && matrix\.node-version == 24/);
   });
 
-  it("every live/container workflow runs the Node the pinned OpenClaw requires (>=24.16)", () => {
-    // OpenClaw 2026.9.3 declares `>=24.16.0 <25 || >=26.1.0`; a Node 22 lane
-    // would spawn a CLI that refuses to start and fail every real install.
+  it("every live/container workflow runs the Node the pinned OpenClaw requires (>=24.22.1)", () => {
+    // OpenClaw 2026.10.6 declares `>=24.22.1 <25 || >=26.12.1`; a lane below
+    // it spawns a CLI whose `gateway run` exits 1 and fails every real install.
     for (const name of ["container-e2e.yml", "live-e2e.yml"]) {
       const text = wf(name);
       expect(text, name).not.toMatch(/node-version:\s*22\b/);
       expect(text, name).toMatch(/node-version:\s*24\b/);
+    }
+  });
+
+  it("every setup-node step resolves the newest patch (the runner's cached Node can sit below the pin's floor)", () => {
+    for (const name of ["ci.yml", "container-e2e.yml", "live-e2e.yml"]) {
+      const text = wf(name);
+      const steps = text.split("uses: actions/setup-node").slice(1);
+      expect(steps.length, name).toBeGreaterThan(0);
+      for (const step of steps) expect(step.split(/\n\s*- /)[0], name).toMatch(/check-latest:\s*true/);
     }
   });
 

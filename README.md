@@ -107,7 +107,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 # Fail the build, not the first boot, if the floating base tag resolved to a
-# Node below AlphaClaw's floor (>=24.16 since v0.9.80, the OpenClaw 2026.9.3 pin).
+# Node below AlphaClaw's floor (>=24.22.1 since v0.10.48, the OpenClaw 2026.10.6 pin).
 RUN node -e "require('@chrysb/alphaclaw/lib/node-runtime').assertSupportedNodeVersion()"
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
@@ -550,7 +550,7 @@ limited container and follow the tested setup in the [cloud testing runbook](doc
 CI or a Docker Desktop/Colima host can also run these checks. The immutable
 two-image journey must pass before considering self-upgrade risk covered.
 
-**Requirements:** Node.js ≥ 24.16.0 on Node 24, or ≥ 26.1.0 on Node 26 (OpenClaw 2026.9.3 dropped Node 22 and 25 — older runtimes truncate SQLite text)
+**Requirements:** Node.js ≥ 24.22.1 on Node 24, or ≥ 26.12.1 on Node 26 (OpenClaw 2026.10.6 refuses to start a gateway on anything older — the October 2026 Node.js security releases; Node 22 and 25 have been unsupported since 2026.9.3)
 
 CI (`.github/workflows/ci.yml`) runs the hermetic suite on Node 24 and Node 26. The `main` ruleset requires `test (24)` plus the container-e2e `gate` aggregator; `test (26)` is an early-warning lane (`continue-on-error`) whose failures are reported but do not block a merge until the ruleset lists it as required.
 

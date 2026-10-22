@@ -29,30 +29,38 @@ const { getProcessTreeUsage } = require("../../lib/server/system-resources");
 //   2. AlphaClaw's RSS sampler (getProcessUsage → /proc) sees a real
 //      gateway's leak as a rising trend (slope/direction only, NEVER absolute
 //      RSS — absolute numbers flake across gateway versions).
-//   3. Terminal stage (user decision D2C, updated to the verified beta
+//   3. Terminal stage (user decision D2C, updated to the 2026.10.5
 //      contract): the leak runs until the gateway's own memory diagnostics
-//      report CRITICAL pressure (or the process dies abnormally). On
-//      2026.9.1-beta.1 plugins run in their own isolate — heap caps do not
-//      bind them (measured: heapUsed ~171MB vs RSS >6GB), so a plugin leak
-//      terminates as a container/kernel OOM, never a V8 heap abort. The V8
-//      signature regression lives in tests/live/autotune-container.e2e.
+//      report CRITICAL pressure or the process dies abnormally. On
+//      2026.9.1-beta.1 plugins ran in their own isolate that heap caps did
+//      not bind (measured: heapUsed ~171MB vs RSS >6GB); on 2026.10.5 the
+//      NODE_OPTIONS cap binds the plugin's heap, so an uncapped host ends in
+//      the V8 heap abort (see the fixture notes below).
 //
-// Fixture notes (outside-voice C6/C7/F13): the plugin retains
-// Buffer.alloc(1<<20).toString("base64") STRINGS rather than raw Buffers
-// (Buffers are external memory and never count against
-// --max-old-space-size). At 1 MiB the base64 result (~1.4 MB) exceeds Node's
-// EXTERN_APEX (0xFBEE9), so these are EXTERNAL strings too: V8 accounts them
-// only between mark-compacts, so they inflate RSS (what stage 2 measures)
-// but do not trip the heap cap deterministically. The V8-abort signature is
-// pinned instead by tests/live/autotune-container.e2e.test.js with 256 KiB
-// chunks (fix wave F220/F223). The heap cap rides NODE_OPTIONS (see
-// gatewayEnv), NOT launcher argv: `gateway run` can fork a worker child that
-// holds the plugin's heap, and only NODE_OPTIONS propagates to it — exactly
-// how production caps the gateway (autotune's suffix). 256MB is kept so that
-// a single-isolate gateway (some versions) can still surface the V8 abort
-// inside the budget if it fires; on the verified beta the run ends at the
-// critical-pressure log line or a container/kernel OOM (stage 3), never a
-// V8 abort.
+// Fixture notes (outside-voice C6/C7/F13, revised for 2026.10.5): the plugin
+// retains Buffer.alloc(256 << 10).toString("base64") STRINGS rather than raw
+// Buffers (Buffers are external memory and never count against
+// --max-old-space-size). At 256 KiB the base64 result (~350 KB) stays under
+// Node's EXTERN_APEX (0xFBEE9), so the strings live IN the V8 heap: they grow
+// RSS (what stage 2 measures) and they fill the heap the cap binds.
+//
+// Why not the 1 MiB external strings used through 2026.10.4: those grew RSS
+// without touching the heap, and the terminal stage relied on the gateway's
+// fixed 3 GiB rss_threshold critical. 2026.10.5 rewrote diagnostic-memory:
+// warning/critical are now 80%/90% of min(process.constrainedMemory(),
+// os.totalmem()), so on an uncapped host the critical line needs 90% of
+// physical RAM and never fires inside the budget (measured 2026-10-20 on a
+// 16 GB host: RSS 0.9 → 1.9 GB, no pressure line in 4 minutes). In a real
+// container the line still fires, at 90% of the cgroup limit.
+//
+// The heap cap rides NODE_OPTIONS (see gatewayEnv), NOT launcher argv:
+// `gateway run` can fork a worker child that holds the plugin's heap, and only
+// NODE_OPTIONS propagates to it — exactly how production caps the gateway
+// (autotune's suffix). On 2026.10.5 that cap binds the plugin's strings: at
+// 256 MB the gateway aborts before the slope stage completes, at 768 MB the
+// slope stage completes and the run ends in a V8 heap abort (SIGABRT with the
+// "Reached heap limit" signature the watchdog classifies) about 100 s later
+// (measured 2026-10-20).
 const describeLive = kLiveEnabled ? describe : describe.skip;
 
 const kTestTimeoutMs = 12 * 60 * 1000;
@@ -72,14 +80,9 @@ const kLeakPluginManifest = {
 // allowConversationAccess=true and is irrelevant to a heap leak; the
 // register-time setInterval is the whole vector.
 //
-// Leak rate: one ~1.4 MB string every 100 ms (~14 MB/s). The terminal stage
-// needs the gateway's own rss_threshold critical (3 GiB, diagnostic-*.mjs
-// DEFAULT_RSS_CRITICAL_BYTES — unchanged 2026.9.8 → 2026.10.2) inside its
-// 4-minute budget; rss_growth critical needs two rising 5-minute half
-// windows and can never fire in time. At the old 250 ms interval 2026.10.2
-// grew RSS at the nominal ~5.6 MB/s (822 MB → 1.29 GB over the slope stage,
-// 2026-10-12), which reaches 3 GiB only after ~7 minutes; 2026.9.8's ~11 MB/s
-// was allocator overhead the build no longer carries.
+// Leak rate: one ~350 KB heap string every 100 ms (~3.5 MB/s), enough for the
+// slope stage's 30 MB floor and for the 768 MB heap cap to bind inside the
+// terminal stage's 4-minute budget.
 const kLeakPluginSource = `
 const leaked = [];
 const plugin = {
@@ -88,7 +91,7 @@ const plugin = {
   description: "Deliberately leaks heap-resident strings for the memory-leak e2e.",
   register() {
     setInterval(() => {
-      leaked.push(Buffer.alloc(1 << 20).toString("base64"));
+      leaked.push(Buffer.alloc(256 << 10).toString("base64"));
     }, 100);
   },
 };
@@ -117,7 +120,7 @@ describeLive("live: gateway memory leak via a real plugin", () => {
       // NODE_OPTIONS DOES — which is exactly how production caps the gateway
       // (autotune's NODE_OPTIONS suffix). Separate plugin isolates can reach
       // critical process pressure while the main heap stays below this cap.
-      NODE_OPTIONS: "--max-old-space-size=256",
+      NODE_OPTIONS: "--max-old-space-size=768",
     });
   };
 
@@ -236,12 +239,11 @@ describeLive("live: gateway memory leak via a real plugin", () => {
           "critical memory pressure or abnormal exit",
         );
         if (gateway.exitCode !== null || gateway.exitSignal !== null) {
-          // Died first: must be abnormal, and if V8 did abort (single-isolate
-          // topology on some versions), the classifier signature must match.
+          // Died first: must be abnormal, and a heap-resident leak under the
+          // NODE_OPTIONS cap must die with the V8 signature the watchdog's
+          // OOM classifier matches.
           expect(gateway.exitCode === 0 && gateway.exitSignal === null).toBe(false);
-          if (kHeapOomPattern.test(gateway.output)) {
-            expect(gateway.output).toMatch(kHeapOomPattern);
-          }
+          expect(gateway.output).toMatch(kHeapOomPattern);
         } else {
           expect(gateway.criticalPressureLine).toMatch(kCriticalPressurePattern);
           const usage = getProcessTreeUsage(gateway.child.pid);

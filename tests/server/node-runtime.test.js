@@ -13,6 +13,9 @@ const {
 // The engines requirement OpenClaw 2026.9.3 publishes on npm (verified
 // 2026-09-08): Node 22 and 25 are gone, 24 needs 24.16.0+, 26 needs 26.1.0+.
 const kOpenclaw2026_9_3Engines = ">=24.16.0 <25 || >=26.1.0";
+// OpenClaw 2026.10.6 (the v0.10.48 pin, verified 2026-10-22): the October 2026
+// Node.js security releases, 24.22.1+ on the 24 line and 26.12.1+ on 26.
+const kOpenclaw2026_10_6Engines = ">=24.22.1 <25 || >=26.12.1";
 
 describe("node-runtime", () => {
   it("parses semantic Node versions", () => {
@@ -26,30 +29,35 @@ describe("node-runtime", () => {
     expect(kAlphaclawNodeEngines).toBe(
       require("../../package.json").engines.node,
     );
-    expect(kAlphaclawNodeEngines).toBe(kOpenclaw2026_9_3Engines);
+    expect(kAlphaclawNodeEngines).toBe(kOpenclaw2026_10_6Engines);
   });
 
-  it("enforces the OpenClaw 2026.9.3 Node floors (24.16+, 26.1+; 22 and 25 dropped)", () => {
+  it("enforces the OpenClaw 2026.10.6 Node floors (24.22.1+, 26.12.1+; 22 and 25 dropped)", () => {
     expect(isSupportedNodeVersion("22.22.3")).toBe(false);
     expect(isSupportedNodeVersion("22.99.0")).toBe(false);
     expect(isSupportedNodeVersion("23.9.0")).toBe(false);
     expect(isSupportedNodeVersion("24.14.1")).toBe(false);
-    expect(isSupportedNodeVersion("24.15.9")).toBe(false);
-    expect(isSupportedNodeVersion("24.16.0")).toBe(true);
-    expect(isSupportedNodeVersion("24.20.0")).toBe(true);
+    expect(isSupportedNodeVersion("24.16.0")).toBe(false);
+    expect(isSupportedNodeVersion("24.21.0")).toBe(false);
+    expect(isSupportedNodeVersion("24.22.0")).toBe(false);
+    expect(isSupportedNodeVersion("24.22.1")).toBe(true);
+    expect(isSupportedNodeVersion("24.30.0")).toBe(true);
     expect(isSupportedNodeVersion("25.9.0")).toBe(false);
     expect(isSupportedNodeVersion("26.0.0")).toBe(false);
-    expect(isSupportedNodeVersion("26.1.0")).toBe(true);
+    expect(isSupportedNodeVersion("26.1.0")).toBe(false);
+    expect(isSupportedNodeVersion("26.12.0")).toBe(false);
+    expect(isSupportedNodeVersion("26.12.1")).toBe(true);
     expect(isSupportedNodeVersion("27.0.0")).toBe(true);
     expect(isSupportedNodeVersion("garbage")).toBe(false);
   });
 
   it("throws an actionable error for unsupported runtimes", () => {
     expect(() => assertSupportedNodeVersion("22.22.3")).toThrow(
-      "requires Node.js >=24.16.0 <25 || >=26.1.0",
+      "requires Node.js >=24.22.1 <25 || >=26.12.1",
     );
+    expect(() => assertSupportedNodeVersion("24.21.0")).toThrow(/October 2026 Node\.js security releases/);
     expect(() => assertSupportedNodeVersion("24.14.1")).toThrow(/SQLite text/);
-    expect(() => assertSupportedNodeVersion("24.16.0")).not.toThrow();
+    expect(() => assertSupportedNodeVersion("24.22.1")).not.toThrow();
   });
 });
 

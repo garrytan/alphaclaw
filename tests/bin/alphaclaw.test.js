@@ -36,7 +36,7 @@ describe("bin/alphaclaw port check", () => {
     const preloadPath = path.join(tmpDir, "force-supported-node.js");
     fs.writeFileSync(
       preloadPath,
-      `Object.defineProperty(process.versions, "node", { value: "24.16.0" });`,
+      `Object.defineProperty(process.versions, "node", { value: "24.22.1" });`,
     );
     return `--require="${preloadPath}"`;
   };
@@ -95,7 +95,7 @@ describe("bin/alphaclaw port check", () => {
     fs.writeFileSync(
       interceptPreload,
       `
-Object.defineProperty(process.versions, "node", { value: "24.16.0" });
+Object.defineProperty(process.versions, "node", { value: "24.22.1" });
 const Module = require("module");
 const realLoad = Module._load;
 Module._load = function (request, parent, isMain) {
@@ -178,7 +178,7 @@ Module._load = function (request, parent, isMain) {
     fs.writeFileSync(
       preloadPath,
       `
-Object.defineProperty(process.versions, "node", { value: "24.16.0" });
+Object.defineProperty(process.versions, "node", { value: "24.22.1" });
 const fs = require("fs");
 process.on("exit", () => {
   fs.writeFileSync(process.env.ALPHACLAW_CAPTURE_ENV_PATH, JSON.stringify({

@@ -7,6 +7,12 @@ const { runCliJson, scrubTestRunnerEnv } = require("./live-helpers");
 // Independent observations of immutable releases, not production's schema
 // oracle. Schema ordering is deliberately non-monotonic across these lines.
 const kObservedSchemas = Object.freeze({
+  // 2026.10.6 (the v0.10.48 pin) and 2026.10.5: observed on real state that
+  // 2026.10.4 wrote, after each build's `doctor --fix --non-interactive`
+  // (2026-10-20 and 2026-10-22). 2026.10.5 moved agent 24 → 25; 2026.10.6
+  // changes neither.
+  "2026.10.6": Object.freeze({ state: 20, agent: 25 }),
+  "2026.10.5": Object.freeze({ state: 20, agent: 25 }),
   // 2026.10.4 (the v0.10.6 pin) and 2026.10.3: declared by each package.json
   // `openclaw.schemaVersions` (2026-10-16); neither changes state or agent.
   "2026.10.4": Object.freeze({ state: 20, agent: 24 }),

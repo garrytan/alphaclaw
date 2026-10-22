@@ -1,6 +1,6 @@
 {
   "name": "alphaclaw",
-  "version": "0.10.47",
+  "version": "0.10.48",
   "publishConfig": {
     "access": "public"
   },
@@ -44,7 +44,7 @@
     "express": "^4.21.0",
     "http-proxy-3": "1.20.10",
     "lil-http-terminator": "1.2.3",
-    "openclaw": "2026.10.4",
+    "openclaw": "2026.10.6",
     "ws": "^8.19.0"
   },
   "devDependencies": {
@@ -64,6 +64,6 @@
     "wouter-preact": "^3.7.1"
   },
   "engines": {
-    "node": ">=24.16.0 <25 || >=26.1.0"
+    "node": ">=24.22.1 <25 || >=26.12.1"
   }
 }

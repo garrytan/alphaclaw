@@ -44,8 +44,12 @@ describe("openclaw pin: lsof contract behind `gateway restart`", () => {
     const text = chunks.map((chunk) => chunk.text).join("\n");
     const scan = /function findGatewayPidsOnPortWithProtectedPidSync\([\s\S]*?\n\}/.exec(text)?.[0];
     expect(scan, explain("findGatewayPidsOnPortWithProtectedPidSync is gone")).toBeTruthy();
-    expect(scan).toMatch(/const lsof = resolveLsofCommandSync\(\);/);
-    expect(scan).toMatch(
+    // 2026.10.5 moved the spawn into scanListeningPort, shared with pollPortOnce.
+    expect(scan).toMatch(/const res = scanListeningPort\(port, lsofTimeoutMs\);/);
+    const spawn = /function scanListeningPort\(port, timeout\) \{[\s\S]*?\n\}/.exec(text)?.[0];
+    expect(spawn, explain("scanListeningPort is gone")).toBeTruthy();
+    expect(spawn).toMatch(/const lsof = resolveLsofCommandSync\(\);/);
+    expect(spawn).toMatch(
       /spawnSync\(lsof, \[\s*"-nP",\s*`-iTCP:\$\{port\}`,\s*"-sTCP:LISTEN",\s*"-Fpc"\s*\], \{\s*env: resolveDiagnosticProcessEnv\(\),/,
     );
     // ENOENT → [] is the bug: a missing binary reads as "no listeners".
@@ -64,7 +68,7 @@ describe("openclaw pin: lsof contract behind `gateway restart`", () => {
     const text = readChunks("restart-stale-pids-").map((chunk) => chunk.text).join("\n");
     const poll = /function pollPortOnce\(port\) \{[\s\S]*?\n\}/.exec(text)?.[0];
     expect(poll, explain("pollPortOnce is gone")).toBeTruthy();
-    expect(poll).toMatch(/"-sTCP:LISTEN",\s*"-Fpc"/);
+    expect(poll).toMatch(/const res = scanListeningPort\(port, POLL_SPAWN_TIMEOUT_MS\);/);
     expect(poll).toMatch(/if \(res\.status === 1\) return res\.stdout\.trim\(\) \? \{ free: false \} : \{ free: true \};/);
   });
 

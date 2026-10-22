@@ -90,7 +90,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          # The pinned OpenClaw requires Node >=24.22.1; resolve the newest 24.x,
+          # not the runner's cached copy.
           node-version: 24
+          check-latest: true
           cache: npm
 
       - run: npm ci

@@ -36,8 +36,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # The pinned OpenClaw requires Node >=24.16 (the runtime floor since v0.9.80; hermetic CI runs 24 and 26).
+          # The pinned OpenClaw requires Node >=24.22.1 (the runtime floor since v0.10.48; hermetic CI runs 24 and 26).
+          # check-latest resolves the newest 24.x instead of the runner's cached copy.
           node-version: 24
+          check-latest: true
           cache: npm
 
       - run: npm ci

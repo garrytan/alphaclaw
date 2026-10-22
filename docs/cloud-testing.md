@@ -8,11 +8,11 @@ kernel; the autotune tests execute real Node processes inside containers.
 ## Use the prepared workspace
 
 Run these commands from the checkout. Use supported Node from `.context/node24`
-or `/opt/alphaclaw-node` for the application and tests. Since v0.9.80,
+or `/opt/alphaclaw-node` for the application and tests. Since v0.10.48,
 AlphaClaw's `engines.node` is
-`>=24.16.0 <25 || >=26.1.0` (the OpenClaw 2026.9.3 pin dropped Node 22 and 25),
-so Node 22 no longer runs the server or the pinned CLI, and the default system
-Node 24.14.1 does not satisfy the range either. Put the supported runtime first
+`>=24.22.1 <25 || >=26.12.1` (the OpenClaw 2026.10.6 pin requires the October
+2026 Node.js security releases), so an older Node runs neither the server nor
+the pinned CLI's `gateway run`; the Capy cloud image's Node 24.21.0 is below it too. Put the supported runtime first
 on `PATH` so child processes and the pinned OpenClaw CLI use it too. A fresh
 workspace has no `.context/node24`: download the newest 24.x tarball from
 nodejs.org into it (the previous sessions' `.context/` directories are not

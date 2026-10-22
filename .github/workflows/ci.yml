@@ -20,6 +20,9 @@ jobs:
     # failure is reported but does not block the merge until the ruleset lists
     # "test (26)" as required (promote it once it has been green for a week).
     # Node 22 left the matrix in v0.9.80: OpenClaw 2026.9.3 requires >=24.16.
+    # OpenClaw 2026.10.6 (v0.10.48) requires >=24.22.1 / >=26.12.1, newer
+    # than the runner image's cached Node can be, so setup-node resolves the
+    # newest patch of each line (check-latest) instead of the toolcache copy.
     continue-on-error: ${{ matrix.node-version == 26 }}
 
     strategy:
@@ -35,6 +38,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          check-latest: true
           cache: npm
 
       # Version guard: a PR's package.json version must strictly advance the

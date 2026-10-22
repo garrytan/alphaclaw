@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.48] - 2026-10-22
+
+Pin OpenClaw 2026.10.6 and raise the Node floor to the one it requires.
+
+### Changed
+- **OpenClaw pin 2026.10.4 → 2026.10.6.** This is the stability patch for the 2026.10.5 feature line. It includes the upstream recovery fixes for held agent and system-agent databases after schema-changing upgrades (openclaw/openclaw#175007 and #176783, the 10.4 → 10.5 crash-loop reported in #176669) and for frozen startup owners (#171678). The pin's `openclaw.schemaVersions` moves agent 24 → 25 (state stays 20). The once-per-pin boot `doctor --fix` migrates it. **The upgrade is one-way:** after the migration, 2026.10.4 refuses the state ("this OpenClaw binary (2026.10.4) is older than the config last written by OpenClaw 2026.10.6"), so rolling back means restoring the pre-upgrade backup, never reinstalling and booting. The schema oracle reads the new numbers from the package, so no seed table changes.
+- **Node floor `>=24.16.0 <25 || >=26.1.0` → `>=24.22.1 <25 || >=26.12.1`.** 2026.10.6 requires the October 2026 Node.js security releases. On older Node its `gateway run` and `doctor --fix` exit 1 with "openclaw requires Node >=24.22.1 <25, or >=26.12.1" (only `--version` and diagnostics still run). `package.json` `engines.node`, `kAlphaclawNodeEngines` and its message, the README and contributor docs move together, so AlphaClaw refuses to start on such a runtime with one clear sentence instead of crash-looping a gateway that cannot launch. The `node:24-slim` base image already resolves to 24.22.1, and the Dockerfile's build-time floor check fails a build that resolves an older Node.
+- CI: every `actions/setup-node` step sets `check-latest: true`, so the 24 and 26 lanes resolve the newest patch instead of a runner-cached Node that can sit below the new floor. A workflow-contract test pins this.
+
+### Fixed (tests)
+- `openclaw-pin-lsof-contract` follows 2026.10.5's move of the stale-pid lsof spawn into `scanListeningPort`, which the stale-pid scan and `pollPortOnce` now share. The argv, the diagnostic env and the status-1 "free" semantics are unchanged, so `lib/server/lsof-shim` still answers it.
+- The live memory-leak test's leak now stays in the V8 heap (256 KiB strings under a 768 MB `NODE_OPTIONS` cap). Since 2026.10.5 the gateway's own critical memory-pressure line fires at 90% of min(cgroup limit, physical RAM) instead of a fixed 3 GiB, so on an uncapped host it never fired inside the budget. The run now ends in the "Reached heap limit" abort the watchdog classifies, and the test asserts that signature.
+
 ## [0.10.47] - 2026-10-22
 
 gateway.js loses dead code and two groups of pure helpers, and its launch guard no longer retains a signal-killed child (refactor plan PR 18, ALPH-15).
