@@ -7,13 +7,10 @@
 const { auditTree, formatHits } = require("./guard-utils");
 const { scanConfigWriters } = require("./scanners");
 
-// Every entry is a KNOWN raw writer with the fix-wave PR that removes it.
-// Add a new entry only with a why-comment; prefer routing through the helper.
-const kKnownOffenders = {
-  // Deliberate: the CLI restore copies the git-tracked bytes verbatim into a
-  // MISSING openclaw.json — there is nothing to fail closed on. Keep raw.
-  "lib/cli/openclaw-config-restore.js::configPath": "intentional: verbatim restore of a missing file",
-};
+// Refactor PR 15 routed the last raw writer (the CLI's missing-config restore)
+// through writeFileAtomic. Keep it empty: route new writers through the
+// helpers; add an entry only with a why-comment.
+const kKnownOffenders = {};
 
 describe("guard: managed config files are never written raw", () => {
   it("detects a raw writeFileSync to a managed config via a bound identifier (self-test)", () => {

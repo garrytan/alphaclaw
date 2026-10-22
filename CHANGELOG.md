@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.40] - 2026-10-22
+
+The last three data-built shell strings in the self-update and onboarding paths become argv calls, and the CLI's missing-config restore stops writing `openclaw.json` raw (refactor plan PR 15a, ALPH-15). Both guard allowlists shrink.
+
+### Changed
+
+- **Self-update copy.** The staged install copy in `alphaclaw-version.js` runs `execFile("cp", ["-af", "<staged>/node_modules/.", "<install>/node_modules/"])` instead of a `cp -af "…"` shell string. The flags and the trailing `/.` are unchanged, so dotfiles and symlinks still copy and an existing destination is still overwritten in place. A path containing a quote or a `$` can no longer change the command.
+- **Onboarding git setup.** The workspace repo is set up with one `execFileCmd("git", argv, { cwd: OPENCLAW_DIR })` call per step: `init -b main`, `remote add origin <url>` (or `remote set-url` for an import), then the two `config user.*` lines. The calls run in order and stop at the first failure, exactly like the old `&&` chain. The local `shellEscapeArg` helper goes with it. These steps no longer print shellCmd's `[onboard] Running: cd … git …` echo; a failure still surfaces through the route's `[onboard] Error:` log.
+- **Missing-config restore.** `lib/cli/openclaw-config-restore.js` writes the restored `openclaw.json` through `writeFileAtomic` (temp file, fsync, rename), so an interrupted restore can't leave a torn config.
+- **Guards.** `shell-strings` drops its three entries for these sites, and `config-writers` drops its last entry and is now empty.
+- **Tests.**
+  - The self-update harness stubs `execFile` by default: a real copy would target the checkout's own `node_modules`. A new real-filesystem test replays the module's exact `cp` argv against a scratch tree whose path contains `$HOME`, quotes and spaces. It checks that dotfiles copy, symlinks survive as symlinks, and existing destination files are overwritten or kept.
+  - The onboarding tests assert the git argv sequence, the `cwd`, and stop-at-first-failure. The error-mapping tests now fail the first spawned command, which is `execFileCmd` instead of `shellCmd`.
+
 ## [0.10.39] - 2026-10-22
 
 The Browse file tree's pure helpers and subcomponents move out of `components/file-tree.js` (refactor plan PR 14d, ALPH-15). No logic changes.

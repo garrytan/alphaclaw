@@ -10,6 +10,7 @@ const {
 } = require("../../lib/server/constants");
 const modulePath = require.resolve("../../lib/server/alphaclaw-version");
 const originalExec = childProcess.exec;
+const originalExecFile = childProcess.execFile;
 
 const createFetchResponse = ({ ok = true, status = 200, body = {} } = {}) => ({
   ok,
@@ -25,8 +26,9 @@ const createFsMock = (overrides = {}) => ({
   ...overrides,
 });
 
-const loadVersionModule = ({ execMock } = {}) => {
+const loadVersionModule = ({ execMock, execFileMock } = {}) => {
   if (execMock) childProcess.exec = execMock;
+  if (execFileMock) childProcess.execFile = execFileMock;
   delete require.cache[modulePath];
   return require(modulePath);
 };
@@ -36,11 +38,14 @@ const createService = ({
   readOpenclawVersion = () => "2026.4.1",
   fetchMock = vi.fn(),
   execMock = vi.fn(),
+  // The staged-install copy runs `cp` through execFile. Always stubbed: a real
+  // copy would target the checkout's own node_modules.
+  execFileMock = vi.fn((file, args, opts, callback) => callback(null, "", "")),
   fsImpl = fs,
   drain,
   markExiting,
 } = {}) => {
-  const { createAlphaclawVersionService } = loadVersionModule({ execMock });
+  const { createAlphaclawVersionService } = loadVersionModule({ execMock, execFileMock });
   const service = createAlphaclawVersionService({
     env,
     readOpenclawVersion,
@@ -52,12 +57,13 @@ const createService = ({
     ...(drain ? { drain } : {}),
     ...(markExiting ? { markExiting } : {}),
   });
-  return { service, fetchMock, execMock };
+  return { service, fetchMock, execMock, execFileMock };
 };
 
 describe("server/alphaclaw-version", () => {
   afterEach(() => {
     childProcess.exec = originalExec;
+    childProcess.execFile = originalExecFile;
     delete require.cache[modulePath];
   });
 
@@ -447,6 +453,9 @@ describe("server/alphaclaw-version", () => {
     const execMock = vi.fn().mockImplementation((cmd, opts, callback) => {
       callbacks.push(callback);
     });
+    const execFileMock = vi.fn((file, args, opts, callback) => {
+      callbacks.push(callback);
+    });
     const fetchMock = vi.fn(async () =>
       createFetchResponse({
         body: {
@@ -457,6 +466,7 @@ describe("server/alphaclaw-version", () => {
     const { service } = createService({
       fetchMock,
       execMock,
+      execFileMock,
       fsImpl: createFsMock({ existsSync: vi.fn(() => false) }),
     });
 
@@ -487,9 +497,13 @@ describe("server/alphaclaw-version", () => {
     const execMock = vi.fn().mockImplementation((cmd, opts, callback) => {
       callbacks.push(callback);
     });
+    const execFileMock = vi.fn((file, args, opts, callback) => {
+      callbacks.push(callback);
+    });
     const { service } = createService({
       fetchMock: vi.fn(),
       execMock,
+      execFileMock,
       fsImpl: createFsMock({ existsSync: vi.fn(() => false) }),
     });
 
@@ -522,7 +536,7 @@ describe("server/alphaclaw-version", () => {
     const execMock = vi.fn().mockImplementation((cmd, opts, callback) => {
       callback(null, "added 1 package", "");
     });
-    const { service } = createService({
+    const { service, execFileMock } = createService({
       execMock,
       fetchMock: vi.fn(),
       fsImpl: createFsMock({ existsSync: vi.fn(() => false) }),
@@ -534,7 +548,7 @@ describe("server/alphaclaw-version", () => {
     expect(result.body.ok).toBe(true);
     expect(result.body.restarting).toBe(true);
     expect(result.body.previousVersion).toBeTruthy();
-    expect(execMock).toHaveBeenCalledTimes(2);
+    expect(execMock).toHaveBeenCalledTimes(1);
     expect(execMock).toHaveBeenNthCalledWith(
       1,
       "npm install --omit=dev --prefer-online --package-lock=false",
@@ -549,12 +563,66 @@ describe("server/alphaclaw-version", () => {
       }),
       expect.any(Function),
     );
-    expect(execMock).toHaveBeenNthCalledWith(
-      2,
-      expect.stringMatching(/^cp -af /),
+    // argv, no shell: the staged tree's contents (dotfiles included, via
+    // "<src>/.") are copied over the install's node_modules.
+    const stagedDir = execMock.mock.calls[0][1].cwd;
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledWith(
+      "cp",
+      [
+        "-af",
+        `${path.join(stagedDir, "node_modules")}/.`,
+        expect.stringMatching(/\/node_modules\/$/),
+      ],
       expect.objectContaining({ timeout: kOpenclawUpdateCopyTimeoutMs }),
       expect.any(Function),
     );
+  });
+
+  it("copies the staged tree with the argv cp: dotfiles, symlinks and an existing dest (real fs)", async () => {
+    const execMock = vi.fn((cmd, opts, callback) => {
+      callback(null, "added 1 package", "");
+    });
+    const { service, execFileMock } = createService({
+      execMock,
+      fetchMock: vi.fn(),
+      fsImpl: createFsMock({ existsSync: vi.fn(() => false) }),
+    });
+    expect((await service.updateAlphaclaw()).status).toBe(200);
+    const [file, args] = execFileMock.mock.calls[0];
+    const stagedModules = path.join(execMock.mock.calls[0][1].cwd, "node_modules");
+
+    // Replay the exact argv against a scratch tree whose path a shell string
+    // would have expanded or split ($HOME, quotes, spaces).
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'alphaclaw cp $HOME "q" '));
+    try {
+      const src = path.join(root, "staged", "node_modules");
+      const dest = path.join(root, "app", "node_modules");
+      fs.mkdirSync(path.join(src, "alphaclaw"), { recursive: true });
+      fs.mkdirSync(path.join(src, ".bin"), { recursive: true });
+      fs.writeFileSync(path.join(src, "alphaclaw", "package.json"), '{"version":"2"}');
+      fs.writeFileSync(path.join(src, ".package-lock.json"), "{}");
+      fs.symlinkSync("../alphaclaw/bin.js", path.join(src, ".bin", "alphaclaw"));
+      fs.mkdirSync(path.join(dest, "alphaclaw"), { recursive: true });
+      fs.mkdirSync(path.join(dest, "other"), { recursive: true });
+      fs.writeFileSync(path.join(dest, "alphaclaw", "package.json"), '{"version":"1"}');
+      fs.writeFileSync(path.join(dest, "other", "keep.txt"), "kept");
+
+      expect(args[0]).toBe("-af");
+      expect(args[1]).toBe(`${stagedModules}/.`);
+      const replayed = ["-af", `${src}/.`, `${dest}/`];
+      await new Promise((resolve, reject) => {
+        originalExecFile(file, replayed, (err) => (err ? reject(err) : resolve()));
+      });
+
+      expect(fs.readFileSync(path.join(dest, "alphaclaw", "package.json"), "utf8")).toBe('{"version":"2"}');
+      expect(fs.existsSync(path.join(dest, ".package-lock.json"))).toBe(true);
+      expect(fs.lstatSync(path.join(dest, ".bin", "alphaclaw")).isSymbolicLink()).toBe(true);
+      expect(fs.readlinkSync(path.join(dest, ".bin", "alphaclaw"))).toBe("../alphaclaw/bin.js");
+      expect(fs.readFileSync(path.join(dest, "other", "keep.txt"), "utf8")).toBe("kept");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("returns 500 when npm install fails", async () => {
@@ -869,16 +937,15 @@ describe("server/alphaclaw-version", () => {
   });
 
   it("returns 500 when copying updated AlphaClaw files fails", async () => {
-    const execMock = vi
-      .fn()
-      .mockImplementationOnce((cmd, opts, callback) => {
-        callback(null, "added 1 package", "");
-      })
-      .mockImplementationOnce((cmd, opts, callback) => {
-        callback(new Error("disk full"));
-      });
+    const execMock = vi.fn((cmd, opts, callback) => {
+      callback(null, "added 1 package", "");
+    });
+    const execFileMock = vi.fn((file, args, opts, callback) => {
+      callback(new Error("disk full"));
+    });
     const { service } = createService({
       execMock,
+      execFileMock,
       fsImpl: createFsMock({ existsSync: vi.fn(() => false) }),
     });
 
@@ -888,7 +955,8 @@ describe("server/alphaclaw-version", () => {
     expect(result.body.error).toBe(
       "Failed to copy updated AlphaClaw files: disk full",
     );
-    expect(execMock).toHaveBeenCalledTimes(2);
+    expect(execMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledTimes(1);
   });
 
   it("still succeeds when the update marker cannot be written", async () => {

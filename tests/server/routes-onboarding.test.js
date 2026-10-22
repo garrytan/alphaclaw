@@ -135,6 +135,12 @@ const mockGithubVerifyAndCreate = ({
   });
 };
 
+// The workspace repo is set up with one `git` argv per step (no shell).
+const gitCallsOf = (deps) =>
+  deps.execFileCmd.mock.calls
+    .filter(([file]) => file === "git")
+    .map(([, args]) => args.join(" "));
+
 describe("server/routes/onboarding", () => {
   beforeEach(() => {
     global.fetch = vi.fn();
@@ -497,11 +503,11 @@ describe("server/routes/onboarding", () => {
     );
     expect(initialPushCall).toBeTruthy();
 
-    const gitInitCall = deps.shellCmd.mock.calls.find(([cmd]) =>
-      cmd.includes("git remote add origin 'https://github.com/owner/repo.git'"),
+    const gitInitCall = gitCallsOf(deps).find(
+      (args) => args === "remote add origin https://github.com/owner/repo.git",
     );
     expect(gitInitCall).toBeTruthy();
-    expect(gitInitCall[0]).not.toContain("ghp_test_123456789");
+    expect(gitInitCall).not.toContain("ghp_test_123456789");
 
     const openclawWriteCall = deps.fs.writeFileSync.mock.calls.find(
       ([path]) => path === "/tmp/openclaw/openclaw.json",
@@ -648,7 +654,7 @@ describe("server/routes/onboarding", () => {
     const deps = createBaseDeps();
     const app = createApp(deps);
     mockGithubVerifyAndCreate();
-    deps.shellCmd.mockRejectedValueOnce(
+    deps.execFileCmd.mockRejectedValueOnce(
       new Error('Command failed: openclaw onboard --openai-api-key "sk-test-secret-value"'),
     );
 
@@ -665,7 +671,7 @@ describe("server/routes/onboarding", () => {
     const deps = createBaseDeps();
     const app = createApp(deps);
     mockGithubVerifyAndCreate();
-    deps.shellCmd.mockRejectedValueOnce(
+    deps.execFileCmd.mockRejectedValueOnce(
       new Error('boom github_pat_super_secret_value openclaw onboard'),
     );
 
@@ -681,7 +687,7 @@ describe("server/routes/onboarding", () => {
     const deps = createBaseDeps();
     const app = createApp(deps);
     mockGithubVerifyAndCreate();
-    deps.shellCmd.mockRejectedValueOnce(
+    deps.execFileCmd.mockRejectedValueOnce(
       new Error("FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory"),
     );
 
@@ -701,7 +707,7 @@ describe("server/routes/onboarding", () => {
     mockGithubVerifyAndCreate();
     const err = new Error("Command failed: openclaw onboard");
     err.stderr = "remote: Permission to owner/repo denied to user";
-    deps.shellCmd.mockRejectedValueOnce(err);
+    deps.execFileCmd.mockRejectedValueOnce(err);
 
     const res = await request(app).post("/api/onboard").send(makeValidBody());
 
@@ -717,7 +723,7 @@ describe("server/routes/onboarding", () => {
     const deps = createBaseDeps();
     const app = createApp(deps);
     mockGithubVerifyAndCreate();
-    deps.shellCmd.mockRejectedValueOnce(new Error("invalid_api_key"));
+    deps.execFileCmd.mockRejectedValueOnce(new Error("invalid_api_key"));
 
     const res = await request(app).post("/api/onboard").send(makeValidBody());
 
@@ -828,13 +834,9 @@ describe("server/routes/onboarding", () => {
     expect(files.get("/tmp/openclaw/exec-approvals.json")).toContain(
       '"askFallback": "full"',
     );
-    expect(
-      deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes(
-          "git init -b main && git remote add origin 'https://github.com/owner/target-repo.git'",
-        ),
-      ),
-    ).toBe(true);
+    expect(gitCallsOf(deps)).toContain(
+      "remote add origin https://github.com/owner/target-repo.git",
+    );
     expect(deps.execFileCmd).toHaveBeenCalledWith(
       "openclaw",
       ["models", "set", "--", "openai/gpt-5.1-codex"],
@@ -882,14 +884,8 @@ describe("server/routes/onboarding", () => {
         ([file, args]) => file === "openclaw" && args[0] === "onboard",
       ),
     ).toBe(true);
-    expect(
-      deps.shellCmd.mock.calls.some(([cmd]) => cmd.includes('git remote set-url origin')),
-    ).toBe(false);
-    expect(
-      deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes("git init -b main && git remote add origin 'https://github.com/owner/repo.git'"),
-      ),
-    ).toBe(true);
+    expect(gitCallsOf(deps).some((args) => args.startsWith("remote set-url"))).toBe(false);
+    expect(gitCallsOf(deps)).toContain("remote add origin https://github.com/owner/repo.git");
   });
 
   it("creates the target repo during import onboarding before git-sync", async () => {
@@ -936,13 +932,9 @@ describe("server/routes/onboarding", () => {
         }),
       }),
     );
-    expect(
-      deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes(
-          "git init -b main && git remote add origin 'https://github.com/owner/import-target.git'",
-        ),
-      ),
-    ).toBe(true);
+    expect(gitCallsOf(deps)).toContain(
+      "remote add origin https://github.com/owner/import-target.git",
+    );
     expect(
       deps.execFileCmd.mock.calls.some(([file, args]) =>
         file === "alphaclaw" &&
@@ -1763,6 +1755,46 @@ describe("server/routes/onboarding", () => {
 });
 
 describe("server/routes/onboarding additional coverage", () => {
+  it("initializes the workspace repo with git argv in OPENCLAW_DIR, in order", async () => {
+    const deps = createBaseDeps();
+    mockHappyPathFiles(deps);
+    const app = createApp(deps);
+    mockGithubVerifyAndCreate();
+
+    const res = await request(app).post("/api/onboard").send(makeValidBody());
+
+    expect(res.status).toBe(200);
+    expect(gitCallsOf(deps)).toEqual([
+      "init -b main",
+      "remote add origin https://github.com/owner/repo.git",
+      "config user.email agent@alphaclaw.md",
+      "config user.name AlphaClaw Agent",
+    ]);
+    for (const [file, , opts] of deps.execFileCmd.mock.calls) {
+      if (file === "git") expect(opts).toEqual({ cwd: "/tmp/openclaw" });
+    }
+    expect(deps.shellCmd).not.toHaveBeenCalled();
+  });
+
+  it("stops the git setup at the first failing step", async () => {
+    const deps = createBaseDeps();
+    mockHappyPathFiles(deps);
+    deps.execFileCmd.mockImplementation(async (file, args) => {
+      if (file === "git" && args[0] === "remote") throw new Error("fatal: remote origin already exists");
+      return "";
+    });
+    const app = createApp(deps);
+    mockGithubVerifyAndCreate();
+
+    const res = await request(app).post("/api/onboard").send(makeValidBody());
+
+    expect(res.status).toBe(500);
+    expect(gitCallsOf(deps)).toEqual([
+      "init -b main",
+      "remote add origin https://github.com/owner/repo.git",
+    ]);
+  });
+
   const { getImportedPlaceholderReview } = require("../../lib/server/onboarding");
 
   beforeEach(() => {
@@ -1784,7 +1816,7 @@ describe("server/routes/onboarding additional coverage", () => {
     const deps = createBaseDeps();
     const app = createApp(deps);
     mockGithubVerifyAndCreate();
-    deps.shellCmd.mockRejectedValueOnce(
+    deps.execFileCmd.mockRejectedValueOnce(
       new Error("fatal: remote repo already exists on origin"),
     );
 
@@ -1802,7 +1834,7 @@ describe("server/routes/onboarding additional coverage", () => {
     const deps = createBaseDeps();
     const app = createApp(deps);
     mockGithubVerifyAndCreate();
-    deps.shellCmd.mockRejectedValueOnce(new Error("connect ETIMEDOUT 1.2.3.4:443"));
+    deps.execFileCmd.mockRejectedValueOnce(new Error("connect ETIMEDOUT 1.2.3.4:443"));
 
     const res = await request(app).post("/api/onboard").send(makeValidBody());
 
@@ -2301,16 +2333,11 @@ describe("server/routes/onboarding additional coverage", () => {
       .send({ ...makeValidBody(), importMode: true });
 
     expect(res.status).toBe(200);
-    expect(
-      deps.shellCmd.mock.calls.some(([cmd]) =>
-        cmd.includes(
-          "git remote set-url origin 'https://github.com/owner/repo.git'",
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      deps.shellCmd.mock.calls.some(([cmd]) => cmd.includes("git init -b main")),
-    ).toBe(false);
+    expect(gitCallsOf(deps)).toEqual([
+      "remote set-url origin https://github.com/owner/repo.git",
+      "config user.email agent@alphaclaw.md",
+      "config user.name AlphaClaw Agent",
+    ]);
   });
 
   it("fails onboarding when the model cannot be set", async () => {

@@ -10,19 +10,12 @@ const { scanShellStrings } = require("./scanners");
 // Content-keyed (callee + command prefix). Every entry names the fix-wave PR
 // that removes it, or why the shell string is deliberate.
 const kKnownOffenders = {
-  // PR 6 — self-update install (F038/F039).
-  "lib/server/alphaclaw-version.js::childProcess.exec(`cp -af \"…`)": "PR 6: argv copy of the staged install (F038/F039)",
   // Deliberate: commands.js IS the shell wrapper (shellCmd/clawCmd) that every
   // trusted-constant command string goes through; the template only splices
   // the already-built command. Callers are what the guard polices.
   // clawCmd spawns `/bin/sh -c` itself (own process group for timeout kills).
   "lib/server/commands.js::sh -c <non-literal>": "intentional: the shell wrapper itself",
   "lib/server/commands.js::exec(`gog…`)": "intentional: the shell wrapper itself",
-  // PR 7 — the H1 fix quotes these through shellEscapeArg (single-quote
-  // escaping); still a shell string, converted to argv with the other
-  // onboarding writers.
-  "lib/server/onboarding/index.js::shellCmd(`cd…`)": "PR 7: argv git init/remote (shellEscapeArg-quoted today)",
-  "lib/server/onboarding/index.js::shellCmd(`cd…`)#2": "PR 7: argv git init/remote (shellEscapeArg-quoted today)",
 };
 
 describe("guard: child processes take argv, never data-built shell strings", () => {
