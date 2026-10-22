@@ -157,11 +157,13 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, pidfile }) => 
   fs.writeFileSync(brokenDb, Buffer.alloc(4096, 0x41));
 
   const packageDir = path.join(installDir, "node_modules", "openclaw");
-  writeJson(path.join(packageDir, "package.json"), { name: "openclaw", version: kPin, bin: "openclaw.mjs" });
+  writeJson(path.join(packageDir, "package.json"), {
+    name: "openclaw",
+    version: kPin,
+    bin: "openclaw.mjs",
+    openclaw: { schemaVersions: { state: 15, agent: 19 } },
+  });
   fs.writeFileSync(path.join(packageDir, "openclaw.mjs"), "");
-  fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
-  fs.writeFileSync(path.join(packageDir, "dist", "openclaw-state-db-contract-AAAA.js"), "const OPENCLAW_STATE_SCHEMA_VERSION=15;export{OPENCLAW_STATE_SCHEMA_VERSION};\n");
-  fs.writeFileSync(path.join(packageDir, "dist", "openclaw-agent-db-contract-BBBB.js"), "const OPENCLAW_AGENT_SCHEMA_VERSION = 19;\n");
 
   const dbDir = path.join(rootDir, "db");
   fs.mkdirSync(dbDir, { recursive: true });
@@ -413,7 +415,7 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
     expect(warnings.some((w) => w.includes("broken") && w.includes("unreadable"))).toBe(true);
   });
 
-  it("supportedSchema: the installed build's declared dist constants win over the seeds", () => {
+  it("supportedSchema: the installed build's package.json metadata declares it", () => {
     const { source, data, warnings } = bundle.sections.supportedSchema;
     expect(source).toBe("disk");
     expect(data.installedVersion).toBe(kPin);

@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.28] - 2026-10-22
+
+The schema oracle reads package metadata only, so an OpenClaw pin bump no longer touches `lib/` (refactor plan PR 6, ALPH-15). No behavior change on any build AlphaClaw can run.
+
+### Removed
+
+- **`kSeededSchemaVersions` and the two-pass dist-constant scan** in `openclaw-schema-versions.js` (about 210 lines). Every build AlphaClaw can run (2026.9.3 and later) publishes `openclaw.schemaVersions` in its package.json; 2026.10.4 declares `{20, 24}` and 2026.10.5 declares `{20, 25}`. That metadata is now the only authority. Absent metadata answers unknown (`{state: null, agent: null}`), and malformed metadata stays explicitly unknown. Before this change, every pin bump had to add a row to the seed table.
+- `openclaw-runtime.js` no longer falls back to the seed table. The supported schema is the declared metadata, else unknown.
+- `initialize-openclaw-auth.js` drops its pre-2026.8 version-parse early return, which could not trigger on a supported build.
+- The TODOS entries that tracked the seed table and the dist grep are marked retired.
+
 ## [0.10.27] - 2026-10-22
 
 The pin boundary is visible (refactor plan PR 5b, ALPH-15, gate_rev=2 d1). AlphaClaw only runs the OpenClaw its `package.json` pins. An install that differs from the pin, or whose version cannot be read, now warns the operator. Before, it showed up only in diagnose output, the boot report and crash evidence. Nothing about what runs changes.
