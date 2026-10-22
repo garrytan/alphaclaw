@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.44] - 2026-10-22
+
+Exec approvals: the file-era writers go, and reaping a stray legacy file needs a known SQLite-era runtime (refactor plan PR 16b-1, ALPH-15).
+
+### Changed
+- The state era no longer resolves a file/sqlite/indeterminate hint. Exec approvals always belong in SQLite on the pin, and `resolveExecApprovalsBackend` answers `backend: "sqlite"`. Renaming a stray `exec-approvals.json` away still needs the `exec_approvals_config` row AND an installed version at or above 2026.9.1-beta.1 (`isSqliteEraRuntime`). An unknown (dev sha, unreadable) or older runtime never authorizes it, even when a historical row exists. The boot migration's pending-legacy-state predicate uses the same floor.
+- Removed the file-era writers: boot and onboarding no longer seed or create `exec-approvals.json`, the stray-file merge remediation is gone, and the nodes exec-approvals routes always go through `openclaw approvals get|set` (the legacy-file read and write fallback and its 503 are gone). Stray-file reaping and the boot migration's legacy detection stay.
+- The capabilities layer is pure constants: the last two CLI probes (`execApprovalsCli`, `execApprovalsSqlite`) and the cache invalidation after channel and Buzz changes are gone. The feature gates lose `versionFeatures`.
+- Boot report and crash-cause facts read `legacyExecApprovalsPresent` as "the legacy file exists".
+
 ## [0.10.43] - 2026-10-22
 
 Test-only: three checks that were failing on `main` now match the shipped behavior. No product code changed.
