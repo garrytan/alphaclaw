@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.31] - 2026-10-22
+
+The Setup UI now has one canonical primitive for each of these jobs (refactor plan PR 9, ALPH-15).
+
+### Changed
+
+- **`copyWithToast(value, label)`** in `lib/clipboard.js` replaces the identical `copyAndToast` copies in the create-channel modal and the nodes setup wizard. The Gmail setup wizard drops its own `copyText` and uses the same path. **Behavior change:** when the browser has no async clipboard API and `execCommand("copy")` returns false, the Gmail wizard now shows "Could not copy text" instead of a false "Copied to clipboard".
+- **Icons live in `icons.js`.** New `ChevronRightIcon` and `ChevronLeftIcon` (exact paths and sizes) replace five inline SVG copies: the agent binding row, the agent tools card, the channels list, and the Telegram workspace and webhooks back buttons. `VerticalDotsIcon` moves out of `overflow-menu.js`. The Doctor empty state uses `HospitalLineIcon`, which has the same path. These decorative SVGs now carry `aria-hidden="true"`. Screenshots of 10 routes are pixel-identical to main.
+- **`lib/ui-events.js`** holds the nine window event names (`alphaclaw:browse-file-saved`, `browse-tree-refresh`, `restart-required` and others). They used to appear as 42 raw strings across 13 files. The values are unchanged.
+- **The onboarding pairing step reads channel labels and icons from `channel-registry.js`.** The four pairing channels look the same as before. Other registered channels now get the registry label, so it reads "ClickClack" instead of "Clickclack".
+
 ## [0.10.30] - 2026-10-22
 
 There is now one canonical server helper for each of these jobs (refactor plan PR 8, ALPH-15). Nothing an operator sees changes.

@@ -1,3 +1,7 @@
+import { showToast } from "../../lib/public/js/components/toast.js";
+
+vi.mock("../../lib/public/js/components/toast.js", () => ({ showToast: vi.fn() }));
+
 const loadClipboardModule = async () => import("../../lib/public/js/lib/clipboard.js");
 
 describe("frontend/clipboard", () => {
@@ -59,5 +63,44 @@ describe("frontend/clipboard", () => {
     const { copyTextToClipboard } = await loadClipboardModule();
 
     await expect(copyTextToClipboard("")).resolves.toBe(false);
+  });
+});
+
+describe("frontend/clipboard copyWithToast", () => {
+  const fallbackDocument = (execCommand) => ({
+    createElement: vi.fn(() => ({ value: "", style: {}, select: vi.fn(), setAttribute: vi.fn() })),
+    execCommand,
+    body: { appendChild: vi.fn(), removeChild: vi.fn() },
+  });
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("navigator", {});
+    showToast.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("toasts success when the copy lands", async () => {
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+    const { copyWithToast } = await loadClipboardModule();
+    await copyWithToast("npm install -g openclaw", "command");
+    expect(showToast).toHaveBeenCalledWith("Copied to clipboard", "success");
+  });
+
+  it("toasts the failure when the execCommand fallback returns false", async () => {
+    vi.stubGlobal("document", fallbackDocument(vi.fn(() => false)));
+    const { copyWithToast } = await loadClipboardModule();
+    await copyWithToast("gcloud auth login", "command");
+    expect(showToast).toHaveBeenCalledWith("Could not copy command", "error");
+  });
+
+  it("toasts the failure when the execCommand fallback throws", async () => {
+    vi.stubGlobal("document", fallbackDocument(vi.fn(() => { throw new Error("denied"); })));
+    const { copyWithToast } = await loadClipboardModule();
+    await copyWithToast("gcloud auth login");
+    expect(showToast).toHaveBeenCalledWith("Could not copy text", "error");
   });
 });
