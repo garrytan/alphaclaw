@@ -139,6 +139,24 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     expect(failing.calls.map((c) => c.method)).not.toContain("sessions.reset");
   });
 
+  it("a cold restart's two launch notices for one generation (the listening line, then /readyz ready) share one sweep and keep the recorded sessions", async () => {
+    const gateway = createGateway({
+      "sessions.list": async (params) => ({ body: { sessions: [row("exec-turn", { hasActiveRun: !!params.activeOnly })] } }),
+      "sessions.recover": async () => ({ ok: false, body: { ok: false, error: { code: "INVALID_REQUEST", message: "Session recovery requires a restart-tombstoned session." } } }),
+    });
+    const { sweep, notify } = createSweep(gateway);
+    await sweep.recordRunningSessions({ opId: "restart1" });
+    const listening = sweep.onGatewayLaunch({ generation: 5, startedAt: kLaunchAt });
+    const ready = sweep.onGatewayLaunch({ generation: 5, startedAt: kLaunchAt + 4000 });
+    expect(ready).toBe(listening);
+    expect(await ready).toEqual({ recovered: [], alerted: [] });
+    expect(gateway.calls.filter((c) => c.method === "sessions.recover").map((c) => c.params.key)).toEqual(["exec-turn"]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(lines().filter((line) => line.includes(" done "))).toEqual([
+      "[alphaclaw] wedge-sweep done generation=5 checked=1 recorded=1 recovered=0 alerted=0",
+    ]);
+  });
+
   it("a newer launch supersedes a pending sweep; a gateway that never becomes ready is skipped", async () => {
     const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });
     let release;
