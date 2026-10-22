@@ -209,7 +209,9 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
     // The fake `gateway run` is a launcher that forks a SIGTERM-ignoring
     // worker and waits on it — the production shape (openclaw.mjs → worker).
     // A SIGKILL to the launcher alone would orphan the worker; the ladder
-    // signals the launcher's process group instead.
+    // signals the launcher's process group instead. The worker holds the
+    // gateway port, as in production, so the ladder identifies it as the
+    // serving worker and waits for it before returning.
     const launcherPidFile = path.join(caseDir, "launcher.pid");
     const workerPidFile = path.join(caseDir, "worker.pid");
     const workerPath = path.join(caseDir, "worker.js");
@@ -217,7 +219,8 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
       workerPath,
       [
         'process.on("SIGTERM", () => {});',
-        `require("fs").writeFileSync(${JSON.stringify(workerPidFile)}, String(process.pid));`,
+        `const port = JSON.parse(require("fs").readFileSync(${JSON.stringify(path.join(OPENCLAW_DIR, "openclaw.json"))}, "utf8")).gateway.port;`,
+        `require("net").createServer().listen(port, "127.0.0.1", () => require("fs").writeFileSync(${JSON.stringify(workerPidFile)}, String(process.pid)));`,
         "setInterval(() => {}, 1000);",
       ].join("\n"),
     );
@@ -350,8 +353,9 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
       workerScript,
       [
         "#!/bin/sh",
-        `echo $$ > ${JSON.stringify(pidFile)}`,
         "sleep 60 &",
+        'while [ "$(cat /proc/$!/comm 2>/dev/null)" != sleep ]; do :; done',
+        `echo $$ > ${JSON.stringify(pidFile)}`,
         "trap 'kill $! 2>/dev/null; exit 0' TERM INT",
         "wait",
         "",

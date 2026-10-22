@@ -932,6 +932,35 @@ describe("server/routes/browse git-summary", () => {
     expect(res.body.error).toContain("invalid gitfile format");
   });
 
+  it("links the configured GitHub remote even when git config rewrites it with insteadOf", async () => {
+    const rootDir = createTestRoot();
+    const app = createApp(rootDir);
+    fs.writeFileSync(path.join(rootDir, "a.txt"), "one\n", "utf8");
+    initRepo(rootDir);
+    runGit(rootDir, "add .");
+    runGit(rootDir, 'commit -q -m "initial commit"');
+    runGit(rootDir, "remote add origin git@github.com:acme/widgets.git");
+    const savedEnv = {
+      GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
+      GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
+      GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+    };
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = "url.https://mirror.example/.insteadOf";
+    process.env.GIT_CONFIG_VALUE_0 = "git@github.com:";
+    try {
+      const res = await request(app).get("/api/browse/git-summary");
+      expect(res.status).toBe(200);
+      expect(res.body.repoSlug).toBe("acme/widgets");
+      expect(res.body.repoUrl).toBe("https://github.com/acme/widgets");
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("summarizes a dirty repo with remote, changes, and commits", async () => {
     const rootDir = createTestRoot();
     const app = createApp(rootDir);
@@ -1707,6 +1736,19 @@ describe("server/routes/browse git helpers", () => {
     expect(parseGithubRepoSlug("https://github.com/acme/widgets")).toBe(
       "acme/widgets",
     );
+    expect(parseGithubRepoSlug("ssh://git@github.com/acme/widgets.git")).toBe(
+      "acme/widgets",
+    );
+    expect(parseGithubRepoSlug("acme/widgets")).toBe("acme/widgets");
+  });
+
+  it("strips credentials from https remotes and rejects non-GitHub remotes", () => {
+    expect(
+      parseGithubRepoSlug("https://x-access-token:secret@github.com/acme/widgets.git"),
+    ).toBe("acme/widgets");
+    expect(parseGithubRepoSlug("https://git.capy.ai/acme/widgets.git")).toBe("");
+    expect(parseGithubRepoSlug("git@gitlab.com:acme/widgets.git")).toBe("");
+    expect(parseGithubRepoSlug("https://github.com/acme/widgets/tree/main")).toBe("");
   });
 
   it("normalizes changed paths including renames", () => {

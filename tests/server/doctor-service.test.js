@@ -3350,6 +3350,45 @@ describe("server/doctor-service", () => {
       }
     });
 
+    it("reports the current auto-run skip reason even when the tick lands inside the status memo window", async () => {
+      vi.useFakeTimers();
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.97);
+      try {
+        const meta = new Map();
+        let autoRunEnabled = false;
+        const staleIso = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+        const { service } = makeService({
+          notify: vi.fn(() => Promise.resolve({ ok: true })),
+          meta,
+          readAutoRunEnabled: () => autoRunEnabled,
+          autoRunTickMs: 1000,
+          summaries: [
+            {
+              id: 1,
+              status: "completed",
+              engine: "gateway_agent",
+              workspaceFingerprint: "stale-baseline",
+              promptVersion: "doctor-v2",
+              contextProfile: "stable-2026.7",
+              openclawVersion: "",
+              completedAt: staleIso,
+              startedAt: staleIso,
+            },
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("disabled");
+
+        await seedLiveEnvSignature(meta);
+        autoRunEnabled = true;
+        await vi.advanceTimersByTimeAsync(1100 + 60000);
+        expect(service.buildStatus().autoRun.lastSkipReason).toBe("no-meaningful-change");
+      } finally {
+        randomSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it("backs off after a failed auto-run until inputs change", async () => {
       vi.useFakeTimers();
       try {
