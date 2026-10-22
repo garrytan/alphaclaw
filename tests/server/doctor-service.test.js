@@ -142,6 +142,51 @@ describe("server/doctor-service", () => {
     expect(latestRun.rawResult).toEqual(sourceRawResult);
   });
 
+  it("the exported listDoctorRunSummaries (GET /api/doctor/runs) lists runs through the lean reader", async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-runs-listing-workspace-"));
+    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-runs-listing-db-"));
+    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
+
+    const doctorDb = loadManagedDoctorDb();
+    doctorDb.initDoctorDb({ rootDir: dbRoot });
+
+    const listRunsSpy = vi.fn(doctorDb.listDoctorRuns);
+    const listSummariesSpy = vi.fn(doctorDb.listDoctorRunSummaries);
+    const { createDoctorService } = loadDoctorService();
+    const doctorService = createDoctorService({
+      clawCmd: vi.fn(),
+      listDoctorRuns: listRunsSpy,
+      listDoctorRunSummaries: listSummariesSpy,
+      getLatestCompletedRunSummary: doctorDb.getLatestCompletedRunSummary,
+      listDoctorCards: doctorDb.listDoctorCards,
+      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+      createDoctorRun: doctorDb.createDoctorRun,
+      completeDoctorRun: doctorDb.completeDoctorRun,
+      insertDoctorCards: doctorDb.insertDoctorCards,
+      getDoctorRun: doctorDb.getDoctorRun,
+      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+      getDoctorCard: doctorDb.getDoctorCard,
+      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+      workspaceRoot,
+      managedRoot: workspaceRoot,
+      computeSnapshotAsync: fastComputeSnapshotAsync,
+    });
+
+    const imported = await doctorService.importDoctorResult({
+      rawOutput: JSON.stringify({ summary: "Listed", cards: [] }),
+    });
+    listSummariesSpy.mockClear();
+    listRunsSpy.mockClear();
+
+    const runs = doctorService.listDoctorRunSummaries({ limit: 5 });
+
+    expect(listSummariesSpy).toHaveBeenCalledWith({ limit: 5 });
+    expect(listRunsSpy).not.toHaveBeenCalled();
+    expect(runs.map((run) => run.id)).toEqual([imported.runId]);
+    expect(runs[0]).not.toHaveProperty("workspaceManifest");
+  });
+
   it("buildStatus reads lean run summaries and caches the baseline manifest per run id", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-summaries-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-summaries-db-"));

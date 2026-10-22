@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.53] - 2026-10-22
+
+The Doctor tab's run history loads again (found by the ALPH-18 black-box pass on a real Ubicloud deploy).
+
+### Fixed
+- `GET /api/doctor/runs` answered every request with `500 {"error":"listDoctorRunSummariesFn is not defined"}` since v0.9.99: the service's route-facing `listDoctorRunSummaries` called a name that no longer existed instead of the `listRunSummaries` reader it builds from its injected dependencies. A Drift Doctor run completed, but the tab could never list it. The hermetic tests injected the db readers straight into the routes and the status path, so none of them called the exported reader.
+
+### Added (tests)
+- `doctor-service.test.js` calls the exported `listDoctorRunSummaries` (what `GET /api/doctor/runs` uses) after an import: the lean reader is used and the run is listed without its manifest.
+
 ## [0.10.52] - 2026-10-22
 
 A memory-mitigation restart gives OpenClaw a drain sized to the memory headroom instead of a fixed 30 s, so an agent turn in flight can finish (ALPH-17, PR 3 of the restart plan).
