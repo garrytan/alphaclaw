@@ -5,6 +5,33 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.20] - 2026-10-21
+
+The hermetic suite is green in Capy sandboxes and its two known flakes are
+fixed at the root (refactor plan PR 2, ALPH-15).
+
+### Fixed
+
+- **Browse git summary links the configured GitHub remote.** It read
+  `git remote get-url origin`, which applies `url.<base>.insteadOf` rewrites,
+  and the old slug parser passed any unrecognized URL through. An operator with
+  a mirror or credential-proxy rewrite got a link like
+  `https://github.com/https://git.capy.ai/acme/widgets`. The route now reads
+  `git config --get remote.origin.url`, and `parseGithubRepoSlug` accepts only
+  `owner/repo`, `git@github.com:`, `ssh://git@github.com/` and
+  `https://[user@]github.com/` shapes (credentials stripped), returning an
+  empty slug for anything else.
+- **`/api/doctor/status` shows the current auto-run state.** `buildStatus`
+  memoizes for 5 s and returned the memoized `autoRun` fields, so
+  `lastSkipReason` / `lastCheckAt` could be up to 5 s stale after a tick. The
+  memo now carries live `autoRun` fields. This also removes the doctor-service
+  "skips the auto-run tick" flake (reproduced 6/6 with the jitter pinned at the
+  memo boundary; a regression test pins it there).
+- **`e2e-gateway-reap` fixture races.** The SIGTERM-ignoring worker now holds
+  the gateway port, as the production worker does, so the ladder identifies it
+  and waits for it; the shell worker writes its pidfile only after its `sleep`
+  child has exec'd. Test-only.
+
 ## [0.10.19] - 2026-10-22
 
 Port of #132 by @exGeni (fixes #125), onto current main with no changes to its scope.
