@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.61] - 2026-10-22
+
+A freshly onboarded install can start chatting from the Chat tab: the sidebar offers the default agent's main session before any turn has run (ALPH-20, found by the black-box onboarding run on a real VM).
+
+### Fixed
+- After the setup wizard finished, the Chat tab showed "No sessions found" and "Select a session to start" with nothing to select, because OpenClaw creates a session only on its first turn and the sidebar lists only sessions that exist. The only way out was a first message from the Control UI. `GET /api/agent/sessions` now returns one starter row, `agent:<default agent>:main` (the configured default agent, else `main`), when the list is empty and onboarding is complete; OpenClaw creates the session on the first message. The row has no session id and is not deliverable, it is never cached in place of the first real list, and `POST /api/agent/message` resolves it like any listed session. Before onboarding the list stays empty.
+
 ## [0.10.60] - 2026-10-22
 
 The onboarding wizard finishes with a model API key (ALPH-20, found by the black-box wizard run on a real VM).
