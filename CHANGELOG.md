@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.45] - 2026-10-22
+
+The Doctor always models the current Project Context contract (refactor plan PR 16b-2, ALPH-15).
+
+### Changed
+- The Doctor's context profile is always the 2026.8.1 contract that every supported OpenClaw ships: six injected root files, TOOLS.md and HEARTBEAT.md retired, the USER.md 4000-char cap, and no [MISSING] marker for an absent USER.md. The 2026.7 stable profile (`kStableProfile`) and the version-gated `selectDoctorContextProfile` are gone, so an unreadable installed version no longer drops the Doctor back to the old contract. The profile keeps its persisted id (`beta-2026.8.1`), which means existing completed runs still qualify for fingerprint reuse.
+- `openclaw-feature-gates.js` loses `supportsFeature`, its last version comparison. `GET /api/openclaw/features` is unchanged.
+
 ## [0.10.44] - 2026-10-22
 
 Exec approvals: the file-era writers go, and reaping a stray legacy file needs a known SQLite-era runtime (refactor plan PR 16b-1, ALPH-15).

@@ -12,7 +12,7 @@ const { createGatewayProcessCollector } = require("../../lib/server/gateway-memo
 const { withGatewayMemoryDetails } = require("../../lib/server/gateway-memory/resources");
 const telemetryModule = require("../../lib/server/gateway-memory/telemetry");
 const { buildDeterministicCards } = require("../../lib/server/doctor/deterministic-checks");
-const { kStableProfile } = require("../../lib/server/doctor/context-profiles");
+const { kCurrentContextProfile } = require("../../lib/server/doctor/context-profiles");
 
 const kMb = 1024 * 1024;
 const kStart = Date.parse("2026-09-09T00:00:00.000Z");
@@ -111,7 +111,7 @@ const createHarness = () => {
 };
 
 const doctorCards = (memoryTrend) => buildDeterministicCards({
-  workspaceRoot: kRoot, managedRoot: kRoot, profile: kStableProfile,
+  workspaceRoot: kRoot, managedRoot: kRoot, profile: kCurrentContextProfile,
   memoryTrend, onboarded: true, releaseChannel: "stable", readLatestDoctorRun: () => null,
 });
 const messages = (harness) => harness.notifier.notify.mock.calls.map(([message]) => message);

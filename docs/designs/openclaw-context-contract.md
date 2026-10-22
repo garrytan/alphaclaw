@@ -165,7 +165,8 @@ Cited: beta `dist/workspace-D59tUhZX.js` `loadExtraBootstrapFilesWithDiagnostics
 
 Present since `2026.8.1-beta.1`: the 6-name set, the 60k total, and the USER 4k cap are all in
 beta.1's dist (`dist/workspace-D9MnI_Ix.js`, `dist/bootstrap-b_Fz07I5.js`) — the
-`bootstrapContractV2` feature gate is correctly pinned at beta.1.
+`bootstrapContractV2` feature entry records beta.1. The Doctor always models this contract
+(`kCurrentContextProfile`); the 2026.7 stable profile was removed in refactor plan PR 16b-2.
 
 ### TOOLS.md / HEARTBEAT.md retirement
 
@@ -460,8 +461,8 @@ Run this on EVERY upstream release adoption (stable pin bump, beta adoption, cha
    `CRON_BOOTSTRAP_ALLOWLIST`, `jsonImpliesLint`, `GATEWAY_RESTART_HANDOFF_TTL_MS`,
    `GATEWAY_PROBE_ROUTES`, ...).
 3. Add or raise the context profiles in `lib/server/doctor/context-profiles.js` as needed
-   (new profile for a contract change; raise the feature-gate minimum when a fact landed later
-   in a release line). The profile fact-snapshot tests are the checked-in golden fixtures —
+   (a contract change on a new pin replaces `kCurrentContextProfile`; keep its persisted id
+   unless the change should invalidate fingerprint reuse). The profile fact-snapshot tests are the checked-in golden fixtures —
    update them together with the profile, never independently.
 4. Update this document: adjust the version table above, and re-confirm or amend each cited
    dist filename/symbol.

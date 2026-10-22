@@ -1,7 +1,6 @@
 const { buildDoctorPrompt } = require("../../lib/server/doctor/prompt");
 const {
-  kBeta81Profile,
-  kStableProfile,
+  kCurrentContextProfile,
 } = require("../../lib/server/doctor/context-profiles");
 
 describe("server/doctor-prompt", () => {
@@ -20,11 +19,11 @@ describe("server/doctor-prompt", () => {
     const prompt = buildDoctorPrompt({
       workspaceRoot: "/tmp/workspace",
       managedRoot: "/tmp/managed",
-      profile: kStableProfile,
-      installedVersion: "2026.7.1-2",
+      profile: kCurrentContextProfile,
+      installedVersion: "2026.10.4",
     });
 
-    expect(prompt).toContain("Installed OpenClaw: 2026.7.1-2 (context profile: stable-2026.7)");
+    expect(prompt).toContain("Installed OpenClaw: 2026.10.4 (context profile: beta-2026.8.1)");
     expect(prompt).toContain("20000 chars per file and 60000 chars total");
     expect(prompt).toContain("spent in injection order");
     expect(prompt).toContain("skipped entirely");
@@ -36,26 +35,18 @@ describe("server/doctor-prompt", () => {
     expect(prompt).not.toContain("150000");
   });
 
-  it("keeps beta-only session-scope advice off the stable prompt", () => {
-    // Group/channel MEMORY.md stripping does not exist on the pinned stable
-    // (filterBootstrapFilesForSession filters subagent/cron keys only) —
-    // giving stable installs that placement advice would be wrong.
-    const stablePrompt = buildDoctorPrompt({
-      workspaceRoot: "/tmp/workspace",
-      managedRoot: "/tmp/managed",
-      profile: kStableProfile,
-    });
-    expect(stablePrompt).not.toContain(
-      "Group and channel sessions never receive the root MEMORY.md.",
-    );
-    expect(stablePrompt).toContain(
-      "Session scope: Sub-agent sessions inject only AGENTS.md and TOOLS.md.",
-    );
+  it("states the profile's session-scope advice, by default too", () => {
+    expect(
+      buildDoctorPrompt({ workspaceRoot: "/tmp/workspace", managedRoot: "/tmp/managed" }),
+    ).toContain("Session scope: Group and channel sessions never receive the root MEMORY.md.");
+    expect(
+      buildDoctorPrompt({ workspaceRoot: "/tmp/workspace", managedRoot: "/tmp/managed" }),
+    ).not.toContain("inject only AGENTS.md and TOOLS.md");
 
     const betaPrompt = buildDoctorPrompt({
       workspaceRoot: "/tmp/workspace",
       managedRoot: "/tmp/managed",
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
     });
     expect(betaPrompt).toContain(
       "Session scope: Group and channel sessions never receive the root MEMORY.md.",
@@ -66,7 +57,7 @@ describe("server/doctor-prompt", () => {
     const prompt = buildDoctorPrompt({
       workspaceRoot: "/tmp/workspace",
       managedRoot: "/tmp/managed",
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       installedVersion: "2026.8.1-beta.3",
       releaseChannel: "beta",
     });

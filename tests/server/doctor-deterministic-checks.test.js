@@ -6,8 +6,7 @@ const path = require("path");
 const { buildDeterministicCards } = require("../../lib/server/doctor/deterministic-checks");
 const { analyzeBootstrapContext } = require("../../lib/server/doctor/bootstrap-context");
 const {
-  kBeta81Profile,
-  kStableProfile,
+  kCurrentContextProfile,
 } = require("../../lib/server/doctor/context-profiles");
 
 describe("server/doctor/deterministic-checks", () => {
@@ -34,10 +33,10 @@ describe("server/doctor/deterministic-checks", () => {
     buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapContext: analyzeBootstrapContext({
         workspaceRoot,
-        profile: overrides.profile || kStableProfile,
+        profile: overrides.profile || kCurrentContextProfile,
         ...(overrides.bootstrapArgs || {}),
       }),
       onboarded: true,
@@ -56,25 +55,22 @@ describe("server/doctor/deterministic-checks", () => {
   const findCard = (cards, sourceKey) =>
     cards.find((card) => card.sourceKey === sourceKey);
 
-  it("flags retired root files on the beta profile only", () => {
+  it("flags retired root files", () => {
     write(workspaceRoot, "TOOLS.md", "tool notes");
     write(workspaceRoot, "HEARTBEAT.md", "beat");
 
-    const betaCards = build({ profile: kBeta81Profile });
+    const betaCards = build({ profile: kCurrentContextProfile });
     expect(findCard(betaCards, "det:retired:TOOLS.md")).toMatchObject({
       priority: "P1",
       source: "deterministic",
     });
     expect(findCard(betaCards, "det:retired:HEARTBEAT.md")).toBeTruthy();
-
-    const stableCards = build({ profile: kStableProfile });
-    expect(findCard(stableCards, "det:retired:TOOLS.md")).toBeUndefined();
   });
 
   it("raises the hardening P0 when the bootstrap context reports blocked", () => {
     write(workspaceRoot, "hooks/bootstrap/TOOLS.md", "hardening tools");
     const cards = build({
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       bootstrapArgs: {
         extraFilePaths: ["hooks/bootstrap/TOOLS.md"],
         hooksEnabled: true,
@@ -225,7 +221,7 @@ describe("server/doctor/deterministic-checks", () => {
     const cards = buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapContext: {
         files: [],
         blockedExtraFiles: [],
@@ -253,7 +249,7 @@ describe("server/doctor/deterministic-checks", () => {
     write(workspaceRoot, "AGENTS.md", "A".repeat(200));
     write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "H".repeat(100));
     const cards = build({
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       bootstrapArgs: {
         extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
         hooksEnabled: true,
@@ -275,7 +271,7 @@ describe("server/doctor/deterministic-checks", () => {
     write(workspaceRoot, "IDENTITY.md", "I".repeat(10));
     write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "H".repeat(200));
     const cards = build({
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       bootstrapArgs: {
         extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
         hooksEnabled: true,
@@ -304,7 +300,7 @@ describe("server/doctor/deterministic-checks", () => {
   it("flags non-AlphaClaw invalid extras as P1", () => {
     write(workspaceRoot, "notes/EXTRA.md", "user extra");
     const cards = build({
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       bootstrapArgs: {
         extraFilePaths: ["notes/EXTRA.md"],
         hooksEnabled: true,
@@ -325,7 +321,7 @@ describe("server/doctor/deterministic-checks", () => {
     const cards = buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapContext: {
         blockedExtraFiles: [{ path: injected }],
       },
@@ -354,7 +350,7 @@ describe("server/doctor/deterministic-checks", () => {
     const cards = buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapContext: {
         blockedExtraFiles: [{ path: controlPath }, { path: oversizedPath }],
       },
@@ -389,7 +385,7 @@ describe("server/doctor/deterministic-checks", () => {
     const normalCards = buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapContext: { blockedExtraFiles: [{ path: "notes/EXTRA.md" }] },
       onboarded: true,
       releaseChannel: "stable",
@@ -1028,8 +1024,8 @@ describe("server/doctor/deterministic-checks det:config-unreadable cards (fix wa
     buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
-      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      profile: kCurrentContextProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kCurrentContextProfile }),
       onboarded: true,
       releaseChannel: "stable",
     });
@@ -1099,8 +1095,8 @@ describe("server/doctor/deterministic-checks det:openclaw-pin-* (the pin boundar
     buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
-      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      profile: kCurrentContextProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kCurrentContextProfile }),
       onboarded: true,
       readLatestDoctorRun: () => null,
       openclawPin,
@@ -1154,8 +1150,8 @@ describe("server/doctor/deterministic-checks det:plugin-api-mismatch (issue #76 
     buildDeterministicCards({
       workspaceRoot,
       managedRoot,
-      profile: kStableProfile,
-      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kStableProfile }),
+      profile: kCurrentContextProfile,
+      bootstrapContext: analyzeBootstrapContext({ workspaceRoot, profile: kCurrentContextProfile }),
       onboarded: true,
       releaseChannel: "stable",
       ...overrides,

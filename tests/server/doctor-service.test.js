@@ -808,7 +808,7 @@ describe("server/doctor-service", () => {
           status: "completed",
           workspaceFingerprint: fingerprint,
           promptVersion: "doctor-v2",
-          contextProfile: "stable-2026.7",
+          contextProfile: "beta-2026.8.1",
           openclawVersion: "",
           completedAt,
           startedAt: completedAt,
@@ -821,7 +821,7 @@ describe("server/doctor-service", () => {
           status: "completed",
           workspaceFingerprint: fingerprint,
           promptVersion: "doctor-v2",
-          contextProfile: "stable-2026.7",
+          contextProfile: "beta-2026.8.1",
           openclawVersion: "",
           completedAt,
           startedAt: completedAt,
@@ -2371,7 +2371,6 @@ describe("server/doctor-service", () => {
       allCards = [],
       workspaceRoot,
       managedRoot = workspaceRoot,
-      featureGates = null,
       getInstalledVersion,
       inserts,
       created,
@@ -2400,7 +2399,6 @@ describe("server/doctor-service", () => {
         setInitialWorkspaceBaseline: () => null,
         workspaceRoot,
         managedRoot,
-        featureGates,
         getInstalledVersion,
         readOpenclawConfig: ({ openclawDir, fallback }) => {
           try {
@@ -2422,7 +2420,7 @@ describe("server/doctor-service", () => {
       status: "completed",
       workspaceFingerprint: fingerprint,
       promptVersion: "doctor-v2",
-      contextProfile: "stable-2026.7",
+      contextProfile: "beta-2026.8.1",
       openclawVersion: "2026.7.1-2",
       completedAt: new Date().toISOString(),
       startedAt: new Date().toISOString(),
@@ -2437,7 +2435,7 @@ describe("server/doctor-service", () => {
 
     it.each([
       ["prompt version", { promptVersion: "doctor-v1" }],
-      ["context profile", { contextProfile: "beta-2026.8.1" }],
+      ["context profile", { contextProfile: "stable-2026.7" }],
       ["installed version", { openclawVersion: "2026.7.1-1" }],
       ["legacy run without profile columns", { promptVersion: "doctor-v2", contextProfile: "", openclawVersion: "" }],
     ])("rejects fingerprint reuse on a %s mismatch", async (_label, overrides) => {
@@ -2461,7 +2459,7 @@ describe("server/doctor-service", () => {
       expect(created[0]).toMatchObject({
         status: "running",
         engine: "gateway_agent",
-        contextProfile: "stable-2026.7",
+        contextProfile: "beta-2026.8.1",
         openclawVersion: "2026.7.1-2",
       });
     });
@@ -2562,14 +2560,13 @@ describe("server/doctor-service", () => {
       expect(inserts.every((insert) => insert.cards.length === 0)).toBe(true);
     });
 
-    it("selects the beta profile through the feature gates", async () => {
+    it("always uses the current context profile, even when the installed version is unknown", async () => {
       const inserts = [];
       const created = [];
       const doctorService = makeFixtureService({
         previousRun: null,
         workspaceRoot,
-        featureGates: { supportsFeature: (name) => name === "bootstrapContractV2" },
-        getInstalledVersion: () => "2026.8.1-beta.3",
+        getInstalledVersion: () => "a1b2c3d",
         inserts,
         created,
       });
@@ -2581,7 +2578,7 @@ describe("server/doctor-service", () => {
       await settleBackgroundRun();
       expect(created[0]).toMatchObject({
         contextProfile: "beta-2026.8.1",
-        openclawVersion: "2026.8.1-beta.3",
+        openclawVersion: "a1b2c3d",
       });
     });
 
@@ -2718,7 +2715,7 @@ describe("server/doctor-service", () => {
             engine: "gateway_agent",
             workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
             promptVersion: "doctor-v2",
-            contextProfile: "stable-2026.7",
+            contextProfile: "beta-2026.8.1",
             openclawVersion: "",
             completedAt: nowIso,
             startedAt: nowIso,
@@ -2755,7 +2752,7 @@ describe("server/doctor-service", () => {
             status: "completed",
             workspaceFingerprint: fingerprint,
             promptVersion: "doctor-v2",
-            contextProfile: "stable-2026.7",
+            contextProfile: "beta-2026.8.1",
             openclawVersion: "",
             completedAt: new Date().toISOString(),
             startedAt: new Date().toISOString(),
@@ -2776,7 +2773,7 @@ describe("server/doctor-service", () => {
           engine: "gateway_agent",
           workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
           promptVersion: "doctor-v2",
-          contextProfile: "stable-2026.7",
+          contextProfile: "beta-2026.8.1",
           openclawVersion: "",
           completedAt: nowIso,
           startedAt: nowIso,
@@ -2840,7 +2837,7 @@ describe("server/doctor-service", () => {
           engine: "gateway_agent",
           workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
           promptVersion: "doctor-v2",
-          contextProfile: "stable-2026.7",
+          contextProfile: "beta-2026.8.1",
           openclawVersion: "",
           completedAt: nowIso,
           startedAt: nowIso,
@@ -3016,7 +3013,7 @@ describe("server/doctor-service", () => {
           engine: "gateway_agent",
           workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
           promptVersion: "doctor-v2",
-          contextProfile: "stable-2026.7",
+          contextProfile: "beta-2026.8.1",
           openclawVersion: "",
           completedAt: nowIso,
           startedAt: nowIso,
@@ -3245,7 +3242,7 @@ describe("server/doctor-service", () => {
             engine: "gateway_agent",
             workspaceFingerprint: "other",
             promptVersion: "doctor-v2",
-            contextProfile: "stable-2026.7",
+            contextProfile: "beta-2026.8.1",
             openclawVersion: "",
             completedAt: new Date().toISOString(),
             startedAt: new Date().toISOString(),
@@ -3285,7 +3282,7 @@ describe("server/doctor-service", () => {
             engine: "manual_import",
             workspaceFingerprint: "other",
             promptVersion: "doctor-v2",
-            contextProfile: "stable-2026.7",
+            contextProfile: "beta-2026.8.1",
             openclawVersion: "",
             completedAt: new Date().toISOString(),
             startedAt: new Date().toISOString(),
@@ -3329,7 +3326,7 @@ describe("server/doctor-service", () => {
               engine: "gateway_agent",
               workspaceFingerprint: "stale-baseline",
               promptVersion: "doctor-v2",
-              contextProfile: "stable-2026.7",
+              contextProfile: "beta-2026.8.1",
               openclawVersion: "",
               completedAt: staleIso,
               startedAt: staleIso,
@@ -3394,7 +3391,7 @@ describe("server/doctor-service", () => {
               engine: "gateway_agent",
               workspaceFingerprint: "stale-baseline",
               promptVersion: "doctor-v2",
-              contextProfile: "stable-2026.7",
+              contextProfile: "beta-2026.8.1",
               openclawVersion: "",
               completedAt: staleIso,
               startedAt: staleIso,
@@ -3619,7 +3616,7 @@ describe("server/doctor-service", () => {
               engine: "gateway_agent",
               workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
               promptVersion: "doctor-v2",
-              contextProfile: "stable-2026.7",
+              contextProfile: "beta-2026.8.1",
               openclawVersion: "",
               completedAt: nowIso,
               startedAt: nowIso,
@@ -3694,7 +3691,7 @@ describe("server/doctor-service", () => {
           engine: "gateway_agent",
           workspaceFingerprint: computeWorkspaceSnapshot(workspaceRoot).fingerprint,
           promptVersion: "doctor-v2",
-          contextProfile: "stable-2026.7",
+          contextProfile: "beta-2026.8.1",
           openclawVersion: "",
           completedAt: nowIso,
           startedAt: nowIso,

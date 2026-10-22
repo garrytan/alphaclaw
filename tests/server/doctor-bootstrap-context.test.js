@@ -10,8 +10,7 @@ const {
   kDoctorBootstrapReadMaxBytes,
 } = require("../../lib/server/doctor/bootstrap-context");
 const {
-  kBeta81Profile,
-  kStableProfile,
+  kCurrentContextProfile,
 } = require("../../lib/server/doctor/context-profiles");
 
 describe("server/doctor/bootstrap-context", () => {
@@ -37,24 +36,24 @@ describe("server/doctor/bootstrap-context", () => {
     expect(context.bootstrapMaxChars).toBe(20000);
     expect(context.bootstrapTotalMaxChars).toBe(60000);
     expect(context.estimated).toBe(true);
-    expect(context.profileId).toBe("stable-2026.7");
+    expect(context.profileId).toBe("beta-2026.8.1");
   });
 
   it("marks files truncated by both the per-file and total limits", () => {
     write("AGENTS.md", "A".repeat(300));
     write("SOUL.md", "B".repeat(300));
-    write("TOOLS.md", "C".repeat(100));
+    write("IDENTITY.md", "C".repeat(100));
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapMaxChars: 200,
       bootstrapTotalMaxChars: 300,
     });
 
     const agents = context.files.find((file) => file.path === "AGENTS.md");
     const soul = context.files.find((file) => file.path === "SOUL.md");
-    const tools = context.files.find((file) => file.path === "TOOLS.md");
+    const identity = context.files.find((file) => file.path === "IDENTITY.md");
 
     expect(agents.reason).toBe("file_limit");
     expect(agents.injectedChars).toBe(200);
@@ -62,10 +61,10 @@ describe("server/doctor/bootstrap-context", () => {
     expect(soul.truncatedByFileLimit).toBe(true);
     expect(soul.truncatedByTotalLimit).toBe(true);
     expect(soul.injectedChars).toBe(100);
-    // TOOLS.md hits the <64-char remaining-budget floor: skipped entirely.
-    expect(tools.reason).toBe("starved");
-    expect(tools.skipped).toBe(true);
-    expect(tools.injectedChars).toBe(0);
+    // IDENTITY.md hits the <64-char remaining-budget floor: skipped entirely.
+    expect(identity.reason).toBe("starved");
+    expect(identity.skipped).toBe(true);
+    expect(identity.injectedChars).toBe(0);
     expect(context.hasTotalLimitTruncation).toBe(true);
     expect(context.totalLimitReached).toBe(true);
   });
@@ -76,7 +75,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapMaxChars: 200,
       bootstrapTotalMaxChars: 200,
     });
@@ -92,7 +91,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
       bootstrapMaxChars: 300,
@@ -108,27 +107,19 @@ describe("server/doctor/bootstrap-context", () => {
     expect(context.hardening.state).toBe("starved");
   });
 
-  it("applies the fixed USER.md cap on the beta profile only", () => {
+  it("applies the fixed USER.md cap", () => {
     write("USER.md", "U".repeat(5000));
 
     const beta = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
     });
     const betaUser = beta.files.find((file) => file.path === "USER.md");
     expect(betaUser.capChars).toBe(4000);
     expect(betaUser.truncatedByFileLimit).toBe(true);
-
-    const stable = analyzeBootstrapContext({
-      workspaceRoot,
-      profile: kStableProfile,
-    });
-    const stableUser = stable.files.find((file) => file.path === "USER.md");
-    expect(stableUser.capChars).toBe(20000);
-    expect(stableUser.truncatedByFileLimit).toBe(false);
   });
 
-  it("applies the USER.md cap by basename to hook extras on beta", () => {
+  it("applies the USER.md cap by basename to hook extras", () => {
     // Upstream caps by basename (effectiveBootstrapFileLimit:
     // name.toLowerCase() === "user.md") — an extra configured as
     // hooks/bootstrap/USER.md gets the same fixed 4k cap, and modeling it
@@ -137,7 +128,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const beta = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/USER.md"],
       hooksEnabled: true,
     });
@@ -147,18 +138,6 @@ describe("server/doctor/bootstrap-context", () => {
     expect(betaExtra.capChars).toBe(4000);
     expect(betaExtra.truncatedByFileLimit).toBe(true);
     expect(betaExtra.injectedChars).toBe(4000);
-
-    const stable = analyzeBootstrapContext({
-      workspaceRoot,
-      profile: kStableProfile,
-      extraFilePaths: ["hooks/bootstrap/USER.md"],
-      hooksEnabled: true,
-    });
-    const stableExtra = stable.files.find(
-      (file) => file.path === "hooks/bootstrap/USER.md",
-    );
-    expect(stableExtra.capChars).toBe(20000);
-    expect(stableExtra.truncatedByFileLimit).toBe(false);
   });
 
   describe("missing-root-file markers", () => {
@@ -167,11 +146,11 @@ describe("server/doctor/bootstrap-context", () => {
     const markerLenFor = (name) =>
       `[MISSING] Expected at: ${path.join(workspaceRoot, name)}`.length;
 
-    it("charges [MISSING] markers for absent root files to the total budget (stable)", () => {
+    it("charges [MISSING] markers for absent root files to the total budget", () => {
       write("AGENTS.md", "A".repeat(100));
       const context = analyzeBootstrapContext({
         workspaceRoot,
-        profile: kStableProfile,
+        profile: kCurrentContextProfile,
         onboarded: false,
       });
       const byPath = (filePath) =>
@@ -181,14 +160,12 @@ describe("server/doctor/bootstrap-context", () => {
       expect(byPath("BOOTSTRAP.md").missingMarkerChars).toBe(
         markerLenFor("BOOTSTRAP.md"),
       );
-      // MEMORY.md is omitted entirely when absent on stable: no marker.
+      // MEMORY.md and USER.md are omitted entirely when absent: no marker.
       expect(byPath("MEMORY.md").missingMarkerChars).toBe(0);
+      expect(byPath("USER.md").missingMarkerChars).toBe(0);
       const expectedTotal = [
         "SOUL.md",
-        "TOOLS.md",
         "IDENTITY.md",
-        "USER.md",
-        "HEARTBEAT.md",
         "BOOTSTRAP.md",
       ].reduce((sum, name) => sum + markerLenFor(name), 0);
       expect(context.missingMarkerChars).toBe(expectedTotal);
@@ -201,7 +178,7 @@ describe("server/doctor/bootstrap-context", () => {
       write("AGENTS.md", "A".repeat(100));
       const context = analyzeBootstrapContext({
         workspaceRoot,
-        profile: kStableProfile,
+        profile: kCurrentContextProfile,
         onboarded: true,
       });
       expect(
@@ -210,11 +187,11 @@ describe("server/doctor/bootstrap-context", () => {
       ).toBe(0);
     });
 
-    it("omits USER.md and MEMORY.md markers on beta", () => {
+    it("omits USER.md and MEMORY.md markers once onboarded", () => {
       write("AGENTS.md", "A".repeat(100));
       const context = analyzeBootstrapContext({
         workspaceRoot,
-        profile: kBeta81Profile,
+        profile: kCurrentContextProfile,
       });
       const byPath = (filePath) =>
         context.files.find((file) => file.path === filePath);
@@ -233,19 +210,19 @@ describe("server/doctor/bootstrap-context", () => {
       write("AGENTS.md", "A".repeat(150));
       const context = analyzeBootstrapContext({
         workspaceRoot,
-        profile: kStableProfile,
+        profile: kCurrentContextProfile,
         bootstrapMaxChars: 200,
         bootstrapTotalMaxChars: 200,
       });
       const byPath = (filePath) =>
         context.files.find((file) => file.path === filePath);
       // SOUL.md's marker is longer than the 50 remaining chars: clamped like
-      // upstream's clampToBudget — and it exhausts the budget, so TOOLS.md's
+      // upstream's clampToBudget — and it exhausts the budget, so IDENTITY.md's
       // marker never renders. Without marker accounting the totals would sit
       // at 150/200 and under-report the near-total-limit pressure.
       expect(markerLenFor("SOUL.md")).toBeGreaterThan(50);
       expect(byPath("SOUL.md").missingMarkerChars).toBe(50);
-      expect(byPath("TOOLS.md").missingMarkerChars).toBe(0);
+      expect(byPath("IDENTITY.md").missingMarkerChars).toBe(0);
       expect(context.activeInjectedChars).toBe(200);
       expect(context.totalLimitReached).toBe(true);
       expect(context.nearTotalLimit).toBe(true);
@@ -256,16 +233,16 @@ describe("server/doctor/bootstrap-context", () => {
       write("SOUL.md", "B".repeat(100));
       const context = analyzeBootstrapContext({
         workspaceRoot,
-        profile: kStableProfile,
+        profile: kCurrentContextProfile,
         bootstrapMaxChars: 200,
         bootstrapTotalMaxChars: 200,
       });
       const byPath = (filePath) =>
         context.files.find((file) => file.path === filePath);
       // 50 chars remain (<64): SOUL.md starves and the allocator STOPS —
-      // TOOLS.md's marker would still fit but upstream never renders it.
+      // IDENTITY.md's marker would still fit but upstream never renders it.
       expect(byPath("SOUL.md").reason).toBe("starved");
-      expect(byPath("TOOLS.md").missingMarkerChars).toBe(0);
+      expect(byPath("IDENTITY.md").missingMarkerChars).toBe(0);
       expect(context.missingMarkerChars).toBe(0);
       expect(context.activeInjectedChars).toBe(150);
     });
@@ -274,7 +251,7 @@ describe("server/doctor/bootstrap-context", () => {
       write("AGENTS.md", "A".repeat(100));
       const context = analyzeBootstrapContext({
         workspaceRoot,
-        profile: kStableProfile,
+        profile: kCurrentContextProfile,
         extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
         hooksEnabled: true,
       });
@@ -303,18 +280,12 @@ describe("server/doctor/bootstrap-context", () => {
     );
   });
 
-  it("includes MEMORY.md in the injected set and excludes retired files on beta", () => {
-    const stablePaths = analyzeBootstrapContext({
-      workspaceRoot,
-      profile: kStableProfile,
-    }).files.map((file) => file.path);
+  it("includes MEMORY.md in the injected set and excludes retired files", () => {
     const betaPaths = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
     }).files.map((file) => file.path);
 
-    expect(stablePaths).toContain("MEMORY.md");
-    expect(stablePaths).toContain("TOOLS.md");
     expect(betaPaths).toContain("MEMORY.md");
     expect(betaPaths).not.toContain("TOOLS.md");
     expect(betaPaths).not.toContain("HEARTBEAT.md");
@@ -326,7 +297,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/TOOLS.md"],
       hooksEnabled: true,
     });
@@ -340,22 +311,13 @@ describe("server/doctor/bootstrap-context", () => {
       "hooks/bootstrap/TOOLS.md",
     ]);
     expect(context.hardening.state).toBe("blocked");
-
-    const stableContext = analyzeBootstrapContext({
-      workspaceRoot,
-      profile: kStableProfile,
-      extraFilePaths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/TOOLS.md"],
-      hooksEnabled: true,
-    });
-    expect(stableContext.blockedExtraFiles).toEqual([]);
-    expect(stableContext.hardening.state).toBe("injected");
   });
 
   it("treats a disabled hook as blocked hardening", () => {
     write("hooks/bootstrap/AGENTS.md", "rules");
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: false,
     });
@@ -373,7 +335,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapMaxChars: 100,
       bootstrapTotalMaxChars: 100,
     });
@@ -391,7 +353,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapMaxChars: 200,
       bootstrapTotalMaxChars: 300,
     });
@@ -424,7 +386,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       bootstrapMaxChars: 200,
       bootstrapTotalMaxChars: 200,
     });
@@ -440,7 +402,7 @@ describe("server/doctor/bootstrap-context", () => {
     write("hooks/bootstrap/AGENTS.md", "H".repeat(300));
     const perFileContext = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
       bootstrapMaxChars: 200,
@@ -456,7 +418,7 @@ describe("server/doctor/bootstrap-context", () => {
     write("hooks/bootstrap/AGENTS.md", "H".repeat(100));
     const starvedContext = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
       bootstrapMaxChars: 300,
@@ -475,7 +437,7 @@ describe("server/doctor/bootstrap-context", () => {
     write("hooks/bootstrap/AGENTS.md", "H".repeat(100));
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kBeta81Profile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
       bootstrapMaxChars: 400,
@@ -514,7 +476,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/*.md"],
       hooksEnabled: true,
     });
@@ -542,7 +504,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: [escapingPath],
       hooksEnabled: true,
     });
@@ -570,7 +532,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
     });
@@ -611,7 +573,7 @@ describe("server/doctor/bootstrap-context", () => {
     // wins regardless of config entry order — never first-file-wins.
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: [
         "hooks/bootstrap/MEMORY.md",
         "hooks/bootstrap/AGENTS.md",
@@ -641,7 +603,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
     });
@@ -678,7 +640,7 @@ describe("server/doctor/bootstrap-context", () => {
     // hardening file exists: the agent runs without safety rules (blocked).
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: [],
       hooksEnabled: true,
     });
@@ -702,7 +664,7 @@ describe("server/doctor/bootstrap-context", () => {
     // since: the agent runs without safety rules and the badge must be loud.
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
     });
@@ -723,7 +685,7 @@ describe("server/doctor/bootstrap-context", () => {
     // missing-file state must never fire off an unverifiable entry.
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: true,
       configUnreadable: true,
@@ -740,7 +702,7 @@ describe("server/doctor/bootstrap-context", () => {
     // blocked/missing_file P0.
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/*.md"],
       hooksEnabled: true,
     });
@@ -758,7 +720,7 @@ describe("server/doctor/bootstrap-context", () => {
     // on-disk merged file must NOT read as a lost config entry.
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: [],
       hooksEnabled: false,
       configUnreadable: true,
@@ -790,7 +752,7 @@ describe("server/doctor/bootstrap-context", () => {
       fs.rmSync(managedRoot, { recursive: true, force: true });
     });
 
-    const makeAnalyzer = ({ profile = kStableProfile, fsModule } = {}) =>
+    const makeAnalyzer = ({ profile = kCurrentContextProfile, fsModule } = {}) =>
       createBootstrapContextAnalyzer({
         workspaceRoot,
         managedRoot,
@@ -999,7 +961,7 @@ describe("server/doctor/bootstrap-context", () => {
       const analyzer = createBootstrapContextAnalyzer({
         workspaceRoot,
         managedRoot,
-        getProfile: () => kStableProfile,
+        getProfile: () => kCurrentContextProfile,
         readOpenclawConfig: () => null,
         isOnboarded: () => true,
       });
@@ -1018,7 +980,7 @@ describe("server/doctor/bootstrap-context", () => {
       const analyzer = createBootstrapContextAnalyzer({
         workspaceRoot,
         managedRoot,
-        getProfile: () => kStableProfile,
+        getProfile: () => kCurrentContextProfile,
         readOpenclawConfig: () => null,
         isOnboarded: () => true,
       });
@@ -1135,7 +1097,7 @@ describe("server/doctor/bootstrap-context", () => {
       write("AGENTS.md", "rules");
       const analyzer = createBootstrapContextAnalyzer({
         workspaceRoot,
-        getProfile: () => kStableProfile,
+        getProfile: () => kCurrentContextProfile,
       });
       const context = analyzer.analyze();
       expect(context.bootstrapMaxChars).toBe(20000);
@@ -1151,7 +1113,7 @@ describe("server/doctor/bootstrap-context", () => {
 
     const context = analyzeBootstrapContext({
       workspaceRoot,
-      profile: kStableProfile,
+      profile: kCurrentContextProfile,
       extraFilePaths: ["hooks/bootstrap/AGENTS.md"],
       hooksEnabled: false,
       bootstrapMaxChars: 100,
