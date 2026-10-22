@@ -81,6 +81,21 @@ describe("control-ui-attach: the redirect decision", () => {
     expect(isControlUiDocumentNavigation({ method: "GET", headers: { upgrade: "websocket" } })).toBe(false);
   });
 
+  it("detours a plain-HTTP navigation, which carries no Fetch Metadata", () => {
+    const d = decide();
+    const kPlainHttpNavigate = {
+      "upgrade-insecure-requests": "1",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      cookie: sessionCookie(),
+    };
+    expect(d(navReq({ headers: kPlainHttpNavigate }))).toBe("/gateway/attach?to=%2Fopenclaw%2Fchat%2Fmain%3Fdraft%3D1");
+    expect(d(navReq({ headers: { ...kPlainHttpNavigate, "upgrade-insecure-requests": undefined } }))).toBeNull();
+    expect(d(navReq({ headers: { ...kPlainHttpNavigate, accept: "*/*" } }))).toBeNull();
+    expect(d(navReq({ headers: { ...kPlainHttpNavigate, accept: "text/css,*/*;q=0.1" } }))).toBeNull();
+    expect(d(navReq({ headers: { ...kPlainHttpNavigate, "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" } }))).toBeNull();
+    expect(d(navReq({ method: "HEAD", headers: kPlainHttpNavigate }))).toBeNull();
+  });
+
   it("does not detour members, a pre-onboarding install or a tokenless gateway", () => {
     expect(decide({ admin: false })(navReq())).toBeNull();
     expect(decide({ onboarded: false })(navReq())).toBeNull();
