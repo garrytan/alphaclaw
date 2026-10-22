@@ -355,6 +355,41 @@ describe("server/watchdog memory monitor", () => {
       harness.nextCriticalRss = baseRss + 4 * extraTicks;
     };
 
+    it("hands the ladder a drain budget from time to exhaustion, re-derived from a fresh sample at ask time (ALPH-17)", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      expect(restart).toHaveBeenCalledTimes(1);
+      const { ladder, shouldAbort } = restart.mock.calls[0][0];
+      expect(typeof shouldAbort).toBe("function");
+      expect(typeof ladder.askGraceMs).toBe("function");
+
+      // The container is filling at ~240 MB/h with minutes of headroom: a
+      // derived grace, longer than the 30 s short ladder.
+      const decided = memoryEvents(harness.insertWatchdogEvent)
+        .find((e) => e.details.kind === "mitigation_restart").details.drainBudget;
+      expect(decided.reason).toBe("derived");
+      expect(decided.askGraceMs).toBeGreaterThan(30_000);
+      expect(decided.askGraceMs).toBeLessThanOrEqual(300_000);
+      expect(notifications(harness.notifier).find((m) => m.includes("Restarting gateway before")))
+        .toContain("to let running agent turns finish");
+
+      // Headroom collapsed during preflight: the fresh sample at ask time
+      // sees the container at 98% and takes the short ladder.
+      harness.readMemorySample.mockImplementation(() => ({ rssBytes: 392 * kMb, rssBasis: "worker",
+        groupRssBytes: 392 * kMb, cgroupUsedBytes: 392 * kMb, containerLimitBytes: 400 * kMb }));
+      expect(ladder.askGraceMs()).toMatchObject({ askGraceMs: 30_000, reason: "imminent" });
+      // The ask's budget is what the operation record keeps.
+      const restartRows = harness.insertWatchdogEvent.mock.calls.map(([row]) => row)
+        .filter((row) => row.eventType === "operation" && row.details?.trigger === "memory_mitigation");
+      expect(restartRows.at(-1)?.details?.drainBudget ?? restartRows.at(-1)?.details?.details?.drainBudget)
+        .toMatchObject({ reason: "derived" });
+    });
+
     it("default OFF: critical never restarts", async () => {
       const restart = vi.fn(async () => ({ ok: true }));
       const harness = createHarness({
@@ -958,6 +993,7 @@ describe("server/watchdog memory monitor", () => {
       expect(restartRows.map((row) => row.status)).toEqual(["started", "failed"]);
       expect(restartRows[1].details).toEqual({
         trigger: "memory_mitigation",
+        drainBudget: expect.objectContaining({ askGraceMs: expect.any(Number), reason: expect.any(String) }),
         error: expect.stringContaining("did not exit after SIGKILL"),
         reason: "stop_failed",
       });

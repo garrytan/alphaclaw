@@ -744,6 +744,27 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       expect(value.how).toBe("graceful");
       expect(logLines().find((line) => /asking status=honoured/.test(line))).toMatch(/drainMs=2931/);
     });
+
+    it("an askGraceMs resolver is called once, after preflight, right before the ask: its grace is the --wait and its reason is logged and kept on the evidence", async () => {
+      await bootManaged(gateway, world);
+      world.restartCli = "graceful";
+      const resolver = vi.fn(() => ({ askGraceMs: 2500, reason: "derived" }));
+      const { value, error } = await runRestart({ ladder: { ...ladder, askGraceMs: resolver } }, 5000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("graceful");
+      expect(resolver).toHaveBeenCalledTimes(1);
+      expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "2500ms"]);
+      expect(logLines().find((line) => /asking status=running/.test(line))).toMatch(/graceMs=2500 graceReason=derived/);
+    });
+
+    it("a throwing resolver falls back to the default 30 s grace and says so", async () => {
+      await bootManaged(gateway, world);
+      world.restartCli = "graceful";
+      const { error } = await runRestart({ ladder: { ...ladder, askGraceMs: () => { throw new Error("sample read failed"); } } }, 5000);
+      expect(error).toBeNull();
+      expect(world.restartArgs.at(-1)).toEqual(["gateway", "restart", "--wait", "30000ms"]);
+      expect(logLines().find((line) => /asking status=running/.test(line))).toMatch(/graceMs=30000 graceReason=resolver_failed/);
+    });
   });
 
   it("stopGatewayForShutdown never asks (no supervisor will relaunch): SIGTERM the group, SIGKILL inside its budget; killManagedGatewayChildNow SIGKILLs the group synchronously", async () => {
