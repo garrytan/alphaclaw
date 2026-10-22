@@ -5,6 +5,12 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.24] - 2026-10-21
+
+### Fixed
+
+- **A config rewrite right after a read can no longer leave the gateway port stale for 1.5 s.** `readOpenclawConfigCached` validated its memo by `mtimeMs` alone. The kernel stamps mtime from a coarse clock, and two writes in one tick share an `mtimeMs` (199 of 200 back-to-back same-size rewrites did on this ext4 sandbox). So a rewrite of `openclaw.json` landing in the same tick as the memoized read kept serving the old `gateway.port`, and every proxied request went to the old port until the TTL ran out. A memo is now trusted only when the file was last modified more than 100 ms before the read that filled it (git's "racily clean" rule). Otherwise the config is read again. This was also the root cause of the `e2e-proxy-gateway` hermetic flake: its "gateway is down" case rewrote the config twice in one tick, and up to 20 following cases got 502.
+
 ## [0.10.23] - 2026-10-21
 
 The live tier now checks every OpenClaw CLI and plugin-sdk assumption AlphaClaw encodes from one typed table (refactor plan PR 3, ALPH-15). Test-only: no runtime code changes.

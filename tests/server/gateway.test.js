@@ -3217,6 +3217,34 @@ describe("server/gateway restart behavior", () => {
       expect(gateway.getGatewayPort()).toBe(kDefaultGatewayPort);
     });
 
+    it("re-reads a config rewritten within the mtime tick of the memoized read", () => {
+      const originalStatSync = fs.statSync;
+      try {
+        fs.existsSync = vi.fn(() => true);
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        let raw = JSON.stringify({ gateway: { port: 11111 } });
+        fs.readFileSync = vi.fn(() => raw);
+        // Same-size rewrite in the same coarse tick: mtimeMs does not move.
+        const freshMtimeMs = Date.now();
+        fs.statSync = vi.fn(() => ({ mtimeMs: freshMtimeMs }));
+        expect(gateway.getGatewayPort()).toBe(11111);
+        raw = JSON.stringify({ gateway: { port: 22222 } });
+        expect(gateway.getGatewayPort()).toBe(22222);
+        // A file last written well before the read is still served from the memo.
+        const oldMtimeMs = Date.now() - 60_000;
+        fs.statSync = vi.fn(() => ({ mtimeMs: oldMtimeMs }));
+        raw = JSON.stringify({ gateway: { port: 33333 } });
+        expect(gateway.getGatewayPort()).toBe(33333);
+        const reads = fs.readFileSync.mock.calls.length;
+        raw = JSON.stringify({ gateway: { port: 44444 } });
+        expect(gateway.getGatewayPort()).toBe(33333);
+        expect(fs.readFileSync.mock.calls.length).toBe(reads);
+      } finally {
+        fs.statSync = originalStatSync;
+      }
+    });
+
     it("returns false when ensureGatewayProxyConfig cannot read the config", () => {
       fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
       delete require.cache[modulePath];
