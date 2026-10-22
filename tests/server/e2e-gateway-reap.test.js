@@ -392,6 +392,8 @@ describe("gateway reap e2e (real child processes via PATH-shimmed openclaw)", ()
     expect(first.identity).toEqual({
       rootPid: first.child.pid,
       workerPid: first.workerPid,
+      // The shimmed worker never binds the gateway port: first-child guess.
+      workerVerified: false,
       startTicks: expect.any(Number),
       pids: expect.arrayContaining([first.child.pid, first.workerPid]),
     });

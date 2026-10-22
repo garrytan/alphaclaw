@@ -50,3 +50,57 @@ describe("default gateway memory sample failure isolation", () => {
       effectiveCapMb: 1216, pressureSource: "container", containerPressureFraction: 0.95 });
   });
 });
+
+describe("enforcement basis (ALPH-17)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  const root = { pid: 100, startTicks: "200" };
+  const worker = { pid: 101, startTicks: "201" };
+  const target = { rootPid: root.pid, workerPid: worker.pid, rootSource: "serving_root", stateDir: "/unused/gateway-memory-test" };
+  const census = (overrides = {}) => ({
+    status: "fresh", reason: null, atMs: 1_700_000_000_000, root, worker,
+    groupRssBytes: 7239 * kMb, workerRssBytes: 3837 * kMb, childRssBytes: 2754 * kMb, childCount: 2,
+    contributors: [
+      { pid: 100, role: "launcher", rssBytes: 648 * kMb },
+      { pid: 101, role: "gateway", rssBytes: 3837 * kMb },
+      { pid: 300, role: "gateway_child", rssBytes: 54 * kMb },
+      { pid: 301, role: "gateway_child", rssBytes: 2700 * kMb },
+    ],
+    ...overrides,
+  });
+  const stub = (snapshot) => {
+    vi.spyOn(systemResources, "parseCgroupMemory").mockReturnValue(null);
+    vi.spyOn(telemetry, "readGatewayTelemetry").mockReturnValue(null);
+    vi.spyOn(autotune, "getActiveGatewayHeapMb").mockReturnValue(8192);
+    vi.spyOn(collector, "getGatewayProcessSnapshot").mockReturnValue(snapshot);
+  };
+
+  it("enforces the verified worker's own RSS and reports the group and children beside it", () => {
+    stub(census());
+    expect(readGatewayMemorySample({ ...target, workerVerified: true })).toMatchObject({
+      rssBasis: "worker", rssBytes: 3837 * kMb, sampleStatus: "fresh", identityToken: "200:101:201",
+      groupRssBytes: 7239 * kMb, workerRssBytes: 3837 * kMb, childRssBytes: 2754 * kMb, childCount: 2,
+      largestChild: { pid: 301, rssBytes: 2700 * kMb },
+    });
+  });
+
+  it("keeps a worker sample when the census went partial after the root and worker reads", () => {
+    stub(census({ status: "partial", reason: "scan_deadline" }));
+    expect(readGatewayMemorySample({ ...target, workerVerified: true })).toMatchObject({
+      rssBasis: "worker", rssBytes: 3837 * kMb, sampleStatus: "fresh", groupRssBytes: null,
+    });
+  });
+
+  it("falls back to the group, labelled, when the worker is not verified", () => {
+    stub(census());
+    expect(readGatewayMemorySample({ ...target, workerVerified: false })).toMatchObject({
+      rssBasis: "group", rssBytes: 7239 * kMb, sampleStatus: "fresh", identityToken: "200",
+    });
+  });
+
+  it("an inconsistent tree is not a worker sample", () => {
+    stub(census({ status: "partial", reason: "invalid_sample" }));
+    expect(readGatewayMemorySample({ ...target, workerVerified: true })).toMatchObject({
+      rssBasis: "group", rssBytes: null, sampleStatus: "partial",
+    });
+  });
+});

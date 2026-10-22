@@ -244,6 +244,8 @@ exit 0
           }
           return {
             rssBytes,
+            rssBasis: "worker",
+            groupRssBytes: rssBytes,
             cgroupUsedBytes: rssBytes,
             containerLimitBytes: capBytes,
           };

@@ -2205,6 +2205,7 @@ describe("server/gateway restart behavior", () => {
         // `pid` keeps meaning "the child AlphaClaw spawned" — none here.
         pid: null,
         servingPid: 701,
+        workerVerified: false,
         rootPid: 700,
         startTicks: 123456,
         generation: null,
@@ -2230,6 +2231,7 @@ describe("server/gateway restart behavior", () => {
         startedAt: expect.any(Number),
         pid: null,
         servingPid: null,
+        workerVerified: false,
         rootPid: null,
         startTicks: null,
         generation: null,
@@ -2267,6 +2269,9 @@ describe("server/gateway restart behavior", () => {
       expect(gateway.resolveServingIdentity()).toEqual({
         rootPid: 700,
         workerPid: 701,
+        // No socket table in the fake /proc: the worker is the first-child
+        // guess, not the proven port holder.
+        workerVerified: false,
         startTicks: 123456,
         pids: [700, 701],
       });
@@ -2412,6 +2417,7 @@ describe("server/gateway restart behavior", () => {
         startedAt: expect.any(Number),
         pid: 1234,
         servingPid: 1234,
+        workerVerified: false,
         rootPid: 1234,
         startTicks: 4242,
         generation: 1,
@@ -2436,7 +2442,7 @@ describe("server/gateway restart behavior", () => {
         ...kOutcomeShape,
         outcome: "incumbent_present",
         pid: 700,
-        serving: { rootPid: 700, workerPid: 701, startTicks: 123456, pids: [700, 701] },
+        serving: { rootPid: 700, workerPid: 701, workerVerified: false, startTicks: 123456, pids: [700, 701] },
       });
       expect(childProcess.spawn).not.toHaveBeenCalled();
       // The watchdog owns intent (adopt vs replace) — gateway.js does not

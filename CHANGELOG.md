@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.50] - 2026-10-22
+
+A tool process the gateway starts can no longer make the gateway look like it is leaking, so it can no longer trigger a gateway restart (ALPH-17, PR 2 of the restart plan).
+
+### Fixed
+- The memory-leak verdict judged the whole process group (launcher + worker + every child) against a single-process budget (configured heap + 192 MiB). On Oct 22 a `bun add -g` child grew to 2754 MB while the gateway worker sat flat at 3837 MB; the group (7239 MB of 8384 MB) read as a leak, and the mitigation restart killed the agent's turn. The enforced series is now the gateway worker's own RSS (`rssBasis: "worker"`), with the group, the children's total and the largest child reported beside it.
+- The worker basis requires the worker to be proven from `/proc` as the process holding the gateway port: the launch identity now carries `workerVerified`, and the first-child guess does not count. Without a proven worker the group is still measured (`rssBasis: "group"`) and alerts, but the watchdog logs `mitigation_skipped reason=worker_unverified` instead of restarting.
+- A basis change resets the series and freezes any open episode as `basis_changed`, so the step between group and worker readings is never read as growth. A census that goes partial after the root and worker reads still yields a worker sample.
+- On the worker basis, container pressure counts toward the verdict only while the worker holds at least half of a completely censused group and is itself growing at 64 MB/h or more.
+
+### Changed
+- When tool processes fill the container, the container alert says so and names the largest child by pid and RSS ("tool processes, not the gateway"); it never restarts the gateway. Memory notifications, the Doctor card and the Resources trend say "Gateway worker RSS" on the worker basis and show the worker/children split.
+
 ## [0.10.48] - 2026-10-22
 
 Pin OpenClaw 2026.10.6 and raise the Node floor to the one it requires.

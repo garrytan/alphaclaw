@@ -70,7 +70,8 @@ describe("issue #102 runtime safety (e2e)", () => {
       resolveGatewayHealthUrl: () => "http://localhost:18789/health",
       resolveGatewayReadyzUrl: () => "http://localhost:18789/readyz",
       readMemorySettings: () => settings,
-      readMemorySample: () => ({ rssBytes: processState.rssMb * kMb }),
+      readMemorySample: () => ({ rssBytes: processState.rssMb * kMb, rssBasis: "worker",
+        groupRssBytes: processState.rssMb * kMb }),
       memoryMonitorConfig: { startupGraceMs: 0, fastPathConfirmEvals: 2 },
       memoryMitigationStatePath: statePath,
       restartGatewayForMitigation: restart,
@@ -97,7 +98,7 @@ describe("issue #102 runtime safety (e2e)", () => {
     await driveMemory(stack, 5, 77);
     expect(brakeNotices()).toHaveLength(1);
     expect(stack.events.filter((event) => event.details?.reason === "rate_brake")).toHaveLength(1);
-    expect(brakeNotices()[0][0]).toContain("Group RSS:");
+    expect(brakeNotices()[0][0]).toContain("Gateway worker RSS:");
     expect(stack.restart).not.toHaveBeenCalled();
     expect(watchdog.getStatus().crashCountInWindow).toBe(0);
 

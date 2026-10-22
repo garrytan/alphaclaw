@@ -15,8 +15,28 @@ The serving root is selected once for Resources and incident snapshots. The
 watchdog uses the same tracked root; PID and `/proc` start ticks identify each
 process lifetime. Within that group the worker, worker descendants, and remaining
 launcher/sibling branches form disjoint RSS totals. `processes.gateway.rssBytes`
-and `gatewayMemoryTrend.rssMb` remain whole-group RSS aliases. A truncated census
-is partial evidence and cannot confirm a restart. Static process roles do not
+remains a whole-group RSS alias. A truncated census is partial evidence and
+cannot confirm a restart.
+
+**Enforcement basis (ALPH-17).** `gatewayMemoryTrend.rssMb` is the series the
+pressure detector judges, and `gatewayMemoryTrend.rssBasis` names it. `worker`:
+the gateway worker's own RSS, used when the worker is proven from `/proc` as the
+process holding the gateway port (gateway.js's launch identity carries
+`workerVerified`; the first-child fallback does not count). The root and worker
+records are read first, so a census that goes partial later still yields a worker
+sample. `group`: the whole group, used only when the worker is unproven; the
+watchdog logs `mitigation_skipped reason=worker_unverified` once per episode and
+never restarts on it. A basis change resets the series and freezes any episode as
+`basis_changed`, because the step between the two would read as growth. Children
+are reported beside the worker (`groupRssMb`, the evidence split, the largest
+child by pid) and never enter the enforced series: a gateway restart cannot free
+a tool child's memory. On the worker basis, container pressure counts toward the
+verdict only while the worker holds at least half of a completely censused group
+and is itself growing at 64 MB/h or more. When the container goes critical
+because of tool processes, the container alert says so and names the largest
+child; it never restarts the gateway. `tests/server/gateway-memory-incident-replay.test.js`
+replays the Oct 22 incident (worker flat at 3837 MB, one child growing to 2754 MB
+at 2021 MB/h, group 7239 MB against an 8384 MB budget). Static process roles do not
 identify MCP sessions, activity, or orphaned children.
 
 RSS counts shared pages in every process. It is not an additive decomposition of

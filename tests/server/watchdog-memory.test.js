@@ -90,10 +90,15 @@ const notifications = (notifier) =>
 // Drives N memory ticks at 60s cadence with the sample reader scripted per
 // tick. Fake Date only — the watchdog's setImmediate/interval plumbing stays
 // real.
+// Scripted samples default to a verified gateway worker alone in its group
+// (no tool children); a test overrides rssBasis/groupRssBytes to model one.
+const asWorkerSample = (sample) => sample && typeof sample === "object"
+  ? { rssBasis: "worker", groupRssBytes: sample.rssBytes ?? null, ...sample }
+  : sample;
 const driveTicks = async (harness, { ticks, sampleAt, startTick = 0 }) => {
   for (let i = startTick; i < startTick + ticks; i += 1) {
     vi.setSystemTime(kStartMs + i * kTickMs);
-    harness.readMemorySample.mockImplementation(() => sampleAt(i));
+    harness.readMemorySample.mockImplementation(() => asWorkerSample(sampleAt(i)));
     await harness.watchdog.checkMemoryTrend();
   }
 };

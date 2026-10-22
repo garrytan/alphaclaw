@@ -753,3 +753,80 @@ describe("scoped policy, freshness and retained explanations", () => {
     expect(monitor.getTrend().lastEpisodeSummary.evidence.attribution.causes).toEqual(["child_accumulation"]);
   });
 });
+
+describe("enforcement basis (ALPH-17)", () => {
+  const fullContainer = () => ({ containerLimitBytes: mb(1100), cgroupUsedBytes: mb(1050), activeHeapMb: null });
+
+  it("container pressure cannot escalate a worker-basis verdict while tool children dominate the group", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    // The worker rises fast (600 MB/h) but holds only 40% of the group.
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: 8,
+      rssAt: (i) => mb(400 + 10 * i),
+      capAt: (i) => ({ ...fullContainer(), rssBasis: "worker", groupRssBytes: mb(1000 + 10 * i) }),
+    });
+    expect(transitions).toHaveLength(0);
+    expect(snapshot).toMatchObject({ rssBasis: "worker", pressureSource: "none" });
+    expect(snapshot.state).not.toBe("critical");
+    expect(snapshot.containerPressureFraction).toBeGreaterThan(0.9);
+  });
+
+  it("container pressure cannot escalate a flat worker that dominates the group", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const jitter = [0, 3, -2, 1, -3, 2, 0, 3, -1, 2];
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: jitter.length,
+      rssAt: (i) => mb(900 + jitter[i]),
+      capAt: (i) => ({ ...fullContainer(), rssBasis: "worker", groupRssBytes: mb(1000 + jitter[i]) }),
+    });
+    expect(transitions).toHaveLength(0);
+    expect(snapshot.state).not.toBe("critical");
+  });
+
+  it("container pressure still escalates a dominant, growing worker", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: 4,
+      rssAt: (i) => mb(900 + 10 * i),
+      capAt: (i) => ({ ...fullContainer(), rssBasis: "worker", groupRssBytes: mb(950 + 10 * i) }),
+    });
+    expect(transitions.find((t) => t.type === "latched")).toMatchObject({ via: "fast_pressure", rssBasis: "worker" });
+    expect(snapshot).toMatchObject({ state: "critical", pressureSource: "container" });
+  });
+
+  it("without a complete census (no group RSS) the container does not count toward a worker verdict", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { transitions } = drive(monitor, {
+      ticks: 4,
+      rssAt: (i) => mb(900 + 10 * i),
+      capAt: () => ({ ...fullContainer(), rssBasis: "worker", groupRssBytes: null }),
+    });
+    expect(transitions).toHaveLength(0);
+  });
+
+  it("a basis change resets the series and freezes the episode as basis_changed instead of reading the step as growth", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const cap = () => ({ activeHeapMb: 1000 });
+    // Group basis climbs into a critical episode (cap 1192 MB).
+    const first = drive(monitor, { ticks: 4, rssAt: (i) => mb(1100 + 10 * i),
+      capAt: () => ({ ...cap(), rssBasis: "group" }) });
+    expect(first.snapshot.state).toBe("critical");
+    // The worker is identified: 500 MB on the worker basis. No growth step,
+    // a fresh series, and the frozen summary says why the episode ended.
+    const second = drive(monitor, { ticks: 3, startMs: kStartMs + 4 * kTickMs,
+      rssAt: () => mb(500), capAt: () => ({ ...cap(), rssBasis: "worker", groupRssBytes: mb(1150) }) });
+    expect(second.transitions).toHaveLength(0);
+    expect(second.snapshot).toMatchObject({ rssBasis: "worker", rssMb: 500, episodeId: null });
+    expect(second.snapshot.lastEpisodeSummary).toMatchObject({ reason: "basis_changed", rssBasis: "group" });
+  });
+
+  it("a read miss does not flip the basis", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    drive(monitor, { ticks: 3, rssAt: (i) => mb(500 + i), capAt: () => ({ rssBasis: "worker", groupRssBytes: mb(600) }) });
+    monitor.addSample({ atMs: kStartMs + 3 * kTickMs, pid: 100, rssBytes: null, rssBasis: "group", sampleStatus: "partial" });
+    monitor.addSample({ atMs: kStartMs + 4 * kTickMs, pid: 100, rssBytes: mb(504), rssBasis: "worker", groupRssBytes: mb(600) });
+    const { snapshot } = monitor.evaluate(kStartMs + 4 * kTickMs);
+    expect(snapshot.sampleCount).toBe(4);
+    expect(snapshot.lastEpisodeSummary).toBeNull();
+  });
+});
