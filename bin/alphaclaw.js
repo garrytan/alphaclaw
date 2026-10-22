@@ -92,6 +92,7 @@ const {
   acquireWriterLock,
 } = require("../lib/cli/git-writer-lock");
 const { resolveSelfDependency } = require("../lib/server/self-dependency");
+const { withPinnedOpenclawOnPath } = require("../lib/server/openclaw-build");
 const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
@@ -262,6 +263,10 @@ if (command === "start") {
     console.error(`[alphaclaw] ${error.message}`);
     process.exit(1);
   }
+  process.env.PATH = withPinnedOpenclawOnPath({
+    installDir: resolveSelfDependency({ fsImpl: fs }).installDir,
+    pathValue: process.env.PATH,
+  });
 }
 
 const resolveGithubRepoPath = (value) =>

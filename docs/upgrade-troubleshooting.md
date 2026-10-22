@@ -182,7 +182,7 @@ gateway is verified healthy.
 
 Every restart first asks OpenClaw to finish its active work
 (`openclaw gateway restart --wait <grace>`), then stops it. How long that
-grace is depends on who asked (v0.10.53, logged on the first ladder line as
+grace is depends on who asked (v0.10.57, logged on the first ladder line as
 `restart op=<id> requested source=… class=…`):
 
 | class | who | grace |

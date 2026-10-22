@@ -40,6 +40,11 @@ const kStepAsideStderrTail = [
   "If the gateway is supervised, stop it with: openclaw gateway stop",
 ];
 
+// Hermetic process table: these tests hand the watchdog fake pids (100, 4242,
+// …). A real process with that pid (pid 100 is a kernel thread after a
+// reboot) must not make a fake gateway look alive, so liveness, start ticks
+// and the pid verdict are injected: no pid is a real process unless a test
+// says so.
 const createHarness = ({
   autoRepair = true,
   notificationsDisabled = false,
@@ -67,8 +72,8 @@ const createHarness = ({
   // launchGatewayProcess stays in force when requestGatewayLaunch is absent).
   requestGatewayLaunch = null,
   discoverServingIdentity = null,
-  readProcStartTicks = null,
-  pidAlive = null,
+  readProcStartTicks = () => null,
+  pidAlive = () => false,
   // Hermetic default: "unknown" keeps the pre-hold liveness counting, so a
   // real process that happens to own a fixture pid never changes a test.
   resolvePidVerdict = () => "unknown",
@@ -149,8 +154,8 @@ const createHarness = ({
     ...(renameStrayExecApprovals ? { renameStrayExecApprovals } : {}),
     ...(requestGatewayLaunch ? { requestGatewayLaunch } : {}),
     ...(discoverServingIdentity ? { discoverServingIdentity } : {}),
-    ...(readProcStartTicks ? { readProcStartTicks } : {}),
-    ...(pidAlive ? { pidAlive } : {}),
+    readProcStartTicks,
+    pidAlive,
     resolvePidVerdict,
     ...(classifyOwnershipConflict ? { classifyOwnershipConflict } : {}),
     ...(readGatewayOwnerLease ? { readGatewayOwnerLease } : {}),
