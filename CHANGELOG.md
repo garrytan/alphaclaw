@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.46] - 2026-10-22
+
+The Setup UI's API client is split by domain behind its old module (refactor plan PR 17, ALPH-15).
+
+### Changed
+- `lib/public/js/lib/api.js` is now a barrel: `export *` over 24 domain modules in `lib/public/js/lib/api/` (`http.js` holds `authFetch` verbatim, `parse.js` the shared envelope parsers, then one module per area such as `watchdog.js`, `doctor.js`, `channels.js` and `browse.js`). Every function body moved unchanged, so no import site and no `vi.mock` of `api.js` changes. A new test pins the barrel to the 182 names the file exported before the split, and the envelope parsers stay off the public surface.
+
 ## [0.10.45] - 2026-10-22
 
 The Doctor always models the current Project Context contract (refactor plan PR 16b-2, ALPH-15).
