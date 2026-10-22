@@ -15,6 +15,11 @@
 // and no tombstone; sessions.recover says there is nothing to recover; the
 // sweep recorded the running session and stays silent.
 //
+// The one loss OpenClaw cannot recover is pinned too: an exec that already
+// yielded to a background process session (the turn ended; OpenClaw caps the
+// yield window at 120 s) is stopped by the restart, nothing resumes it, and
+// the sweep tells the owner once from OpenClaw's drain report.
+//
 // ALPH-18's "exec turn lost" verdict came from its blackbox mock model, which
 // answered the recovery prompt with plain text instead of acting on it. This
 // fixture answers the way a working model does: on the restart-recovery note
@@ -96,12 +101,13 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
           else reply = `recovered without exec: ${tag}`;
         } else if (/exec:\s*(.+)/.test(userText)) command = userText.match(/exec:\s*(.+)/)[1].trim();
         else reply = "pong";
+        const yieldMs = /in the background/.test(userText) && !recovery ? 2000 : 600000;
         requests.push({ at: Date.now(), tag, recovery, execOffered: toolNames.includes("exec") });
         const chunk = (delta, finish = null) =>
           `data: ${JSON.stringify({ id: "exec-restart-live", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
         res.writeHead(200, { "content-type": "text/event-stream" });
         if (command) {
-          const call = { index: 0, id: `call_${Date.now()}`, type: "function", function: { name: "exec", arguments: JSON.stringify({ command, timeoutSeconds: 900, yieldMs: 600000 }) } };
+          const call = { index: 0, id: `call_${Date.now()}`, type: "function", function: { name: "exec", arguments: JSON.stringify({ command, timeoutSeconds: 900, yieldMs }) } };
           res.write(chunk({ role: "assistant", content: null, tool_calls: [call] }));
           res.write(chunk({}, "tool_calls"));
         } else {
@@ -158,6 +164,7 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
       settleAfterReadyMs: 20_000,
     });
     gateway.setGatewayRestartRequestedHandler((payload) => sweep.recordRunningSessions(payload));
+    gateway.setGatewayOutputObserver((text) => sweep.observeGatewayOutput(text));
     gateway.setGatewayLaunchHandler((payload) => {
       sweepJob = sweep.onGatewayLaunch(payload);
     });
@@ -169,6 +176,7 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
   afterAll(async () => {
     if (originalLog) console.log = originalLog;
     gateway?.setGatewayLaunchHandler?.(null);
+    gateway?.setGatewayOutputObserver?.(null);
     gateway?.setGatewayRestartRequestedHandler?.(null);
     try {
       await gateway?.stopGatewayForShutdown?.({ budgetMs: 8000 });
@@ -187,6 +195,11 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
     const tag = `xr-${name}-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
     const sessionKey = `agent:main:${tag}`;
     const marker = path.join(kRootDir, `${tag}.started`);
+    if (!(await readyzOk())) {
+      await gateway.startGateway();
+      await waitFor(readyzOk, 240_000, `${name}: gateway ready before the case`);
+      await sweepJob;
+    }
     notify.mockClear();
     insertEvent.mockClear();
     const sent = await call("chat.send", {
@@ -202,11 +215,11 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
     await waitFor(readyzOk, 240_000, `${name}: /readyz after the restart`);
     const readyAt = Date.now();
 
-    const history = await waitFor(async () => {
-      const result = await call("chat.history", { sessionKey, limit: 30 });
-      const messages = result.body?.messages || [];
-      const finalText = textOf([...messages].reverse().find((m) => m.role === "assistant")?.content);
-      return finalText.includes(`exec done: resumed-${tag}`) ? messages : null;
+    let history = [];
+    await waitFor(async () => {
+      history = (await call("chat.history", { sessionKey, limit: 30 })).body?.messages || [];
+      const finalText = textOf([...history].reverse().find((m) => m.role === "assistant")?.content);
+      return finalText.includes(`exec done: resumed-${tag}`);
     }, 240_000, `${name}: the interrupted exec turn resumed and finished`);
     expect(history.some((m) => m.role === "user" && kRecoveryNotePattern.test(textOf(m.content)))).toBe(true);
     const recoveryRequest = requests.find((r) => r.tag === tag && r.recovery);
@@ -261,6 +274,50 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
       ladder: { askGraceMs: () => ({ askGraceMs: 30_000, reason: "live_imminent" }) },
     }), { recorded: 1 });
     expect(outcome.stopEvidence.askGraceReason).toBe("live_imminent");
+  }, kCaseTimeoutMs);
+
+  it("an exec already moved to the background is stopped by the restart, nothing resumes it, and the owner is told once", async () => {
+    if (!(await readyzOk())) {
+      await gateway.startGateway();
+      await waitFor(readyzOk, 240_000, "background: gateway ready before the case");
+      await sweepJob;
+    }
+    const tag = `xr-bg-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
+    const sessionKey = `agent:main:${tag}`;
+    const marker = path.join(kRootDir, `${tag}.started`);
+    notify.mockClear();
+    insertEvent.mockClear();
+    const sent = await call("chat.send", {
+      sessionKey,
+      message: `Run it in the background exec: touch ${marker} && sleep ${kExecSleepSeconds} && echo done-${tag}`,
+      idempotencyKey: `${tag}-send`,
+      deliver: false,
+    });
+    expect(sent.body?.status, sent.stderr).toBe("started");
+    await waitFor(async () => fs.existsSync(marker), 120_000, "background: exec started");
+    // The turn ends once the exec yields to a background process session.
+    await waitFor(async () => {
+      const listed = await call("sessions.list", { activeMinutes: 60, limit: 200, rowMode: "compact" });
+      const row = (listed.body?.sessions || []).find((s) => s.key === sessionKey);
+      return Boolean(row) && row.hasActiveRun !== true && row.status === "done";
+    }, 120_000, "background: the turn ended with the exec still running");
+    sweepJob = null;
+    const outcome = await gateway.restartGateway(() => {}, { source: "watchdog:repair_replace", reason: "live exec turn" });
+    expect(outcome.ok).toBe(true);
+    await waitFor(readyzOk, 240_000, "background: /readyz after the restart");
+    expect(await sweepJob).toEqual({ recovered: [], alerted: [] });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain("The gateway restart stopped 1 command the agent was running in the background.");
+    expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.count])).toEqual([["exec_stopped", 1]]);
+    // OpenClaw's side: nothing marks or resumes it.
+    expect(requests.some((r) => r.tag === tag && r.recovery)).toBe(false);
+    const listed = await call("sessions.list", { activeMinutes: 60, limit: 200, rowMode: "compact" });
+    const row = (listed.body?.sessions || []).find((s) => s.key === sessionKey);
+    expect(row.abortedLastRun).not.toBe(true);
+    expect(row.restartRecoveryStatus).toBeUndefined();
+    const recover = await call("sessions.recover", { key: sessionKey, agentId: "main" });
+    expect(`${recover.body?.error?.message || ""} ${recover.stderr}`).toMatch(kNothingToRecoverPattern);
   }, kCaseTimeoutMs);
 
   it("SIGKILL crash and relaunch: OpenClaw resumes the turn", async () => {
