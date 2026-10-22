@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.47] - 2026-10-22
+
+gateway.js loses dead code and two groups of pure helpers, and its launch guard no longer retains a signal-killed child (refactor plan PR 18, ALPH-15).
+
+### Fixed
+- A gateway child killed by a signal (SIGKILL from the stop ladder, or the OOM killer) no longer reads as "already running" to `requestGatewayLaunch` during the 400 ms window between its `exit` and `close`. The ladder signals the process group, so `child.killed` stays false and `exitCode` stays null. A replacement launch inside that window used to be skipped as `child_retained`. The launch guard now also requires `signalCode === null`. `isManagedGatewayChildLive` (shared with `resolveGatewayIdentity` and `notifyGatewayLaunch`) and `markManagedGatewayExitExpected` are unchanged, and the dead child's late `close` still books its own exit once without clearing the replacement's slot.
+
+### Changed
+- The unused `hasActiveManagedGatewayChild` is deleted.
+- The restart log and evidence helpers (`formatRestartLogLine`, `logRestart`, `redactEvidenceLine`, `appendLockContentionEvidence`, `createStderrTail`) move verbatim to `lib/server/gateway-restart-log.js`.
+- The pure plugin-preflight helpers (install-stage cleanup, enabled-channel check, install-stage failure match, desired-state hash) move verbatim to `lib/server/gateway-plugin-preflight.js`.
+- `gateway.js` keeps every export, every module `let` and every `child_process` call, so the tests that replace `spawn`/`execFile` and re-require it see the same seams.
+
 ## [0.10.46] - 2026-10-22
 
 The Setup UI's API client is split by domain behind its old module (refactor plan PR 17, ALPH-15).

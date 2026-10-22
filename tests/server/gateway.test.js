@@ -2356,6 +2356,42 @@ describe("server/gateway restart behavior", () => {
       gateway.setGatewayExitHandler(null);
     });
 
+    it("a signal-killed child whose close is still draining is not retained: the launch guard spawns its replacement, and the late close neither clears the new slot nor fires twice", async () => {
+      const first = createChild();
+      const second = { ...createChild(), pid: 5678 };
+      const children = [first, second];
+      childProcess.spawn = vi.fn(() => children.shift());
+      fs.existsSync = vi.fn(() => false);
+      net.createConnection = vi.fn(() => createSocket(false));
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      const exitHandler = vi.fn();
+      gateway.setGatewayExitHandler(exitHandler);
+
+      expect(await gateway.requestGatewayLaunch()).toMatchObject({ outcome: "launch_requested", child: first, generation: 1 });
+
+      // The ladder signals the process GROUP, so first.killed stays false. Node
+      // sets signalCode (exitCode stays null) and emits 'exit'; 'close' waits on
+      // inherited stdio and is withheld here, inside the close-drain window.
+      first.signalCode = "SIGKILL";
+      first.on.mock.calls.find((c) => c[0] === "exit")[1](null, "SIGKILL");
+      expect(first.killed).toBe(false);
+      expect(exitHandler).not.toHaveBeenCalled();
+
+      const replacement = await gateway.requestGatewayLaunch();
+      expect(replacement).toMatchObject({ outcome: "launch_requested", child: second, pid: 5678, generation: 2 });
+      expect(childProcess.spawn).toHaveBeenCalledTimes(2);
+
+      // The dead child's close finalizes ITS exit once, with its own generation,
+      // and leaves the replacement in the managed slot.
+      first.on.mock.calls.find((c) => c[0] === "close")[1](null, "SIGKILL");
+      expect(exitHandler).toHaveBeenCalledTimes(1);
+      expect(exitHandler).toHaveBeenCalledWith(expect.objectContaining({ pid: 1234, signal: "SIGKILL", generation: 1 }));
+      expect(await gateway.requestGatewayLaunch()).toMatchObject({ outcome: "child_retained", child: second, generation: 2 });
+      expect(childProcess.spawn).toHaveBeenCalledTimes(2);
+      gateway.setGatewayExitHandler(null);
+    });
+
     it("the stdout 'listening on' sniff notifies servingPid/rootPid/startTicks/generation for a MANAGED child", async () => {
       installFakeProc([
         { pid: 1234, ppid: process.pid, argv: ["openclaw", "gateway", "run"], comm: "openclaw", startTicks: 4242 },
