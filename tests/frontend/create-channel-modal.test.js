@@ -61,10 +61,8 @@ vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({
 }));
 
 import * as preactHooks from "preact/hooks";
-import {
-  CreateChannelModal,
-  buildSlackManifest,
-} from "../../lib/public/js/components/agents-tab/create-channel-modal.js";
+import { CreateChannelModal } from "../../lib/public/js/components/agents-tab/create-channel-modal.js";
+import { buildSlackManifest } from "../../lib/public/js/components/agents-tab/create-channel/slack-manifest.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { SecretInput } from "../../lib/public/js/components/secret-input.js";
 

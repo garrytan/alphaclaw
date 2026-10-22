@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.37] - 2026-10-22
+
+The create-channel modal's pure helpers and the channel display metadata move out of component files (refactor plan PR 14b, ALPH-15). No logic changes.
+
+### Changed
+
+- **`agents-tab/create-channel-modal.js`** keeps only the `CreateChannelModal` component. Its env-key derivation (`kChannelExtraEnvKeys`, `slugifyChannelAccountId`, `deriveChannelEnvKey`, `deriveChannelExtraEnvKey`, `isMaskedTokenValue`) moves to `agents-tab/create-channel/channel-env-keys.js`, and the Slack scopes, events, docs link and `buildSlackManifest` move to `agents-tab/create-channel/slack-manifest.js`. The manifest test imports `buildSlackManifest` from its new home.
+- **`kChannelMeta` and `getChannelMeta`** move from `components/channels.js` into `lib/channel-registry.js`, next to the registry they derive from. `channels.js` keeps re-exporting them, so the existing importers and the six tests that `vi.mock` `channels.js` are unchanged.
+- Every line moved unchanged; the only edits are import lists and `export` on helpers the modal now imports.
+
 ## [0.10.36] - 2026-10-22
 
 The Watchdog tab's autotune and overseer cards are split into model and view modules (refactor plan PR 14a, ALPH-15). No logic changes.
