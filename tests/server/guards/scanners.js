@@ -1,4 +1,4 @@
-// The four fix-wave guard scanners, kept importable (no vitest globals) so the
+// The structural guard scanners, kept importable (no vitest globals) so the
 // self-tests and ad-hoc `node -e` audits can call them directly.
 const { lineOf, stripComments } = require("./guard-utils");
 
@@ -195,9 +195,91 @@ const scanUiIntervals = (rawText, relPath) => {
   ];
 };
 
+// Secret comparisons (secret-compare guard). A raw ===/!==/==/!= with a
+// secret-named operand compares in time proportional to the matching prefix
+// and ends early on a length mismatch; every such check goes through
+// lib/server/utils/timing-safe.js instead, and so does every direct
+// crypto.timingSafeEqual call (the helper is the one place that hashes both
+// sides first). An operand is secret-named when the last word of its final
+// identifier (camelCase or SNAKE_CASE) is a secret word, or a hash/digest
+// word qualified by one ("sessionTokenHash"). A literal on either side
+// (`token === ""`, `typeof x === "string"`) is a shape check, not a match.
+const kSecretWords = new Set([
+  "token",
+  "secret",
+  "password",
+  "passwd",
+  "signature",
+  "hmac",
+  "bearer",
+  "credential",
+  "cookie",
+  "apikey",
+]);
+const kDigestWords = new Set(["hash", "digest"]);
+const kTimingSafeHelperFile = "lib/server/utils/timing-safe.js";
+const kCompareOperatorRe = /(!==|===|!=|==)/g;
+const kLeftOperandRe = /([A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*|\(\s*\))*)\s*$/;
+const kRightOperandRe = /^\s*(["'`]|-?\d|[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*|\(\s*\))*)/;
+const kLiteralWords = new Set(["null", "undefined", "true", "false", "NaN"]);
+const kDirectTimingSafeEqualRe = /\btimingSafeEqual\s*\(/g;
+
+const identifierWords = (name) =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .split(/[\s_$]+/)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase());
+
+const isSecretName = (operand) => {
+  const name = operand.replace(/\(\s*\)$/, "").match(/[\w$]+$/)?.[0] || "";
+  const words = identifierWords(name);
+  const last = words.at(-1);
+  if (!last) return false;
+  if (kSecretWords.has(last)) return true;
+  if (last === "key" && words.at(-2) === "api") return true;
+  return (
+    kDigestWords.has(last) &&
+    words.slice(0, -1).some((word) => kSecretWords.has(word) || word === "session")
+  );
+};
+
+const isLiteralOperand = (operand) =>
+  /^["'`]|^-?\d/.test(operand) || kLiteralWords.has(operand);
+
+const scanSecretCompares = (rawText, relPath) => {
+  if (relPath === kTimingSafeHelperFile) return [];
+  const text = stripComments(rawText);
+  const hits = [];
+  const ordinals = new Map();
+  const push = (index, label) => {
+    const n = (ordinals.get(label) || 0) + 1;
+    ordinals.set(label, n);
+    hits.push({
+      key: `${relPath}::${label}${n > 1 ? `#${n}` : ""}`,
+      file: relPath,
+      line: lineOf(text, index),
+    });
+  };
+  for (const m of text.matchAll(kCompareOperatorRe)) {
+    const left = text.slice(Math.max(0, m.index - 200), m.index).match(kLeftOperandRe)?.[1];
+    const right = text.slice(m.index + m[0].length, m.index + m[0].length + 200).match(kRightOperandRe)?.[1];
+    if (!left || !right) continue;
+    if (isLiteralOperand(left) || isLiteralOperand(right)) continue;
+    if (!isSecretName(left) && !isSecretName(right)) continue;
+    push(m.index, `${left.replace(/\s+/g, "")} ${m[0]} ${right.replace(/\s+/g, "")}`);
+  }
+  for (const m of text.matchAll(kDirectTimingSafeEqualRe)) {
+    push(m.index, "crypto.timingSafeEqual");
+  }
+  return hits;
+};
+
 module.exports = {
   scanConfigWriters,
   scanShellStrings,
   scanUnwrappedAsyncRoutes,
   scanUiIntervals,
+  scanSecretCompares,
 };

@@ -4,6 +4,7 @@ const request = require("supertest");
 const {
   kControlUiAttachCookie,
   computeAttachMarker,
+  hasCurrentAttachMarker,
   createControlUiAttachRedirect,
   isControlUiDocumentNavigation,
   resolveAttachTarget,
@@ -54,6 +55,21 @@ describe("control-ui-attach: the redirect decision", () => {
     const stale = `${kControlUiAttachCookie}=${computeAttachMarker("old-session.sig")}`;
     const req = navReq({ headers: { ...kNavigate, cookie: sessionCookie(stale) } });
     expect(decide()(req)).toMatch(/^\/gateway\/attach\?to=/);
+  });
+
+  it("accepts only this session's exact marker: truncated, extended, altered and empty markers do not count", () => {
+    const marker = computeAttachMarker(kSession);
+    const withMarker = (value, session = sessionCookie()) => ({
+      headers: { cookie: `${session}; ${kControlUiAttachCookie}=${value}` },
+    });
+    expect(hasCurrentAttachMarker(withMarker(marker))).toBe(true);
+    const altered = `${marker.slice(0, -1)}${marker.endsWith("A") ? "B" : "A"}`;
+    for (const value of [marker.slice(0, -1), `${marker}A`, altered, ""]) {
+      expect(hasCurrentAttachMarker(withMarker(value)), value).toBe(false);
+    }
+    expect(hasCurrentAttachMarker({ headers: { cookie: sessionCookie() } })).toBe(false);
+    expect(hasCurrentAttachMarker(withMarker(marker, "setup_token="))).toBe(false);
+    expect(hasCurrentAttachMarker(withMarker("", "setup_token="))).toBe(false);
   });
 
   it("leaves subresources, fetches, iframes, WebSocket upgrades and non-GETs alone", () => {

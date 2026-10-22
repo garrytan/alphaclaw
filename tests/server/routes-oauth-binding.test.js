@@ -272,6 +272,27 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("session binding compares in constant time: a longer, shorter or one-byte-different session cannot complete the flow", async () => {
+    const { app, tmpDir } = buildGoogleApp();
+    const crypto = require("crypto");
+    const fetchCalls = [];
+    global.fetch = async (url) => {
+      fetchCalls.push(String(url));
+      return { ok: false, json: async () => ({ error: "stub" }) };
+    };
+    const spy = vi.spyOn(crypto, "timingSafeEqual");
+    for (const other of ["session-tokenX", "session-toke", "session-tokem"]) {
+      const state = await startFlow(app, { cookie: "setup_token=session-token" });
+      const res = await request(app)
+        .get(`/auth/google/callback?code=c&state=${state}`)
+        .set("Cookie", `setup_token=${other}`);
+      expect(res.text, other).toContain("started from this dashboard");
+    }
+    expect(fetchCalls.length).toBe(0);
+    expect(spy).toHaveBeenCalled();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("stages the refresh token in a private mkdtemp file, never a predictable /tmp path (H14)", async () => {
     const { app, tmpDir } = buildGoogleApp();
     const state = await startFlow(app);

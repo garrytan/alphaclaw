@@ -1009,17 +1009,18 @@
 - **Context:** `lib/server/claude-code-local/index.js` — rotate = replace `session.linkToken` + `persistSession()` under `runExclusive`; the resolver picks up the new token immediately. Re-notify via the existing notification-line hook. Deferred from the rescue-link CEO review (2026-09-01, D3.5).
 - **Effort:** M (service + route + card button + tests). **Depends on:** the rescue-link capability wrapper (v0.9.66).
 
-## P3 — Migrate the timing-safe comparison sites onto lib/server/utils/timing-safe.js
-- **What:** Move the four existing timing-safe comparisons (`routes/auth.js:92-96` `timingSafeStringEqual` and `:476-481` `timingSafeTokenEqual`, `routes/proxy.js:47-54`, `db/auth/members.js:55-63` — two distinct semantics today: length-short-circuit vs hash-both-sides) and the non-timing-safe `!==` in `gmail-push.js:140` onto the shared hash-both-sides util shipped in v0.9.66. Only `lib/server/claude-code-local/index.js:34` consumes the util so far.
-- **Why:** One canonical, length-leak-free comparator instead of five variants; gmail-push's plain `!==` is the outlier that should not exist on a token check.
-- **Context:** `lib/server/utils/timing-safe.js` carries the canonical semantic (from `routes/auth.js:476-481` `timingSafeTokenEqual`). Deliberately NOT done in the rescue-link PR (blast-radius discipline per CLAUDE.md merge rules — security-sensitive comparison code across auth/proxy/members belongs in its own reviewed diff).
-- **Effort:** S. **Depends on:** nothing (util already shipped).
-
 ## P3 — Hermetic tests still execute the real `gog` binary when the host has one (2026-09-03, from the #54 ship pass)
 
 Under `npm test`, a burst of ~20 `gog` invocations per run was traced (via the orphaned `dbus-daemon` env: `_=/usr/local/bin/gog`, `VITEST_WORKER_ID` set) to tests that reach `gogCmd`/`exec("gog …")` without a child_process mock; the run env now blocks the session-bus autolaunch so nothing leaks, but the tests remain host-dependent (slower and different on a box with `gog` installed). Fix: a `tests/setup-*` PATH stub directory with a fail-fast `gog` shim, or mocks at the call sites (`routes/google.js`, `routes/gmail.js`, `gmail-watch.js`, `server.js` boot paths).
 
 ## Completed
+
+## ~~P3 — Migrate the timing-safe comparison sites onto lib/server/utils/timing-safe.js~~
+- **Completed (v0.10.18, 2026-10-21):** Every site now calls `timingSafeStringEqual` (sha256 both sides; non-empty strings only): Gmail push, setup password, legacy and member session signatures, agent bearer, `/v1` gateway bearer, member password verification, the Control UI attach marker and the Google OAuth session binding. `tests/server/guards/secret-compare.guard.test.js` fails CI on a new raw secret comparison or a direct `crypto.timingSafeEqual` outside the helper.
+- **What:** Move the four existing timing-safe comparisons (`routes/auth.js:92-96` `timingSafeStringEqual` and `:476-481` `timingSafeTokenEqual`, `routes/proxy.js:47-54`, `db/auth/members.js:55-63` — two distinct semantics today: length-short-circuit vs hash-both-sides) and the non-timing-safe `!==` in `gmail-push.js:140` onto the shared hash-both-sides util shipped in v0.9.66. Only `lib/server/claude-code-local/index.js:34` consumes the util so far.
+- **Why:** One canonical, length-leak-free comparator instead of five variants; gmail-push's plain `!==` is the outlier that should not exist on a token check.
+- **Context:** `lib/server/utils/timing-safe.js` carries the canonical semantic (from `routes/auth.js:476-481` `timingSafeTokenEqual`). Deliberately NOT done in the rescue-link PR (blast-radius discipline per CLAUDE.md merge rules — security-sensitive comparison code across auth/proxy/members belongs in its own reviewed diff).
+- **Effort:** S. **Depends on:** nothing (util already shipped).
 
 ## ~~P3 — Freshness bound for overseer notices in the durable outbox (2026-09-11, from the #87 Codex review, T-h)~~
 - **Completed (reliability wave, 2026-09-15):** Overseer notices retain one sixty-minute deadline across quiet holds, direct delivery, retries, fallback, restart, pruning and revival. Source records persist the deadline; expiry retains partial counts and retries failed audits without resending. Verified with the notification-expiry, outbox, SQLite, notifier and overseer suites (368 focused tests). Other notification classes retain their 48-hour policy. See [reliability ownership](docs/designs/reliability-ownership.md#gmail-intent-and-notification-deadlines).

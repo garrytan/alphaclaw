@@ -164,6 +164,27 @@ describe("server/routes/proxy OpenAI compatibility", () => {
     expect(upstreamCalls).toBe(0);
   });
 
+  it("refuses wrong-length and same-length wrong bearers without reaching the gateway", async () => {
+    let upstreamCalls = 0;
+    upstream = http.createServer((_req, res) => {
+      upstreamCalls += 1;
+      res.statusCode = 200;
+      res.end("{}");
+    });
+    const port = await listen(upstream);
+    const app = createApp({ gatewayUrl: `http://127.0.0.1:${port}` });
+
+    for (const bearer of ["gateway", "gateway-token-extra", "gateway-tokem"]) {
+      const res = await request(app)
+        .post("/v1/chat/completions")
+        .set("Authorization", `Bearer ${bearer}`)
+        .send({ model: "openclaw/default", stream: true });
+      expect(res.status, bearer).toBe(401);
+      expect(res.body).toEqual({ error: "Unauthorized" });
+    }
+    expect(upstreamCalls).toBe(0);
+  });
+
   it("rejects /v1 requests when no gateway token is configured", async () => {
     let upstreamCalls = 0;
     upstream = http.createServer((_req, res) => {

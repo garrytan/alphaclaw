@@ -491,6 +491,21 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("a v2 token whose signature is truncated, extended, altered or empty is rejected", async () => {
+    createAdmin();
+    const login = await loginMember("admin@example.com", "admin password");
+    const token = cookieOf(login).replace("setup_token=", "");
+    const parts = token.split(".");
+    const signature = parts[3];
+    const altered = `${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`;
+    for (const sig of [signature.slice(0, -1), `${signature}A`, altered, ""]) {
+      const forged = [...parts.slice(0, 3), sig].join(".");
+      const res = await request(app).get("/api/status").set("Cookie", `setup_token=${forged}`);
+      expect(res.status, sig).toBe(401);
+    }
+    expect((await request(app).get("/api/status").set("Cookie", `setup_token=${token}`)).status).toBe(200);
+  });
+
   describe("resolveProxyIdentity (4.3 proxy-boundary identity)", () => {
     // Raw upgrade-style request: only a cookie header, no Express middleware.
     const rawRequest = (cookie) => ({ headers: { cookie } });

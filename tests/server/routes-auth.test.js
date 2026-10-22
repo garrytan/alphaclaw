@@ -159,6 +159,30 @@ describe("server/routes/auth", () => {
     expect(protectedRes.body).toEqual({ error: "Unauthorized" });
   });
 
+  it("refuses wrong-length, same-length, empty and non-string setup passwords", async () => {
+    const { app, throttle } = createTestApp({ setupPassword: "secret" });
+    for (const password of ["secre", "secret!", "secrex", "", " ", ["secret"]]) {
+      const res = await request(app).post("/api/auth/login").send({ password });
+      expect(res.status, JSON.stringify(password)).toBe(401);
+    }
+    expect(throttle.recordLoginFailure).toHaveBeenCalledTimes(6);
+    expect((await request(app).post("/api/auth/login").send({ password: "secret" })).status).toBe(200);
+  });
+
+  it("refuses a session cookie whose signature is truncated, extended, altered or empty", async () => {
+    const { app } = createTestApp({ setupPassword: "secret" });
+    const cookie = await loginCookie(app, "secret");
+    const [payload, signature] = cookie.replace("setup_token=", "").split(".");
+    const flipped = `${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`;
+    for (const sig of [signature.slice(0, -1), `${signature}A`, flipped, ""]) {
+      const res = await request(app)
+        .get("/api/protected")
+        .set("Cookie", `setup_token=${payload}.${sig}`);
+      expect(res.status, sig).toBe(401);
+    }
+    expect((await request(app).get("/api/protected").set("Cookie", cookie)).status).toBe(200);
+  });
+
   it("rejects a correctly signed token whose payload is not JSON", async () => {
     const { app } = createTestApp({ setupPassword: "secret" });
     const payload = Buffer.from("definitely-not-json").toString("base64url");

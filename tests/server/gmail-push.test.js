@@ -270,6 +270,42 @@ describe("server/gmail-push handler guards", () => {
     expect(proxy).not.toHaveBeenCalled();
   });
 
+  it("compares the push token in constant time: wrong length, same length, empty and array tokens are refused", async () => {
+    const crypto = require("crypto");
+    const spy = vi.spyOn(crypto, "timingSafeEqual");
+    const proxy = vi.fn(async () => ({ statusCode: 200, body: "ok" }));
+    const handler = createGmailPushHandler({
+      resolvePushToken: () => "push-secret-0123",
+      resolveTargetByEmail: () => ({ accountId: "a", port: 1 }),
+      markPushReceived: vi.fn(),
+      proxyPushToServeImpl: proxy,
+    });
+    const send = async (query) => {
+      const res = createMockResponse();
+      await handler(
+        { query, headers: {}, body: encodeEnvelope({ emailAddress: "x@y.com", historyId: "1" }) },
+        res,
+      );
+      return res;
+    };
+    for (const token of ["push", "push-secret-0123-and-more", "push-secret-0124", "", "   ", ["push-secret-0123"]]) {
+      const res = await send({ token });
+      expect(res.statusCode, JSON.stringify(token)).toBe(401);
+      expect(res.body).toEqual({ ok: false, error: "Invalid push token" });
+    }
+    expect(proxy).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalled();
+    for (const [left, right] of spy.mock.calls) {
+      expect(left).toHaveLength(32);
+      expect(right).toHaveLength(32);
+    }
+    spy.mockRestore();
+
+    const ok = await send({ token: " push-secret-0123 " });
+    expect(ok.statusCode).toBe(200);
+    expect(proxy).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores envelopes without an email address", async () => {
     const handler = createGmailPushHandler({
       resolvePushToken: () => "secret",

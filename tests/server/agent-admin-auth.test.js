@@ -45,7 +45,7 @@ const createApp = ({
   app.get("/ws-style", (req, res) =>
     res.json({ ok: registered.isAuthorizedRequest(req, { allowBearer: false }) }),
   );
-  return { app, agentAdmin, login };
+  return { app, agentAdmin, login, registered };
 };
 
 describe("agent-admin bearer auth", () => {
@@ -89,6 +89,37 @@ describe("agent-admin bearer auth", () => {
       .set("Authorization", `Bearer ${kToken}`);
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("agent_admin_unavailable");
+  });
+
+  it("refuses a same-length wrong bearer, a longer bearer and an empty stored token", async () => {
+    const { app } = createApp({ storedToken: kToken });
+    for (const bearer of ["b".repeat(64), `${kToken}a`, kToken.slice(0, -1)]) {
+      const res = await request(app)
+        .get("/api/protected")
+        .set("Authorization", `Bearer ${bearer}`);
+      expect(res.status, bearer).toBe(401);
+      expect(res.body.code).toBe("unauthorized");
+    }
+    const empty = createApp({ storedToken: "" });
+    const res = await request(empty.app)
+      .get("/api/protected")
+      .set("Authorization", `Bearer ${kToken}`);
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("agent_admin_unavailable");
+  });
+
+  it("isAuthorizedRequest's opt-in bearer check refuses wrong-length, same-length and empty bearers", () => {
+    const { registered } = createApp({ storedToken: kToken });
+    const check = (authorization) =>
+      registered.isAuthorizedRequest({ headers: { authorization } }, { allowBearer: true });
+    expect(check(`Bearer ${kToken}`)).toBe(true);
+    for (const authorization of ["Bearer short", `Bearer ${kToken}a`, `Bearer ${"b".repeat(64)}`, "Bearer ", ""]) {
+      expect(check(authorization), authorization).toBe(false);
+    }
+    const empty = createApp({ storedToken: "" });
+    expect(
+      empty.registered.isAuthorizedRequest({ headers: { authorization: "Bearer x" } }, { allowBearer: true }),
+    ).toBe(false);
   });
 
   it("does not throw on a length-mismatched token (sha256 before compare)", async () => {

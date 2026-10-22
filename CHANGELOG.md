@@ -5,6 +5,29 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.18] - 2026-10-21
+
+Constant-time secret comparisons everywhere (TODOS "Migrate the timing-safe
+comparison sites").
+
+### Security
+
+- **Every secret comparison now goes through one helper.**
+  `timingSafeStringEqual` in `lib/server/utils/timing-safe.js` hashes both
+  sides with sha256 and compares the digests with `crypto.timingSafeEqual`,
+  so neither timing nor the expected value's length leaks. Only non-empty
+  strings can match. The Gmail push endpoint compared its token with `!==`;
+  it now uses the helper and refuses a non-string `token` query value.
+  The setup password, legacy and member session signatures, and the
+  `/v1` gateway bearer used a length short-circuit that revealed the
+  secret's length. Those moved too, along with the agent-admin bearer, member
+  password verification, the Control UI attach marker and the Google OAuth
+  session binding.
+- **New guard: `tests/server/guards/secret-compare.guard.test.js`.** CI fails on
+  a new raw `===`/`!==` against a secret-named value, or a direct
+  `crypto.timingSafeEqual` call outside the helper. Comparisons that never
+  check a caller-supplied value against a secret are allowlisted with a reason.
+
 ## [0.10.17] - 2026-10-21
 
 Garry's call on the GPT-5.6 Ultra catalog row.

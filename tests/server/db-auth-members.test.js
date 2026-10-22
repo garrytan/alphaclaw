@@ -58,6 +58,23 @@ describe("server/db/auth members store (4.1)", () => {
     ).toBeNull();
   });
 
+  it("refuses empty, near-miss and different-length passwords, and a corrupt stored hash, without throwing", () => {
+    createOwner();
+    const verify = (password) =>
+      store.verifyMemberPassword({ email: "owner@example.com", password });
+    for (const password of ["", "correct horse batter", "correct horse battery!", "correct horse batterx", undefined]) {
+      expect(verify(password), String(password)).toBeNull();
+    }
+    expect(verify("correct horse battery")).not.toBeNull();
+
+    for (const corrupt of ["", "abcd", "zz"]) {
+      getAuthDb()
+        .prepare("UPDATE members SET password_hash = $hash WHERE email = $email")
+        .run({ $hash: corrupt, $email: "owner@example.com" });
+      expect(verify("correct horse battery"), corrupt).toBeNull();
+    }
+  });
+
   it("rejects duplicate emails (case-insensitive), bad emails, weak passwords", () => {
     createOwner();
     expect(() =>
