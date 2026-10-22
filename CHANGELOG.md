@@ -5,12 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.63] - 2026-10-22
+## [0.10.64] - 2026-10-22
 
 Team access can be enabled again on OpenClaw 2026.10.6: the enable no longer rolls itself back with "gateway rejected the credential (HTTP 403)" (ALPH-20, found on a real deploy).
 
 ### Fixed
 - The identity-handshake probe that verifies a team enable (and the Team page's cached identity check) now sends `X-Forwarded-For` with a documentation address (`192.0.2.1`, RFC 5737) beside the `x-alphaclaw-user` header (`probeIdentityHandshake` in `lib/server/team-auth-transition.js`). OpenClaw 2026.10 attributes proxy-shaped traffic before trusted-proxy auth: an identity header from a loopback source with no forwarded client address, or a loopback one, gets 403 `proxy_attribution_required`. The probe read that as a rejected credential, so every enable restored the previous token auth. The real proxy path already forwards the member's client IP (`applyProxyIdentity`), so only the probe changes. An unknown user is still refused with 401, so the probe still tells a working handshake from a broken one.
+
+## [0.10.62] - 2026-10-22
+
+Typing a `/openclaw/…` address opens the Control UI signed in on a plain-HTTP origin too, such as a VPS reached by IP (ALPH-20, found by the black-box Control UI run on a real VM).
+
+### Fixed
+- A signed-in admin who typed `http://<ip>:<port>/openclaw/chat` (or opened a deep link, or reloaded) got "This Gateway expects its token", while the dashboard's **Open** button worked. The once-per-session `/gateway/attach` detour (v0.10.15) recognized a top-level navigation only by its Fetch Metadata headers, and browsers send Fetch Metadata only to secure origins. A request with no Fetch Metadata now counts as a document navigation when it carries what browsers send on navigations to any origin: `Upgrade-Insecure-Requests: 1` and an `Accept` that leads with `text/html`. Requests that do carry Fetch Metadata are judged exactly as before, and the token is still fetched only by the same-origin, custom-header `POST /gateway/attach`. Verified on a real deploy: direct open, reload and deep link by raw IP now connect and chat.
+
+## [0.10.61] - 2026-10-22
+
+A freshly onboarded install can start chatting from the Chat tab: the sidebar offers the default agent's main session before any turn has run (ALPH-20, found by the black-box onboarding run on a real VM).
+
+### Fixed
+- After the setup wizard finished, the Chat tab showed "No sessions found" and "Select a session to start" with nothing to select, because OpenClaw creates a session only on its first turn and the sidebar lists only sessions that exist. The only way out was a first message from the Control UI. `GET /api/agent/sessions` now returns one starter row, `agent:<default agent>:main` (the configured default agent, else `main`), when the list is empty and onboarding is complete; OpenClaw creates the session on the first message. The row has no session id and is not deliverable, it is never cached in place of the first real list, and `POST /api/agent/message` resolves it like any listed session. Before onboarding the list stays empty.
 
 ## [0.10.60] - 2026-10-22
 

@@ -2288,6 +2288,7 @@ describe("server/routes/system", () => {
 
   it("tolerates noisy or empty sessions CLI output", async () => {
     const deps = createSystemDeps();
+    deps.isOnboarded.mockReturnValue(false);
     const app = createApp(deps);
 
     deps.clawCmd.mockResolvedValueOnce({ ok: true, stdout: "" });
@@ -2340,6 +2341,57 @@ describe("server/routes/system", () => {
         channel: "slack",
       }),
     ]);
+  });
+
+  it("offers the default agent's main session when an onboarded install has none yet", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValue({ ok: true, stdout: JSON.stringify({ sessions: [] }) });
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/agent/sessions");
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessions).toEqual([
+      expect.objectContaining({
+        key: "agent:main:main",
+        agentId: "main",
+        agentLabel: "Main Agent",
+        sessionId: "",
+        deliverable: false,
+      }),
+    ]);
+
+    deps.clawCmd.mockResolvedValue({ ok: true, stdout: "queued" });
+    const sendRes = await request(app)
+      .post("/api/agent/message")
+      .send({ message: "hello", sessionKey: "agent:main:main" });
+    expect(sendRes.status).toBe(200);
+    expect(deps.clawCmd).toHaveBeenLastCalledWith("agent --agent main --message 'hello'", { quiet: true });
+  });
+
+  it("names the configured default agent in the starter session and offers none before onboarding", async () => {
+    const deps = createSystemDeps();
+    deps.fs.readFileSync.mockImplementation((targetPath) => {
+      if (targetPath === "/tmp/openclaw/openclaw.json") {
+        return JSON.stringify({
+          agents: {
+            ownership: "explicit",
+            defaults: { systemAgent: { agentId: "ops" } },
+            entries: { main: {}, ops: { name: "Ops" } },
+          },
+        });
+      }
+      throw new Error(`unexpected read: ${targetPath}`);
+    });
+    deps.clawCmd.mockResolvedValue({ ok: true, stdout: JSON.stringify({ sessions: [] }) });
+    const app = createApp(deps);
+
+    const res = await request(app).get("/api/agent/sessions");
+    expect(res.body.sessions.map((row) => [row.key, row.agentId])).toEqual([["agent:ops:main", "ops"]]);
+
+    deps.isOnboarded.mockReturnValue(false);
+    const preOnboarding = await request(app).get("/api/agent/sessions");
+    expect(preOnboarding.body.sessions).toEqual([]);
   });
 
   it("labels sessions from configured agents and tolerates topic lookup failures", async () => {
@@ -4049,6 +4101,7 @@ describe("server/routes/system agent-sessions micro-cache", () => {
 
   it("never caches an empty list (pre-onboarding must see the first session appear)", async () => {
     const deps = createSystemDeps();
+    deps.isOnboarded.mockReturnValue(false);
     deps.clawCmd.mockResolvedValueOnce({ ok: true, stdout: "{}" });
     deps.clawCmd.mockResolvedValueOnce({
       ok: true,
@@ -4062,6 +4115,23 @@ describe("server/routes/system agent-sessions micro-cache", () => {
     expect(empty.body.sessions).toEqual([]);
     const fresh = await request(app).get("/api/agent/sessions");
     expect(fresh.body.sessions).toHaveLength(1);
+  });
+
+  it("never caches the starter session in place of the first real one", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValueOnce({ ok: true, stdout: "{}" });
+    deps.clawCmd.mockResolvedValueOnce({
+      ok: true,
+      stdout: JSON.stringify({
+        sessions: [{ key: "agent:main:main", sessionId: "s1", updatedAt: 5 }],
+      }),
+    });
+    const app = createCachingApp(deps);
+
+    const starter = await request(app).get("/api/agent/sessions");
+    expect(starter.body.sessions.map((row) => [row.key, row.sessionId])).toEqual([["agent:main:main", ""]]);
+    const fresh = await request(app).get("/api/agent/sessions");
+    expect(fresh.body.sessions.map((row) => [row.key, row.sessionId])).toEqual([["agent:main:main", "s1"]]);
   });
 });
 
