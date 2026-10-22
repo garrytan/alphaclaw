@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.42] - 2026-10-22
+
+Capabilities and features API answers become constants on the pinned OpenClaw (refactor plan PR 16a, ALPH-15).
+
+### Changed
+- `GET /api/openclaw/capabilities` answers the pinned constants with the same ten keys and value shapes, so a cold read spawns 0 CLIs instead of up to 10 sequential `openclaw` probes (each checked against the pinned 2026.10.4 CLI). A wedged or timing-out CLI no longer reports Buzz, Team or ClickClack codes as unavailable. The TTL and CLI-unavailable suppression machinery is gone, and the capability layer no longer spawns `openclaw --version`: it reads the installed version from the runtime info.
+- The Doctor CLI availability tracker no longer gets "unavailable" records from capability probes; it keeps hearing from real Doctor CLI runs.
+- `GET /api/openclaw/features` answers `true` for every gate whatever the version read returns (keys kept). An unreadable or diverged install is surfaced by the pin warning on status, General and Doctor instead of silently selecting pre-2026.8 behavior.
+- Internal consumers are unchanged until PR 16b: the state era keeps its version evidence and `execApprovalsSqlite` probe, `routes/nodes.js` keeps its `execApprovalsCli` probe, and the Doctor context profile keeps `supportsFeature("bootstrapContractV2")`.
+- The Team route reads the one `trustedProxyTeam` capability instead of the whole map.
+- Setup UI: the Team tab's "needs OpenClaw 2026.8" upsell card and the ClickClack setup-URL-only copy are removed; ClickClack always offers code-or-URL paste and the edit-mode toggles.
+
 ## [0.10.41] - 2026-10-22
 
 `lib/server.js` joins the async-route guard, its last unwrapped route moves into a route module, and the Doctor's character counts use the shared en-US formatter (refactor plan PR 15b, ALPH-15). The shell-strings guard also learns the CLI wrapper calls it could not see.

@@ -186,14 +186,14 @@ describe("frontend/create-channel-modal clickclack (5.1/5.3/D15)", () => {
     ).toBeTruthy();
   });
 
-  it("falls back to setup-URL-only copy when the beta code flow is unsupported", () => {
+  it("offers codes and URLs without reading capabilities (no URL-only branch)", () => {
     kCapsState.payload = { capabilities: { clickclackGuidedSetup: false } };
     const tree = mount();
     const text = collectText(tree).join(" ");
-    expect(text).toContain("ClickClack setup URL");
-    expect(text).toContain("Raw setup codes need OpenClaw 2026.8+");
+    expect(text).toContain("ClickClack setup code or URL");
+    expect(text).not.toContain("Raw setup codes need");
     expect(
-      findSecretInputByPlaceholder(tree, "Paste the setup URL"),
+      findSecretInputByPlaceholder(tree, "Paste the code or URL"),
     ).toBeTruthy();
   });
 
