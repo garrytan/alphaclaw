@@ -33,12 +33,33 @@ describe("server/openclaw-feature-gates", () => {
     expect(throwing.supportsFeature("supervisorMode")).toBe(false);
   });
 
-  it("features() maps every declared gate", () => {
-    const { version, features } = gatesFor("2026.8.1-beta.2").features();
+  it("versionFeatures() maps every declared gate", () => {
+    const { version, features } = gatesFor("2026.8.1-beta.2").versionFeatures();
     expect(version).toBe("2026.8.1-beta.2");
     expect(Object.keys(features).sort()).toEqual(
       Object.keys(kFeatureMinVersions).sort(),
     );
     expect(features.supervisorMode).toBe(true);
+    expect(features.execApprovalsSqlite).toBe(false);
+  });
+
+  it("features() answers every gate true on any version read, keeping the keys", () => {
+    for (const version of ["2026.10.4", "2026.7.1-2", "a1b2c3d", null]) {
+      const answer = gatesFor(version).features();
+      expect(Object.keys(answer.features).sort()).toEqual(Object.keys(kFeatureMinVersions).sort());
+      expect(Object.values(answer.features).every((v) => v === true)).toBe(true);
+    }
+    expect(gatesFor("2026.10.4").features().version).toBe("2026.10.4");
+    expect(gatesFor("a1b2c3d").features().version).toBe(null);
+    const throwing = createFeatureGates({
+      getInstalledVersion: () => {
+        throw new Error("unreadable");
+      },
+    });
+    expect(throwing.features()).toEqual({
+      version: null,
+      features: Object.fromEntries(Object.keys(kFeatureMinVersions).map((k) => [k, true])),
+    });
+    expect(throwing.versionFeatures().features.sessionDashboards).toBe(false);
   });
 });

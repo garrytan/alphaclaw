@@ -154,7 +154,7 @@ describe("server/routes/team (4.5)", () => {
         markRequired: (reason) => restartReasons.push(reason),
       },
       openclawCapabilities: {
-        getAll: () => capabilityProbe(),
+        get: async (key) => (await capabilityProbe())[key],
       },
       insertWatchdogEvent: (event) => auditEvents.push(event),
       resolveSetupUrl: () => "https://claw.example.com/",

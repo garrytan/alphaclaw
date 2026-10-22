@@ -51,6 +51,11 @@ import {
   __resetForTests,
   useOpenclawFeatures,
 } from "../../lib/public/js/hooks/use-openclaw-features.js";
+import {
+  buildNavSections,
+  kDashboardsNavItem,
+  kNavSections,
+} from "../../lib/public/js/lib/app-navigation.js";
 
 const harness = preactHooks.__harness;
 
@@ -117,6 +122,26 @@ describe("frontend/use-openclaw-features hook", () => {
     expect(consumer.loading).toBe(false);
     expect(consumer.features).toEqual({});
     expect(consumer.version).toBe(null);
+  });
+
+  it("a failed features fetch leaves the nav at its base sections, a constant map opens Dashboards", async () => {
+    api.fetchOpenclawFeatures.mockRejectedValue(new Error("gateway down"));
+    renderConsumers(1);
+    await runEffects();
+    const [failed] = renderConsumers(1);
+    expect(buildNavSections({ features: failed.features })).toBe(kNavSections);
+
+    harness.reset();
+    __resetForTests();
+    api.fetchOpenclawFeatures.mockResolvedValue({
+      version: null,
+      features: { sessionDashboards: true, bootstrapContractV2: true },
+    });
+    renderConsumers(1);
+    await runEffects();
+    const [loaded] = renderConsumers(1);
+    const items = buildNavSections({ features: loaded.features }).flatMap((section) => section.items);
+    expect(items).toContain(kDashboardsNavItem);
   });
 
   it("does not fetch at all when disabled", async () => {

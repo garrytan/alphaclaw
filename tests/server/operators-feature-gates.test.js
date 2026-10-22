@@ -120,8 +120,8 @@ describe("server/openclaw-feature-gates", () => {
     expect(throwing.supportsFeature("multiUser")).toBe(false);
   });
 
-  it("features() maps every known feature", () => {
-    const { features, version } = gatesFor("2026.8.1-beta.3").features();
+  it("versionFeatures() maps every known feature", () => {
+    const { features, version } = gatesFor("2026.8.1-beta.3").versionFeatures();
     expect(version).toBe("2026.8.1-beta.3");
     expect(Object.keys(features).sort()).toEqual(
       Object.keys(kFeatureMinVersions).sort(),
