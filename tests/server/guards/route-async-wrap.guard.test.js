@@ -5,9 +5,6 @@
 const { auditTree, formatHits } = require("./guard-utils");
 const { scanUnwrappedAsyncRoutes } = require("./scanners");
 
-// PR 2a (the wrapAsync sweep) drives this list to zero. Until then every
-// entry is a known unwrapped async handler: a throw before res.json hangs the
-// request and lands as an unhandledRejection.
 // PR 2a (the wrapAsync sweep) drove this list to zero: every async route
 // handler in lib/server goes through wrapAsync. Keep it empty.
 const kKnownOffenders = {};
