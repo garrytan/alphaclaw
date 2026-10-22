@@ -326,6 +326,43 @@ View logs for the `stop_failed survivors=` line — a survivor with
 `verdict=unknown` means `/proc` could not be read for that pid, a
 `verdict=alive` survivor after SIGKILL is a kernel-stuck process.
 
+## A session may be stuck after the gateway restarted
+
+**What it means:** after a gateway relaunch (an AlphaClaw restart, a crash or
+OOM relaunch, a boot) the watchdog sent "⚠️ A session may be stuck after the
+gateway restarted" and the Watchdog tab has a `session_wedge` event with
+status `alerted` (v0.10.58). The log line is
+`[alphaclaw] wedge-sweep alerted session=<key> reason=not_resumed|recovery_gave_up`.
+
+**Why it happens:** a turn that was running when the gateway stopped is marked
+interrupted, and OpenClaw's recovery owner normally resumes it after the
+relaunch (2026.10.5+; on 10.4 a killed turn could leave the session refusing
+every new message, the Oct 18 and Oct 22 incidents). One case is still open
+upstream: a channel session whose interrupted turn is never resumed keeps
+refusing new messages ("This conversation changed before your message could
+start"). After every launch, once the new gateway is ready + 90 s, AlphaClaw
+checks the sessions that were running when the restart was requested (or,
+after a crash, sessions active in the 15 minutes before the launch) through
+OpenClaw's own `sessions.list`:
+
+| what it sees | what it does |
+| --- | --- |
+| live work on the session | nothing |
+| idle, not marked interrupted, was running before the restart | `sessions.recover` — OpenClaw decides whether the session holds an orphaned claim; if it does, it resumes the turn in the same session (`session_wedge` `recovered`), otherwise it answers "nothing to recover" and nothing is logged |
+| still marked interrupted (`abortedLastRun`) | alert: `not_resumed` |
+| restart recovery gave up (`restartRecoveryStatus: tombstoned`) | alert: `recovery_gave_up` |
+
+AlphaClaw never resets a session (that drops its context), never reads
+OpenClaw's SQLite files and never posts into the session's own chat; the alert
+goes to the watchdog's admin targets. Each session is alerted once per state.
+
+**What to do:** open the session in the Control UI and send a message (on
+2026.10.5+ a Control UI send reconciles an orphaned claim first). If it still
+refuses, start over in that chat with `/new`, which drops the conversation's
+context. For a `recovery_gave_up` session,
+`openclaw gateway call sessions.recover --params '{"key":"<key>"}' --json`
+continues it in a new session.
+
 ## Restart failed: the old gateway stopped, but OpenClaw didn't start / wasn't ready
 
 **What it means:** `code: "launch_failed"` — the new `gateway run` exited
