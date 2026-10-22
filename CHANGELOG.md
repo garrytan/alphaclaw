@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.51] - 2026-10-22
+
+The watchdog unit tests no longer depend on which pids happen to be alive on the machine running them (test-only, ALPH-17).
+
+### Changed
+- The harnesses in `watchdog.test.js`, `watchdog-crash-recovery.test.js` and `watchdog-restart-failure.test.js` hand the watchdog fake pids (100, 4242, ...) but fell back to the production liveness seams unless a test passed its own, so a real process owning one of those pids could make a fake gateway look alive. Each harness now injects `pidAlive`, `readProcStartTicks` and `resolvePidVerdict` unconditionally, defaulting to "no fixture pid is a real process". With every production liveness default forced to "alive", the full hermetic suite still passes (542 files, 8535 tests).
+- New guard `tests/server/guards/watchdog-hermetic-pids.guard.test.js` fails CI if any of those harnesses stops injecting one of the three seams.
+
 ## [0.10.50] - 2026-10-22
 
 A tool process the gateway starts can no longer make the gateway look like it is leaking, so it can no longer trigger a gateway restart (ALPH-17, PR 2 of the restart plan).

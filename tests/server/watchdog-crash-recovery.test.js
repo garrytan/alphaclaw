@@ -31,6 +31,10 @@ describe("watchdog retained crash recovery", () => {
       resolveGatewayHealthUrl: () => "http://127.0.0.1:18789/health",
       resolveGatewayReadyzUrl: () => "",
       supervisorModeActive: () => false,
+      // Hermetic process table: pid 100/4242 are fake, never real processes.
+      pidAlive: () => false,
+      readProcStartTicks: () => null,
+      resolvePidVerdict: () => "gone",
       ...options,
     });
     watchdog.onGatewayLaunch({ startedAt: Date.now() - 60_000, pid: 100, generation: 1 });
