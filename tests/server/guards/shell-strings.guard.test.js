@@ -16,6 +16,23 @@ const kKnownOffenders = {
   // clawCmd spawns `/bin/sh -c` itself (own process group for timeout kills).
   "lib/server/commands.js::sh -c <non-literal>": "intentional: the shell wrapper itself",
   "lib/server/commands.js::exec(`gog…`)": "intentional: the shell wrapper itself",
+  // Refactor PR 15 taught the scanner clawCmd/clawCmdWithRetry/gogCmd and the
+  // injected execSyncImpl/execImpl. An interpolation that is one quoting-helper
+  // call or a numeric literal passes; these sites interpolate something else
+  // that is still not data:
+  // - a numeric constant or a pid (a number, never a string):
+  "lib/server/doctor/service.js::clawCmd(`gateway call agent --expect-final --json…`)": "numeric timeout constant; --params is shellEscapeArg-quoted",
+  "lib/server/doctor/service.js::clawCmd(`gateway call agent --json --timeout…`)": "numeric timeout constant; escapedParams is shellEscapeArg output, kept in a variable for the 120 kB byte budget",
+  "lib/server/gateway-restart-handoff.js::clawCmd(`gateway restart-handoff consume --expect…`)": "pid is a process number",
+  "lib/server/routes/nodes.js::clawCmd(`nodes invoke --node…`)": "numeric timeout constant; node id and params are quoteCliArg-quoted",
+  // - a closed enum:
+  "lib/server/routes/pairings.js::clawCmd(`pairing list --channel…`)": "ch iterates kAllowedPairingChannels (four constants)",
+  // - a prefix assembled from quoteShellArg output plus constant command text:
+  "lib/server/gmail-watch.js::gogCmd(`…`)": "prefix is '--client <quoteShellArg>' or empty; command is built with quoteShellArg in gmail-watch-lifecycle",
+  "lib/server/google-disconnect.js::gogCmd(`…`)": "clientArg is '--client <quoteShellArg>' or empty",
+  "lib/server/google-disconnect.js::gogCmd(`…`)#2": "clientArg is '--client <quoteShellArg>' or empty",
+  "lib/server/routes/google.js::gogCmd(`…`)": "clientArg is '--client <quoteShellArg>' or empty",
+  "lib/server/routes/google.js::gogCmd(`…`)#2": "clientArg as above; cmd comes from the constant API_TEST_COMMANDS table",
 };
 
 describe("guard: child processes take argv, never data-built shell strings", () => {
@@ -28,11 +45,16 @@ describe("guard: child processes take argv, never data-built shell strings", () 
       'spawnSync("sh", ["-c", "command -v script"]); // literal: fine',
       "db.exec(`PRAGMA busy_timeout = ${ms};`); // sqlite, not a shell",
       "execSync(`git status`); // no interpolation: fine",
+      "clawCmd(`agents bind --agent ${quoteShellArg(agentId)} --timeout ${30000}`); // helper + literal: fine",
+      "clawCmd(`pairing list --channel ${ch}`);",
+      "gogCmd(`auth remove ${quoteShellArg(a) + b}`); // not ONE helper call",
     ].join("\n");
     const hits = scanShellStrings(fixture, "lib/server/planted.js");
     expect(hits.map((h) => h.key.split("::")[1])).toEqual([
       "execSync(`git remote set-url origin \"…`)",
       "exec(…+…)",
+      "clawCmd(`pairing list --channel…`)",
+      "gogCmd(`auth remove…`)",
       "shell:true",
       "sh -c <non-literal>",
     ]);

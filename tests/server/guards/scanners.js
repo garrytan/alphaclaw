@@ -78,8 +78,14 @@ const scanConfigWriters = (rawText, relPath) => {
 };
 
 
+// clawCmd/clawCmdWithRetry/gogCmd hand their string to /bin/sh, and
+// execSyncImpl/execImpl are injected execSync/exec: the same defect class.
 const kShellCallRe =
-  /(^|[^.\w$])(exec|execSync|execAsync|shellCmd|runShell)\(\s*(`|[^,)`]*\+)/g;
+  /(^|[^.\w$])(exec|execSync|execAsync|shellCmd|runShell|clawCmd|clawCmdWithRetry|gogCmd|execSyncImpl|execImpl)\(\s*(`|[^,)`]*\+)/g;
+// An interpolation is safe when it is a numeric literal or exactly one call to
+// a quoting helper (the whole expression, so `${quoteShellArg(a) + b}` still
+// counts as data). Anything else is flagged, or allowlisted with a why-comment.
+const kQuoteHelpers = ["quoteShellArg", "quoteCliArg", "shellEscapeArg"];
 const kChildProcessMethodRe = /\b(childProcess|child_process|cp)\.(exec|execSync)\(\s*`/g;
 const kShellTrueRe = /\bshell\s*:\s*true\b/g;
 // `sh -c <x>` where x is not a string literal: the char after the comma (and
@@ -101,6 +107,60 @@ const templateHasInterpolation = (text, backtickIndex) => {
   }
   return false;
 };
+
+// The `${…}` expressions of the template opening at backtickIndex. Brace
+// depth is tracked outside nested template literals only (good enough for
+// the call sites this guard sees).
+const templateInterpolations = (text, backtickIndex) => {
+  const out = [];
+  let i = backtickIndex + 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === "`") return out;
+    if (ch === "$" && text[i + 1] === "{") {
+      let depth = 1;
+      let j = i + 2;
+      let inTemplate = false;
+      while (j < text.length && depth) {
+        const c = text[j];
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === "`") inTemplate = !inTemplate;
+        else if (!inTemplate && c === "{") depth += 1;
+        else if (!inTemplate && c === "}") depth -= 1;
+        j += 1;
+      }
+      out.push(text.slice(i + 2, j - 1).trim());
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+  return out;
+};
+
+const isSingleCall = (expr, name) => {
+  if (!expr.startsWith(`${name}(`) || !expr.endsWith(")")) return false;
+  let depth = 0;
+  for (let k = name.length; k < expr.length; k += 1) {
+    if (expr[k] === "(") depth += 1;
+    else if (expr[k] === ")") {
+      depth -= 1;
+      if (depth === 0) return k === expr.length - 1;
+    }
+  }
+  return false;
+};
+
+const isSafeInterpolation = (expr) =>
+  /^\d+(?:\.\d+)?$/.test(expr) ||
+  kQuoteHelpers.some((name) => isSingleCall(expr, name));
 
 const templatePrefix = (text, backtickIndex) => {
   const end = text.indexOf("${", backtickIndex);
@@ -126,7 +186,7 @@ const scanShellStrings = (rawText, relPath) => {
   for (const m of text.matchAll(kShellCallRe)) {
     const openIndex = m.index + m[0].length - 1;
     if (m[3] === "`") {
-      if (templateHasInterpolation(text, openIndex)) {
+      if (templateInterpolations(text, openIndex).some((expr) => !isSafeInterpolation(expr))) {
         push(m.index, `${m[2]}(\`${templatePrefix(text, openIndex)}…\`)`);
       }
     } else {

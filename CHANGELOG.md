@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.41] - 2026-10-22
+
+`lib/server.js` joins the async-route guard, its last unwrapped route moves into a route module, and the Doctor's character counts use the shared en-US formatter (refactor plan PR 15b, ALPH-15). The shell-strings guard also learns the CLI wrapper calls it could not see.
+
+### Changed
+
+- **`GET /api/openclaw/capabilities`** moves from an inline handler in `lib/server.js` to `lib/server/routes/openclaw-capabilities.js` and is wrapped in `wrapAsync`. The handler body and its 500 answer are unchanged. It registers at the same slot (after every API route module, before `express.static`), and its admin-manifest op is unchanged.
+- **The async-route guard** now scans `lib/server.js` as well as `lib/server/`. `guard-utils` accepts a single file as a root. The one remaining inline handler, `GET /api/chat/history`, is allowlisted with a why-comment: chat is out of the refactor's scope, and its body catches its own awaits.
+- **The shell-strings guard sees the CLI wrappers.** The scanner now also checks `clawCmd`, `clawCmdWithRetry`, `gogCmd` and the injected `execSyncImpl`/`execImpl`, all of which hand their string to a shell. An interpolation passes only when it is a numeric literal or exactly one call to `quoteShellArg`, `quoteCliArg` or `shellEscapeArg`. The ten sites that interpolate something else that is still not data (numeric constants, a pid, the closed pairing-channel enum, `--client` prefixes built from `quoteShellArg`) are allowlisted with a why-comment each. The two onboarding entries the old scanner needed are gone (PR 15a removed those shell strings).
+- **Doctor character counts** (`formatDoctorCharCount` and the bootstrap truncation item's `-N cut`) use `formatInteger`, the en-US formatter the context-budget meter already uses. Behavior change: in a browser whose default locale is not en-US, these two counts now render as `1,234` instead of the locale's grouping (`1.234`, `1 234`), so they match the rest of the page.
+
 ## [0.10.40] - 2026-10-22
 
 The last three data-built shell strings in the self-update and onboarding paths become argv calls, and the CLI's missing-config restore stops writing `openclaw.json` raw (refactor plan PR 15a, ALPH-15). Both guard allowlists shrink.

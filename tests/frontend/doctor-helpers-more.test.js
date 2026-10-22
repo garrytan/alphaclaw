@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildDoctorRunMarkers,
   buildDoctorStatusFilterOptions,
@@ -85,6 +85,16 @@ describe("frontend/doctor helpers (extended)", () => {
   it("formats char counts", () => {
     expect(formatDoctorCharCount(1234)).toBe("1,234 chars");
     expect(formatDoctorCharCount()).toBe("0 chars");
+    // Pinned to en-US like every other count on the page, whatever the
+    // browser's default locale.
+    const localeSpy = vi
+      .spyOn(Number.prototype, "toLocaleString")
+      .mockReturnValue("1.234");
+    try {
+      expect(formatDoctorCharCount(1234)).toBe("1,234 chars");
+    } finally {
+      localeSpy.mockRestore();
+    }
   });
 
   it("builds bootstrap warning titles for each combination", () => {

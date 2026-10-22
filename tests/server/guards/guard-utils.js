@@ -29,9 +29,13 @@ const walkJsFiles = (relRoots) => {
       }
     }
   };
+  // A root is a directory (walked) or a single file (lib/server.js, the
+  // composition root that also registers a route inline).
   for (const rel of relRoots) {
     const abs = path.join(kRepoRoot, rel);
-    if (fs.existsSync(abs)) visit(abs);
+    if (!fs.existsSync(abs)) continue;
+    if (fs.statSync(abs).isDirectory()) visit(abs);
+    else out.push(abs);
   }
   return out.sort();
 };

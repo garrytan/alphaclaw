@@ -5,9 +5,14 @@
 const { auditTree, formatHits } = require("./guard-utils");
 const { scanUnwrappedAsyncRoutes } = require("./scanners");
 
-// PR 2a (the wrapAsync sweep) drove this list to zero: every async route
-// handler in lib/server goes through wrapAsync. Keep it empty.
-const kKnownOffenders = {};
+// PR 2a (the wrapAsync sweep) drove lib/server/ to zero; refactor PR 15 added
+// lib/server.js as a root. Do not add entries for new routes.
+const kKnownOffenders = {
+  // Deliberate: the chat history read belongs to the chat bridge, which the
+  // refactor plan leaves alone (docs/designs/chat-reliability.md). Its body
+  // catches every await itself, so no rejection escapes today.
+  "lib/server.js::GET /api/chat/history": "intentional: chat is out of the refactor's scope",
+};
 
 describe("guard: async route handlers are wrapped with wrapAsync", () => {
   it("detects an unwrapped async handler, with and without middleware, and accepts wrapped ones (self-test)", () => {
@@ -23,7 +28,7 @@ describe("guard: async route handlers are wrapped with wrapAsync", () => {
 
   it("has no unwrapped async route handlers outside the allowlist, and no stale entries", () => {
     const { unexpected, stale } = auditTree({
-      roots: ["lib/server"],
+      roots: ["lib/server", "lib/server.js"],
       scan: scanUnwrappedAsyncRoutes,
       allowlist: kKnownOffenders,
     });

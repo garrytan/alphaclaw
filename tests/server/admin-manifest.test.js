@@ -211,8 +211,8 @@ describe("admin-manifest route coverage", () => {
 
   it("classifies every /api route in the route modules", () => {
     const unclassified = [];
-    // lib/server.js registers a handful of /api routes inline (capabilities,
-    // chat history); they are subject to the same classification rule (F070).
+    // lib/server.js registers /api routes inline (chat history); they are
+    // subject to the same classification rule (F070).
     const serverEntry = path.join(__dirname, "../../lib/server.js");
     for (const file of [...collectRouteFiles(routesDir), serverEntry]) {
       // admin.js + proxy.js register the meta/catch-all surface, not tiered ops.
