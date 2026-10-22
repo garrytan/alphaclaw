@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { resolveCodexMigrationBuild, loadOpenclawMigrationApi, kMigrationModuleNotFound } = require("../../lib/server/openclaw-codex-migration-runtime");
+const { resolveCodexMigrationBuild, loadOpenclawMigrationApi } = require("../../lib/server/openclaw-codex-migration-runtime");
 const { resolveSelfDependency } = require("../../lib/server/self-dependency");
 
 describe("Codex migration executing build", () => {
@@ -41,32 +41,27 @@ describe("Codex migration executing build", () => {
     await expect(loadOpenclawMigrationApi({ build, prefix: "codex-route-warnings", functionNames: ["maybeRepairCodexRoutes"] })).rejects.toThrow("migration exports not found");
   });
 
-  it("names an ABSENT chunk with a stable code and an export-less chunk with none (2026.9.4+ successor fallback)", async () => {
-    // 2026.9.4 dropped `doctor-auth-flat-profiles-*` for `auth-profile-repair-*`.
-    // The migration falls back on the code alone: a chunk that exists but
-    // lost an export is a contract break, not a reason to try another chunk.
-    const absent = await loadOpenclawMigrationApi({ build, prefix: "doctor-auth-flat-profiles", functionNames: ["maybeRepairOpenAICodexAuthConfig"] }).catch((error) => error);
-    expect(absent).toBeInstanceOf(Error);
-    expect(absent.code).toBe(kMigrationModuleNotFound);
-    expect(absent.message).toContain("migration module not found: doctor-auth-flat-profiles");
-
-    fs.writeFileSync(path.join(packageDir, "dist", "doctor-auth-flat-profiles-fixture.mjs"), "export function unrelated() {}\n");
-    const exportless = await loadOpenclawMigrationApi({ build, prefix: "doctor-auth-flat-profiles", functionNames: ["maybeRepairOpenAICodexAuthConfig"] }).catch((error) => error);
-    expect(exportless).toBeInstanceOf(Error);
-    expect(exportless.code).toBeUndefined();
-    expect(exportless.message).toContain("migration exports not found");
-
-    // The successor chunk is matched by function NAME, not export key: 2026.9.5
-    // publishes `export { repairAuthProfileMigration as t }`.
+  it("matches the successor chunk by function NAME, not export key", async () => {
+    // 2026.9.5+ publishes `export { repairAuthProfileMigration as t }`.
     fs.writeFileSync(path.join(packageDir, "dist", "auth-profile-repair-fixture.mjs"), "async function repairAuthProfileMigration() { return \"composed\"; }\nexport { repairAuthProfileMigration as t };\n");
     const api = await loadOpenclawMigrationApi({ build, prefix: "auth-profile-repair", functionNames: ["repairAuthProfileMigration"] });
     expect(await api.repairAuthProfileMigration()).toBe("composed");
   });
 
-  it("loads optional exports when present and tolerates their absence", async () => {
-    fs.writeFileSync(path.join(packageDir, "dist", "codex-route-warnings-fixture.mjs"), "export function readFixture() { return 1; }\nexport function retiredRepair() { return 2; }\n");
-    const api = await loadOpenclawMigrationApi({ build, prefix: "codex-route-warnings", functionNames: ["readFixture"], optionalFunctionNames: ["retiredRepair", "neverShipped"] });
-    expect(api.retiredRepair()).toBe(2);
-    expect(api.neverShipped).toBeUndefined();
+  it("imports only the prefix chunks whose source names a wanted function", async () => {
+    const dist = path.join(packageDir, "dist");
+    fs.writeFileSync(path.join(dist, "sqlite-a.mjs"), "throw new Error(\"unrelated chunk imported\");\n");
+    fs.writeFileSync(path.join(dist, "sqlite-b.mjs"), "function runAuthProfileWriteTransaction() { return \"named\"; }\nexport { runAuthProfileWriteTransaction as r };\n");
+    fs.writeFileSync(path.join(dist, "sqlite-c.js"), "throw new Error(\"unrelated chunk imported\");\n");
+    const api = await loadOpenclawMigrationApi({ build, prefix: "sqlite", functionNames: ["runAuthProfileWriteTransaction"] });
+    expect(api.runAuthProfileWriteTransaction()).toBe("named");
+  });
+
+  it("falls back to every prefix chunk when no source names a wanted function", async () => {
+    const dist = path.join(packageDir, "dist");
+    fs.writeFileSync(path.join(dist, "sqlite-a.mjs"), "export function unrelated() {}\n");
+    fs.writeFileSync(path.join(dist, "sqlite-b.mjs"), "const f = () => \"renamed\";\nObject.defineProperty(f, \"name\", { value: [\"runAuthProfile\", \"WriteTransaction\"].join(\"\") });\nexport { f as r };\n");
+    const api = await loadOpenclawMigrationApi({ build, prefix: "sqlite", functionNames: ["runAuthProfileWriteTransaction"] });
+    expect(api.runAuthProfileWriteTransaction()).toBe("renamed");
   });
 });

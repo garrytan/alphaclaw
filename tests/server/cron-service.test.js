@@ -24,25 +24,51 @@ const createOpenclawDirWithRawStore = (rawContents) => {
   return openclawDir;
 };
 
-const writeRunLog = (openclawDir, jobId, entries = []) => {
-  const runsDir = path.join(openclawDir, "cron", "runs");
-  fs.mkdirSync(runsDir, { recursive: true });
-  const lines = entries.map((entry) =>
-    typeof entry === "string" ? entry : JSON.stringify(entry));
-  fs.writeFileSync(
-    path.join(runsDir, `${jobId}.jsonl`),
-    `${lines.join("\n")}\n`,
-    "utf8",
-  );
+// OpenClaw 2026.9.3+ records each finished cron run as a `task_runs` row in
+// its state database; this mirrors the columns and index the pin creates.
+const ensureTaskRuns = (openclawDir) => {
+  const databaseDir = path.join(openclawDir, "state");
+  fs.mkdirSync(databaseDir, { recursive: true });
+  const db = new DatabaseSync(path.join(databaseDir, "openclaw.sqlite"));
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_runs (
+      task_id TEXT PRIMARY KEY, runtime TEXT, source_id TEXT, created_at INTEGER,
+      ended_at INTEGER, last_event_at INTEGER, child_session_key TEXT,
+      error TEXT, terminal_summary TEXT, detail_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_source_ended
+      ON task_runs(runtime, source_id, ended_at, created_at, task_id);
+  `);
+  return db;
 };
 
-const makeService = (openclawDir, overrides = {}) =>
-  createCronService({
+// Strings were malformed JSONL lines in the file era; task_runs has no
+// equivalent, so only object entries become rows.
+const writeCronRuns = (openclawDir, jobId, entries = []) => {
+  const db = ensureTaskRuns(openclawDir);
+  const storeKey = path.join(openclawDir, "cron", "jobs.json");
+  const insert = db.prepare("INSERT INTO task_runs (task_id, runtime, source_id, created_at, ended_at, detail_json) VALUES (?, 'cron', ?, ?, ?, ?)");
+  try {
+    entries.forEach((entry, index) => {
+      if (typeof entry !== "object") return;
+      const { action, jobId: entryJobId = jobId, ts, ...detail } = entry;
+      const endedAt = Number.isFinite(ts) ? ts : null;
+      insert.run(`${entryJobId}-${index}`, entryJobId, endedAt == null ? 0 : 1, endedAt, JSON.stringify({ kind: "cron-run", storeKey, ...detail }));
+    });
+  } finally {
+    db.close();
+  }
+};
+
+const makeService = (openclawDir, overrides = {}) => {
+  ensureTaskRuns(openclawDir).close();
+  return createCronService({
     clawCmd: vi.fn(async () => ({ ok: true, stdout: "" })),
     OPENCLAW_DIR: openclawDir,
     getSessionUsageByKeyPattern: vi.fn(() => ({})),
     ...overrides,
   });
+};
 
 const finishedEntry = (jobId, overrides = {}) => ({
   action: "finished",
@@ -622,7 +648,7 @@ describe("server/cron-service command execution", () => {
 });
 
 describe("server/cron-service run history", () => {
-  it("returns empty history when the run log is missing", () => {
+  it("returns empty history when no runs are recorded", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
     try {
       const service = makeService(openclawDir);
@@ -636,46 +662,9 @@ describe("server/cron-service run history", () => {
     }
   });
 
-  it("skips malformed and unrelated run log lines", () => {
-    const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
-      "not json at all",
-      "null",
-      '"a string"',
-      "42",
-      JSON.stringify({ action: "started", jobId: "job-a", ts: 100 }),
-      JSON.stringify({ action: "finished", jobId: "other-job", ts: 100 }),
-      JSON.stringify({ action: "finished", jobId: "job-a" }),
-      JSON.stringify({ action: "finished", jobId: "job-a", ts: "not-a-number" }),
-      JSON.stringify({
-        action: "finished",
-        jobId: "job-a",
-        ts: 100,
-        status: "ok",
-        delivered: true,
-        usage: "not-an-object",
-      }),
-    ]);
-    try {
-      const service = makeService(openclawDir);
-      const runs = service.getJobRuns({ jobId: "job-a" });
-      expect(runs.total).toBe(1);
-      expect(runs.entries[0]).toMatchObject({
-        ts: 100,
-        jobId: "job-a",
-        action: "finished",
-        status: "ok",
-        delivered: true,
-      });
-      expect(runs.entries[0].usage).toBeUndefined();
-    } finally {
-      fs.rmSync(openclawDir, { recursive: true, force: true });
-    }
-  });
-
   it("filters by status, delivery status, and query text", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", {
         ts: 1000,
         status: "ok",
@@ -738,7 +727,7 @@ describe("server/cron-service run history", () => {
 
   it("sorts and paginates run history", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: 1000 }),
       finishedEntry("job-a", { ts: 3000 }),
       finishedEntry("job-a", { ts: 2000 }),
@@ -777,7 +766,7 @@ describe("server/cron-service run history", () => {
 
   it("enriches run entries with estimated costs", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       // 1000: usage already carries estimatedCost.
       finishedEntry("job-a", { ts: 1000, usage: { estimatedCost: 0.25 } }),
       // 2000: snake_case estimated cost.
@@ -844,9 +833,9 @@ describe("server/cron-service run history", () => {
 });
 
 describe("server/cron-service usage", () => {
-  it("merges session usage totals with duration stats from the run log", () => {
+  it("merges session usage totals with duration stats from recorded runs", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: 1000, durationMs: 100 }),
       finishedEntry("job-a", { ts: 2000, durationMs: 200 }),
       finishedEntry("job-a", { ts: 3000 }), // no durationMs -> skipped
@@ -877,7 +866,7 @@ describe("server/cron-service usage", () => {
 
   it("applies sinceMs filtering to duration stats and tolerates non-object usage", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: 1000, durationMs: 100 }),
       finishedEntry("job-a", { ts: 5000, durationMs: 400 }),
     ]);
@@ -946,7 +935,7 @@ describe("server/cron-service usage", () => {
       { id: "job-a", name: "A", state: {} },
       { id: "job-b", name: "B", state: {} },
     ]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: 1000 }),
       finishedEntry("job-a", { ts: 5000 }),
     ]);
@@ -983,7 +972,7 @@ describe("server/cron-service trends", () => {
   it("builds daily buckets for the default 7d range", () => {
     const nowMs = Date.now();
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", {
         ts: nowMs - 1000,
         status: "ok",
@@ -1025,7 +1014,7 @@ describe("server/cron-service trends", () => {
   it("builds hourly buckets for the 24h range", () => {
     const nowMs = Date.now();
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: nowMs - 30 * 60 * 1000, status: "ok" }),
       finishedEntry("job-a", { ts: nowMs - 30 * 60 * 60 * 1000, status: "ok" }),
     ]);
@@ -1043,7 +1032,7 @@ describe("server/cron-service trends", () => {
 
   it("supports the 30d range and falls back to 7d for unknown ranges", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: Date.now() - 1000, status: "ok" }),
     ]);
     try {
@@ -1064,7 +1053,7 @@ describe("server/cron-service trends", () => {
   it("anchors the window at sinceMs and skips entries beyond bucket coverage", () => {
     const nowMs = Date.now();
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: nowMs - 1000, status: "ok" }),
     ]);
     try {
@@ -1092,7 +1081,7 @@ describe("server/cron-service trends", () => {
   it("computes trend token totals from fallback fields", () => {
     const nowMs = Date.now();
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       // Component tokens with camelCase keys and ignored negatives.
       finishedEntry("job-a", {
         ts: nowMs - 1000,
@@ -1129,7 +1118,7 @@ describe("server/cron-service trends", () => {
     }
   });
 
-  it("returns empty trend buckets when the run log is missing", () => {
+  it("returns empty trend buckets when no runs are recorded", () => {
     const openclawDir = createOpenclawDirWithCronJobs([]);
     try {
       const service = makeService(openclawDir);
@@ -1159,7 +1148,7 @@ describe("server/cron-service trends client time zones", () => {
     vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
     const entryTs = Date.UTC(2026, 7, 30, 6, 0); // Aug 29 23:00 PDT / Aug 30 06:00 UTC
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: entryTs, status: "ok" }),
     ]);
     try {
@@ -1200,7 +1189,7 @@ describe("server/cron-service trends client time zones", () => {
     // Frozen now: Nov 3, 2026 noon PST.
     vi.setSystemTime(new Date(Date.UTC(2026, 10, 3, 20, 0)));
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       // Both instants of the ambiguous 01:30 wall time on the 25h day.
       finishedEntry("job-a", { ts: Date.UTC(2026, 10, 1, 8, 30), status: "ok" }), // 01:30 PDT
       finishedEntry("job-a", { ts: Date.UTC(2026, 10, 1, 9, 30), status: "ok" }), // 01:30 PST
@@ -1228,7 +1217,7 @@ describe("server/cron-service trends client time zones", () => {
   it("falls back to legacy server-local buckets without or with an invalid zone", () => {
     vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: Date.now() - 1000, status: "ok" }),
     ]);
     try {
@@ -1257,7 +1246,7 @@ describe("server/cron-service trends client time zones", () => {
   it("anchors sinceMs windows to the client zone's day start", () => {
     vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: Date.UTC(2026, 7, 28, 12, 0), status: "ok" }),
     ]);
     try {
@@ -1280,7 +1269,7 @@ describe("server/cron-service trends client time zones", () => {
   it("leaves hourly 24h buckets untouched by the client zone", () => {
     vi.setSystemTime(new Date(Date.UTC(2026, 7, 30, 6, 30)));
     const openclawDir = createOpenclawDirWithCronJobs([]);
-    writeRunLog(openclawDir, "job-a", [
+    writeCronRuns(openclawDir, "job-a", [
       finishedEntry("job-a", { ts: Date.now() - 30 * 60 * 1000, status: "ok" }),
     ]);
     try {

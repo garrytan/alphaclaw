@@ -8,7 +8,7 @@ const request = require("supertest");
 const { registerCronRoutes } = require("../../lib/server/routes/cron");
 
 const roots = [];
-const makeFixture = ({ version = "2026.9.5" } = {}) => {
+const makeFixture = () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cron-runs-"));
   roots.push(root);
   fs.mkdirSync(path.join(root, "state"));
@@ -33,7 +33,7 @@ const makeFixture = ({ version = "2026.9.5" } = {}) => {
     options.ts ?? Date.now(), options.lastEventAt ?? null, "agent:main:cron:job-a:run:fixture",
     null, null, JSON.stringify({ kind: "cron-run", storeKey: path.join(root, "cron", "jobs.json"), status: "ok", ...detail }));
   const clawCmd = vi.fn();
-  const service = createCronService({ OPENCLAW_DIR: root, clawCmd, getInstalledVersion: () => version, getSessionUsageByKeyPattern: () => ({}) });
+  const service = createCronService({ OPENCLAW_DIR: root, clawCmd, getSessionUsageByKeyPattern: () => ({}) });
   return { root, db, insert, service, clawCmd };
 };
 
@@ -123,32 +123,16 @@ describe("authoritative cron outcomes", () => {
     expect(service.getJobRunTrends({ jobId: "job-a" }).points.reduce((sum, point) => sum + point.durationSamples, 0)).toBe(1);
   });
 
-  it("reads the actual older cron_run_logs shape even while generic task_runs exists", async () => {
-    const { root, db, insert, service } = makeFixture({ version: "2026.7.1-2" });
-    insert("ignored-task", { summary: "not the old authority" });
-    db.exec(`PRAGMA user_version = 1; ${legacySchema}`);
-    const entry = { action: "finished", jobId: "job-a", ts: 100, status: "ok", summary: "old summary", durationMs: 8, usage: { total_tokens: 20 } };
-    db.prepare(`INSERT INTO cron_run_logs (store_key, job_id, seq, ts, status, summary, delivered, delivery_status, duration_ms, entry_json, created_at) VALUES (?, 'job-a', 1, ?, 'error', 'projected summary', 0, 'not-delivered', 42, ?, 1)`).run(path.join(root, "cron", "jobs.json"), Date.now(), JSON.stringify(entry));
-    db.close();
-    const response = await request(appFor(service)).get(historyUrls[0]);
-    expect(response.status).toBe(200);
-    expect(response.body.runs).toMatchObject({ total: 1, entries: [{ status: "error", summary: "projected summary", delivered: false, deliveryStatus: "not-delivered", durationMs: 42, usage: { total_tokens: 20 } }] });
-    expect(service.getJobUsage({ jobId: "job-a" }).totals).toMatchObject({ totalDurationMs: 42, durationSamples: 1 });
-    expect(service.getJobRunTrends({ jobId: "job-a" }).points.reduce((sum, point) => sum + point.totalTokens, 0)).toBe(20);
-    expect(service.getBulkJobRuns().byJobId["job-a"].entries[0].summary).toBe("projected summary");
-  });
-
-  it.each(["task", "legacy"])("keeps an empty %s authority empty despite stale JSONL", (kind) => {
-    const { root, db, service } = makeFixture({ version: kind === "legacy" ? "2026.7.1-2" : "2026.9.5" });
-    if (kind === "legacy") db.exec(legacySchema);
+  it("keeps an empty task authority empty despite stale JSONL", () => {
+    const { root, db, service } = makeFixture();
     db.close();
     fs.writeFileSync(path.join(root, "cron", "runs", "job-a.jsonl"), `${JSON.stringify({ action: "finished", jobId: "job-a", ts: 100, summary: "stale" })}\n`);
     expect(service.getJobRuns({ jobId: "job-a" }).total).toBe(0);
     expect(service.getJobUsage({ jobId: "job-a" }).totals.durationSamples).toBe(0);
   });
 
-  it.each(["2026.7.2-beta.1", "2026.8.1", "2026.9.5"])("keeps task runs authoritative on %s despite a stale legacy table at schema 17", (version) => {
-    const { root, db, insert, service } = makeFixture({ version });
+  it("keeps task runs authoritative despite a stale legacy table at schema 17", () => {
+    const { root, db, insert, service } = makeFixture();
     db.exec(legacySchema);
     db.prepare("INSERT INTO cron_run_logs (store_key, job_id, seq, ts, entry_json, created_at) VALUES (?, 'job-a', 1, 100, ?, 1)")
       .run(path.join(root, "cron", "jobs.json"), JSON.stringify({ action: "finished", jobId: "job-a", ts: 100, summary: "stale legacy" }));
@@ -160,61 +144,20 @@ describe("authoritative cron outcomes", () => {
     db.close();
   });
 
-  it.each(["2026.9.5", null])("refuses a partial or ambiguous migration rather than selecting the legacy table (%s)", (version) => {
-    const { db, service } = makeFixture({ version });
+  it("refuses a database that only has the legacy cron_run_logs table", () => {
+    const { db, service } = makeFixture();
     db.exec(legacySchema);
-    if (version) db.exec("DROP TABLE task_runs");
+    db.exec("DROP TABLE task_runs");
     expect(() => service.getJobRuns({ jobId: "job-a" })).toThrow(/unavailable/);
     db.close();
   });
 
-  it("does not substitute generic task history for a missing older-runtime cron table", () => {
-    const { db, insert, service } = makeFixture({ version: "2026.7.1-2" });
-    insert("mirror", { summary: "not the old authority" });
+  it("never falls back to JSONL on a missing database", () => {
+    const { root, db, service } = makeFixture();
     db.close();
+    fs.unlinkSync(path.join(root, "state", "openclaw.sqlite"));
+    fs.writeFileSync(path.join(root, "cron", "runs", "job-a.jsonl"), `${JSON.stringify({ action: "finished", jobId: "job-a", ts: 100 })}\n`);
     expect(() => service.getJobRuns({ jobId: "job-a" })).toThrow(/unavailable/);
-  });
-
-  it("keeps genuine file-era API reads, pagination, and the bounded tail contract", async () => {
-    const { root, db, service } = makeFixture({ version: "2026.5.28" });
-    db.close();
-    fs.unlinkSync(path.join(root, "state", "openclaw.sqlite"));
-    const rows = Array.from({ length: 4000 }, (_, index) => ({ action: "finished", jobId: "job-a", ts: index + 1, status: "ok", summary: "x".repeat(100), durationMs: 10 }));
-    fs.writeFileSync(path.join(root, "cron", "runs", "job-a.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
-    const response = await request(appFor(service)).get(`${historyUrls[0]}?limit=2`);
-    expect(response.status).toBe(200);
-    expect(response.body.runs.total).toBeLessThan(4000);
-    expect(response.body.runs.entries.map((entry) => entry.ts)).toEqual([4000, 3999]);
-    expect(service.getJobRuns({ jobId: "missing" }).total).toBe(0);
-  });
-
-  it("respects a verified file-era runtime even if an old database remains after downgrade", () => {
-    const { root, db, insert } = makeFixture();
-    insert("stale-database", { summary: "stale database" });
-    db.close();
-    fs.writeFileSync(path.join(root, "cron", "runs", "job-a.jsonl"), `${JSON.stringify({ action: "finished", jobId: "job-a", ts: 100, summary: "file authority" })}\n`);
-    const service = createCronService({ OPENCLAW_DIR: root, getInstalledVersion: () => "2026.5.28" });
-    expect(service.getJobRuns({ jobId: "job-a" }).entries[0].summary).toBe("file authority");
-  });
-
-  it.each(["2026.5.30-beta.1", "2026.6.1", "2026.7.1-2", "2026.9.5", "dev-sha", null])("never falls back on a missing DB with a non-file runtime hint %s", (version) => {
-    const { root, db } = makeFixture();
-    db.close();
-    fs.unlinkSync(path.join(root, "state", "openclaw.sqlite"));
-    const service = createCronService({ OPENCLAW_DIR: root, getInstalledVersion: () => version });
-    expect(() => service.getJobRuns({ jobId: "job-a" })).toThrow(/unavailable/);
-  });
-
-  it("reports an unreadable file-era log instead of treating it as missing", async () => {
-    const { root, db, service } = makeFixture({ version: "2026.5.28" });
-    db.close();
-    fs.unlinkSync(path.join(root, "state", "openclaw.sqlite"));
-    fs.mkdirSync(path.join(root, "cron", "runs", "job-a.jsonl"));
-    for (const url of historyUrls.filter((url) => !url.endsWith("usage/bulk"))) {
-      const response = await request(appFor(service)).get(url);
-      expect(response.status).toBe(503);
-      expect(response.body.code).toBe("cron_history_unavailable");
-    }
   });
 
   it("recovers after an exclusive writer without serving a stale file during SQLITE_BUSY", () => {
@@ -240,7 +183,7 @@ describe("authoritative cron outcomes", () => {
     if (failure === "corrupt database") fs.writeFileSync(path.join(root, "state", "openclaw.sqlite"), "not SQLite");
     if (failure === "missing modern database") fs.unlinkSync(path.join(root, "state", "openclaw.sqlite"));
     fs.writeFileSync(path.join(root, "cron", "runs", "job-a.jsonl"), `${JSON.stringify({ action: "finished", jobId: "job-a", ts: 100 })}\n`);
-    const service = createCronService({ OPENCLAW_DIR: root, clawCmd: vi.fn(), getInstalledVersion: () => "2026.9.5", getSessionUsageByKeyPattern: () => ({}) });
+    const service = createCronService({ OPENCLAW_DIR: root, clawCmd: vi.fn(), getSessionUsageByKeyPattern: () => ({}) });
     for (const url of historyUrls.filter((url) => failure !== "malformed detail" || !url.endsWith("usage/bulk"))) {
       const response = await request(appFor(service)).get(url);
       expect(response.status, url).toBe(503);
@@ -272,37 +215,6 @@ describe("authoritative cron outcomes", () => {
     expect(service.getBulkJobRuns({ sortDir: "asc", sinceMs: 3, limitPerJob: 2 }).byJobId["job-a"].entries).toEqual([]);
     expect(service.getBulkJobRuns({ sortDir: "desc", sinceMs: 3, limitPerJob: 2 }).byJobId["job-a"].entries.map((entry) => entry.ts)).toEqual([5, 4]);
     expect(service.getBulkJobRuns({ status: "error" }).byJobId["job-a"].entries.map((entry) => entry.ts)).toEqual([3]);
-  });
-
-  it("uses the older database's existing indexes and stable sequence ties at scale", () => {
-    const { root, db, service } = makeFixture({ version: "2026.7.1-2" });
-    db.exec(legacySchema);
-    const write = db.prepare("INSERT INTO cron_run_logs (store_key, job_id, seq, ts, entry_json, created_at) VALUES (?, ?, ?, ?, ?, 1)");
-    db.exec("BEGIN");
-    for (let index = 1; index <= 10000; index++) {
-      const jobId = index % 2 ? "job-a" : "other-job";
-      write.run(path.join(root, "cron", "jobs.json"), jobId, index, 100, JSON.stringify({ action: "finished", jobId, ts: 100, status: "ok", summary: String(index) }));
-    }
-    db.exec("COMMIT");
-    db.close();
-    const plans = [];
-    const prepare = DatabaseSync.prototype.prepare;
-    vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (sql) {
-      const statement = prepare.call(this, sql);
-      if (/^SELECT/.test(sql) && /FROM cron_run_logs/.test(sql)) {
-        const method = sql.includes("SUM(count)") ? "get" : "all";
-        const native = statement[method].bind(statement);
-        statement[method] = (...params) => {
-          plans.push(...prepare.call(this, `EXPLAIN QUERY PLAN ${sql}`).all(...params).map((row) => row.detail));
-          return native(...params);
-        };
-      }
-      return statement;
-    });
-    expect(service.getJobRuns({ jobId: "job-a", limit: 2 })).toMatchObject({ total: 5000, entries: [{ summary: "9999" }, { summary: "9997" }] });
-    expect(service.getJobRuns({ jobId: "job-a", limit: 2, sortDir: "asc" }).entries.map((entry) => entry.summary)).toEqual(["1", "3"]);
-    expect(plans.some((line) => /^SCAN cron_run_logs/.test(line))).toBe(false);
-    expect(plans.some((line) => /SEARCH cron_run_logs USING INDEX/.test(line))).toBe(true);
   });
 
   it("uses client-zone day boundaries across DST for SQLite trends through the API", async () => {

@@ -886,7 +886,7 @@
 - **Why:** The upgrade smoke silently no-ops in environments with a current browse CLI, so the channel-segment regression it guards is unwatched.
 - **Context:** Pre-existing (login.html last touched v0.9.38, smoke v0.9.40); surfaced by /qa on 2026-08-29 while running it as a regression check for the time-normalization branch. Not modified per QA rule "never modify existing tests".
 - **Effort:** S. **Depends on:** nothing.
-## P2 — Cron run-history UI: read run logs from the state db
+## ~~P2 — Cron run-history UI: read run logs from the state db~~ (DONE — the SQLite reader shipped with the 2026.9 compatibility work; v0.10.29 retired the `cron_run_logs` and JSONL readers, so history reads only `task_runs` through lib/server/cron-run-store.js)
 - **What:** The cron run/trend UI reads `cron/runs/<jobId>.jsonl` (lib/server/cron-service.js), but even the PINNED openclaw 2026.7.1-2 writes run logs to SQLite (`cron_run_logs`), and 2026.9.1-beta.1's `doctor --fix` additionally renames leftover `.jsonl` to `.jsonl.migrated` — after the first beta doctor run, run history and trends silently go empty. Port the bounded-tail reads to `cron_run_logs` (cached-handle pattern from lib/server/cron-store.js), keeping the `.jsonl` fallback for genuinely old dirs.
 - **Why:** Stale-data class of the issue-#23 family: a file the runtime no longer writes, read as if authoritative.
 - **Context:** Surfaced by the 2026.9.1-beta.1 compatibility review (plan §11). Self-contained: cron-service.js read paths + tests.

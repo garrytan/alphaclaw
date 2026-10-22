@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.29] - 2026-10-22
+
+Codex auth repair and cron history only use the shapes the pinned OpenClaw ships (refactor plan PR 7, ALPH-15). This changes nothing on any build AlphaClaw can run (2026.9.3 and later).
+
+### Removed
+
+- **The legacy `doctor-auth-flat-profiles-*` branch of the Codex migration.** 2026.9.4 and later fold those repairs into `auth-profile-repair-*`, and 2026.10.4 and 2026.10.5 ship no legacy chunk. The migration now loads `repairAuthProfileMigration` directly. With the branch gone, the loader's module-not-found code and its optional-export list had no caller left, so they are removed too.
+- **The `cron_run_logs` and JSONL cron-history readers.** History, trends, duration stats and bulk runs read only `task_runs`, the table every supported build writes (the pinned runtime fixture proves 2026.10.4 has no `cron_run_logs`). The table-shape and index guard stays. A missing or unreadable state database is still reported as unavailable and never falls back to a stale file. `createCronService` no longer takes `getInstalledVersion`, because the version only chose between those backends.
+
+### Changed
+
+- **The migration loader imports only the chunks it needs.** A prefix can match dozens of chunks (2026.10.4 ships 70 `sqlite-*` chunks, 2026.10.5 ships 78). Auth init used to import all of them to find one function. The loader now imports only the chunks whose source names a wanted function (2 of the 70 on the pin). If no chunk's source names it, the loader falls back to importing every chunk.
+
 ## [0.10.28] - 2026-10-22
 
 The schema oracle reads package metadata only, so an OpenClaw pin bump no longer touches `lib/` (refactor plan PR 6, ALPH-15). No behavior change on any build AlphaClaw can run.
