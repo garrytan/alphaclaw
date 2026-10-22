@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.55] - 2026-10-22
+## [0.10.58] - 2026-10-22
 
 After every gateway relaunch, AlphaClaw checks that no session was left stuck, resumes one through OpenClaw when OpenClaw says it qualifies, and alerts the admin targets otherwise (ALPH-17, PR 6 of the restart plan).
 
@@ -13,7 +13,7 @@ After every gateway relaunch, AlphaClaw checks that no session was left stuck, r
 - Post-relaunch wedge sweep (`lib/server/session-wedge-sweep.js`). When a cold restart is requested, AlphaClaw records which sessions OpenClaw reports running (`sessions.list` `activeOnly`, read while the gateway still admits work, never awaited by the restart). After every launch (restart, crash or OOM relaunch, boot), once `/readyz` is ready + 90 s, it checks those sessions (or, with nothing recorded, sessions active in the 15 minutes before the launch). A session with live work is never touched. An idle recorded session goes to `sessions.recover`, where OpenClaw decides whether it holds an orphaned claim; "nothing to recover" stays silent. A session still marked interrupted (`abortedLastRun`) or whose recovery gave up (`restartRecoveryStatus: tombstoned`) is alerted once to the admin targets. It uses only OpenClaw's supported reads, never resets a session and never posts into the session's own chat. Each outcome is one `[alphaclaw] wedge-sweep …` line and one `session_wedge` watchdog event (`recovered | alerted | failed`). A newer launch supersedes a pending sweep.
 - Live test `tests/live/session-wedge-sweep.e2e.test.js`: the sweep's reads and `sessions.recover` against the real pin, with the gateway SIGKILLed mid-turn and relaunched.
 
-## [0.10.53] - 2026-10-22
+## [0.10.57] - 2026-10-22
 
 A routine restart lets OpenClaw finish its active work for up to 3 minutes before stopping it, and the restart card offers Restart now (ALPH-17, PR 5 of the restart plan).
 
@@ -24,7 +24,7 @@ A routine restart lets OpenClaw finish its active work for up to 3 minutes befor
 ### Added
 - **Restart now** on the restart card while OpenClaw drains for the ask: `POST /api/gateway/restart/expedite {operationId}` cuts that drain short and the ladder moves on to SIGTERM (`asking status=expedited`). Only the running operation can be expedited (otherwise `409 no_matching_restart`). Human-only: the agent-admin manifest denies it. The stop evidence reads "cut short" rather than "OpenClaw refused".
 
-## [0.10.52] - 2026-10-22
+## [0.10.56] - 2026-10-22
 
 Every gateway restart now says who asked for it and why (ALPH-17, PR 4 of the restart plan).
 
@@ -35,7 +35,37 @@ Every gateway restart now says who asked for it and why (ALPH-17, PR 4 of the re
 ### Added
 - Structural guard `tests/server/guards/restart-attribution.guard.test.js`: a call to a restart primitive or forwarding wrapper (`restartGateway`, `coldRestartGateway`, `scopedRestart`, `restartSavedChannel`, `runGatewayColdStart`, …) without `source` fails CI unless it forwards its caller's options.
 
-## [0.10.51] - 2026-10-22
+## [0.10.55] - 2026-10-22
+
+The dashboard chat sends messages on a plain-HTTP origin, such as a VPS reached by IP (found by the ALPH-18 black-box pass on a real Ubicloud VPS).
+
+### Fixed
+- The chat composer, transcript store and history requests minted ids with `crypto.randomUUID()`, which browsers expose only in secure contexts (HTTPS or localhost). On `http://<ip>:<port>` every send threw `TypeError: crypto.randomUUID is not a function`, and the typed message never left the page. A new `lib/public/js/lib/random-uuid.js` uses `randomUUID` when it exists and otherwise builds the same v4 UUID from `crypto.getRandomValues`, which works everywhere.
+
+### Added (tests)
+- `tests/frontend/random-uuid.test.js`: the secure path, and v4-shaped unique ids without `randomUUID`.
+
+## [0.10.54] - 2026-10-22
+
+A global npm install (`npm install -g alphaclaw && alphaclaw start`) starts its gateway (found by the ALPH-18 black-box pass on a real Ubicloud VPS).
+
+### Fixed
+- A global install linked only AlphaClaw's own bin, so the pinned OpenClaw (a nested dependency) was not on `PATH`. The boot `doctor --fix` and every gateway launch failed with `spawn openclaw ENOENT`, the watchdog paused restarts after three tries, and the dashboard blamed it on "OpenClaw's data upgrade was interrupted … with an error it didn't explain". `alphaclaw start` now puts the pinned package's `node_modules/.bin` first on `PATH` when it holds an `openclaw` bin. Docker images and `npx` starts already had it there, so nothing changes for them except that the pin wins over any other `openclaw` on the host.
+
+### Added (tests)
+- `openclaw-build.test.js` covers `withPinnedOpenclawOnPath`: prepend, de-duplicate, and leave `PATH` alone without an installed bin.
+
+## [0.10.53] - 2026-10-22
+
+The Doctor tab's run history loads again (found by the ALPH-18 black-box pass on a real Ubicloud deploy).
+
+### Fixed
+- `GET /api/doctor/runs` answered every request with `500 {"error":"listDoctorRunSummariesFn is not defined"}` since v0.9.99: the service's route-facing `listDoctorRunSummaries` called a name that no longer existed instead of the `listRunSummaries` reader it builds from its injected dependencies. A Drift Doctor run completed, but the tab could never list it. The hermetic tests injected the db readers straight into the routes and the status path, so none of them called the exported reader.
+
+### Added (tests)
+- `doctor-service.test.js` calls the exported `listDoctorRunSummaries` (what `GET /api/doctor/runs` uses) after an import: the lean reader is used and the run is listed without its manifest.
+
+## [0.10.52] - 2026-10-22
 
 A memory-mitigation restart gives OpenClaw a drain sized to the memory headroom instead of a fixed 30 s, so an agent turn in flight can finish (ALPH-17, PR 3 of the restart plan).
 
@@ -47,6 +77,14 @@ A memory-mitigation restart gives OpenClaw a drain sized to the memory headroom 
 
 ### Added
 - Live test `tests/live/openclaw-restart-drain-contract.e2e.test.js`: the pin's `gateway restart` still takes `--wait` and its `DEFAULT_RESTART_DEFERRAL_TIMEOUT_MS` is still 300 000 ms.
+
+## [0.10.51] - 2026-10-22
+
+The watchdog unit tests no longer depend on which pids happen to be alive on the machine running them (test-only, ALPH-17).
+
+### Changed
+- The harnesses in `watchdog.test.js`, `watchdog-crash-recovery.test.js` and `watchdog-restart-failure.test.js` hand the watchdog fake pids (100, 4242, ...) but fell back to the production liveness seams unless a test passed its own, so a real process owning one of those pids could make a fake gateway look alive. Each harness now injects `pidAlive`, `readProcStartTicks` and `resolvePidVerdict` unconditionally, defaulting to "no fixture pid is a real process". With every production liveness default forced to "alive", the full hermetic suite still passes (542 files, 8535 tests).
+- New guard `tests/server/guards/watchdog-hermetic-pids.guard.test.js` fails CI if any of those harnesses stops injecting one of the three seams.
 
 ## [0.10.50] - 2026-10-22
 

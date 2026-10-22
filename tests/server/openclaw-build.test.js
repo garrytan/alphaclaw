@@ -2,7 +2,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
-const { describeExecutingBuild, resolvePackageBin } = require("../../lib/server/openclaw-build");
+const { describeExecutingBuild, resolvePackageBin, withPinnedOpenclawOnPath } = require("../../lib/server/openclaw-build");
 
 describe("bounded executing-build identity", () => {
   let root;
@@ -78,5 +78,30 @@ describe("bounded executing-build identity", () => {
     `;
     expect(JSON.parse(execFileSync(process.execPath, ["-e", script, require.resolve("../../lib/server/openclaw-build"), root], { encoding: "utf8", timeout: 1500 }))).toBeNull();
     expect(fs.lstatSync(file).isFIFO()).toBe(true);
+  });
+});
+
+describe("withPinnedOpenclawOnPath (npm install -g puts only alphaclaw on PATH)", () => {
+  let root;
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-openclaw-path-")); });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  const binDir = () => path.join(root, "node_modules", ".bin");
+  const linkOpenclaw = () => { fs.mkdirSync(binDir(), { recursive: true }); fs.writeFileSync(path.join(binDir(), "openclaw"), ""); };
+
+  it("puts the pinned package's .bin first", () => {
+    linkOpenclaw();
+    expect(withPinnedOpenclawOnPath({ installDir: root, pathValue: ["/usr/local/bin", "/usr/bin"].join(path.delimiter) }))
+      .toBe([binDir(), "/usr/local/bin", "/usr/bin"].join(path.delimiter));
+  });
+
+  it("moves an existing entry to the front instead of duplicating it", () => {
+    linkOpenclaw();
+    expect(withPinnedOpenclawOnPath({ installDir: root, pathValue: ["/usr/bin", binDir()].join(path.delimiter) }))
+      .toBe([binDir(), "/usr/bin"].join(path.delimiter));
+  });
+
+  it("leaves PATH alone when the install has no openclaw bin or no install dir", () => {
+    expect(withPinnedOpenclawOnPath({ installDir: root, pathValue: "/usr/bin" })).toBe("/usr/bin");
+    expect(withPinnedOpenclawOnPath({ installDir: null, pathValue: "/usr/bin" })).toBe("/usr/bin");
   });
 });

@@ -182,7 +182,7 @@ gateway is verified healthy.
 
 Every restart first asks OpenClaw to finish its active work
 (`openclaw gateway restart --wait <grace>`), then stops it. How long that
-grace is depends on who asked (v0.10.53, logged on the first ladder line as
+grace is depends on who asked (v0.10.57, logged on the first ladder line as
 `restart op=<id> requested source=… class=…`):
 
 | class | who | grace |
@@ -331,7 +331,7 @@ View logs for the `stop_failed survivors=` line — a survivor with
 **What it means:** after a gateway relaunch (an AlphaClaw restart, a crash or
 OOM relaunch, a boot) the watchdog sent "⚠️ A session may be stuck after the
 gateway restarted" and the Watchdog tab has a `session_wedge` event with
-status `alerted` (v0.10.55). The log line is
+status `alerted` (v0.10.58). The log line is
 `[alphaclaw] wedge-sweep alerted session=<key> reason=not_resumed|recovery_gave_up`.
 
 **Why it happens:** a turn that was running when the gateway stopped is marked
