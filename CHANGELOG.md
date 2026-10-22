@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.32] - 2026-10-22
+
+Watchdog: one require cycle broken and the stateless code moved out of the closure (refactor plan PR 10, ALPH-15). No logic changes.
+
+### Changed
+
+- **New leaf `gateway-exit-signatures.js`.** It holds the gateway exit and stderr signatures: `kOpenclawConfigErrorExitCode`, `kStateMigrationRefusalPattern`, `kHeapOomPattern`, `stderrTailText`, `isDuplicateGatewayLaunchExit` and `isHealthyIncumbentStepAsideExit`. `gateway-crash-cause.js` now requires the leaf eagerly. Before, it used a lazy `require("./watchdog")` to dodge a cycle, so classifying a crash loaded all of `watchdog.js` and `gateway.js`. `watchdog.js` re-exports the same values.
+- **The overseer imports its readiness enums from `gateway-readiness.js`** (`kReadinessStatuses`, `kReadinessProbeKinds`) instead of from `watchdog.js`. The frozen arrays are the same objects.
+- **About 250 lines of closure-free watchdog code move into three modules**, with call sites unchanged:
+  - `watchdog-format.js`: token, ETA, memory-line, correlation-id and owner-lease formatting.
+  - `watchdog-pending-replacement.js`: pending-replacement identity matching.
+  - `watchdog-exit-cause.js`: exit description, model-diagnosis sanitizing, migration-refusal detection, heap-OOM remedy and cause rows.
+
+  `kDegradedReasons` and the `logEvent` and verbose sites stay in `watchdog.js`, because tests pin them in that file's source. `watchdog.js` drops from 8,791 to about 8,540 lines.
+
 ## [0.10.31] - 2026-10-22
 
 The Setup UI now has one canonical primitive for each of these jobs (refactor plan PR 9, ALPH-15).
