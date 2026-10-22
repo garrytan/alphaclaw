@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.39] - 2026-10-22
+
+The Browse file tree's pure helpers and subcomponents move out of `components/file-tree.js` (refactor plan PR 14d, ALPH-15). No logic changes.
+
+### Changed
+
+- **`lib/file-tree-utils.js`** gains the tree helpers: `readStoredExpandedPaths`, `collectFolderPaths`, `collectTruncatedExpandedFolderPaths`, `collectFilePaths`, `removeTreePath`, `replaceTreeNode` and `filterTreeNode`.
+- **`components/file-tree/`** holds the subcomponents: `context-menu.js` (`TreeContextMenu`), `creation-input.js` (`CreationInput`), `tree-node.js` (`TreeNode` and `getFileIconMeta`), and `constants.js` (the three indent and padding constants both rows use).
+- `FileTree` stays in `components/file-tree.js` (the H15 source pin in `file-tree-loadtree.test.js` reads that file), down from 1,386 to 776 lines. Every line moved unchanged; the only edits are import lists and `export` on the moved helpers and components.
+
 ## [0.10.38] - 2026-10-22
 
 Pure helpers move out of the Envars tab, the cron calendar and the app-shell controller hook (refactor plan PR 14c, ALPH-15). No logic changes.
