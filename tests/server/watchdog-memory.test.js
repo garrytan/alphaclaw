@@ -369,9 +369,10 @@ describe("server/watchdog memory monitor", () => {
       // Attributed (ALPH-17): the started row and the ladder share the op id.
       expect(source).toBe("watchdog:memory_mitigation");
       expect(reason).toMatch(/^episode \d+-\d+$/);
-      const started = harness.insertWatchdogEvent.mock.calls.map(([row]) => row)
-        .find((row) => row.eventType === "operation" && JSON.stringify(row.details).includes('"status":"started"'));
-      expect(JSON.stringify(started?.details ?? {})).toContain(opId);
+      const opRows = harness.insertWatchdogEvent.mock.calls.map(([row]) => JSON.stringify(row))
+        .filter((row) => row.includes('"operation"') && row.includes("memory_mitigation"));
+      expect(opRows.length).toBeGreaterThan(0);
+      expect(opRows.every((row) => row.includes(opId) && row.includes("watchdog:memory_mitigation"))).toBe(true);
       expect(typeof ladder.askGraceMs).toBe("function");
 
       // The container is filling at ~240 MB/h with minutes of headroom: a
@@ -999,6 +1000,8 @@ describe("server/watchdog memory monitor", () => {
       expect(restartRows.map((row) => row.status)).toEqual(["started", "failed"]);
       expect(restartRows[1].details).toEqual({
         trigger: "memory_mitigation",
+        opId: expect.any(String),
+        restartSource: "watchdog:memory_mitigation",
         drainBudget: expect.objectContaining({ askGraceMs: expect.any(Number), reason: expect.any(String) }),
         error: expect.stringContaining("did not exit after SIGKILL"),
         reason: "stop_failed",

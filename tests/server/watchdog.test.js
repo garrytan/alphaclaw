@@ -7055,7 +7055,7 @@ describe("server/watchdog", () => {
       const result = await watchdog.triggerRepair();
       await settle();
       expect(restartGatewayForMitigation).toHaveBeenCalledTimes(1);
-      expect(restartGatewayForMitigation).toHaveBeenCalledWith({ shouldAbort: expect.any(Function) });
+      expect(restartGatewayForMitigation).toHaveBeenCalledWith({ shouldAbort: expect.any(Function), opId: expect.any(String), source: "watchdog:repair_replace", reason: expect.any(String) });
       expect(result).toMatchObject({ ok: true, verdict: "replacement_ready", verifiedHealthy: true });
       expect(operationRows(insertWatchdogEvent).map((event) => event.details.trigger)).toEqual(["repair", "repair"]);
       watchdog.stop();
