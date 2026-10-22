@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.30] - 2026-10-22
+
+There is now one canonical server helper for each of these jobs (refactor plan PR 8, ALPH-15). Nothing an operator sees changes.
+
+### Changed
+
+- **Shell quoting.** The private single-quote escapers in `agents/shared.js`, `cron-service.js`, `routes/system.js` and `lib/cli/openclaw-config-restore.js` now call `quoteShellArg(value, { strategy: "single" })` from `utils/shell.js`. Single quotes inside a value are now written as `'"'"'` instead of `'\\''`. Both are standard POSIX quoting, so the shell passes every command the same argv. `doctor/service.js` (its Doctor-fix argument budget counts escaped bytes), onboarding and `watchdog.js` keep their own escapers.
+- **`utils/sleep.js`** replaces the three local `sleep` copies in `commands.js`, `doctor/workspace-fingerprint.js` and `team-auth-transition.js`. The ones in `gateway.js` and `watchdog.js` stay.
+- **`utils/object.js` `isNonArrayObject`** replaces eight copies of the same check: `auth-store`, `boot-progress/history`, `boot-report`, `boot-report-steps`, `diagnose/collect`, `diagnose/render`, `doctor/bootstrap-context` and `openclaw-config-migrations`. The strict variant in `utils/config-key-diff.js` and the helper in `control-ui-mount.js` keep their own definitions.
+- **Atomic writes.** Five hand-rolled temp-plus-rename writes now go through `writeFileAtomic(..., { durable: false })`: the Claude Code rescue state file (0600), the gateway state file, the notification outbox, team state (0600) and the boot-time system cron file (0644). The ones that set a mode now create their temp file exclusively under a fresh random name, so the mode always lands on a new file. Team state no longer needs its `chmod` fallback. `server-pidfile.js` and `watchdog.js` keep their own writes.
+- **`/proc/<pid>/stat` parsing.** `process-group.js` and the lock-owner start-time read in `utils/safe-file.js` now use the shared `parseProcStat`.
+
 ## [0.10.29] - 2026-10-22
 
 Codex auth repair and cron history only use the shapes the pinned OpenClaw ships (refactor plan PR 7, ALPH-15). This changes nothing on any build AlphaClaw can run (2026.9.3 and later).

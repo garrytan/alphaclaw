@@ -2431,7 +2431,7 @@ describe("server/routes/system", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, stdout: "queued" });
     expect(deps.clawCmd).toHaveBeenCalledWith(
-      `agent --agent main --message 'it'\\''s ready'`,
+      `agent --agent main --message 'it'"'"'s ready'`,
       { quiet: true },
     );
   });

@@ -1523,12 +1523,8 @@ if (fs.existsSync(hourlyGitSyncPath)) {
       });
       if (cronContent) {
         // Atomic install (dotted temp names are ignored by cron.d).
-        if (typeof fs.renameSync === "function") {
-          fs.writeFileSync(`${cronFilePath}.tmp`, cronContent, { mode: 0o644 });
-          fs.renameSync(`${cronFilePath}.tmp`, cronFilePath);
-        } else {
-          fs.writeFileSync(cronFilePath, cronContent, { mode: 0o644 });
-        }
+        const { writeFileAtomic } = require("../lib/server/utils/safe-file");
+        writeFileAtomic(cronFilePath, cronContent, { fsModule: fs, mode: 0o644, durable: false });
         console.log("[alphaclaw] System cron entry installed");
       } else {
         // The builder refused — never leave a stale (possibly pre-fix

@@ -5,7 +5,6 @@ const {
 } = require("../../lib/server/claude-code-local/state-file");
 
 const kStateFilePath = "/data/claude-code-local/state.json";
-const kTmpPath = `/data/claude-code-local/.state.json.${process.pid}.tmp`;
 const kState = {
   sessionName: "alphaclaw-rescue",
   sessionId: "sess_0123456789",
@@ -37,6 +36,10 @@ const createFakeFs = () => {
     rmSync: vi.fn((p) => {
       files.delete(p);
     }),
+    unlinkSync: vi.fn((p) => {
+      files.delete(p);
+    }),
+    mkdirSync: vi.fn(),
   };
 };
 
@@ -89,24 +92,24 @@ describe("claude-code-local state-file", () => {
   });
 
   describe("writeStateFile", () => {
-    it("writes a 0600 temp file then renames it into place", () => {
+    const kTmpPattern = /^\/data\/claude-code-local\/state\.json\.\d+\.[a-z0-9]+\.tmp$/;
+
+    it("writes a fresh 0600 temp file then renames it into place", () => {
       const fsModule = createFakeFs();
       const logger = createFakeLogger();
       const ok = writeStateFile({ filePath: kStateFilePath, state: kState, fsModule, logger });
       expect(ok).toBe(true);
-      expect(fsModule.writeFileSync).toHaveBeenCalledWith(
-        kTmpPath,
-        `${JSON.stringify(kState, null, 2)}\n`,
-        { mode: 0o600 },
-      );
-      expect(fsModule.modes.get(kTmpPath)).toBe(0o600);
-      expect(fsModule.renameSync).toHaveBeenCalledWith(kTmpPath, kStateFilePath);
-      expect(fsModule.files.has(kTmpPath)).toBe(false);
+      const [tmpPath, data, options] = fsModule.writeFileSync.mock.calls[0];
+      expect(tmpPath).toMatch(kTmpPattern);
+      expect(data).toBe(JSON.stringify(kState, null, 2) + "\n");
+      expect(options).toEqual({ mode: 0o600, flag: "wx" });
+      expect(fsModule.renameSync).toHaveBeenCalledWith(tmpPath, kStateFilePath);
+      expect(fsModule.files.has(tmpPath)).toBe(false);
       expect(JSON.parse(fsModule.files.get(kStateFilePath))).toEqual(kState);
       expect(logger.warn).not.toHaveBeenCalled();
     });
 
-    it("returns false, cleans up the temp, and warns when the write fails", () => {
+    it("returns false and warns when the write fails, leaving no temp", () => {
       const fsModule = createFakeFs();
       const logger = createFakeLogger();
       fsModule.writeFileSync.mockImplementation(() => {
@@ -116,9 +119,7 @@ describe("claude-code-local state-file", () => {
       });
       const ok = writeStateFile({ filePath: kStateFilePath, state: kState, fsModule, logger });
       expect(ok).toBe(false);
-      expect(fsModule.rmSync).toHaveBeenCalledWith(kTmpPath, { force: true });
-      expect(fsModule.files.has(kTmpPath)).toBe(false);
-      expect(fsModule.files.has(kStateFilePath)).toBe(false);
+      expect(fsModule.files.size).toBe(0);
       expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.warn.mock.calls[0][0]).toContain("ENOSPC");
     });
@@ -133,9 +134,9 @@ describe("claude-code-local state-file", () => {
       });
       const ok = writeStateFile({ filePath: kStateFilePath, state: kState, fsModule, logger });
       expect(ok).toBe(false);
-      expect(fsModule.rmSync).toHaveBeenCalledWith(kTmpPath, { force: true });
-      expect(fsModule.files.has(kTmpPath)).toBe(false);
-      expect(fsModule.files.has(kStateFilePath)).toBe(false);
+      const [tmpPath] = fsModule.writeFileSync.mock.calls[0];
+      expect(fsModule.unlinkSync).toHaveBeenCalledWith(tmpPath);
+      expect(fsModule.files.size).toBe(0);
       expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.warn.mock.calls[0][0]).toContain("write failed");
     });

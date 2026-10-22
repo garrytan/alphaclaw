@@ -561,7 +561,7 @@ describe("server/cron-service command execution", () => {
       const service = makeService(openclawDir, { clawCmd });
       await service.updateJobPrompt({ jobId: "job-a", message: "it's tricky" });
       expect(clawCmd).toHaveBeenCalledWith(
-        `cron edit 'job-a' --message 'it'\\''s tricky'`,
+        `cron edit 'job-a' --message 'it'"'"'s tricky'`,
         expect.objectContaining({ quiet: true }),
       );
       await service.updateJobPrompt({ jobId: "job-a" });
