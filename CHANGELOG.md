@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.52] - 2026-10-22
+
+A memory-mitigation restart gives OpenClaw a drain sized to the memory headroom instead of a fixed 30 s, so an agent turn in flight can finish (ALPH-17, PR 3 of the restart plan).
+
+### Changed
+- The pre-OOM mitigation computes its ask grace from time to exhaustion (`lib/server/gateway-memory/drain-budget.js`): half the projected time until the worker reaches its memory budget or the container its limit, whichever is sooner, minus SIGTERM and SIGKILL, clamped between 30 s and OpenClaw's own default restart deferral (300 s, `kOpenclawDefaultRestartDrainMs`). An imminent OOM (≤ 2 min left, container ≥ 97%, or no projection at ≥ 97% budget pressure) keeps the short 30 s ask.
+- The budget is decided when the mitigation fires and re-derived from a fresh sample right before the ask spawns (after preflight and the restart notice), never later than the exhaustion time fixed at the decision: `ladder.askGraceMs` accepts a resolver returning `{ askGraceMs, reason }`. The ask's log line carries `graceReason=`, and the stop evidence carries `askGraceMs`/`askGraceReason`. A resolver that throws falls back to 30 s (`graceReason=resolver_failed`).
+- The restart notice says how long OpenClaw gets and why. The `mitigation_restart` event and the `gateway_restart` ok/failed records carry `drainBudget` (`askGraceMs`, `reason`: `derived | imminent | no_projection`, `etaMs`).
+- `kGatewayRestartOperationBudgetMs` (the restart lifecycle lease, the operation record lifetime and the expected-restart window) now covers the longest ask: 925 s with the default 300 s ready wait (was 630 s). The stop ladder's step durations moved to `constants.js` beside it.
+
+### Added
+- Live test `tests/live/openclaw-restart-drain-contract.e2e.test.js`: the pin's `gateway restart` still takes `--wait` and its `DEFAULT_RESTART_DEFERRAL_TIMEOUT_MS` is still 300 000 ms.
+
 ## [0.10.51] - 2026-10-22
 
 The watchdog unit tests no longer depend on which pids happen to be alive on the machine running them (test-only, ALPH-17).

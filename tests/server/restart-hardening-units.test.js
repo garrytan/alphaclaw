@@ -30,11 +30,13 @@ describe("GATEWAY_RESTART_READY_TIMEOUT clamp (module-load read)", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const constants = await loadConstantsWithEnv(undefined);
     expect(constants.kGatewayRestartReadyTimeoutMs).toBe(300_000);
-    // budget = ready + 240s preflight worst case + 90s margin, floored at
-    // the 10-min lease.
+    // budget = ready + 240s preflight worst case + the longest ask (OpenClaw's
+    // 300 s drain + 10 s ack + 15 s reserve) + 25 s SIGTERM + 5 s SIGKILL +
+    // 30 s margin, floored at the 10-min lease.
     expect(constants.kGatewayRestartOperationBudgetMs).toBe(
-      Math.max(600_000, 300_000 + 240_000 + 90_000),
+      Math.max(600_000, 300_000 + 240_000 + 325_000 + 30_000 + 30_000),
     );
+    expect(constants.kGatewayRestartOperationBudgetMs).toBe(925_000);
     expect(warnSpy).not.toHaveBeenCalledWith(
       expect.stringContaining("GATEWAY_RESTART_READY_TIMEOUT"),
     );
@@ -67,7 +69,7 @@ describe("GATEWAY_RESTART_READY_TIMEOUT clamp (module-load read)", () => {
     );
     // Even at the cap, the derived budget covers the wait with margin.
     expect(constants.kGatewayRestartOperationBudgetMs).toBe(
-      480_000 + 240_000 + 90_000,
+      480_000 + 240_000 + 325_000 + 30_000 + 30_000,
     );
   });
 
