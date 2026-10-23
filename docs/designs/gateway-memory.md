@@ -97,10 +97,15 @@ unavailable. RSS and container monitoring continue if instrumentation is disable
 unsupported, unreadable, or unable to write.
 
 **Trust:** the gateway and AlphaClaw share a UID. Private permissions and identity
-checks do not authenticate the telemetry writer. Heap, GC, external memory, and
-attribution are diagnostic only: none can set budgets, clear pressure, or authorize
-a restart. Public/agent projections contain selected finite numbers and closed
-enums, never raw histories, argv, boot IDs, filenames, or error text.
+checks do not authenticate the telemetry writer. External memory and attribution
+are diagnostic only. Since ALPH-22 the heap reading (heap used against the V8 heap
+limit, and confirmed rising post-GC floors) is one of the three critical gates: it
+can keep a worker that is growing under load out of critical, and it can name the
+heap as the floor, but it never sets the memory budget, and every critical still
+needs the independently sampled worker slope. Missing or stale telemetry leaves
+the gate open, so a writer that stops publishing cannot hide a leak. Public/agent
+projections contain selected finite numbers and closed enums, never raw
+histories, argv, boot IDs, filenames, or error text.
 
 ## Detection and retained explanations
 
@@ -110,9 +115,26 @@ The group policy budget is the tighter valid value of configured active heap plu
 formula `cgroupUsed - groupRSS` is removed. The old `projectedExhaustionAt` field
 aliases projected group-budget crossing; new code uses `projectedBudgetCrossingAt`.
 
-Group growth retains its existing grace, confirmation, recovery and restart
-interlocks. Fresh container pressure can satisfy the pressure side of its growth
-predicate. Container pressure also has its own two-read 90% latch and three-read
+**Critical (ALPH-22)** needs all three gates on the verified worker, held for
+three consecutive fresh evaluations (the fast path also needs RSS rising on each):
+
+1. **Slope:** the fitted worker RSS slope over the window is positive.
+2. **Floor:** the worker's memory is at 90% of the budget or more, or the V8 heap
+   is at 70% of its limit or more. Worker memory is its private memory (USS, from
+   its own `smaps_rollup`) while that read is fresh, otherwise its RSS. The
+   worker's own reading stays fresh when tool children come and go; only the
+   group PSS total goes stale with `membership_changed`.
+3. **Heap:** when heap telemetry is fresh, heap used is at 70% of the limit, or
+   post-GC floors are rising (`possible_heap_retention`), or the worker itself
+   has the container at 90% (it dominates the group and is growing).
+
+A group series (the worker is not verified) can latch `leak_suspected`, labelled
+as the group with its tool children, but never goes critical and never counts
+container pressure. The heap projection (worker slope toward the heap limit)
+can latch a warning as well as the budget projection.
+
+Worker growth retains its existing grace, confirmation, recovery and restart
+interlocks. Fresh container pressure counts only for a dominant, growing worker. Container pressure also has its own two-read 90% latch and three-read
 recovery, independent of gateway presence. Container-only pressure never permits
 a gateway restart. Duplicate, stale, partial or out-of-order process evidence
 cannot confirm mitigation; missing evidence cannot clear a critical verdict.

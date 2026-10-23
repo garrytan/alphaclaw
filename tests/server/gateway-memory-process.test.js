@@ -329,6 +329,28 @@ describe("bounded process PSS sampling", () => {
     expect(fixture.sampler.read(fixture.snapshot, fixture.members)).toMatchObject({ status: "stale", reason: "sample_stale" });
   });
 
+  it("keeps the worker's own private memory fresh while tool children come and go (ALPH-22)", async () => {
+    const fixture = createPss();
+    fixture.files["/proc/200/smaps_rollup"] = rollup(3000, 2600, 100, 2400);
+    expect(fixture.sampler.read(fixture.snapshot, fixture.members)).toMatchObject({ status: "collecting", workerStatus: "unavailable", workerPrivateBytes: null });
+    await fixture.sampler.settleForTests();
+    const withChild = [...fixture.members, { pid: 300, parentPid: 200, startTicks: "100", role: "gateway_child" }];
+    expect(fixture.sampler.read(fixture.snapshot, withChild)).toMatchObject({
+      status: "stale", reason: "membership_changed",
+      workerStatus: "fresh", workerAtMs: 10000, workerPssBytes: 2600 * 1024, workerPrivateBytes: 2500 * 1024,
+    });
+    fixture.setNow(370001);
+    expect(fixture.sampler.read(fixture.snapshot, fixture.members)).toMatchObject({ workerStatus: "stale", workerPrivateBytes: 2500 * 1024 });
+  });
+
+  it("does not record a worker reading when the worker's own rollup fails", async () => {
+    const fixture = createPss();
+    fixture.files["/proc/200/smaps_rollup"] = error("EACCES");
+    fixture.sampler.read(fixture.snapshot, fixture.members);
+    await fixture.sampler.settleForTests();
+    expect(fixture.sampler.read(fixture.snapshot, fixture.members)).toMatchObject({ workerStatus: "unavailable", workerPrivateBytes: null });
+  });
+
   it("keeps the operation owned across deadlines, invalidation and process replacement", async () => {
     let elapsed = 0;
     const fixture = createPss({ monotonicNowFn: () => elapsed });

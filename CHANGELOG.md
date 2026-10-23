@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.71] - 2026-10-23
+
+The memory watchdog's `critical` verdict now judges a leak, not load: it needs a sustained rise, a real floor and a heap signal on the gateway worker, so a burst of real work stays a warning (ALPH-22, PR 1 of 4, from the critique Garry's deployed agent wrote on his 100 GB box).
+
+### Changed
+- **Three gates for `leak_critical`.** On the verified gateway worker, held for three consecutive fresh evaluations (two before): the fitted RSS slope is positive; the worker's memory is at 90% of the budget or the V8 heap is at 70% of its limit; and, when heap telemetry is fresh, heap used is at 70% of the limit, post-GC heap floors are rising, or the worker itself has the container at 90%. A worker at 3.5 GB with 789 MB used of an 8.8 GB heap and flat GC floors cannot go critical, whatever its slope. Stale or missing telemetry leaves the heap gate open, so a gateway that stops publishing cannot hide a leak. A heap at 70% of its limit counts as the floor even on a box where the memory budget is far away, and the worker slope projected toward the heap limit can latch a warning.
+- **The floor reads the worker's private memory.** The PSS sampler now keeps the worker's own `smaps_rollup` (USS and PSS) beside the group total. It stays fresh while tool children come and go; before, the only PSS figure was the group total, which went stale (`membership_changed`) every time a child started or exited. Worker RSS is used when the worker's own reading is stale. The slope still fits the per-minute RSS series.
+- **Group RSS and the children never drive critical.** When the worker is not verified the series measures the whole group; it can latch a warning, now labelled "Group RSS (gateway plus its tool children)", but it never goes critical, and container pressure no longer counts toward it.
+- Memory events (`leak_suspected`, `leak_critical`) carry `rssBasis`, `memoryMb`, `memoryMeasure` (`private`, `rss` or `group_rss`), `heap` (used, limit, fraction, floors rising) and `criticalGates`; the trend snapshot carries the same plus `heapLimitCrossingAt`. Notifications add a V8 heap line. The Doctor's critical card is now "Gateway worker memory critical" and says which gates were met.
+
+### Tests
+- `tests/server/gateway-memory-load-episodes.test.js` replays Garry's Oct 23 day through the real watchdog tick (`tests/server/helpers/memory-load-day.js`): the three episodes with group peaks of 3,984, 4,347 and 6,135 MB, worker 3.5 GB, heap 789 MB of 8.8 GB and 23 children all stay non-critical with no restart, with the worker's private memory fresh, stale, or the worker unverified. A real heap leak (worker and heap both climbing 40 MB/min, post-GC floors rising) goes critical and restarts once through the graceful ladder with a derived drain.
+- New monitor, PSS sampler and sample-reader cases for each gate, the private-memory floor and the group basis. Tests that relied on a group series or on container pressure alone going critical now assert the warning instead.
+
 ## [0.10.70] - 2026-10-23
 
 The live restart loop now fails on any restart that does not come back ready, including a new gateway that exits during startup (`exited_before_ready`) (ALPH-21).

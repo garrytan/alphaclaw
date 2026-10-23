@@ -46,8 +46,10 @@ describe("default gateway memory sample failure isolation", () => {
       rootPid: root.pid, workerPid: worker.pid, rootSource: target.rootSource,
     });
     expect(readTelemetry).toHaveBeenLastCalledWith({ identity: worker, stateDir: target.stateDir });
-    expect(trend).toMatchObject({ state: "critical", sampleStatus: "fresh", rssMb: 600,
-      effectiveCapMb: 1216, pressureSource: "container", containerPressureFraction: 0.95 });
+    // A group series (no verified worker) is measured but never critical.
+    expect(trend).toMatchObject({ rssBasis: "group", sampleStatus: "fresh", rssMb: 600,
+      effectiveCapMb: 1216, containerPressureFraction: 0.95 });
+    expect(trend.state).not.toBe("critical");
   });
 });
 
@@ -95,6 +97,26 @@ describe("enforcement basis (ALPH-17)", () => {
     expect(readGatewayMemorySample({ ...target, workerVerified: false })).toMatchObject({
       rssBasis: "group", rssBytes: 7239 * kMb, sampleStatus: "fresh", identityToken: "200",
     });
+  });
+
+  it("carries the worker's fresh private memory and the latest heap reading (ALPH-22)", () => {
+    stub(census({ pss: { status: "stale", reason: "membership_changed", workerStatus: "fresh", workerPrivateBytes: 3100 * kMb } }));
+    telemetry.readGatewayTelemetry.mockReturnValue({ status: "fresh", atMs: 5, records: [
+      { atMs: 4, heapUsedBytes: 700 * kMb, heapLimitBytes: 9011 * kMb },
+      { atMs: 5, heapUsedBytes: 789 * kMb, heapLimitBytes: 9011 * kMb },
+    ] });
+    expect(readGatewayMemorySample({ ...target, workerVerified: true })).toMatchObject({
+      rssBasis: "worker", workerPrivateBytes: 3100 * kMb,
+      heap: { status: "fresh", atMs: 5, usedBytes: 789 * kMb, limitBytes: 9011 * kMb },
+    });
+  });
+
+  it("never offers private memory for a group sample or from a stale worker reading", () => {
+    stub(census({ pss: { workerStatus: "fresh", workerPrivateBytes: 3100 * kMb } }));
+    expect(readGatewayMemorySample({ ...target, workerVerified: false })).toMatchObject({ rssBasis: "group", workerPrivateBytes: null, heap: null });
+    vi.restoreAllMocks();
+    stub(census({ pss: { workerStatus: "stale", workerPrivateBytes: 3100 * kMb } }));
+    expect(readGatewayMemorySample({ ...target, workerVerified: true })).toMatchObject({ rssBasis: "worker", workerPrivateBytes: null });
   });
 
   it("an inconsistent tree is not a worker sample", () => {

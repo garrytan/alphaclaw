@@ -139,18 +139,20 @@ describe("Oct 22 memory incident replay", () => {
     expect(critical.details).toMatchObject({ childDriven: true, largestChild: { pid: kChildPid } });
   });
 
-  it("the same replay when the worker is only the first-child guess sees the group verdict the incident saw, but alerts instead of restarting", async () => {
+  it("the same replay when the worker is only the first-child guess warns about the group, labelled, and never goes critical", async () => {
     const stack = createStack({ workerVerified: false });
     const readProcess = await replay(stack, { untilMs: Date.parse("2026-10-22T11:30:00.000Z") });
     expect(readProcess).toHaveBeenLastCalledWith({ rootPid: kRoot.pid, workerPid: kWorker.pid, rootSource: "serving_root" });
 
     const kinds = stack.events().map((event) => event.details.kind);
-    expect(kinds).toContain("leak_critical");
-    expect(stack.watchdog.getMemoryTrend()).toMatchObject({ state: "critical", rssBasis: "group" });
+    expect(kinds).toContain("leak_suspected");
+    expect(kinds).not.toContain("leak_critical");
+    expect(kinds).not.toContain("mitigation_restart");
+    const trend = stack.watchdog.getMemoryTrend();
+    expect(trend.rssBasis).toBe("group");
+    expect(trend.state).not.toBe("critical");
     expect(stack.restart).not.toHaveBeenCalled();
-    const skipped = stack.events().filter((event) => event.details.kind === "mitigation_skipped");
-    expect(skipped).toHaveLength(1);
-    expect(skipped[0].details).toMatchObject({ reason: "worker_unverified", rssBasis: "group" });
+    expect(stack.messages().some((message) => message.includes("Group RSS (gateway plus its tool children)"))).toBe(true);
   });
 
   it("a later launch redelivery that proves the worker switches the reader to the worker basis", async () => {

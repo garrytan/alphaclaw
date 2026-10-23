@@ -13,7 +13,8 @@ const kStartMs = 1_000_000_000;
 const kTickMs = 60_000;
 
 // Drives a synthetic scenario: rssAt(tick) returns bytes (or null for a read
-// miss); capAt(tick) returns the cap inputs. Collects every transition and
+// miss); capAt(tick) returns the cap inputs. Samples are worker-basis unless
+// capAt says otherwise (a group series never goes critical). Collects every transition and
 // the final snapshot.
 const drive = (
   monitor,
@@ -30,7 +31,7 @@ const drive = (
   let snapshot = null;
   for (let i = 0; i < ticks; i += 1) {
     const atMs = startMs + i * intervalMs;
-    monitor.addSample({ atMs, pid, rssBytes: rssAt(i), ...capAt(i) });
+    monitor.addSample({ atMs, pid, rssBytes: rssAt(i), rssBasis: "worker", ...capAt(i) });
     const result = monitor.evaluate(atMs);
     snapshot = result.snapshot;
     for (const t of result.transitions) transitions.push({ ...t, tick: i });
@@ -268,12 +269,18 @@ describe("trend detection (default constants, synthetic hours)", () => {
 
 describe("fast high-pressure path", () => {
   const cap = () => ({
-    containerLimitBytes: mb(1100),
-    cgroupUsedBytes: mb(1012),
+    budgetBytes: mb(1100),
     activeHeapMb: null,
   });
 
-  it("two rising post-grace evals at ≥90% of cap jump straight to critical", () => {
+  it("three rising post-grace evals with every critical gate jump straight to critical; two are not enough", () => {
+    const early = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
+      ticks: 3,
+      rssAt: (i) => mb(980 + 10 * i),
+      capAt: cap,
+    });
+    expect(early.transitions).toHaveLength(0);
+    expect(early.snapshot.state).not.toBe("critical");
     const monitor = createGatewayMemoryMonitor({
       config: { startupGraceMs: 0 },
     });
@@ -336,7 +343,7 @@ describe("fast high-pressure path", () => {
     });
     // containerLimit 400, non-gateway 150 → cap 250MB ≤ rss 300MB.
     const { snapshot, transitions } = drive(monitor, {
-      ticks: 3,
+      ticks: 4,
       rssAt: (i) => mb(300 + i),
       capAt: () => ({
         budgetBytes: mb(250),
@@ -414,7 +421,7 @@ describe("episode lifecycle (small config)", () => {
     expect(monitor.getTrend().state).toBe("leak_suspected");
     // The replacement process reports fresh, low RSS.
     const atMs = kStartMs + 100 * kTickMs;
-    monitor.addSample({ atMs, pid: 200, rssBytes: mb(90) });
+    monitor.addSample({ rssBasis: "worker", atMs, pid: 200, rssBytes: mb(90) });
     const { snapshot } = monitor.evaluate(atMs);
     expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
     expect(snapshot.episodeId).toBeNull();
@@ -428,9 +435,9 @@ describe("episode lifecycle (small config)", () => {
     const monitor = createGatewayMemoryMonitor({ config });
     let heapMb = 130; // cap = 130+192 = 322MB
     const capAt = () => ({ activeHeapMb: heapMb });
-    // Rise to >90% of 322MB.
+    // Rise to >90% of 322MB and hold there for three evaluations.
     const { transitions } = drive(monitor, {
-      ticks: 40,
+      ticks: 41,
       rssAt: (i) => mb(100 + 5 * i),
       capAt,
     });
@@ -443,7 +450,7 @@ describe("episode lifecycle (small config)", () => {
     // the episode de-escalates without clearing.
     heapMb = 2048;
     const atMs = kStartMs + 41 * kTickMs;
-    monitor.addSample({ atMs, pid: 100, rssBytes: mb(305), activeHeapMb: heapMb });
+    monitor.addSample({ rssBasis: "worker", atMs, pid: 100, rssBytes: mb(305), activeHeapMb: heapMb });
     const { snapshot } = monitor.evaluate(atMs);
     expect(snapshot.state).toBe("leak_suspected");
     expect(snapshot.criticalEvalStreak).toBe(0);
@@ -476,7 +483,7 @@ describe("episode lifecycle (small config)", () => {
     );
     // The replacement pid starts a clean baseline.
     const atMs = kStartMs + 20 * kTickMs;
-    monitor.addSample({ atMs, pid: 200, rssBytes: mb(90) });
+    monitor.addSample({ rssBasis: "worker", atMs, pid: 200, rssBytes: mb(90) });
     const { snapshot } = monitor.evaluate(atMs);
     expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
     expect(snapshot.lastEpisodeSummary?.episodeId).toBe(live.episodeId);
@@ -522,7 +529,7 @@ describe("episode lifecycle (small config)", () => {
     // Re-enable with the SAME pid: detection starts from scratch — no stale
     // samples, no retained streaks, full warm-up before any verdict.
     const backAt = kStartMs + 20 * kTickMs;
-    monitor.addSample({ atMs: backAt, pid: 100, rssBytes: mb(290) });
+    monitor.addSample({ rssBasis: "worker", atMs: backAt, pid: 100, rssBytes: mb(290) });
     const { snapshot, transitions } = monitor.evaluate(backAt);
     expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
     expect(transitions).toHaveLength(0);
@@ -537,7 +544,7 @@ describe("episode lifecycle (small config)", () => {
     // clear, addSample would skip the pid-change reset and blend old samples
     // into the new process's trend with no startup grace.
     const backAt = kStartMs + 17 * kTickMs;
-    monitor.addSample({ atMs: backAt, pid: 100, rssBytes: mb(500) });
+    monitor.addSample({ rssBasis: "worker", atMs: backAt, pid: 100, rssBytes: mb(500) });
     const { snapshot, transitions } = monitor.evaluate(backAt);
     expect(["warming_up", "insufficient_samples"]).toContain(snapshot.state);
     expect(transitions).toHaveLength(0);
@@ -561,7 +568,7 @@ describe("episode lifecycle (small config)", () => {
     monitor.noteMitigation();
     // Drop below 90% of peak → immediate clear.
     const atMs = kStartMs + 30 * kTickMs;
-    monitor.addSample({ atMs, pid: 100, rssBytes: mb(90) });
+    monitor.addSample({ rssBasis: "worker", atMs, pid: 100, rssBytes: mb(90) });
     const { transitions } = monitor.evaluate(atMs);
     const cleared = transitions.find((t) => t.type === "cleared");
     expect(cleared?.mitigationCount).toBe(1);
@@ -575,7 +582,7 @@ describe("episode lifecycle (small config)", () => {
     let tick = 0;
     const step = (rssBytes) => {
       const atMs = kStartMs + tick * kTickMs;
-      monitor.addSample({ atMs, pid: 100, rssBytes });
+      monitor.addSample({ rssBasis: "worker", atMs, pid: 100, rssBytes });
       const out = monitor.evaluate(atMs);
       tick += 1;
       return out;
@@ -607,7 +614,7 @@ describe("getTrend caching", () => {
     const monitor = createGatewayMemoryMonitor();
     expect(monitor.getTrend().state).toBe("no_gateway");
     const atMs = kStartMs;
-    monitor.addSample({ atMs, pid: 1, rssBytes: mb(100) });
+    monitor.addSample({ rssBasis: "worker", atMs, pid: 1, rssBytes: mb(100) });
     const { snapshot } = monitor.evaluate(atMs);
     const cached = monitor.getTrend();
     expect(cached).toEqual(snapshot);
@@ -639,18 +646,19 @@ describe("scoped policy, freshness and retained explanations", () => {
     expect(transitions).toEqual([]);
   });
 
-  it("rising group RSS can use direct container pressure without fabricating a group cap/projection", () => {
+  it("rising group RSS never uses container pressure and never goes critical (ALPH-22)", () => {
     const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
     const { snapshot, transitions } = drive(monitor, {
-      ticks: 4, rssAt: (i) => mb(100 + i),
-      capAt: (i) => ({ cgroupUsedBytes: mb(950 + i), containerLimitBytes: mb(1000) }),
+      ticks: 8, rssAt: (i) => mb(900 + 10 * i),
+      capAt: (i) => ({ rssBasis: "group", groupRssBytes: mb(900 + 10 * i),
+        cgroupUsedBytes: mb(950 + i), containerLimitBytes: mb(1000), budgetBytes: mb(960) }),
     });
-    expect(snapshot.state).toBe("critical");
-    expect(snapshot.pressureSource).toBe("container");
-    expect(snapshot.effectiveCapMb).toBeNull();
-    expect(snapshot.projectedBudgetCrossingAt).toBeNull();
-    expect(snapshot.projectedExhaustionAt).toBeNull();
-    expect(transitions.find((t) => t.type === "escalated_critical").pressureSource).toBe("container");
+    expect(snapshot.rssBasis).toBe("group");
+    expect(snapshot.containerPressureFraction).toBeGreaterThan(0.9);
+    expect(snapshot.pressureFraction).toBe(1);
+    expect(snapshot.state).not.toBe("critical");
+    expect(snapshot.criticalEvalStreak).toBe(0);
+    expect(transitions.some((t) => t.type === "escalated_critical")).toBe(false);
   });
 
   it("RSS shared-page amplification alone does not become physical container pressure", () => {
@@ -697,12 +705,12 @@ describe("scoped policy, freshness and retained explanations", () => {
       ticks: 4, rssAt: (i) => mb(300 + 5 * i), capAt: () => ({ budgetBytes: mb(320) }),
     });
     const when = kStartMs + 3 * kTickMs;
-    monitor.addSample({ atMs: when, pid: 100, rssBytes: mb(316), budgetBytes: mb(320) });
+    monitor.addSample({ rssBasis: "worker", atMs: when, pid: 100, rssBytes: mb(316), budgetBytes: mb(320) });
     const duplicate = monitor.evaluate(when);
     expect(duplicate.snapshot.sampleStatus).toBe("stale");
     expect(duplicate.snapshot.criticalEvalStreak).toBe(snapshot.criticalEvalStreak);
     expect(duplicate.transitions).toEqual([]);
-    monitor.addSample({ atMs: when + kTickMs, pid: 100, rssBytes: mb(10), sampleStatus: "partial" });
+    monitor.addSample({ rssBasis: "worker", atMs: when + kTickMs, pid: 100, rssBytes: mb(10), sampleStatus: "partial" });
     const partial = monitor.evaluate(when + kTickMs);
     expect(partial.snapshot.sampleStatus).toBe("partial");
     expect(partial.snapshot.episodeId).toBe(snapshot.episodeId);
@@ -716,7 +724,7 @@ describe("scoped policy, freshness and retained explanations", () => {
       ticks: 15, rssAt: (i) => mb(100 + 5 * i), capAt: () => ({ identityToken: "root-generation-1" }),
     });
     const nowMs = kStartMs + 16 * kTickMs;
-    monitor.addSample({ atMs: nowMs, pid: 100, identityToken: "root-generation-2", rssBytes: mb(100) });
+    monitor.addSample({ rssBasis: "worker", atMs: nowMs, pid: 100, identityToken: "root-generation-2", rssBytes: mb(100) });
     const next = monitor.evaluate(nowMs).snapshot;
     expect(next.episodeId).toBeNull();
     expect(next.lastEpisodeSummary.episodeId).toBe(snapshot.episodeId);
@@ -739,10 +747,10 @@ describe("scoped policy, freshness and retained explanations", () => {
     expect(JSON.stringify(snapshot.evidence)).not.toContain("secret");
     snapshot.evidence.process.worker.pid = 999;
     expect(monitor.getTrend().evidence.process.worker.pid).toBe(101);
-    monitor.addSample({ atMs: kStartMs + 15 * kTickMs, pid: 100, rssBytes: mb(180),
+    monitor.addSample({ rssBasis: "worker", atMs: kStartMs + 15 * kTickMs, pid: 100, rssBytes: mb(180),
       evidence: { attribution: { state: "unknown" }, telemetry: { status: "unavailable" } } });
     monitor.evaluate(kStartMs + 15 * kTickMs);
-    monitor.addSample({ atMs: kStartMs + 16 * kTickMs, pid: 100, rssBytes: mb(185),
+    monitor.addSample({ rssBasis: "worker", atMs: kStartMs + 16 * kTickMs, pid: 100, rssBytes: mb(185),
       evidence: { attribution: { state: "observing", causes: [] }, telemetry: { status: "fresh" } } });
     monitor.evaluate(kStartMs + 16 * kTickMs);
     monitor.noteProcessExited(kStartMs + 17 * kTickMs, 100);
@@ -805,15 +813,16 @@ describe("enforcement basis (ALPH-17)", () => {
   });
 
   it("a basis change resets the series and freezes the episode as basis_changed instead of reading the step as growth", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: kSmallConfig });
     const cap = () => ({ activeHeapMb: 1000 });
-    // Group basis climbs into a critical episode (cap 1192 MB).
-    const first = drive(monitor, { ticks: 4, rssAt: (i) => mb(1100 + 10 * i),
+    // Group basis climbs into a leak_suspected episode (cap 1192 MB): it can
+    // warn, never go critical.
+    const first = drive(monitor, { ticks: 15, rssAt: (i) => mb(1000 + 10 * i),
       capAt: () => ({ ...cap(), rssBasis: "group" }) });
-    expect(first.snapshot.state).toBe("critical");
+    expect(first.snapshot.state).toBe("leak_suspected");
     // The worker is identified: 500 MB on the worker basis. No growth step,
     // a fresh series, and the frozen summary says why the episode ended.
-    const second = drive(monitor, { ticks: 3, startMs: kStartMs + 4 * kTickMs,
+    const second = drive(monitor, { ticks: 3, startMs: kStartMs + 15 * kTickMs,
       rssAt: () => mb(500), capAt: () => ({ ...cap(), rssBasis: "worker", groupRssBytes: mb(1150) }) });
     expect(second.transitions).toHaveLength(0);
     expect(second.snapshot).toMatchObject({ rssBasis: "worker", rssMb: 500, episodeId: null });
@@ -830,3 +839,92 @@ describe("enforcement basis (ALPH-17)", () => {
     expect(snapshot.lastEpisodeSummary).toBeNull();
   });
 });
+
+describe("critical gates: slope, floor, heap (ALPH-22)", () => {
+  const heapAt = (i, { usedMb, limitMb = 9011, floorsRising = false, status = "fresh" }) => ({
+    status, atMs: kStartMs + i * kTickMs, usedBytes: mb(typeof usedMb === "function" ? usedMb(i) : usedMb),
+    limitBytes: mb(limitMb), floorsRising,
+  });
+  const rising = (i) => mb(1000 + 10 * i);
+  const budget = { budgetBytes: mb(1100) };
+
+  it("fresh heap telemetry with a roomy heap and flat post-GC floors vetoes critical at 90%+ of the cap", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: 8, rssAt: rising, capAt: (i) => ({ ...budget, heap: heapAt(i, { usedMb: 789 }) }),
+    });
+    expect(snapshot.pressureFraction).toBeGreaterThan(0.9);
+    expect(snapshot.criticalGates).toEqual({ slope: true, floor: true, heap: false });
+    expect(snapshot.heap).toMatchObject({ status: "fresh", usedMb: 789, limitMb: 9011, fraction: 0.088 });
+    expect(snapshot.state).not.toBe("critical");
+    expect(transitions.some((t) => t.type === "escalated_critical")).toBe(false);
+  });
+
+  it("stale or missing heap telemetry leaves the heap gate open", () => {
+    for (const heap of [(i) => heapAt(i, { usedMb: 789, status: "stale" }),
+      (i) => ({ ...heapAt(i, { usedMb: 789 }), atMs: kStartMs + i * kTickMs - 5 * kTickMs }), () => null]) {
+      const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+      const { snapshot } = drive(monitor, { ticks: 5, rssAt: rising, capAt: (i) => ({ ...budget, heap: heap(i) }) });
+      expect(snapshot.state).toBe("critical");
+      expect(snapshot.criticalGates.heap).toBe(true);
+    }
+  });
+
+  it("rising post-GC heap floors satisfy the heap gate", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 5, rssAt: rising, capAt: (i) => ({ ...budget, heap: heapAt(i, { usedMb: 789, floorsRising: true }) }),
+    });
+    expect(snapshot.state).toBe("critical");
+  });
+
+  it("a heap at 70% of its limit is the floor even when worker memory is far below the cap", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 5, rssAt: (i) => mb(6800 + 30 * i),
+      capAt: (i) => ({ budgetBytes: mb(80_000), heap: heapAt(i, { usedMb: (t) => 6300 + 30 * t }) }),
+    });
+    expect(snapshot.pressureFraction).toBeLessThan(0.1);
+    expect(snapshot.criticalGates).toEqual({ slope: true, floor: true, heap: true });
+    expect(snapshot.state).toBe("critical");
+  });
+
+  it("the floor reads the worker's private memory when it is fresh, not its RSS", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 8, rssAt: rising, capAt: (i) => ({ ...budget, workerPrivateBytes: mb(600 + 10 * i) }),
+    });
+    expect(snapshot).toMatchObject({ memoryMeasure: "private", memoryMb: 670, rssMb: 1070 });
+    expect(snapshot.criticalGates.floor).toBe(false);
+    expect(snapshot.state).not.toBe("critical");
+  });
+
+  it("a group series ignores a private-memory reading", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 3, rssAt: rising, capAt: () => ({ rssBasis: "group", workerPrivateBytes: mb(10) }),
+    });
+    expect(snapshot).toMatchObject({ memoryMeasure: "group_rss", memoryMb: 1020 });
+  });
+
+  it("a dominant, growing worker filling the container opens the heap gate", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const { snapshot } = drive(monitor, {
+      ticks: 5, rssAt: (i) => mb(900 + 10 * i),
+      capAt: (i) => ({ rssBasis: "worker", groupRssBytes: mb(950 + 10 * i), containerLimitBytes: mb(1100),
+        cgroupUsedBytes: mb(1050), heap: heapAt(i, { usedMb: 200 }) }),
+    });
+    expect(snapshot).toMatchObject({ state: "critical", pressureSource: "container" });
+  });
+
+  it("a burst that meets every gate for two evaluations and recovers never goes critical", () => {
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const shape = [900, 905, 910, 1000, 1010, 905, 900, 900];
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: shape.length, rssAt: (i) => mb(shape[i]), capAt: () => budget,
+    });
+    expect(transitions.some((t) => t.type === "escalated_critical")).toBe(false);
+    expect(snapshot.state).not.toBe("critical");
+  });
+});
+

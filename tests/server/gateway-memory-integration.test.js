@@ -136,7 +136,9 @@ describe("gateway memory attribution across operational surfaces", () => {
     const harness = createHarness();
     for (let tick = 0; tick < 80; tick += 1) await harness.tick(tick, { containerCritical: tick >= 70 });
     const trend = harness.watchdog.getMemoryTrend();
-    expect(trend.state).toBe("critical");
+    // Group RSS driven by children warns; it never goes critical (ALPH-22).
+    expect(trend.state).toBe("leak_suspected");
+    expect(trend.rssBasis).toBe("group");
     expect(trend.container.state).toBe("critical");
     expect(trend.evidence.attribution.causes).toContain("child_accumulation");
     expect(trend.evidence.attribution.causes).not.toContain("possible_heap_retention");
@@ -158,9 +160,11 @@ describe("gateway memory attribution across operational surfaces", () => {
     expect(resources.gatewayMemory.attribution.causes).toContain("child_accumulation");
     expect(resources.gatewayMemory.telemetry).not.toHaveProperty("records");
     expect(JSON.stringify(resources)).not.toContain("private-process-title");
-    const critical = doctorCards(trend).find((card) => card.sourceKey.startsWith("det:gateway-memory-leak-critical:"));
-    expect(critical.priority).toBe("P0");
-    expect(critical.summary).toContain("child-process count and RSS grew");
+    const cards = doctorCards(trend);
+    expect(cards.some((card) => card.sourceKey.startsWith("det:gateway-memory-leak-critical:"))).toBe(false);
+    const rising = cards.find((card) => card.sourceKey.startsWith("det:gateway-memory-leak:"));
+    expect(rising.priority).toBe("P1");
+    expect(rising.summary).toContain("child-process count and RSS grew");
 
     const episodeId = trend.episodeId;
     vi.setSystemTime(kStart + 80 * kMinute);
@@ -186,17 +190,21 @@ describe("gateway memory attribution across operational surfaces", () => {
     expect(harness.restart).not.toHaveBeenCalled();
   });
 
-  it("gateway-reported low heap pressure cannot mute actual process-group budget pressure", async () => {
+  it("process-group budget pressure from growing children warns, labelled, but never goes critical (ALPH-22)", async () => {
     const harness = createHarness();
     for (let tick = 0; tick < 75; tick += 1) {
       await harness.tick(tick, { activeHeapMb: 1808, heapUsedMb: 1, heapLimitMb: 100000 });
     }
     const trend = harness.watchdog.getMemoryTrend();
-    expect(trend.state).toBe("critical");
+    expect(trend.state).toBe("leak_suspected");
+    expect(trend.pressureFraction).toBeGreaterThanOrEqual(0.9);
     expect(trend.capSource).toBe("derived_group_budget");
     expect(trend.effectiveCapMb).toBe(2000);
     expect(trend.container.state).toBe("normal");
     expect(trend.evidence.attribution.causes).toContain("child_accumulation");
-    expect(messages(harness).some((message) => /gateway memory critical/i.test(message))).toBe(true);
+    const notices = messages(harness);
+    expect(notices.some((message) => /gateway memory critical/i.test(message))).toBe(false);
+    expect(notices.some((message) => message.includes("Group RSS (gateway plus its tool children)"))).toBe(true);
+    expect(harness.restart).not.toHaveBeenCalled();
   });
 });
