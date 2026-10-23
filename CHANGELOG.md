@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.74] - 2026-10-23
+
+Memory notifications now send one message per episode tier instead of one per transition, wait five minutes before paging, and follow up when an episode clears. No memory notice advises a manual restart (ALPH-22, PR 4 of 4).
+
+### Changed
+- **One message per episode.** The opening alert waits five minutes, so load that settles inside that hold never pages. An episode that outlasts it sends one 🟡 "rising steadily" warning, or one 🔴 critical that says whether the watchdog will restart and, if not, why: auto-restart is off, the worker is not identified, or the heap and container give no restart authority. A restart or brake notice takes the critical slot.
+- **Spikes that recover get one combined message.** A critical that clears inside the hold sends one 🟡 "spiked and recovered" message with how long it was critical and its peak, instead of a red alert followed by silence.
+- **Cleared follow-up.** When an episode that notified clears in place, one ✅ "back to normal" message names its duration, its peak, whether it reached critical and any restarts during it.
+- **The brake notice explains itself.** "🔴 Gateway memory critical — automatic restart is paused" now gives the memory restarts in the last 24 hours, the limit and spacing, and the UTC time the brake lifts. It no longer advises restarting the gateway by hand, which is the step the brake exists to stop repeating; it points to Doctor and the watchdog's memory events. A memory restart that fails to stop the gateway says the watchdog re-evaluates on the next tick, with the same pointer.
+
+### Tests
+- New watchdog cases: an episode that clears inside the hold sends nothing; a sustained warning sends one message after the hold and one cleared follow-up with duration and peak; a critical that clears inside the hold sends one combined message and no 🔴; a sustained critical with auto-restart off sends one 🔴 explaining why it will not restart, then a cleared follow-up. The brake case pins the new wording and the absence of manual-restart advice.
+- Harnesses that pin per-transition behaviour run with `memoryNoticeHoldMs: 0`.
+
 ## [0.10.73] - 2026-10-23
 
 An automatic memory restart now needs a reason a restart would help: the V8 heap near its limit, the worker itself filling the container, or the operator's own budget. Critical alone no longer restarts the gateway (ALPH-22, PR 3 of 4).

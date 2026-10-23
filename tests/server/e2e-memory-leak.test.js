@@ -119,6 +119,8 @@ exit 0
         readMemorySample,
         readMemorySettings: () => settings,
         memoryMonitorConfig: kFastDetectorConfig,
+        // Real time: the five-minute episode hold would outlast the test.
+        memoryNoticeHoldMs: 0,
         restartGatewayForMitigation,
         memoryMitigationStatePath: path.join(caseDir, "mitigation-state.json"),
       });

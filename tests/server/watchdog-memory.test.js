@@ -45,6 +45,9 @@ const createHarness = ({
   // v0.9.75 identity seams (pid-reuse guard for the serving root).
   readProcStartTicks = null,
   discoverServingIdentity = null,
+  // Most cases pin the per-transition notification; the one-message-per-
+  // episode hold (ALPH-22) has its own cases below.
+  memoryNoticeHoldMs = 0,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
@@ -66,6 +69,7 @@ const createHarness = ({
     readMemorySample,
     readMemorySettings: readMemorySettings || (() => settings),
     memoryMonitorConfig: kMonitorConfig,
+    memoryNoticeHoldMs,
     restartGatewayForMitigation,
     ...(readProcStartTicks ? { readProcStartTicks } : {}),
     ...(discoverServingIdentity ? { discoverServingIdentity } : {}),
@@ -701,9 +705,15 @@ describe("server/watchdog memory monitor", () => {
         ),
       ).toBe(true);
       const brakeNotices = notifications(harness.notifier).filter((m) =>
-        m.includes("auto-restart brake engaged"),
+        m.includes("automatic restart is paused"),
       );
       expect(brakeNotices).toHaveLength(1);
+      // ALPH-22: the brake says why and when it lifts, and never advises the
+      // manual restart it exists to stop repeating.
+      expect(brakeNotices[0]).toContain("🔴 Gateway memory critical — automatic restart is paused");
+      expect(brakeNotices[0]).toMatch(/will not restart it again before \d{4}-\d{2}-\d{2}T/);
+      expect(brakeNotices[0]).toContain("Run Doctor for a diagnosis");
+      expect(brakeNotices[0]).not.toMatch(/restart (the gateway|it) (manually|yourself)|manual restart|Restart the gateway/i);
     });
 
     it("skips-if-busy on a held lifecycle lock and retries a later tick", async () => {
@@ -1590,6 +1600,94 @@ describe("restart authority in the watchdog (ALPH-22)", () => {
     expect(skipped).toHaveLength(1);
     expect(skipped[0].details).toMatchObject({ reason: "not_near_limit" });
     expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_restart")).toBe(false);
+  });
+});
+
+
+describe("one message per memory episode (ALPH-22)", () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(kStartMs); });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.WATCHDOG_AUTO_REPAIR;
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    vi.restoreAllMocks();
+  });
+
+  const kHoldMs = 5 * kTickMs;
+  const leakSample = (i) => ({ rssBytes: (100 + 5 * i) * kMb });
+  const criticalSample = (i) => ({
+    rssBytes: (365 + 4 * i) * kMb,
+    cgroupUsedBytes: (365 + 4 * i) * kMb,
+    containerLimitBytes: 540 * kMb,
+    heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 750 * kMb, limitBytes: 1000 * kMb },
+  });
+  // Ticks until the trend reaches the state; returns the next tick index.
+  const driveUntil = async (harness, sampleAt, trendState, { from = 0, max = 40 } = {}) => {
+    for (let i = from; i < from + max; i += 1) {
+      await driveTicks(harness, { ticks: 1, startTick: i, sampleAt });
+      if (harness.watchdog.getMemoryTrend().state === trendState) return i + 1;
+    }
+    throw new Error(`trend never reached ${trendState}`);
+  };
+  const recover = (harness, startTick) =>
+    driveTicks(harness, { ticks: 1, startTick, sampleAt: () => ({ rssBytes: 60 * kMb }) });
+
+  it("an episode that clears inside the hold sends nothing", async () => {
+    const harness = createHarness({ memoryNoticeHoldMs: kHoldMs });
+    launchGateway(harness);
+    const next = await driveUntil(harness, leakSample, "leak_suspected");
+    await driveTicks(harness, { ticks: 2, startTick: next, sampleAt: leakSample });
+    await recover(harness, next + 2);
+    const kinds = memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind);
+    expect(kinds).toEqual(expect.arrayContaining(["leak_suspected", "leak_cleared"]));
+    expect(notifications(harness.notifier)).toEqual([]);
+  });
+
+  it("a sustained episode sends one warning after the hold and one cleared follow-up with duration and peak", async () => {
+    const harness = createHarness({ memoryNoticeHoldMs: kHoldMs });
+    launchGateway(harness);
+    const next = await driveUntil(harness, leakSample, "leak_suspected");
+    await driveTicks(harness, { ticks: 4, startTick: next, sampleAt: leakSample });
+    expect(notifications(harness.notifier)).toEqual([]);
+    await driveTicks(harness, { ticks: 10, startTick: next + 4, sampleAt: leakSample });
+    expect(notifications(harness.notifier)).toHaveLength(1);
+    expect(notifications(harness.notifier)[0]).toContain("🟡 Gateway memory rising steadily");
+    await recover(harness, next + 14);
+    const sent = notifications(harness.notifier);
+    expect(sent).toHaveLength(2);
+    const cleared = memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.kind === "leak_cleared");
+    expect(sent[1]).toContain("✅ Gateway memory back to normal");
+    expect(sent[1]).toContain(`peaked at ${cleared.details.peakRssMb} MB`);
+    expect(sent[1]).toMatch(/lasted \d+ minutes/);
+    expect(sent[1]).not.toContain("reaching critical");
+  });
+
+  it("a critical that clears inside the hold sends one combined message, never a red alert", async () => {
+    const harness = createHarness({ memoryNoticeHoldMs: kHoldMs });
+    launchGateway(harness);
+    const next = await driveUntil(harness, criticalSample, "critical");
+    await recover(harness, next);
+    const sent = notifications(harness.notifier);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("🟡 Gateway memory spiked and recovered");
+    expect(sent[0]).toContain("The watchdog took no action.");
+    expect(sent.some((m) => m.includes("🔴"))).toBe(false);
+  });
+
+  it("a sustained critical sends one red alert that says why it will not restart, then a cleared follow-up", async () => {
+    const harness = createHarness({ memoryNoticeHoldMs: kHoldMs });
+    launchGateway(harness);
+    const next = await driveUntil(harness, criticalSample, "critical");
+    await driveTicks(harness, { ticks: 10, startTick: next, sampleAt: criticalSample });
+    const red = notifications(harness.notifier).filter((m) => m.includes("🔴"));
+    expect(red).toHaveLength(1);
+    expect(red[0]).toContain("Automatic restart is off");
+    expect(notifications(harness.notifier).some((m) => m.includes("rising steadily"))).toBe(false);
+    await recover(harness, next + 10);
+    const sent = notifications(harness.notifier);
+    expect(sent.at(-1)).toContain("✅ Gateway memory back to normal");
+    expect(sent.at(-1)).toContain("reaching critical");
+    for (const message of sent) expect(message).not.toMatch(/restart (the gateway|it) (manually|yourself)|manual restart/i);
   });
 });
 

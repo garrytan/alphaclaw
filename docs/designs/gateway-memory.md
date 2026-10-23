@@ -165,6 +165,26 @@ refunds the brake and notification dedupe, and releases the lifecycle lock so a
 fresh sample can retry. Settings, restart interlocks and rate brakes are also
 rechecked after notification delivery.
 
+### Notifications (ALPH-22)
+
+Each episode sends at most one message per tier. The opening alert waits five
+minutes (`memoryNoticeHoldMs` in `watchdog.js`), so load that settles inside
+that hold never pages. A warning episode that outlasts the hold sends one 🟡
+"rising steadily" message; a critical one sends one 🔴 message that says
+whether the watchdog will restart and, if not, why (auto-restart off, the worker
+not identified, or no restart authority). A restart or rate-brake notice takes
+the critical slot. A critical that clears inside the hold gets one combined
+"spiked and recovered" message instead of a red alert. When an episode that
+notified clears in place, one ✅ follow-up names its duration, its peak and any
+restarts. An episode that ends with the process (a restart or crash) closes
+without a follow-up, because the restart path reports its own outcome.
+
+The brake notice ("automatic restart is paused") states how many memory
+restarts the window holds, the limit and spacing, and the UTC time the brake
+lifts. No memory notice advises a manual restart: repeated restarts are the
+harm the brake exists to stop, so every notice points to Doctor and the
+watchdog's memory events.
+
 Attribution uses a one-hour covered window and two fresh confirmations. Child
 growth is distinct from accumulation (count and RSS growth). Possible heap
 retention additionally needs three observed major-GC bucket minima spanning 48
