@@ -4,11 +4,15 @@
 // launch guard waited for the reap, about one restart in fifteen was skipped
 // as child_retained and left no gateway running. This loop runs N real
 // restarts through the REAL lib/server/gateway.js against the pinned OpenClaw
-// and requires that none is skipped as child_retained ("already running —
-// skipping launch"). Any other restart failure is printed with its evidence:
-// a rare new gateway that receives a SIGTERM during startup and exits 0
-// (exited_before_ready) is still under investigation and does not fail here. Loop count:
-// ALPHACLAW_LIVE_RESTART_LOOPS (default 30). About 30 s per restart.
+// and requires every one to succeed: none skipped as child_retained ("already
+// running — skipping launch"), none failed in any other way. That includes a
+// new gateway that gets a SIGTERM during startup and exits 0
+// (exited_before_ready), which ALPH-19 saw about twice in 300 restarts on a
+// Capy machine. ALPH-21 traced every signal on a Ubicloud VM with bpftrace
+// over 1,650 restarts (and a signal recorder over 600 on a Capy machine) and
+// saw no starting gateway signalled by anyone. Each
+// failure is printed with its evidence. Loop count:
+// ALPHACLAW_LIVE_RESTART_LOOPS (default 30). About 15-30 s per restart.
 // Requires: Node 24.22.1+/26.12.1+ first on PATH, the pinned OpenClaw in
 // node_modules (no registry access).
 
@@ -96,7 +100,7 @@ describeLive(`LIVE restart loop against the ${readDeclaredPin()} pin`, () => {
   };
 
   it(
-    `${kLoops} cold restarts in a row: none is skipped as child_retained`,
+    `${kLoops} cold restarts in a row: every one relaunches and is ready`,
     async () => {
       const child = await gateway.startGateway();
       expect(child?.pid).toEqual(expect.any(Number));
@@ -125,8 +129,8 @@ describeLive(`LIVE restart loop against the ${readDeclaredPin()} pin`, () => {
       originalLog(`[live-loop] summary restarts=${kLoops} failures=${failures.length} skipped=${skipped.length} reapWaits=${reapWaits.length}`);
       for (const line of reapWaits) originalLog(`[live-loop] ${line}`);
       for (const failure of failures) originalLog(`[live-loop] failure ${JSON.stringify(failure)}`);
-      expect(failures.filter((failure) => failure.outcome === "child_retained")).toEqual([]);
       expect(skipped).toEqual([]);
+      expect(failures).toEqual([]);
       await waitFor(async () => (await readyzStatus()) === 200, 60_000, "gateway ready at the end");
     },
     kTestTimeoutMs,

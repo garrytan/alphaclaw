@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.70] - 2026-10-23
+
+The live restart loop now fails on any restart that does not come back ready, including a new gateway that exits during startup (`exited_before_ready`) (ALPH-21).
+
+### Tests
+- `tests/live/gateway-restart-loop.e2e.test.js` used to fail only on a launch skipped as `child_retained`. Every other restart failure was printed and ignored, because ALPH-19 had seen a new gateway get a SIGTERM about 2 s into startup and exit 0 in about 2 of 300 restarts on a Capy machine, and the sender was unknown. ALPH-21 ran 1,650 restarts on a Ubicloud VM with bpftrace tracing every signal (`signal:signal_generate`, `kill`, `tgkill`, `pidfd_send_signal`, `execve`). They covered a plain session, a systemd unit with `TimeoutStopSec=90` like the Capy machine's, and 4 CPUs under 6 parallel loops. It also ran 600 restarts on a Capy machine with an LD_PRELOAD signal recorder in every OpenClaw process. Neither saw an `exited_before_ready`, and no process signalled a starting gateway. The only SIGTERMs to gateway processes came from test teardown and the compile-cache launcher forwarding to its own child. OpenClaw's `terminateStaleGatewayPids` cannot run in AlphaClaw's setup: `openclaw gateway restart` under `OPENCLAW_SUPERVISOR_MODE=external` takes `runExternalSupervisorRestart`, whose health wait never signals. The loop now requires every restart to relaunch and become ready, and it prints the evidence for any that does not.
+
 ## [0.10.69] - 2026-10-23
 
 The live ask-outcome test no longer fails when it runs beside other live tests (ALPH-21).
