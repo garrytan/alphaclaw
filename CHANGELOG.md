@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.73] - 2026-10-23
+
+An automatic memory restart now needs a reason a restart would help: the V8 heap near its limit, the worker itself filling the container, or the operator's own budget. Critical alone no longer restarts the gateway (ALPH-22, PR 3 of 4).
+
+### Changed
+- **Restart authority.** With auto-restart on, a critical verdict restarts the gateway only when the snapshot carries a `restartAuthority`:
+  - `heap_near_limit`: fresh heap telemetry shows heap used at 85% of the V8 limit or more, where V8 would abort anyway.
+  - `worker_container_oom`: the dominant, growing worker has the container at 90%.
+  - `operator_budget`: `watchdog.memory.budgetMb` is the cap and the worker is at 90% of it (the issue #56 fast-leak profile, which the operator chose).
+
+  Without one, the watchdog records one `mitigation_skipped` event with `reason: "not_near_limit"` per episode and leaves the gateway alone. `mitigation_restart` events carry the authority.
+- **The drain budget knows the heap.** The exhaustion estimate that sizes OpenClaw's drain now includes the heap's own crossing (heap used toward its limit at the worker slope). It takes the 30 s short ladder at 97% of the heap limit, as it already does at 97% of the container. Every memory restart still goes through the graceful ladder with this derived drain, SIGKILL stays its last step, and the rate brake is unchanged.
+
+### Tests
+- In the load-episode replay the heap leak goes critical at 70% of its heap limit, logs one `not_near_limit` skip, and restarts once at 85% with `restartAuthority: "heap_near_limit"` and a derived (not short) drain. Garry's three episodes record no skip and no restart.
+- Authority cases in the monitor, the watchdog and the drain-budget tests. The existing mitigation scenarios now carry a heap at 90% of its limit as their authority.
+
 ## [0.10.72] - 2026-10-23
 
 With no operator budget, the memory watchdog's budget is now a real share of the memory the gateway can use, not configured heap plus 192 MiB (ALPH-22, PR 2 of 4).

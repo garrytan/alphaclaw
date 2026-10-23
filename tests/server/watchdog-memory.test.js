@@ -350,11 +350,13 @@ describe("server/watchdog memory monitor", () => {
       const baseRss = startTick === undefined ? harness.nextCriticalRss ?? 365 : 365;
       await driveTicks(harness, {
         ticks: extraTicks, startTick: first,
-        // Container 540 MB → budget 405 MB: 365 MB starts at 90%.
+        // Container 540 MB → budget 405 MB: 365 MB starts at 90%. The V8
+        // heap at 90% of its limit is the restart authority (ALPH-22).
         sampleAt: (i) => ({
           rssBytes: (baseRss + 4 * (i - first)) * kMb,
           cgroupUsedBytes: (baseRss + 4 * (i - first)) * kMb,
           containerLimitBytes: 540 * kMb,
+          heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 900 * kMb, limitBytes: 1000 * kMb },
         }),
       });
       harness.nextCriticalTick = first + extraTicks;
@@ -1553,3 +1555,41 @@ describe("server/watchdog memory monitor", () => {
     }
   });
 });
+
+describe("restart authority in the watchdog (ALPH-22)", () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(kStartMs); });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.WATCHDOG_AUTO_REPAIR;
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    vi.restoreAllMocks();
+  });
+
+  it("a critical worker with a roomy heap and container is not restarted, and says why once", async () => {
+    const restart = vi.fn(async () => ({ ok: true }));
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+      restartGatewayForMitigation: restart,
+    });
+    launchGateway(harness);
+    // Budget 405 MB (540 MB container); the worker passes 90% with its heap
+    // at 75% of its limit (critical), but below the 85% restart line, and
+    // the container is not nearly full.
+    await driveTicks(harness, {
+      ticks: 8,
+      sampleAt: (i) => ({
+        rssBytes: (365 + 4 * i) * kMb,
+        cgroupUsedBytes: (365 + 4 * i) * kMb,
+        containerLimitBytes: 540 * kMb,
+        heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 750 * kMb, limitBytes: 1000 * kMb },
+      }),
+    });
+    expect(harness.watchdog.getMemoryTrend()).toMatchObject({ state: "critical", restartAuthority: null });
+    expect(restart).not.toHaveBeenCalled();
+    const skipped = memoryEvents(harness.insertWatchdogEvent).filter((e) => e.details.kind === "mitigation_skipped");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].details).toMatchObject({ reason: "not_near_limit" });
+    expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_restart")).toBe(false);
+  });
+});
+

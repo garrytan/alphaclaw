@@ -66,3 +66,20 @@ describe("memory-mitigation drain budget (ALPH-17, D2)", () => {
     );
   });
 });
+
+describe("heap-aware drain budget (ALPH-22)", () => {
+  it("the heap's own crossing can be the soonest exhaustion", () => {
+    const slope = 40 * 1024 * 1024 / 60_000;
+    const budget = resolveMemoryDrainBudget({ nowMs: 0, rssBytes: 7000 * kMb, capBytes: 76_800 * kMb,
+      slopeBytesPerMs: slope, heapUsedBytes: 8700 * kMb, heapLimitBytes: 9011 * kMb });
+    expect(budget.reason).toBe("derived");
+    expect(budget.etaMs).toBeCloseTo((311 * kMb) / slope, -3);
+    expect(budget.askGraceMs).toBeLessThan(300_000);
+  });
+
+  it("a heap at 97% of its limit takes the short ladder", () => {
+    expect(resolveMemoryDrainBudget({ nowMs: 0, rssBytes: kMb, capBytes: 1000 * kMb,
+      heapUsedBytes: 975 * kMb, heapLimitBytes: 1000 * kMb }).reason).toBe("imminent");
+  });
+});
+

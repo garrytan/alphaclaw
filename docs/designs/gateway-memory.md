@@ -140,6 +140,19 @@ as the group with its tool children, but never goes critical and never counts
 container pressure. The heap projection (worker slope toward the heap limit)
 can latch a warning as well as the budget projection.
 
+**Restart policy (ALPH-22).** A critical verdict alone never restarts the gateway.
+The opt-in mitigation also needs a restart authority on the snapshot:
+`heap_near_limit` (fresh heap telemetry at 85% of the V8 limit or more: the
+worker would abort anyway), `worker_container_oom` (the dominant, growing worker
+has the container at 90%), or `operator_budget` (the operator's own
+`watchdog.memory.budgetMb` is the cap and the worker is at 90% of it, the issue
+#56 fast-leak profile). Without one, the watchdog logs one `mitigation_skipped`
+`not_near_limit` per episode. A restart always goes through the graceful ladder
+with the derived drain; the drain's exhaustion estimate now includes the heap's
+own crossing (heap used toward its limit at the worker slope) and takes the
+short ladder at 97% of the heap limit. SIGKILL stays the ladder's last step,
+and the rate brake is unchanged.
+
 Worker growth retains its existing grace, confirmation, recovery and restart
 interlocks. Fresh container pressure counts only for a dominant, growing worker. Container pressure also has its own two-read 90% latch and three-read
 recovery, independent of gateway presence. Container-only pressure never permits

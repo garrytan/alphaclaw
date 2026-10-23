@@ -104,6 +104,7 @@ describe("Garry's Oct 23 load episodes (ALPH-22)", () => {
       const kinds = stack.events().map((event) => event.details.kind);
       expect(kinds).not.toContain("leak_critical");
       expect(kinds).not.toContain("mitigation_restart");
+      expect(kinds).not.toContain("mitigation_skipped");
       expect(stack.restart).not.toHaveBeenCalled();
       expect(trace.every((entry) => entry.trend.state !== "critical")).toBe(true);
       expect(stack.messages().join("\n")).not.toContain("🔴");
@@ -139,6 +140,15 @@ describe("Garry's Oct 23 load episodes (ALPH-22)", () => {
     expect(critical.details).toMatchObject({ rssBasis: "worker", memoryMeasure: "private",
       criticalGates: { slope: true, floor: true, heap: true } });
     expect(critical.details.heap.fraction).toBeGreaterThanOrEqual(0.7);
+    // Critical from 70% of the heap limit; the restart waits for 85%, where
+    // V8 would abort anyway.
+    const skipped = stack.events().filter((event) => event.details.kind === "mitigation_skipped");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].details).toMatchObject({ reason: "not_near_limit" });
+    expect(skipped[0].details.heap.fraction).toBeLessThan(0.85);
+    const mitigation = stack.events().find((event) => event.details.kind === "mitigation_restart");
+    expect(mitigation.details.restartAuthority).toBe("heap_near_limit");
+    expect(mitigation.details.drainBudget).toMatchObject({ reason: "derived" });
     expect(stack.restart).toHaveBeenCalledTimes(1);
     const [options] = stack.restart.mock.calls[0];
     expect(options).toMatchObject({ source: "watchdog:memory_mitigation" });
