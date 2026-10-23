@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.75] - 2026-10-23
+
+The per-process memory (PSS) sampler keeps its cached sample when something reads Resources without naming the gateway. On a real box it was restarting collection on every other watchdog tick, so the critical floor used worker RSS instead of worker private memory about half the time and the watchdog logged a `diagnostic_availability` event every minute (ALPH-22 follow-up).
+
+### Fixed
+- **A read that names no gateway no longer evicts the PSS cache.** The local Claude Code rescue session checks the memory floor through `getSystemResources({})` about every two minutes. That read has no root or worker, and the shared sampler answered it by dropping its cached entry, so the watchdog's next tick found nothing and reported `collecting`. Such a read now gets `unavailable` and leaves the cache alone. Entries are keyed by pid and start ticks, so a kept entry is never reused for another process. Traced on a Ubicloud box with a debug build; the pattern is also in ALPH-18's v0.10.53 evidence.
+
+### Tests
+- `gateway-memory-process.test.js` drives the real collector and sampler over one fake /proc, alternating gateway reads with no-gateway reads. The gateway's sample stays `fresh` with a fresh worker reading and one collection; without the fix it fails on the first tick after the no-gateway read.
+
 ## [0.10.74] - 2026-10-23
 
 Memory notifications now send one message per episode tier instead of one per transition, wait five minutes before paging, and follow up when an episode clears. No memory notice advises a manual restart (ALPH-22, PR 4 of 4).
