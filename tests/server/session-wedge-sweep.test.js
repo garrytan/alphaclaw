@@ -139,6 +139,53 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     expect(failing.calls.map((c) => c.method)).not.toContain("sessions.reset");
   });
 
+  it("a cold restart's two launch notices for one generation (the listening line, then /readyz ready) share one sweep and keep the recorded sessions", async () => {
+    const gateway = createGateway({
+      "sessions.list": async (params) => ({ body: { sessions: [row("exec-turn", { hasActiveRun: !!params.activeOnly })] } }),
+      "sessions.recover": async () => ({ ok: false, body: { ok: false, error: { code: "INVALID_REQUEST", message: "Session recovery requires a restart-tombstoned session." } } }),
+    });
+    const { sweep, notify } = createSweep(gateway);
+    await sweep.recordRunningSessions({ opId: "restart1" });
+    const listening = sweep.onGatewayLaunch({ generation: 5, startedAt: kLaunchAt });
+    const ready = sweep.onGatewayLaunch({ generation: 5, startedAt: kLaunchAt + 4000 });
+    expect(ready).toBe(listening);
+    expect(await ready).toEqual({ recovered: [], alerted: [] });
+    expect(gateway.calls.filter((c) => c.method === "sessions.recover").map((c) => c.params.key)).toEqual(["exec-turn"]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(lines().filter((line) => line.includes(" done "))).toEqual([
+      "[alphaclaw] wedge-sweep done generation=5 checked=1 recorded=1 recovered=0 alerted=0",
+    ]);
+  });
+
+  it("a restart that cuts short a background exec (OpenClaw's drain report) tells the owner once after the relaunch; a drained one stays silent", async () => {
+    const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });
+    const { sweep, notify, insertEvent } = createSweep(gateway);
+    await sweep.recordRunningSessions({ opId: "abcdef1234" });
+    sweep.observeGatewayOutput("[gateway] 2026-10-22T22:36:05Z [gateway] draining active work before restart with timeout 179991ms: queueSize=2 embeddedRuns=1 agentRuns=1\n");
+    sweep.observeGatewayOutput("[gateway] 2026-10-22T22:38:36Z [gateway] still draining active work before restart: backgroundExecSess");
+    sweep.observeGatewayOutput("ions=1\n[gateway] 2026-10-22T22:39:05Z [gateway] restart drain budget 179991.6ms exhausted; cutting short backgroundExecSessions=2\n");
+    await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [message, opts] = notify.mock.calls[0];
+    expect(message).toContain("The gateway restart stopped 2 commands the agent was running in the background.");
+    expect(message).toContain("the agent was not told");
+    expect(message).not.toMatch(/reset|pid/i);
+    expect(opts).toEqual({ eventType: "session_wedge", id: "exec-stopped-2" });
+    expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.count])).toEqual([["exec_stopped", 2]]);
+    expect(lines()).toContain("[alphaclaw] wedge-sweep exec-stopped generation=2 op=abcdef12 count=2");
+
+    // The next relaunch does not repeat it; a drain that finished its background work is silent.
+    notify.mockClear();
+    await sweep.onGatewayLaunch({ generation: 3, startedAt: kLaunchAt });
+    await sweep.recordRunningSessions({ opId: "second" });
+    sweep.observeGatewayOutput("draining active work before restart with timeout 30000ms: backgroundExecSessions=1\nall active work drained\n");
+    await sweep.onGatewayLaunch({ generation: 4, startedAt: kLaunchAt });
+    // A crash relaunch (no restart requested) never reads the output.
+    sweep.observeGatewayOutput("restart drain budget 1ms exhausted; cutting short backgroundExecSessions=3\n");
+    await sweep.onGatewayLaunch({ generation: 5, startedAt: kLaunchAt });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("a newer launch supersedes a pending sweep; a gateway that never becomes ready is skipped", async () => {
     const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });
     let release;
