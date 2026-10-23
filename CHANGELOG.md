@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.72] - 2026-10-23
+
+With no operator budget, the memory watchdog's budget is now a real share of the memory the gateway can use, not configured heap plus 192 MiB (ALPH-22, PR 2 of 4).
+
+### Changed
+- **Budget = 75% of min(container memory limit, host MemTotal)** when `watchdog.memory.budgetMb` is not set (`capSource: "container_share"` or `"host_share"`). The other quarter is left for tool children, AlphaClaw and the kernel. On Garry's 100 GB host with no container limit the budget goes from 8,384 MB to 76,800 MB. An operator budget still wins, above or below the share. The heap signal keeps its own cap, the actual V8 heap limit from telemetry.
+- **Configured heap + 192 MiB is only the worker's expected size** (`expectedSizeMb`, `aboveExpectedSize`). It is an informational line ("above its expected size ... informational, not a leak verdict") and decides nothing.
+- **Where the budget came from is shown everywhere.** The trend, `leak_suspected` and `leak_critical` events carry `capSource`, `capPhysicalMb`, `capFraction` and `expectedSizeMb`. Notifications say, for example, "The gateway memory budget is 76800 MB: 75% of the host's 102400 MB (no container memory limit)". The Resources card's "Which budget?" names the source, the V8 heap limit as the heap signal's cap, and the expected size. The overseer's trusted projection accepts the two new sources.
+
+### Tests
+- The load-episode replay now runs on a 100 GB host: none of Garry's three episodes latches even a warning (no memory notification at all, whether the worker is verified or not), and the heap leak still goes critical and restarts gracefully.
+- Cap helper, watchdog notification and Resources-card cases for each source. Tests that used configured heap as the cap now use an operator budget or a container limit.
+
 ## [0.10.71] - 2026-10-23
 
 The memory watchdog's `critical` verdict now judges a leak, not load: it needs a sustained rise, a real floor and a heap signal on the gateway worker, so a burst of real work stays a warning (ALPH-22, PR 1 of 4, from the critique Garry's deployed agent wrote on his 100 GB box).

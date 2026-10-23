@@ -221,32 +221,37 @@ describe("server/watchdog memory monitor", () => {
     expect(harness.watchdog.getMemoryTrend().capSource).toBe("budget");
     const critical = notifications(harness.notifier).find((m) => m.includes("memory critical"));
     expect(critical).toBeTruthy();
-    expect(critical).toContain("operator memory budget (400 MB, watchdog.memory.budgetMb)");
+    expect(critical).toContain("The gateway memory budget is the operator's 400 MB (watchdog.memory.budgetMb).");
     expect(critical).not.toContain("against the container limit");
     expect(critical).not.toContain("resource autotune");
   });
 
-  it("derived group budget pressure is not reported as V8 heap exhaustion", async () => {
+  it("configured heap + 192 MiB is only an expected-size line; the budget is a share of the container (ALPH-22)", async () => {
     const harness = createHarness();
     launchGateway(harness);
-    // activeHeapMb 128 → heap cap 320MB (128 + 192 overhead); container far
-    // above → capSource "heap"; fast path at ≥288MB rising.
+    // Container 400 MB → budget 300 MB (75%); configured heap 128 MB →
+    // expected size 320 MB, which decides nothing.
     await driveTicks(harness, {
       ticks: 4,
       sampleAt: (i) => ({
-        rssBytes: (300 + 5 * i) * kMb,
-        cgroupUsedBytes: (300 + 5 * i) * kMb,
-        containerLimitBytes: 4096 * kMb,
+        rssBytes: (321 + 5 * i) * kMb,
+        cgroupUsedBytes: (321 + 5 * i) * kMb,
+        containerLimitBytes: 400 * kMb,
         activeHeapMb: 128,
       }),
     });
+    const trend = harness.watchdog.getMemoryTrend();
+    expect(trend).toMatchObject({ capSource: "container_share", effectiveCapMb: 300, capPhysicalMb: 400,
+      capFraction: 0.75, expectedSizeMb: 320, aboveExpectedSize: true });
     const critical = notifications(harness.notifier).find((m) =>
       m.includes("memory critical"),
     );
     expect(critical).toBeTruthy();
-    expect(critical).toContain("derived group RSS budget");
-    expect(critical).toContain("does not establish V8 heap exhaustion");
+    expect(critical).toContain("The gateway memory budget is 300 MB: 75% of the 400 MB container memory limit.");
+    expect(critical).toContain("above its expected size (320 MB: configured heap plus 192 MiB); that is informational, not a leak verdict.");
     expect(critical).not.toContain("resource autotune");
+    const event = memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.kind === "leak_critical");
+    expect(event.details).toMatchObject({ capSource: "container_share", capPhysicalMb: 400, capFraction: 0.75, expectedSizeMb: 320 });
   });
 
   it("disabled settings idle the monitor without sampling", async () => {
@@ -345,10 +350,11 @@ describe("server/watchdog memory monitor", () => {
       const baseRss = startTick === undefined ? harness.nextCriticalRss ?? 365 : 365;
       await driveTicks(harness, {
         ticks: extraTicks, startTick: first,
+        // Container 540 MB → budget 405 MB: 365 MB starts at 90%.
         sampleAt: (i) => ({
           rssBytes: (baseRss + 4 * (i - first)) * kMb,
           cgroupUsedBytes: (baseRss + 4 * (i - first)) * kMb,
-          containerLimitBytes: 400 * kMb,
+          containerLimitBytes: 540 * kMb,
         }),
       });
       harness.nextCriticalTick = first + extraTicks;
@@ -375,8 +381,8 @@ describe("server/watchdog memory monitor", () => {
       expect(opRows.every((row) => row.includes(opId) && row.includes("watchdog:memory_mitigation"))).toBe(true);
       expect(typeof ladder.askGraceMs).toBe("function");
 
-      // The container is filling at ~240 MB/h with minutes of headroom: a
-      // derived grace, longer than the 30 s short ladder.
+      // The worker is filling its budget at ~240 MB/h with minutes of
+      // headroom: a derived grace, longer than the 30 s short ladder.
       const decided = memoryEvents(harness.insertWatchdogEvent)
         .find((e) => e.details.kind === "mitigation_restart").details.drainBudget;
       expect(decided.reason).toBe("derived");
@@ -848,12 +854,16 @@ describe("server/watchdog memory monitor", () => {
         return { ok: true };
       });
       launchGateway(harness);
+      // The container variant keeps the worker under 90% of its 405 MB budget
+      // (540 MB container) while the dominant, growing worker has the
+      // container at 93%+, so container pressure is the trigger.
+      const containerTrigger = cgroupOffsetMs > 0;
       await driveTicks(harness, {
         ticks: 4,
         sampleAt: (i) => ({
-          rssBytes: (365 + 4 * i) * kMb,
-          cgroupUsedBytes: (365 + 4 * i) * kMb,
-          containerLimitBytes: 400 * kMb,
+          rssBytes: ((containerTrigger ? 300 : 365) + 4 * i) * kMb,
+          cgroupUsedBytes: ((containerTrigger ? 505 : 365) + 4 * i) * kMb,
+          containerLimitBytes: (containerTrigger ? 540 : 400) * kMb,
           cgroupAtMs: Date.now() - cgroupOffsetMs,
         }),
       });

@@ -1,5 +1,6 @@
 const fs = require("fs");
 const os = require("os");
+const kHostMemTotalBytes = 100 * 1024 * 1024 * 1024;
 const path = require("path");
 
 // ALPH-22: Garry's three load episodes and one real heap leak, driven through
@@ -76,6 +77,7 @@ describe("Garry's Oct 23 load episodes (ALPH-22)", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.spyOn(autotune, "getActiveGatewayHeapMb").mockReturnValue(8192);
+    vi.spyOn(os, "totalmem").mockReturnValue(kHostMemTotalBytes);
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -105,9 +107,16 @@ describe("Garry's Oct 23 load episodes (ALPH-22)", () => {
       expect(stack.restart).not.toHaveBeenCalled();
       expect(trace.every((entry) => entry.trend.state !== "critical")).toBe(true);
       expect(stack.messages().join("\n")).not.toContain("🔴");
+      // The budget is 75% of the 100 GB host, not configured heap + 192 MiB
+      // (8,384 MB), so the day's growth never projects close enough to warn.
+      expect(kinds).not.toContain("leak_suspected");
+      expect(stack.messages()).toEqual([]);
 
       const peak = trendAt(trace, "14:20");
       expect(peak.memoryMeasure).toBe(variant.measure);
+      expect(peak).toMatchObject({ capSource: "host_share", effectiveCapMb: 76_800, capPhysicalMb: 102_400, capFraction: 0.75 });
+      expect(peak.expectedSizeMb).toBe(variant.workerVerified ? 8384 : null);
+      expect(peak.aboveExpectedSize).toBe(false);
       if (variant.workerVerified) {
         expect(peak.rssBasis).toBe("worker");
         expect(peak.rssMb).toBeGreaterThanOrEqual(3497);

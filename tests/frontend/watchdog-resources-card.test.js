@@ -5,6 +5,7 @@ import {
   buildMemoryTrendModel,
 } from "../../lib/public/js/components/watchdog-tab/resources/index.js";
 import { ResourceBar } from "../../lib/public/js/components/watchdog-tab/resource-bar.js";
+import { describeBudgetSource } from "../../lib/public/js/components/watchdog-tab/resources/memory-details.js";
 import { AsyncSection } from "../../lib/public/js/components/async-section.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
@@ -398,3 +399,25 @@ describe("buildMemoryTrendModel", () => {
     }
   });
 });
+
+describe("memory budget source (ALPH-22)", () => {
+  it("names where the budget came from", () => {
+    expect(describeBudgetSource({ capSource: "host_share", capPhysicalMb: 102400, capFraction: 0.75 }))
+      .toBe("75% of the host's 102400 MB (no container memory limit)");
+    expect(describeBudgetSource({ capSource: "container_share", capPhysicalMb: 4096, capFraction: 0.75 }))
+      .toBe("75% of the 4096 MB container memory limit");
+    expect(describeBudgetSource({ capSource: "budget" })).toBe("operator setting (watchdog.memory.budgetMb)");
+    expect(describeBudgetSource({ capSource: "derived_group_budget" })).toBe("derived from configured heap + 192 MiB");
+    expect(describeBudgetSource({ capSource: "none" })).toBeNull();
+  });
+
+  it("states the worker's private memory against the gateway memory budget", () => {
+    const model = buildMemoryTrendModel({ state: "normal", rssBasis: "worker", rssMb: 3500, memoryMb: 3240,
+      memoryMeasure: "private", effectiveCapMb: 76800, sampleStatus: "fresh" });
+    expect(model.detail).toBe("3240 MB gateway worker private memory of 76800 MB gateway memory budget");
+    const rss = buildMemoryTrendModel({ state: "normal", rssBasis: "worker", rssMb: 3500, memoryMb: 3500,
+      memoryMeasure: "rss", effectiveCapMb: 76800, sampleStatus: "fresh" });
+    expect(rss.detail).toBe("3500 MB gateway worker RSS of 76800 MB gateway memory budget");
+  });
+});
+

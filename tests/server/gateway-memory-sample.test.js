@@ -48,7 +48,7 @@ describe("default gateway memory sample failure isolation", () => {
     expect(readTelemetry).toHaveBeenLastCalledWith({ identity: worker, stateDir: target.stateDir });
     // A group series (no verified worker) is measured but never critical.
     expect(trend).toMatchObject({ rssBasis: "group", sampleStatus: "fresh", rssMb: 600,
-      effectiveCapMb: 1216, containerPressureFraction: 0.95 });
+      effectiveCapMb: 750, capSource: "container_share", containerPressureFraction: 0.95 });
     expect(trend.state).not.toBe("critical");
   });
 });

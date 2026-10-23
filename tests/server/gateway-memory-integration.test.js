@@ -171,7 +171,7 @@ describe("gateway memory attribution across operational surfaces", () => {
     harness.watchdog.onGatewayLaunch({ pid: 101, workerPid: 201, startedAt: Date.now() });
     const replacement = await harness.tick(80, { rootPid: 101, workerPid: 201, growChildren: false });
     expect(replacement.state).toBe("warming_up");
-    expect(replacement.lastEpisodeSummary).toMatchObject({ episodeId, reason: "process_exited", capSource: "derived_group_budget" });
+    expect(replacement.lastEpisodeSummary).toMatchObject({ episodeId, reason: "process_exited", capSource: "container_share", capPhysicalMb: 10000 });
     expect(replacement.lastEpisodeSummary.evidence.attribution.causes).toContain("child_accumulation");
     const recent = doctorCards(replacement).find((card) => card.sourceKey.startsWith("det:gateway-memory-leak-recent:"));
     expect(recent.priority).toBe("P2");
@@ -190,16 +190,16 @@ describe("gateway memory attribution across operational surfaces", () => {
     expect(harness.restart).not.toHaveBeenCalled();
   });
 
-  it("process-group budget pressure from growing children warns, labelled, but never goes critical (ALPH-22)", async () => {
+  it("process-group growth from children warns, labelled, but never goes critical (ALPH-22)", async () => {
     const harness = createHarness();
     for (let tick = 0; tick < 75; tick += 1) {
       await harness.tick(tick, { activeHeapMb: 1808, heapUsedMb: 1, heapLimitMb: 100000 });
     }
     const trend = harness.watchdog.getMemoryTrend();
     expect(trend.state).toBe("leak_suspected");
-    expect(trend.pressureFraction).toBeGreaterThanOrEqual(0.9);
-    expect(trend.capSource).toBe("derived_group_budget");
-    expect(trend.effectiveCapMb).toBe(2000);
+    expect(trend.capSource).toBe("container_share");
+    expect(trend.effectiveCapMb).toBe(7500);
+    expect(trend.expectedSizeMb).toBeNull();
     expect(trend.container.state).toBe("normal");
     expect(trend.evidence.attribution.causes).toContain("child_accumulation");
     const notices = messages(harness);

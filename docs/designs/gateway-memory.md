@@ -109,10 +109,17 @@ histories, argv, boot IDs, filenames, or error text.
 
 ## Detection and retained explanations
 
-The group policy budget is the tighter valid value of configured active heap plus
-192 MiB and `watchdog.memory.budgetMb`. Its source is `derived_group_budget`,
-`budget`, or `none`. It is not the actual V8 heap limit. The previous co-resident
-formula `cgroupUsed - groupRSS` is removed. The old `projectedExhaustionAt` field
+**The memory budget (ALPH-22)** is `watchdog.memory.budgetMb` when the operator
+set one (`capSource: "budget"`). Otherwise it is 75% (`memoryShareFraction`) of
+min(container memory limit, host MemTotal): `container_share` or `host_share`,
+with `capPhysicalMb` and `capFraction` on the trend, the events and the Resources
+card. The other quarter is left for tool children, AlphaClaw and the kernel. The
+heap signal has its own cap, the actual V8 heap limit from telemetry. Configured
+heap plus 192 MiB is now only the worker's expected size (`expectedSizeMb`,
+`aboveExpectedSize`), an informational line that decides nothing; before
+ALPH-22 it was the budget (`derived_group_budget`, 8,384 MB on a 100 GB host
+with an 8 GB heap, which the overseer still accepts in historical records). The
+previous co-resident formula `cgroupUsed - groupRSS` is removed. The old `projectedExhaustionAt` field
 aliases projected group-budget crossing; new code uses `projectedBudgetCrossingAt`.
 
 **Critical (ALPH-22)** needs all three gates on the verified worker, held for
