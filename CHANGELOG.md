@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.69] - 2026-10-23
+
+The live ask-outcome test no longer fails when it runs beside other live tests (ALPH-21).
+
+### Tests
+- `tests/live/gateway-restart-ask-outcome.e2e.test.js` stalls the gateway worker with SIGSTOP when AlphaClaw reads the gateway's restart-fence line. Under load the gateway can write its ack before that SIGSTOP lands. The ask then succeeds normally, and the 10 s ack timeout the test is about never happens. On a loaded 16-core VM this happened in 1 of 12 runs, and it failed that assertion. The stalled-ask case now checks every attempt for a graceful stop with no SIGTERM. When the ack got out first, it repeats the case (up to 4 attempts). The exit-1, outcome-unknown assertions apply unchanged to the attempt where the stall landed first. The test fails if the stall never lands first.
+- The same test now SIGKILLs only its own ask CLIs (descendants of the test worker). Before, it killed every `openclaw gateway restart --wait` on the machine, including the asks of live tests running beside it.
+
 ## [0.10.68] - 2026-10-23
 
 The owner is now told when a background command finished during a gateway restart but OpenClaw refused to hand its result to the agent (ALPH-19, ALPH-20 finding 3).

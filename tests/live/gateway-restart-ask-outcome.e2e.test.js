@@ -11,6 +11,12 @@
 //      exits 1 with "… its outcome is unknown." 2026.10.4 rolls the stalled
 //      request back (admission reopens) and the ladder re-asks; 2026.10.6
 //      applies it and drains. Either way: no SIGTERM, a graceful stop.
+//      The stall is sent when AlphaClaw reads the gateway's fence line, and
+//      the gateway can write its ack before that SIGSTOP lands (more likely
+//      under load). Then the ask simply succeeds and the incident did not
+//      happen, so that attempt is checked for a graceful stop with no SIGTERM
+//      and repeated, up to kStallAttempts; the incident's assertions apply in
+//      full to the attempt where the stall landed first.
 // OpenClaw's effective drain is min(--wait, its supervisor's stop budget):
 // under systemd (this repo's cloud VM) that is ~75 s, so the turn here is
 // shorter than that. Set OPENCLAW_CONTRACT_INSTALL_DIR to a directory with a
@@ -38,12 +44,28 @@ process.env.PATH = [kCandidateBinDir, liveHelpers.repoBinDir(), process.env.PATH
 
 const { kLiveEnabled, waitFor, readDeclaredPin } = liveHelpers;
 const describeLive = kLiveEnabled ? describe : describe.skip;
-const kTestTimeoutMs = 12 * 60 * 1000;
+const kTestTimeoutMs = 16 * 60 * 1000;
+const kStallAttempts = 4;
 const kTurnSeconds = 35;
 const kAskGraceMs = 60_000;
 
-// Every process whose argv is the ask (`openclaw gateway restart --wait`):
-// under the compile cache the CLI is a launcher plus its respawned child.
+// This worker's own ask processes (`openclaw gateway restart --wait`): under
+// the compile cache the CLI is a launcher plus its respawned child. Only
+// descendants of this process, so a live test running beside this one keeps
+// its own ask.
+const parentPid = (pid) => {
+  try {
+    return Number(fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")[1]);
+  } catch {
+    return 0;
+  }
+};
+const isDescendant = (pid) => {
+  for (let at = parentPid(pid), hops = 0; at > 1 && hops < 16; at = parentPid(at), hops += 1) {
+    if (at === process.pid) return true;
+  }
+  return false;
+};
 const askCliPids = () => {
   const pids = [];
   for (const entry of fs.readdirSync("/proc")) {
@@ -51,7 +73,7 @@ const askCliPids = () => {
     try {
       const argv = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
       const at = argv.indexOf("gateway");
-      if (at >= 0 && argv[at + 1] === "restart" && argv.includes("--wait")) pids.push(Number(entry));
+      if (at >= 0 && argv[at + 1] === "restart" && argv.includes("--wait") && isDescendant(Number(entry))) pids.push(Number(entry));
     } catch {}
   }
   return pids;
@@ -183,34 +205,43 @@ describeLive(`LIVE ask outcome against the ${kCandidateBinDir ? "candidate" : re
         await waitFor(readyzOk, 180_000, "relaunched gateway /readyz 200");
 
         // 2. The incident: ack timeout under a stalled worker.
-        const second = startTurn("ask-live-2");
-        await second.inFlight();
-        const worker = gateway.getManagedGatewayWorkerPid();
-        expect(worker).toEqual(expect.any(Number));
-        const stalled = onAdmissionClosed(() => {
-          try {
-            process.kill(worker, "SIGSTOP");
-          } catch {}
-          setTimeout(() => {
+        let exited = null;
+        for (let attempt = 1; attempt <= kStallAttempts && !exited; attempt += 1) {
+          const second = startTurn(`ask-live-2-${attempt}`);
+          await second.inFlight();
+          const worker = gateway.getManagedGatewayWorkerPid();
+          expect(worker).toEqual(expect.any(Number));
+          const stalled = onAdmissionClosed(() => {
             try {
-              process.kill(worker, "SIGCONT");
+              process.kill(worker, "SIGSTOP");
             } catch {}
-          }, 11_000);
-        });
-        lines.length = 0;
-        const two = await gateway.restartGateway(() => {}, { opId: "askliv02", ladder: { askGraceMs: kAskGraceMs } });
-        expect(stalled()).toBe(true);
-        expect(two).toMatchObject({ ok: true, how: "graceful" });
-        const twoLines = ladderLines(lines);
-        const exited = twoLines.find((line) => /asking status=exited attempt=1/.test(line));
-        expect(exited).toMatch(/exit=1 class=unknown/);
-        expect(exited).toMatch(/outcome is unknown|gateway timeout after 10000ms/);
-        expect(twoLines.some((line) => /stopping signal=SIGTERM/.test(line))).toBe(false);
-        // Which branch the pin took is evidence, not a requirement.
-        const reasked = twoLines.some((line) => /asking status=reasking/.test(line));
-        originalLog(`[live] stalled ask: ${reasked ? "request rolled back, re-asked" : "request applied, drained"}`);
-        await second.exited;
-        await waitFor(readyzOk, 180_000, "second relaunch /readyz 200");
+            setTimeout(() => {
+              try {
+                process.kill(worker, "SIGCONT");
+              } catch {}
+            }, 11_000);
+          });
+          lines.length = 0;
+          const two = await gateway.restartGateway(() => {}, { opId: `askliv2${attempt}`, ladder: { askGraceMs: kAskGraceMs } });
+          expect(stalled()).toBe(true);
+          expect(two).toMatchObject({ ok: true, how: "graceful" });
+          const twoLines = ladderLines(lines);
+          expect(twoLines.some((line) => /stopping signal=SIGTERM/.test(line))).toBe(false);
+          exited = twoLines.find((line) => /asking status=exited attempt=1/.test(line)) ?? null;
+          if (exited) {
+            expect(exited).toMatch(/exit=1 class=unknown/);
+            expect(exited).toMatch(/outcome is unknown|gateway timeout after 10000ms/);
+            // Which branch the pin took is evidence, not a requirement.
+            const reasked = twoLines.some((line) => /asking status=reasking/.test(line));
+            originalLog(`[live] stalled ask attempt ${attempt}: ${reasked ? "request rolled back, re-asked" : "request applied, drained"}`);
+          } else {
+            expect(twoLines.some((line) => /asking status=honoured attempts=1 /.test(line))).toBe(true);
+            originalLog(`[live] stalled ask attempt ${attempt}: the ack left before the stall landed; repeating`);
+          }
+          await second.exited;
+          await waitFor(readyzOk, 180_000, "relaunch after the stalled ask /readyz 200");
+        }
+        expect(exited, `the stall never landed before the ack in ${kStallAttempts} attempts`).not.toBeNull();
       } finally {
         console.log = originalLog;
         gateway.setGatewayOutputObserver(null);
