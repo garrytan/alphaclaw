@@ -5,6 +5,11 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.67] - 2026-10-23
+
+### Documentation
+- `AGENTS.md`: the note that `tests/live/restart-exec-turn.e2e.test.js` covers the v0.10.63 background-exec behaviour is back at the end of that note. The v0.10.66 merge had left it twice, after the team-auth note.
+
 ## [0.10.66] - 2026-10-23
 
 Turning team access on or off no longer cuts off the agent's running turn: AlphaClaw rewrites the gateway's auth only once the old gateway has stopped, so a team transition gets the same drain as any routine restart (ALPH-19, found by ALPH-20's real-VM team run).
