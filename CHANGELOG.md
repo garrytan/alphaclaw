@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.66] - 2026-10-23
+
+Turning team access on or off no longer cuts off the agent's running turn: AlphaClaw rewrites the gateway's auth only once the old gateway has stopped, so a team transition gets the same drain as any routine restart (ALPH-19, found by ALPH-20's real-VM team run).
+
+### Fixed
+- Enabling or disabling team access aborted the agent's in-flight turn 1 to 8 s after the click, with no grace period. AlphaClaw wrote the new `gateway.auth` while the gateway was still serving. OpenClaw's config watcher saw the auth change ("config change requires gateway restart"), restarted itself, and aborted the turn. The ladder's own restart request then failed against a gateway that was already closing ("admission closed" or "gateway rejected websocket upgrade", exit 1) and had to wait the drain out. The ask CLI's environment was also built from the new auth while the old gateway still expected the token. The `team:enable`, `team:disable` and `team:restore` writes now run inside the cold restart's `afterStop`, after the old gateway has drained and exited and before the new one launches. The ask is honoured on its first attempt, OpenClaw never restarts itself on the change, and a running turn gets the routine 180 s drain. A transition therefore takes as long as that drain when a turn is running. **Restart now** on the restart card still cuts it short.
+- A write that fails while the gateway is stopped never leaves it stopped: the gateway relaunches on the auth it had, and the write error is reported afterwards (disable answers "Could not update openclaw.json", enable falls through to the automatic restore).
+
 ## [0.10.64] - 2026-10-22
 
 Team access can be enabled again on OpenClaw 2026.10.6: the enable no longer rolls itself back with "gateway rejected the credential (HTTP 403)" (ALPH-20, found on a real deploy).
