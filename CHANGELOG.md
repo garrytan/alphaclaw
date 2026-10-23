@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.64] - 2026-10-23
+## [0.10.65] - 2026-10-23
 
 A restart the operator asks for starts a new gateway every time: the cold restart no longer skips the relaunch now and then and leaves nothing running (ALPH-19).
 
@@ -14,6 +14,12 @@ A restart the operator asks for starts a new gateway every time: the cold restar
 
 ### Tests
 - `tests/live/gateway-restart-loop.e2e.test.js` runs 30 consecutive real restarts (`ALPHACLAW_LIVE_RESTART_LOOPS` to change it) and fails on any launch skipped as `child_retained`. Other restart failures are printed with their evidence.
+## [0.10.64] - 2026-10-22
+
+Team access can be enabled again on OpenClaw 2026.10.6: the enable no longer rolls itself back with "gateway rejected the credential (HTTP 403)" (ALPH-20, found on a real deploy).
+
+### Fixed
+- The identity-handshake probe that verifies a team enable (and the Team page's cached identity check) now sends `X-Forwarded-For` with a documentation address (`192.0.2.1`, RFC 5737) beside the `x-alphaclaw-user` header (`probeIdentityHandshake` in `lib/server/team-auth-transition.js`). OpenClaw 2026.10 attributes proxy-shaped traffic before trusted-proxy auth: an identity header from a loopback source with no forwarded client address, or a loopback one, gets 403 `proxy_attribution_required`. The probe read that as a rejected credential, so every enable restored the previous token auth. The real proxy path already forwards the member's client IP (`applyProxyIdentity`), so only the probe changes. An unknown user is still refused with 401, so the probe still tells a working handshake from a broken one.
 
 ## [0.10.63] - 2026-10-22
 

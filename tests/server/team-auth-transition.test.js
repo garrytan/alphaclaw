@@ -5,6 +5,7 @@ const path = require("path");
 const {
   disableTeamMode,
   enableTeamMode,
+  probeIdentityHandshake,
   readTeamAuthSnapshot,
   resolveTeamAuthSnapshotPath,
 } = require("../../lib/server/team-auth-transition");
@@ -76,6 +77,36 @@ describe("server/team-auth-transition", () => {
     });
     return (options) => writer.applyTeamGatewayConfig(options);
   };
+
+  // OpenClaw 2026.10.6, live: an identity header from a loopback source with no
+  // forwarded client address (or a loopback one) is refused with 403
+  // proxy_attribution_required before trusted-proxy auth runs; an attributed
+  // allowed user passes auth and the bogus tool 404s; an unknown user is 401.
+  const createAttributingGateway = ({ allowUsers }) =>
+    vi.fn(async ({ url, headers = {} }) => {
+      if (url.endsWith("/health")) return { status: 200, error: null };
+      const client = String(headers["x-forwarded-for"] || "").split(",")[0].trim();
+      if (!client || /^(127\.|::1$|localhost$)/.test(client)) return { status: 403, error: null };
+      return allowUsers.includes(headers["x-alphaclaw-user"])
+        ? { status: 404, error: null }
+        : { status: 401, error: null };
+    });
+
+  it("the identity probe presents a non-loopback forwarded client, as OpenClaw 2026.10 requires", async () => {
+    const request = createAttributingGateway({ allowUsers: [kProbeUser] });
+
+    const accepted = await probeIdentityHandshake({
+      gatewayUrl: kGatewayUrl, operatorId: kProbeUser, request, ...kFastProbe,
+    });
+    const rejected = await probeIdentityHandshake({
+      gatewayUrl: kGatewayUrl, operatorId: "stranger@example.com", request, ...kFastProbe,
+    });
+
+    expect(accepted).toEqual({ ok: true });
+    expect(rejected).toEqual({ ok: false, error: "gateway rejected the credential (HTTP 401)" });
+    const invoke = request.mock.calls.map(([call]) => call).find((call) => call.url.endsWith("/tools/invoke"));
+    expect(invoke.headers).toMatchObject({ "x-alphaclaw-user": kProbeUser, "x-forwarded-for": "192.0.2.1" });
+  });
 
   it("enable happy path writes the trusted-proxy config and snapshots the old auth", async () => {
     const openclawDir = createTempOpenclawDir();
