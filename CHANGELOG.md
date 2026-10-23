@@ -13,6 +13,15 @@ Turning team access on or off no longer cuts off the agent's running turn: Alpha
 - Enabling or disabling team access aborted the agent's in-flight turn 1 to 8 s after the click, with no grace period. AlphaClaw wrote the new `gateway.auth` while the gateway was still serving. OpenClaw's config watcher saw the auth change ("config change requires gateway restart"), restarted itself, and aborted the turn. The ladder's own restart request then failed against a gateway that was already closing ("admission closed" or "gateway rejected websocket upgrade", exit 1) and had to wait the drain out. The ask CLI's environment was also built from the new auth while the old gateway still expected the token. The `team:enable`, `team:disable` and `team:restore` writes now run inside the cold restart's `afterStop`, after the old gateway has drained and exited and before the new one launches. The ask is honoured on its first attempt, OpenClaw never restarts itself on the change, and a running turn gets the routine 180 s drain. A transition therefore takes as long as that drain when a turn is running. **Restart now** on the restart card still cuts it short.
 - A write that fails while the gateway is stopped never leaves it stopped: the gateway relaunches on the auth it had, and the write error is reported afterwards (disable answers "Could not update openclaw.json", enable falls through to the automatic restore).
 
+## [0.10.65] - 2026-10-23
+
+A restart the operator asks for starts a new gateway every time: the cold restart no longer skips the relaunch now and then and leaves nothing running (ALPH-19).
+
+### Fixed
+- About one graceful restart in 30-60 stopped the old gateway, then logged "Managed gateway process already running — skipping launch" and failed as `child_retained`, with nothing serving until the watchdog stepped in. The stop ladder judges the old launcher gone from `/proc`, where an exited but unreaped process already counts as gone, and it could reach the launch before Node had processed the child's exit, so every field the launch guard reads still said "running". The launch guard now waits up to 2 s for Node to reap a child the kernel already reports dead. `isManagedGatewayChildLive` and `markManagedGatewayExitExpected` are unchanged.
+
+### Tests
+- `tests/live/gateway-restart-loop.e2e.test.js` runs 30 consecutive real restarts (`ALPHACLAW_LIVE_RESTART_LOOPS` to change it) and fails on any launch skipped as `child_retained`. Other restart failures are printed with their evidence.
 ## [0.10.64] - 2026-10-22
 
 Team access can be enabled again on OpenClaw 2026.10.6: the enable no longer rolls itself back with "gateway rejected the credential (HTTP 403)" (ALPH-20, found on a real deploy).

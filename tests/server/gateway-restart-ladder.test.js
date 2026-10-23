@@ -59,6 +59,8 @@ const createWorld = () => {
     restartArgs: [],
     listenDelayMs: 200,
     lockWaitLine: false,
+    slowReap: new Set(),
+    slowReapMs: 300,
     spawned: [],
     add(pid, { ppid = null, listens = false, openclaw = true, ignoreSigterm = false, pgid = null, child = null, cmd = null, zombie = false, unknown = false } = {}) {
       procs.set(pid, { pid, ppid, alive: true, listens, openclaw, ignoreSigterm, pgid: pgid ?? pid, child, exitCode: null, cmd: cmd ?? (openclaw ? "node openclaw" : "node service.mjs"), zombie, unknown });
@@ -98,12 +100,17 @@ const createWorld = () => {
       }
       for (const p of procs.values()) if (p.alive && p.ppid === pid) world.exit(p.pid, code, signal);
       const child = proc.child;
-      if (child) {
+      if (!child) return;
+      const reap = () => {
         child.exitCode = signal ? null : code;
         child.signalCode = signal;
         child.emit("exit", child.exitCode, signal);
         child.emit("close", child.exitCode, signal);
-      }
+      };
+      // slowReap: the kernel already reports the pid gone, but Node has not
+      // read the SIGCHLD yet, so the ChildProcess still looks live.
+      if (world.slowReap.has(pid)) setTimeout(reap, world.slowReapMs);
+      else reap();
     },
     signal(pid, sig) {
       world.signals.push([pid, sig]);
@@ -534,6 +541,17 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     const preflights = childProcess.execFile.mock.calls.filter(([, args]) => args?.[0] === "plugins");
     expect(preflights).toHaveLength(1);
     fs.readdirSync = require("fs").readdirSync;
+  });
+
+  it("a launcher the kernel reports gone before Node has reaped it is waited for, not retained: the graceful stop relaunches instead of failing as child_retained (ALPH-19)", async () => {
+    const { launcherPid } = await bootManaged(gateway, world);
+    world.slowReap.add(launcherPid);
+    const { value, error } = await runRestart({}, 5000);
+    expect(error).toBeNull();
+    expect(value).toMatchObject({ ok: true, how: "graceful" });
+    const runs = world.spawned.filter((s) => s.kind === "run");
+    expect(runs).toHaveLength(2);
+    expect(world.listeners()).toEqual([runs[1].workerPid]);
   });
 
   it("a stranger that grabs the port between stop and spawn is launch_failed — nothing is spawned into it", async () => {
