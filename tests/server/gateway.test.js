@@ -89,6 +89,7 @@ const originalCreateConnection = net.createConnection;
 const originalPrelaunchHookEnv = process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
 // Namespace-required by gateway.js so the live-process scan can be pinned.
 const lockContention = require("../../lib/server/openclaw-lock-contention");
+const gatewayIdentity = require("../../lib/server/gateway-identity");
 // The REAL /proc scan, captured before any suite spies on it (v0.9.81 fixture
 // test below drives listGatewayPids through it over a fake /proc).
 const realListLiveOpenclawProcesses = lockContention.listLiveOpenclawProcesses;
@@ -135,8 +136,9 @@ const createSocket = (isRunning) => {
   };
 };
 
+const kFakeChildPid = 1234;
 const createChild = () => ({
-  pid: 1234,
+  pid: kFakeChildPid,
   stdout: { on: vi.fn() },
   stderr: { on: vi.fn() },
   on: vi.fn(),
@@ -154,6 +156,13 @@ describe("server/gateway restart behavior", () => {
     // openclaw processes; a developer's own gateway must never leak into a
     // drill's pid evidence. Tests that need pids override this spy.
     vi.spyOn(lockContention, "listLiveOpenclawProcesses").mockReturnValue([]);
+    // The fake children (createChild's pid and the replacement's 5678) are
+    // running processes to the launch guard's kernel check, whatever really
+    // holds those pids on this host.
+    const realVerdict = gatewayIdentity.resolveProcessVerdict;
+    vi.spyOn(gatewayIdentity, "resolveProcessVerdict").mockImplementation((pid, ...rest) =>
+      pid === kFakeChildPid || pid === 5678 ? { verdict: "alive", reason: "state_s" } : realVerdict(pid, ...rest),
+    );
     // Hermetic by default (C13): a managed launch fires the `gateway stop
     // --help` capability probe through execFile; gateway.js binds execFile at
     // require time, so a fresh require in a test that never installed its own

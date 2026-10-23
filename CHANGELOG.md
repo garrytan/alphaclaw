@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.64] - 2026-10-23
+
+A restart the operator asks for starts a new gateway every time: the cold restart no longer skips the relaunch now and then and leaves nothing running (ALPH-19).
+
+### Fixed
+- About one graceful restart in 30-60 stopped the old gateway, then logged "Managed gateway process already running — skipping launch" and failed as `child_retained`, with nothing serving until the watchdog stepped in. The stop ladder judges the old launcher gone from `/proc`, where an exited but unreaped process already counts as gone, and it could reach the launch before Node had processed the child's exit, so every field the launch guard reads still said "running". The launch guard now waits up to 2 s for Node to reap a child the kernel already reports dead. `isManagedGatewayChildLive` and `markManagedGatewayExitExpected` are unchanged.
+
+### Tests
+- `tests/live/gateway-restart-loop.e2e.test.js` runs 30 consecutive real restarts (`ALPHACLAW_LIVE_RESTART_LOOPS` to change it) and fails on any launch skipped as `child_retained`. Other restart failures are printed with their evidence.
+
 ## [0.10.63] - 2026-10-22
 
 A gateway restart no longer drops an agent's running shell command without a word: OpenClaw resumes an exec turn interrupted in the foreground, and when the restart stops a command that had already moved to the background, the owner is told once (ALPH-19).
