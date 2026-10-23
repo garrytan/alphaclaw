@@ -62,12 +62,12 @@ describe("server/team-service", () => {
     it("rejects a second transition while the first is mid-restart", async () => {
       const openclawDir = createTempOpenclawDir();
       let releaseRestart;
-      const restartGateway = vi.fn(
-        () =>
-          new Promise((resolve) => {
-            releaseRestart = resolve;
-          }),
-      );
+      const restartGateway = vi.fn(async (options) => {
+        await options?.afterStop?.();
+        await new Promise((resolve) => {
+          releaseRestart = resolve;
+        });
+      });
       const request = createProbeRequest();
       const teamService = createTeamService({
         fsModule: fs,
@@ -81,10 +81,10 @@ describe("server/team-service", () => {
         ...createWriterDeps(openclawDir),
       });
 
-      // enableTeamMode reaches `await restartGateway()` after the async
-      // config write settles; the first call is parked mid-transition there.
+      // The first transition is parked inside the restart, after its config
+      // write ran with the gateway stopped.
       const firstTransition = teamService.setEnabled(true);
-      await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(releaseRestart).toBeTypeOf("function"));
 
       const second = await teamService.setEnabled(true);
       expect(second).toEqual({
@@ -106,7 +106,7 @@ describe("server/team-service", () => {
 
     it("allows a new transition once the previous one settles", async () => {
       const openclawDir = createTempOpenclawDir();
-      const restartGateway = vi.fn(async () => {});
+      const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
       const request = createProbeRequest();
       const teamService = createTeamService({
         fsModule: fs,
@@ -240,7 +240,8 @@ describe("team transition ownership at the actual auth write", () => {
     updateTeamConfig({ openclawDir, enabled: true });
     updateOpenclawConfig({ openclawDir, mutate: (cfg) => { cfg.gateway = { auth: { mode: "trusted-proxy" } }; } });
     const authority = makeAuthority();
-    const restartGateway = vi.fn(async () => { authority.expire(); authority.assertCanMutate(); });
+    const restartGateway = vi.fn(async (options) => {
+      await options?.afterStop?.(); authority.expire(); authority.assertCanMutate(); });
     const service = createTeamService({ openclawDir, env: { OPENCLAW_GATEWAY_TOKEN: "fixture-token" },
       restartGateway, getGatewayUrl: () => kGatewayUrl, withGatewayTransition: authority.scope(restartGateway) });
     expect(await service.setEnabled(false)).toMatchObject({ ok: false, blocked: true, enabled: false,
@@ -257,7 +258,7 @@ describe("team transition ownership at the actual auth write", () => {
     const authority = makeAuthority();
     let resolveScopes;
     const getAdvertisedScopes = vi.fn(() => new Promise((resolve) => { resolveScopes = resolve; }));
-    const restartGateway = vi.fn();
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     const service = createTeamService({ openclawDir, restartGateway, getGatewayUrl: () => kGatewayUrl,
       withGatewayTransition: authority.scope(restartGateway), logger: kSilentLogger,
       ...createWriterDeps(openclawDir, { getAdvertisedScopes }) });
@@ -267,14 +268,16 @@ describe("team transition ownership at the actual auth write", () => {
     resolveScopes([]);
     expect(await pending).toMatchObject({ ok: false, blocked: true, enabled: false, changed: false, configApplied: false });
     expect(fs.readFileSync(path.join(openclawDir, "openclaw.json"))).toEqual(before);
-    expect(restartGateway).not.toHaveBeenCalled();
+    // The write runs with the gateway stopped; refused there, the gateway
+    // relaunches once on the config it had.
+    expect(restartGateway).toHaveBeenCalledTimes(1);
   });
 
   it("a late successful identity response cannot hide applied auth or restore after lease loss", async () => {
     const { readTeamSettings } = require("../../lib/server/alphaclaw-config");
     const openclawDir = createTempOpenclawDir();
     const authority = makeAuthority();
-    const restartGateway = vi.fn(async () => {});
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     const request = vi.fn(async ({ url }) => {
       if (url.endsWith("/health")) return { status: 200 };
       authority.expire();
@@ -297,7 +300,8 @@ describe("team transition ownership at the actual auth write", () => {
     const authority = makeAuthority();
     const modesAtRestart = [];
     let service;
-    const restartGateway = vi.fn(async () => { modesAtRestart.push(service.isTeamEnabled()); });
+    const restartGateway = vi.fn(async (options) => {
+      await options?.afterStop?.(); modesAtRestart.push(service.isTeamEnabled()); });
     const request = vi.fn(async ({ url, headers = {} }) => {
       if (url.endsWith("/health")) return { status: 200 };
       return { status: headers["x-alphaclaw-user"] ? 401 : headers.authorization === "Bearer original-token" ? 400 : 401 };
@@ -323,7 +327,7 @@ describe("roster reconciliation shares transition ownership", () => {
     } });
     const lock = createGatewayLifecycleLock();
     const policy = createGatewayMutationPolicy({ lock });
-    const restartGateway = vi.fn(async () => {});
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     let activeHold;
     const service = createTeamService({ openclawDir, env: { OPENCLAW_GATEWAY_TOKEN: "original-token" },
       restartGateway, getGatewayUrl: () => kGatewayUrl, request: createProbeRequest(),

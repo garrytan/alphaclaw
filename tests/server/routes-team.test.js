@@ -69,7 +69,7 @@ describe("server/routes/team (4.5)", () => {
     );
     presence = createTeamPresence();
     restartReasons = [];
-    restartGateway = vi.fn(async () => {});
+    restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     auditEvents = [];
     capability = true;
     probeIdentityOk = true;
@@ -561,7 +561,8 @@ describe("server/routes/team (4.5)", () => {
 
   it("reports applied auth truthfully when ownership is lost before enable verification, without arming lockdown", async () => {
     const cookie = await legacyCookie();
-    restartGateway.mockImplementationOnce(async () => {
+    restartGateway.mockImplementationOnce(async (options) => {
+      await options?.afterStop?.();
       transitionBlocker = new GatewayMutationBlockedError({ code: "lease_expired", statusCode: 409,
         error: "Lifecycle ownership expired.", hint: "Wait for the current operation." });
     });
@@ -579,7 +580,8 @@ describe("server/routes/team (4.5)", () => {
   it("reports a saved disable separately from a newly blocked gateway restart", async () => {
     const cookie = await legacyCookie();
     await enableTeam(cookie);
-    restartGateway.mockImplementationOnce(async () => {
+    restartGateway.mockImplementationOnce(async (options) => {
+      await options?.afterStop?.();
       transitionBlocker = new GatewayMutationBlockedError({ code: "gateway_held", statusCode: 409,
         error: "Gateway recovery is held.", hint: "Review the Upgrade page." });
     });
@@ -596,14 +598,14 @@ describe("server/routes/team (4.5)", () => {
   it("a concurrent enable is rejected 409 transition_in_flight without a second transition", async () => {
     const cookie = await legacyCookie();
     let releaseRestart;
-    restartGateway.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          releaseRestart = resolve;
-        }),
-    );
+    restartGateway.mockImplementationOnce(async (options) => {
+      await options?.afterStop?.();
+      await new Promise((resolve) => {
+        releaseRestart = resolve;
+      });
+    });
     const first = enableTeam(cookie).then((res) => res);
-    await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(releaseRestart).toBeTypeOf("function"));
 
     const second = await enableTeam(cookie);
     expect(second.status).toBe(409);
@@ -621,16 +623,16 @@ describe("server/routes/team (4.5)", () => {
     const cookie = await legacyCookie();
     await enableTeam(cookie);
     let releaseRestart;
-    restartGateway.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          releaseRestart = resolve;
-        }),
-    );
+    restartGateway.mockImplementationOnce(async (options) => {
+      await options?.afterStop?.();
+      await new Promise((resolve) => {
+        releaseRestart = resolve;
+      });
+    });
     const disable = () =>
       request(app).post("/api/team/disable").set("Cookie", cookie).send({});
     const first = disable().then((res) => res);
-    await vi.waitFor(() => expect(restartGateway).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(releaseRestart).toBeTypeOf("function"));
 
     const second = await disable();
     expect(second.status).toBe(409);

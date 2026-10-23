@@ -116,7 +116,7 @@ describe("server/team-auth-transition", () => {
         trustedProxies: ["127.0.0.1"],
       },
     });
-    const restartGateway = vi.fn(async () => {});
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     const request = createProbeRequest({
       acceptInvoke: (headers) => headers["x-alphaclaw-user"] === kProbeUser,
     });
@@ -218,7 +218,7 @@ describe("server/team-auth-transition", () => {
       channels: { telegram: { enabled: true } },
     };
     writeConfig(openclawDir, originalConfig);
-    const restartGateway = vi.fn(async () => {});
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     const request = createProbeRequest({ acceptInvoke: (headers) => headers.authorization === "Bearer shared-token" });
     const notify = vi.fn(async () => ({ ok: true }));
 
@@ -263,7 +263,8 @@ describe("server/team-auth-transition", () => {
     });
     // First restart (apply) succeeds; the restore restart throws.
     let calls = 0;
-    const restartGateway = vi.fn(async () => {
+    const restartGateway = vi.fn(async (options) => {
+      await options?.afterStop?.();
       calls += 1;
       if (calls > 1) throw new Error("gateway refused to come back");
     });
@@ -296,7 +297,7 @@ describe("server/team-auth-transition", () => {
   it("restores health-probe failures too", async () => {
     const openclawDir = createTempOpenclawDir();
     writeConfig(openclawDir, { gateway: { auth: { token: "abc" } } });
-    const restartGateway = vi.fn(async () => {});
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     const request = vi.fn(async () => ({ status: 0, error: "ECONNREFUSED" }));
 
     const result = await enableTeamMode({
@@ -325,7 +326,7 @@ describe("server/team-auth-transition", () => {
     const restartGateway = vi
       .fn()
       .mockRejectedValueOnce(new Error("spawn EAGAIN"))
-      .mockResolvedValue(undefined);
+      .mockImplementation(async (options) => { await options?.afterStop?.(); });
     const request = createProbeRequest({ acceptInvoke: () => true });
 
     const result = await enableTeamMode({
@@ -357,7 +358,7 @@ describe("server/team-auth-transition", () => {
     writeConfig(openclawDir, {
       gateway: { auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" } },
     });
-    const restartGateway = vi.fn(async () => {});
+    const restartGateway = vi.fn(async (options) => { await options?.afterStop?.(); });
     const enableRequest = createProbeRequest({ acceptInvoke: () => true });
 
     const enabled = await enableTeamMode({
@@ -392,6 +393,69 @@ describe("server/team-auth-transition", () => {
     expect(fs.existsSync(resolveTeamAuthSnapshotPath({ openclawDir }))).toBe(false);
   });
 
+  it("enable and disable write gateway.auth only while the gateway is stopped, so OpenClaw never restarts itself on the auth change (ALPH-19)", async () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, { gateway: { auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" } } });
+    const seen = [];
+    const restartGateway = vi.fn(async (options) => {
+      seen.push({ source: options.source, beforeStop: readConfig(openclawDir).gateway.auth.mode ?? "token" });
+      await options.afterStop();
+      seen.at(-1).afterStop = readConfig(openclawDir).gateway.auth.mode ?? "token";
+    });
+    const enabled = await enableTeamMode({
+      openclawDir,
+      env,
+      applyAuthConfig: createApplyAuthConfig({ openclawDir }),
+      probeUser: kProbeUser,
+      restartGateway,
+      getGatewayUrl: () => kGatewayUrl,
+      request: createProbeRequest({ acceptInvoke: (headers) => headers["x-alphaclaw-user"] === kProbeUser }),
+      probeOptions: kFastProbe,
+    });
+    expect(enabled.ok).toBe(true);
+    const disabled = await disableTeamMode({
+      openclawDir,
+      env,
+      restartGateway,
+      getGatewayUrl: () => kGatewayUrl,
+      request: createProbeRequest({ acceptInvoke: (headers) => headers.authorization === "Bearer shared-token" }),
+      probeOptions: kFastProbe,
+    });
+    expect(disabled.ok).toBe(true);
+    expect(seen).toEqual([
+      { source: "team:enable", beforeStop: "token", afterStop: "trusted-proxy" },
+      { source: "team:disable", beforeStop: "trusted-proxy", afterStop: "token" },
+    ]);
+  });
+
+  it("a disable whose config write fails still relaunches the gateway on the auth it had and reports the write error", async () => {
+    const openclawDir = createTempOpenclawDir();
+    writeConfig(openclawDir, {
+      gateway: { auth: { mode: "trusted-proxy", password: "${OPENCLAW_GATEWAY_PASSWORD}", trustedProxy: { userHeader: "x-alphaclaw-user" } } },
+    });
+    const before = fs.readFileSync(path.join(openclawDir, "openclaw.json"), "utf8");
+    fs.writeFileSync(path.join(openclawDir, "openclaw.json"), "{ not json");
+    let afterStopSettled = false;
+    const restartGateway = vi.fn(async (options) => {
+      await options.afterStop();
+      afterStopSettled = true;
+    });
+    const onAuthConfigRestored = vi.fn();
+    const disabled = await disableTeamMode({
+      openclawDir,
+      env,
+      restartGateway,
+      onAuthConfigRestored,
+      getGatewayUrl: () => kGatewayUrl,
+      request: vi.fn(),
+      probeOptions: kFastProbe,
+    });
+    expect(afterStopSettled).toBe(true);
+    expect(disabled).toMatchObject({ ok: false, error: expect.stringContaining("Could not update openclaw.json") });
+    expect(onAuthConfigRestored).not.toHaveBeenCalled();
+    expect(before).toContain("trusted-proxy");
+  });
+
   it("disable survives a throwing restart: token auth restored on disk, failure reported", async () => {
     const openclawDir = createTempOpenclawDir();
     writeConfig(openclawDir, {
@@ -411,7 +475,8 @@ describe("server/team-auth-transition", () => {
       // (GatewayRestartError contract on this branch). Disable must treat
       // that as a failed probe — never rethrow (the route would crash) and
       // never leave trusted-proxy config behind.
-      restartGateway: vi.fn(async () => {
+      restartGateway: vi.fn(async (options) => {
+        await options?.afterStop?.();
         throw new Error("Gateway did not become ready within 120s");
       }),
       getGatewayUrl: () => kGatewayUrl,
@@ -421,7 +486,8 @@ describe("server/team-auth-transition", () => {
 
     expect(disabled.ok).toBe(false);
     expect(disabled.error).toContain("did not become ready");
-    // The config restore happened BEFORE the restart — token auth is on disk.
+    // The config restore ran inside the restart, with the gateway stopped —
+    // token auth is on disk.
     expect(readConfig(openclawDir).gateway.auth.mode).not.toBe("trusted-proxy");
   });
 
@@ -443,7 +509,7 @@ describe("server/team-auth-transition", () => {
     const disabled = await disableTeamMode({
       openclawDir,
       env,
-      restartGateway: vi.fn(async () => {}),
+      restartGateway: vi.fn(async (options) => { await options?.afterStop?.(); }),
       getGatewayUrl: () => kGatewayUrl,
       request,
       probeOptions: kFastProbe,
@@ -469,7 +535,7 @@ describe("server/team-auth-transition", () => {
     const disabled = await disableTeamMode({
       openclawDir,
       env,
-      restartGateway: vi.fn(async () => {}),
+      restartGateway: vi.fn(async (options) => { await options?.afterStop?.(); }),
       getGatewayUrl: () => kGatewayUrl,
       request,
       probeOptions: kFastProbe,
