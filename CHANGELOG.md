@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.68] - 2026-10-23
+
+The owner is now told when a background command finished during a gateway restart but OpenClaw refused to hand its result to the agent (ALPH-19, ALPH-20 finding 3).
+
+### Fixed
+- A command the agent had moved to the background that finished while an AlphaClaw restart was draining was lost without a word. OpenClaw refused its completion wake ("[exec] completion delivery failed (GatewayDrainingError ...)") and then reported "all active work drained", which zeroed the count the v0.10.63 notice relies on. The wedge sweep now counts those refusals separately during an AlphaClaw restart and sends the same one-time owner notice after the relaunch, saying the result was not delivered. It records an `exec_stopped` event with `reason: "result_not_delivered"` (stopped work now carries `reason: "stopped"`) and logs `[alphaclaw] wedge-sweep exec-undelivered`. A crash relaunch still stays silent.
+
+### Tests
+- `tests/live/restart-exec-turn.e2e.test.js` has a case where a 150 s background command finishes during a routine restart's drain.
+
 ## [0.10.67] - 2026-10-23
 
 ### Documentation

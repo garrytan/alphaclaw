@@ -18,7 +18,10 @@
 // The one loss OpenClaw cannot recover is pinned too: an exec that already
 // yielded to a background process session (the turn ended; OpenClaw caps the
 // yield window at 120 s) is stopped by the restart, nothing resumes it, and
-// the sweep tells the owner once from OpenClaw's drain report.
+// the sweep tells the owner once from OpenClaw's drain report. A background
+// exec that finishes during the drain is pinned as well: OpenClaw refuses its
+// completion wake (GatewayDrainingError), reports the drain clean, and the
+// sweep tells the owner the result was not delivered.
 //
 // ALPH-18's "exec turn lost" verdict came from its blackbox mock model, which
 // answered the recovery prompt with plain text instead of acting on it. This
@@ -318,6 +321,44 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
     expect(row.restartRecoveryStatus).toBeUndefined();
     const recover = await call("sessions.recover", { key: sessionKey, agentId: "main" });
     expect(`${recover.body?.error?.message || ""} ${recover.stderr}`).toMatch(kNothingToRecoverPattern);
+  }, kCaseTimeoutMs);
+
+  it("a background exec that finishes during the drain has its completion refused; the owner is told the result was not delivered", async () => {
+    if (!(await readyzOk())) {
+      await gateway.startGateway();
+      await waitFor(readyzOk, 240_000, "undelivered: gateway ready before the case");
+      await sweepJob;
+    }
+    const sleepSeconds = 150;
+    const tag = `xr-und-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
+    const sessionKey = `agent:main:${tag}`;
+    const marker = path.join(kRootDir, `${tag}.started`);
+    notify.mockClear();
+    insertEvent.mockClear();
+    const sent = await call("chat.send", {
+      sessionKey,
+      message: `Run it in the background exec: touch ${marker} && sleep ${sleepSeconds} && echo done-${tag}`,
+      idempotencyKey: `${tag}-send`,
+      deliver: false,
+    });
+    expect(sent.body?.status, sent.stderr).toBe("started");
+    await waitFor(async () => fs.existsSync(marker), 120_000, "undelivered: exec started");
+    // Restart about 40 s before the command ends, so it finishes inside the
+    // drain even where the host caps OpenClaw's drain near 75 s.
+    const startedAt = fs.statSync(marker).mtimeMs;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, startedAt + (sleepSeconds - 40) * 1000 - Date.now())));
+    sweepJob = null;
+    const outcome = await gateway.restartGateway(() => {}, { source: "api:restart", reason: "live exec turn" });
+    expect(outcome.ok).toBe(true);
+    await waitFor(readyzOk, 240_000, "undelivered: /readyz after the restart");
+    expect(await sweepJob).toEqual({ recovered: [], alerted: [] });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain("finished while the gateway was restarting, but OpenClaw refused to deliver the result.");
+    expect(notify.mock.calls[0][0]).not.toContain("The gateway restart stopped");
+    expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.count, e.details.reason])).toEqual([["exec_stopped", 1, "result_not_delivered"]]);
+    expect(lines.filter((line) => line.startsWith("[alphaclaw] wedge-sweep exec-undelivered "))).toHaveLength(1);
+    expect(requests.some((r) => r.tag === tag && r.recovery)).toBe(false);
   }, kCaseTimeoutMs);
 
   it("SIGKILL crash and relaunch: OpenClaw resumes the turn", async () => {

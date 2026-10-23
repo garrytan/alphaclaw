@@ -186,6 +186,42 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("a background exec whose completion OpenClaw refused while draining is reported as not delivered, even after the drain reports clean; a crash stays silent", async () => {
+    const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });
+    const { sweep, notify, insertEvent } = createSweep(gateway);
+    await sweep.recordRunningSessions({ opId: "45ff1ae2aa" });
+    sweep.observeGatewayOutput("[gateway] 2026-10-23T01:57:46.709+00:00 [gateway] still draining active work before restart: backgroundExecSessions=1\n");
+    sweep.observeGatewayOutput("[gateway] 2026-10-23T01:58:08.029+00:00 [session-events] session event execution failed source=exec agentId=main sessionKey=agent:main:main eventId=e1 error=\"GatewayDrainingError: Gateway is restarting. Please try again shortly.\"\n");
+    sweep.observeGatewayOutput("[gateway] 2026-10-23T01:58:08.031+00:00 [exec] completion delivery failed (GatewayDrain");
+    sweep.observeGatewayOutput("ingError: Gateway is restarting. Please try again shortly.); inspect the process result.\n[gateway] 2026-10-23T01:58:08.240+00:00 [gateway] all active work drained\n");
+    await sweep.onGatewayLaunch({ generation: 6, startedAt: kLaunchAt });
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [message, opts] = notify.mock.calls[0];
+    expect(message).toContain("A background command the agent was running finished while the gateway was restarting, but OpenClaw refused to deliver the result.");
+    expect(message).not.toContain("The gateway restart stopped");
+    expect(message).not.toMatch(/reset|pid/i);
+    expect(opts).toEqual({ eventType: "session_wedge", id: "exec-stopped-6" });
+    expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.count, e.details.reason])).toEqual([["exec_stopped", 1, "result_not_delivered"]]);
+    expect(lines()).toContain("[alphaclaw] wedge-sweep exec-undelivered generation=6 op=45ff1ae2 count=1");
+
+    // Both in one restart: one notice, one event per reason.
+    notify.mockClear();
+    insertEvent.mockClear();
+    await sweep.recordRunningSessions({ opId: "second" });
+    sweep.observeGatewayOutput("[exec] completion delivery failed (GatewayDrainingError: Gateway is restarting.)\nrestart drain budget 1ms exhausted; cutting short backgroundExecSessions=2\n");
+    await sweep.onGatewayLaunch({ generation: 7, startedAt: kLaunchAt });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain("The gateway restart stopped 2 commands");
+    expect(notify.mock.calls[0][0]).toContain("refused to deliver the result");
+    expect(insertEvent.mock.calls.map(([e]) => [e.details.count, e.details.reason])).toEqual([[2, "stopped"], [1, "result_not_delivered"]]);
+
+    // A crash relaunch (no restart requested) never reads the output.
+    notify.mockClear();
+    sweep.observeGatewayOutput("[exec] completion delivery failed (GatewayDrainingError: Gateway is restarting.)\n");
+    await sweep.onGatewayLaunch({ generation: 8, startedAt: kLaunchAt });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("a newer launch supersedes a pending sweep; a gateway that never becomes ready is skipped", async () => {
     const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });
     let release;
