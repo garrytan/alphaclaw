@@ -140,6 +140,19 @@ as the group with its tool children, but never goes critical and never counts
 container pressure. The heap projection (worker slope toward the heap limit)
 can latch a warning as well as the budget projection.
 
+**Restart policy (ALPH-22).** A critical verdict alone never restarts the gateway.
+The opt-in mitigation also needs a restart authority on the snapshot:
+`heap_near_limit` (fresh heap telemetry at 85% of the V8 limit or more: the
+worker would abort anyway), `worker_container_oom` (the dominant, growing worker
+has the container at 90%), or `operator_budget` (the operator's own
+`watchdog.memory.budgetMb` is the cap and the worker is at 90% of it, the issue
+#56 fast-leak profile). Without one, the watchdog logs one `mitigation_skipped`
+`not_near_limit` per episode. A restart always goes through the graceful ladder
+with the derived drain; the drain's exhaustion estimate now includes the heap's
+own crossing (heap used toward its limit at the worker slope) and takes the
+short ladder at 97% of the heap limit. SIGKILL stays the ladder's last step,
+and the rate brake is unchanged.
+
 Worker growth retains its existing grace, confirmation, recovery and restart
 interlocks. Fresh container pressure counts only for a dominant, growing worker. Container pressure also has its own two-read 90% latch and three-read
 recovery, independent of gateway presence. Container-only pressure never permits
@@ -151,6 +164,26 @@ notification delivery. Evidence older than 90 seconds vetoes the restart,
 refunds the brake and notification dedupe, and releases the lifecycle lock so a
 fresh sample can retry. Settings, restart interlocks and rate brakes are also
 rechecked after notification delivery.
+
+### Notifications (ALPH-22)
+
+Each episode sends at most one message per tier. The opening alert waits five
+minutes (`memoryNoticeHoldMs` in `watchdog.js`), so load that settles inside
+that hold never pages. A warning episode that outlasts the hold sends one 🟡
+"rising steadily" message; a critical one sends one 🔴 message that says
+whether the watchdog will restart and, if not, why (auto-restart off, the worker
+not identified, or no restart authority). A restart or rate-brake notice takes
+the critical slot. A critical that clears inside the hold gets one combined
+"spiked and recovered" message instead of a red alert. When an episode that
+notified clears in place, one ✅ follow-up names its duration, its peak and any
+restarts. An episode that ends with the process (a restart or crash) closes
+without a follow-up, because the restart path reports its own outcome.
+
+The brake notice ("automatic restart is paused") states how many memory
+restarts the window holds, the limit and spacing, and the UTC time the brake
+lifts. No memory notice advises a manual restart: repeated restarts are the
+harm the brake exists to stop, so every notice points to Doctor and the
+watchdog's memory events.
 
 Attribution uses a one-hour covered window and two fresh confirmations. Child
 growth is distinct from accumulation (count and RSS growth). Possible heap

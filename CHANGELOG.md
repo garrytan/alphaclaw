@@ -5,6 +5,37 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.74] - 2026-10-23
+
+Memory notifications now send one message per episode tier instead of one per transition, wait five minutes before paging, and follow up when an episode clears. No memory notice advises a manual restart (ALPH-22, PR 4 of 4).
+
+### Changed
+- **One message per episode.** The opening alert waits five minutes, so load that settles inside that hold never pages. An episode that outlasts it sends one 🟡 "rising steadily" warning, or one 🔴 critical that says whether the watchdog will restart and, if not, why: auto-restart is off, the worker is not identified, or the heap and container give no restart authority. A restart or brake notice takes the critical slot.
+- **Spikes that recover get one combined message.** A critical that clears inside the hold sends one 🟡 "spiked and recovered" message with how long it was critical and its peak, instead of a red alert followed by silence.
+- **Cleared follow-up.** When an episode that notified clears in place, one ✅ "back to normal" message names its duration, its peak, whether it reached critical and any restarts during it.
+- **The brake notice explains itself.** "🔴 Gateway memory critical — automatic restart is paused" now gives the memory restarts in the last 24 hours, the limit and spacing, and the UTC time the brake lifts. It no longer advises restarting the gateway by hand, which is the step the brake exists to stop repeating; it points to Doctor and the watchdog's memory events. A memory restart that fails to stop the gateway says the watchdog re-evaluates on the next tick, with the same pointer.
+
+### Tests
+- New watchdog cases: an episode that clears inside the hold sends nothing; a sustained warning sends one message after the hold and one cleared follow-up with duration and peak; a critical that clears inside the hold sends one combined message and no 🔴; a sustained critical with auto-restart off sends one 🔴 explaining why it will not restart, then a cleared follow-up. The brake case pins the new wording and the absence of manual-restart advice.
+- Harnesses that pin per-transition behaviour run with `memoryNoticeHoldMs: 0`.
+
+## [0.10.73] - 2026-10-23
+
+An automatic memory restart now needs a reason a restart would help: the V8 heap near its limit, the worker itself filling the container, or the operator's own budget. Critical alone no longer restarts the gateway (ALPH-22, PR 3 of 4).
+
+### Changed
+- **Restart authority.** With auto-restart on, a critical verdict restarts the gateway only when the snapshot carries a `restartAuthority`:
+  - `heap_near_limit`: fresh heap telemetry shows heap used at 85% of the V8 limit or more, where V8 would abort anyway.
+  - `worker_container_oom`: the dominant, growing worker has the container at 90%.
+  - `operator_budget`: `watchdog.memory.budgetMb` is the cap and the worker is at 90% of it (the issue #56 fast-leak profile, which the operator chose).
+
+  Without one, the watchdog records one `mitigation_skipped` event with `reason: "not_near_limit"` per episode and leaves the gateway alone. `mitigation_restart` events carry the authority.
+- **The drain budget knows the heap.** The exhaustion estimate that sizes OpenClaw's drain now includes the heap's own crossing (heap used toward its limit at the worker slope). It takes the 30 s short ladder at 97% of the heap limit, as it already does at 97% of the container. Every memory restart still goes through the graceful ladder with this derived drain, SIGKILL stays its last step, and the rate brake is unchanged.
+
+### Tests
+- In the load-episode replay the heap leak goes critical at 70% of its heap limit, logs one `not_near_limit` skip, and restarts once at 85% with `restartAuthority: "heap_near_limit"` and a derived (not short) drain. Garry's three episodes record no skip and no restart.
+- Authority cases in the monitor, the watchdog and the drain-budget tests. The existing mitigation scenarios now carry a heap at 90% of its limit as their authority.
+
 ## [0.10.72] - 2026-10-23
 
 With no operator budget, the memory watchdog's budget is now a real share of the memory the gateway can use, not configured heap plus 192 MiB (ALPH-22, PR 2 of 4).

@@ -889,3 +889,38 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 });
 
+
+describe("restart authority (ALPH-22)", () => {
+  const heapAt = (i, usedMb, floorsRising = false) => ({ status: "fresh", atMs: kStartMs + i * kTickMs,
+    usedBytes: mb(usedMb), limitBytes: mb(1000), floorsRising });
+  const run = (capAt, rssAt = (i) => mb(1000 + 10 * i)) =>
+    drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), { ticks: 5, rssAt, capAt }).snapshot;
+
+  it("the V8 heap at 85% of its limit authorizes a restart", () => {
+    const snapshot = run((i) => ({ hostTotalBytes: mb(1400), heap: heapAt(i, 860) }));
+    expect(snapshot).toMatchObject({ state: "critical", restartAuthority: "heap_near_limit" });
+  });
+
+  it("a critical with the heap below 85% and no other authority does not", () => {
+    const snapshot = run((i) => ({ hostTotalBytes: mb(1400), heap: heapAt(i, 200, true) }));
+    expect(snapshot).toMatchObject({ state: "critical", restartAuthority: null });
+  });
+
+  it("a dominant, growing worker filling the container authorizes a restart", () => {
+    const snapshot = run((i) => ({ groupRssBytes: mb(1050 + 10 * i), containerLimitBytes: mb(1150),
+      cgroupUsedBytes: mb(1080 + 10 * i), heap: heapAt(i, 200) }), (i) => mb(1000 + 10 * i));
+    expect(snapshot).toMatchObject({ state: "critical", restartAuthority: "worker_container_oom" });
+  });
+
+  it("the operator's own budget authorizes a restart (issue #56 fast-leak profile)", () => {
+    const snapshot = run(() => ({ budgetBytes: mb(1100) }));
+    expect(snapshot).toMatchObject({ state: "critical", restartAuthority: "operator_budget" });
+  });
+
+  it("there is no authority without critical", () => {
+    const snapshot = run((i) => ({ hostTotalBytes: mb(100_000), heap: heapAt(i, 200) }));
+    expect(snapshot.state).not.toBe("critical");
+    expect(snapshot.restartAuthority).toBeNull();
+  });
+});
+

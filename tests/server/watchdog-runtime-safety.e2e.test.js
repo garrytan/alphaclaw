@@ -92,7 +92,7 @@ describe("issue #102 runtime safety (e2e)", () => {
   it("alerts within five minutes of a sustained over-cap brake and records it once over 82 minutes", async () => {
     const stack = createStack({ restarts: [kStartMs - 12 * 60 * kMinute, kStartMs - 6 * 60 * kMinute] });
     await driveMemory(stack, 0, 5);
-    const brakeNotices = () => stack.notifier.notify.mock.calls.filter(([message]) => message.includes("auto-restart brake engaged"));
+    const brakeNotices = () => stack.notifier.notify.mock.calls.filter(([message]) => message.includes("automatic restart is paused"));
     expect(brakeNotices()).toHaveLength(1);
     expect(brakeNotices()[0][1]).toMatchObject({ eventType: "memory", verbose: false });
     await driveMemory(stack, 5, 77);
@@ -120,7 +120,7 @@ describe("issue #102 runtime safety (e2e)", () => {
       if (stack.events.some((event) => event.details?.recheck)) break;
     }
     expect(stack.events.some((event) => event.details?.recheck)).toBe(true);
-    expect(stack.notifier.notify.mock.calls.filter(([message]) => message.includes("auto-restart brake engaged"))).toHaveLength(1);
+    expect(stack.notifier.notify.mock.calls.filter(([message]) => message.includes("automatic restart is paused"))).toHaveLength(1);
     expect(stack.restart).not.toHaveBeenCalled();
     expect(JSON.parse(fs.readFileSync(path.join(root, "memory-mitigation-state.json"))).restarts).toHaveLength(1);
     expect(stack.lock.getActiveOperation()).toBeNull();
