@@ -202,6 +202,26 @@ const createPss = (options = {}) => {
 };
 
 describe("bounded process PSS sampling", () => {
+  it("a read that names no gateway keeps the cached sample for the gateway's next read", async () => {
+    // Real collector and sampler over one fake /proc: the watchdog tick reads
+    // the gateway; between ticks the rescue session's memory-floor probe
+    // calls getSystemResources({}), which reads with no root or worker.
+    const fixture = createFs({ 100: {}, 200: { parentPid: 100 } });
+    let now = 10000;
+    const collector = createGatewayProcessCollector({ fsModule: fixture.fsModule, monotonicNowFn: () => 0,
+      pssSampler: createProcessPssSampler({ fsModule: fixture.fsModule, nowFn: () => now, monotonicNowFn: () => 0 }) });
+    const tick = () => collector.getSnapshot({ rootPid: 100, workerPid: 200, rootSource: "serving_root", nowMs: now }).pss;
+    expect(tick().status).toBe("collecting");
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let minute = 1; minute <= 4; minute += 1) {
+      now = 10000 + minute * 60000;
+      expect(collector.getSnapshot({ rootPid: null, workerPid: null, nowMs: now }).pss)
+        .toMatchObject({ status: "unavailable", reason: "process_unavailable" });
+      expect(tick()).toMatchObject({ status: "fresh", workerStatus: "fresh", atMs: 10000 });
+    }
+    expect(fixture.fsModule.promises.open).toHaveBeenCalledTimes(6);
+  });
+
   it("parses shared-page-aware counters and does not substitute missing data with zero", () => {
     expect(parseSmapsRollup(rollup())).toEqual({ rssBytes: 102400, pssBytes: 71680, privateBytes: 51200, privateHugetlbBytes: 0 });
     expect(parseSmapsRollup(rollup().replace(/^Pss:.*\n/m, ""))).toBeNull();
