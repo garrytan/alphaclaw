@@ -57,6 +57,22 @@ describe("git sync last-run line", () => {
     });
     expect(describeGitSyncLastRun({ at: "x", outcome: "refused", code: "lock_timeout", consecutiveFailures: 1, headline: "h" }, { nowMs }).tone)
       .toBe("warning");
+    expect(describeGitSyncLastRun({ at: "2026-10-12T11:48:00.000Z", outcome: "warning", code: "held_back", heldBackCount: 2 }, { nowMs })).toEqual({
+      tone: "warning",
+      text: "Pushed 12 minutes ago, but 2 large new paths are held back and not backed up",
+    });
+    expect(describeGitSyncLastRun({
+      at: "2026-10-12T11:37:00.000Z",
+      outcome: "failed",
+      code: "failed",
+      headline: "Git sync failed",
+      firstFailureAt: "2026-10-12T09:00:00.000Z",
+      consecutiveFailures: 5,
+      reason: 'Git could not match "workspace/a.md", a path the sync asked it to commit.',
+    }, { nowMs })).toEqual({
+      tone: "error",
+      text: 'Git sync failed since 3 hours ago (5 runs). Workspace changes are not being backed up. Git could not match "workspace/a.md", a path the sync asked it to commit.',
+    });
   });
 });
 

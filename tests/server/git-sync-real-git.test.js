@@ -31,10 +31,10 @@ const sh = (cwd, args, opts = {}) =>
     ...opts,
   });
 
-const createRunner = (cwd) => (args, { input, literalPathspecs = false, timeoutMs } = {}) =>
+const createRunner = (repoDir) => (args, { input, literalPathspecs = false, bytes = false, cwd = repoDir, timeoutMs } = {}) =>
   execFileSync("git", args, {
     cwd,
-    encoding: "utf8",
+    encoding: bytes ? "latin1" : "utf8",
     stdio: "pipe",
     ...(input !== undefined ? { input } : {}),
     ...(Number.isFinite(timeoutMs) ? { timeout: Math.floor(timeoutMs) } : {}),
@@ -247,6 +247,234 @@ describe("git-sync against real git (issue #140)", () => {
     const result = sync();
     expect(result.code).toBe("detached_head");
     expect(result.exitCode).toBe(1);
+  });
+
+  // Each of these made git refuse the whole commit, so every later run
+  // failed the same way and nothing was pushed again.
+  describe("paths git cannot take as given", () => {
+    const rawName = (dir, ...parts) => Buffer.concat([Buffer.from(`${dir}${path.sep}`), ...parts]);
+    const kLatin1Name = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x6d, 0x64]);
+    const remoteNames = () =>
+      execFileSync("git", ["ls-tree", "-r", "-z", "--name-only", "main"], { cwd: remote, env: { ...process.env, ...kGitEnv } })
+        .toString("latin1")
+        .split("\0")
+        .filter(Boolean);
+    const writeRaw = (relativeDir, name, content) => {
+      fs.mkdirSync(path.join(live, relativeDir), { recursive: true });
+      try {
+        fs.writeFileSync(rawName(path.join(live, relativeDir), name), content);
+        return true;
+      } catch (error) {
+        if (error.code === "EILSEQ") return false;
+        throw error;
+      }
+    };
+
+    it("commits, updates and deletes a file whose name is not valid UTF-8", () => {
+      if (!writeRaw("workspace", kLatin1Name, "v1\n")) return;
+      const expected = `workspace/${kLatin1Name.toString("latin1")}`;
+
+      expect(sync()).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(remoteNames()).toContain(expected);
+
+      fs.writeFileSync(rawName(path.join(live, "workspace"), kLatin1Name), "v2\n");
+      expect(sync()).toMatchObject({ code: "ok", committed: true, pushed: true });
+
+      fs.rmSync(rawName(path.join(live, "workspace"), kLatin1Name));
+      expect(sync()).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(remoteNames()).not.toContain(expected);
+      expect(sh(live, ["status", "--porcelain"])).toBe("");
+    });
+
+    it("takes a non-UTF-8 name on the very first commit", () => {
+      fs.rmSync(remote, { recursive: true, force: true });
+      sh(root, ["init", "-q", "-b", "main", "--bare", remote]);
+      const fresh = path.join(root, "fresh");
+      sh(root, ["init", "-q", "-b", "main", fresh]);
+      sh(fresh, ["remote", "add", "origin", remote]);
+      fs.mkdirSync(path.join(fresh, "workspace"), { recursive: true });
+      try {
+        fs.writeFileSync(rawName(path.join(fresh, "workspace"), Buffer.from([0xff, 0x2e, 0x6d, 0x64])), "x\n");
+      } catch (error) {
+        if (error.code === "EILSEQ") return;
+        throw error;
+      }
+      write(fresh, "workspace/-dash.md", "dash\n");
+
+      const result = performGitSync({
+        git: createRunner(fresh),
+        openclawDir: fresh,
+        githubRepo: "owner/repo",
+        originUrl: remote,
+        commitMessage: "first sync",
+        log: () => {},
+        error: () => {},
+      });
+
+      expect(result).toMatchObject({ code: "ok", pushed: true });
+      expect(remoteNames()).toEqual(expect.arrayContaining(["workspace/-dash.md", "workspace/\xff.md"]));
+    });
+
+    it("commits names that start with a dash and leaves a missing --file or sync path alone", () => {
+      write(live, "workspace/-rf.md", "dash\n");
+      write(live, "workspace/--force", "dashes\n");
+
+      expect(sync({ filePath: "workspace/missing.json" })).toMatchObject({ code: "ok", committed: false });
+      expect(sync({ syncPaths: ["workspace/missing/", "cron/jobs.json"] })).toMatchObject({ code: "ok", committed: false });
+      expect(sync()).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(remoteNames()).toEqual(expect.arrayContaining(["workspace/-rf.md", "workspace/--force"]));
+    });
+
+    it("records a tracked file that was replaced by a folder", () => {
+      fs.rmSync(path.join(live, "workspace/notes.md"));
+      write(live, "workspace/notes.md/today.md", "now a folder\n");
+
+      expect(sync()).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(remoteNames()).toContain("workspace/notes.md/today.md");
+      expect(remoteNames()).not.toContain("workspace/notes.md");
+    });
+
+    it("leaves out a nested repository with no commits and still pushes everything else", () => {
+      const nested = path.join(live, "workspace/clone");
+      fs.mkdirSync(nested, { recursive: true });
+      sh(nested, ["init", "-q", "-b", "main"]);
+      write(nested, "README.md", "nested\n");
+      write(live, "workspace/notes.md", "b\n");
+      const log = vi.fn();
+
+      expect(sync({ log })).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(remoteNames()).not.toContain("workspace/clone");
+      expect(sh(remote, ["show", "main:workspace/notes.md"])).toBe("b\n");
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("left out 1 path(s) git cannot commit"));
+    });
+
+    it("reads the tree again when an untracked file vanishes before git add", () => {
+      write(live, "workspace/scratch.tmp", "gone soon\n");
+      write(live, "workspace/notes.md", "kept\n");
+      const runner = createRunner(live);
+      let vanished = false;
+      const git = (args, opts) => {
+        if (args[0] === "add" && !vanished) {
+          vanished = true;
+          fs.rmSync(path.join(live, "workspace/scratch.tmp"));
+        }
+        return runner(args, opts);
+      };
+
+      expect(sync({ git })).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(remoteNames()).not.toContain("workspace/scratch.tmp");
+      expect(sh(remote, ["show", "main:workspace/notes.md"])).toBe("kept\n");
+    });
+  });
+
+  // The managed directory inside a larger repository: git status prints
+  // paths from the repository's top level, so every commit failed with
+  // "pathspec did not match" and the scan reached files outside .openclaw.
+  describe("a managed directory inside a larger repository", () => {
+    let outer;
+    let managed;
+    beforeEach(() => {
+      outer = path.join(root, "outer");
+      managed = path.join(outer, ".openclaw");
+      fs.rmSync(remote, { recursive: true, force: true });
+      sh(root, ["init", "-q", "-b", "main", "--bare", remote]);
+      sh(root, ["init", "-q", "-b", "main", outer]);
+      sh(outer, ["remote", "add", "origin", remote]);
+      write(outer, "top.txt", "outside\n");
+      write(managed, "openclaw.json", "{}\n");
+      write(managed, "workspace/notes.md", "a\n");
+      sh(outer, ["add", "-A"]);
+      sh(outer, ["commit", "-qm", "init"]);
+      sh(outer, ["push", "-q", "origin", "main"]);
+    });
+    const syncManaged = (overrides = {}) =>
+      performGitSync({
+        git: createRunner(managed),
+        openclawDir: managed,
+        githubRepo: "owner/repo",
+        originUrl: remote,
+        commitMessage: "hourly sync",
+        log: () => {},
+        error: () => {},
+        ...overrides,
+      });
+    const committedNames = () =>
+      sh(outer, ["-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD"]).trim().split("\n").sort();
+
+    it("commits new and changed files of the managed directory only, never the state capture beside it", () => {
+      write(managed, "workspace/notes.md", "b\n");
+      write(managed, "workspace/new.md", "new\n");
+      write(outer, "top.txt", "changed outside\n");
+      write(outer, "elsewhere.txt", "untracked outside\n");
+      write(outer, ".openclaw.update-captures/doctor-1/openclaw.json", "{\"copy\":true}\n");
+
+      const result = syncManaged();
+
+      expect(result).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(committedNames()).toEqual([".openclaw/workspace/new.md", ".openclaw/workspace/notes.md"]);
+      expect(sh(remote, ["show", "main:.openclaw/workspace/notes.md"])).toBe("b\n");
+      expect(sh(outer, ["status", "--porcelain"]).split("\n").filter(Boolean).sort()).toEqual([
+        " M top.txt",
+        "?? .openclaw.update-captures/",
+        "?? elsewhere.txt",
+      ]);
+    });
+
+    it("keeps the managed directory's secrets out when the path above it is not ASCII", () => {
+      const unicodeManaged = path.join(outer, "café", ".openclaw");
+      write(unicodeManaged, "workspace/note.md", "safe\n");
+      write(unicodeManaged, ".env", "GITHUB_TOKEN=not-a-real-token\n");
+      write(unicodeManaged, "credentials/telegram.json", "{}\n");
+
+      expect(syncManaged({ git: createRunner(unicodeManaged), openclawDir: unicodeManaged })).toMatchObject({ code: "ok", pushed: true });
+      expect(committedNames()).toEqual(["café/.openclaw/workspace/note.md"]);
+    });
+
+    it("commits a change to a tracked file alone", () => {
+      write(managed, "openclaw.json", "{\"x\":1}\n");
+      expect(syncManaged()).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(committedNames()).toEqual([".openclaw/openclaw.json"]);
+    });
+  });
+
+  it("never commits state copies or the managed directory's secrets, whatever .gitignore says", () => {
+    write(live, "workspace/notes.md", "b\n");
+    write(live, ".env", "GITHUB_TOKEN=secret\n");
+    write(live, ".alphaclaw/git-sync-status.json", "{}\n");
+    write(live, "credentials/telegram.json", "{}\n");
+    write(live, "agents/main/agent/auth-profiles.json", "{}\n");
+    write(live, "workspace/old.update-captures/doctor-1/openclaw.json", "{}\n");
+    write(live, ".openclaw.package-backup-123/package.json", "{}\n");
+    const log = vi.fn();
+
+    const result = sync({ log });
+
+    expect(result).toMatchObject({ code: "ok", committed: true, pushed: true });
+    expect(sh(live, ["show", "--name-only", "--format=", "HEAD"]).trim()).toBe("workspace/notes.md");
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("never commits state copies or secrets; skipped 6 path(s)"));
+  });
+
+  it("holds back a new file or folder over the size limit, pushes the rest, and clears once it is gone", () => {
+    write(live, "workspace/small.md", "small\n");
+    write(live, "workspace/dump/a.bin", "a".repeat(800));
+    write(live, "workspace/dump/b.bin", "b".repeat(800));
+    write(live, "workspace/big.bin", "c".repeat(2000));
+
+    const held = sync({ maxUntrackedBytes: 1024 });
+
+    expect(held).toMatchObject({ code: "held_back", outcome: "warning", exitCode: 0, committed: true, pushed: true });
+    expect(held.heldBack).toEqual([
+      { path: "workspace/big.bin", bytes: 2000 },
+      { path: "workspace/dump/", bytes: 1600 },
+    ]);
+    expect(held.detail).toBe("held back workspace/big.bin (0.0 MB), workspace/dump/ (0.0 MB)");
+    expect(sh(live, ["show", "--name-only", "--format=", "HEAD"]).trim()).toBe("workspace/small.md");
+
+    const single = sync({ maxUntrackedBytes: 1024, filePath: "workspace/big.bin" });
+    expect(single).toMatchObject({ code: "held_back", singleFile: true, committed: false, heldBack: [{ path: "workspace/big.bin", bytes: 2000 }] });
+    fs.rmSync(path.join(live, "workspace/dump"), { recursive: true });
+    fs.rmSync(path.join(live, "workspace/big.bin"));
+    expect(sync({ maxUntrackedBytes: 1024 })).toMatchObject({ code: "ok", heldBack: [] });
   });
 
   it("keeps file names with glob characters literal", () => {
