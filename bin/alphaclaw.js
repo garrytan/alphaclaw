@@ -84,7 +84,7 @@ const {
   kGitAskpassScript,
 } = require("../lib/git-askpass-script");
 const { kGithubRepoSlugPattern } = require("../lib/server/helpers");
-const { performGitSync, parseGitSyncPaths } = require("../lib/cli/git-sync");
+const { performGitSync, parseGitSyncPaths, kGitMaxBufferBytes } = require("../lib/cli/git-sync");
 const { getGitSyncCode } = require("../lib/cli/git-sync-codes");
 const { recordGitSyncRun } = require("../lib/cli/git-sync-status");
 const {
@@ -725,6 +725,7 @@ const runGitSync = () => {
       {
         cwd,
         stdio: "pipe",
+        maxBuffer: kGitMaxBufferBytes,
         encoding: bytes ? "latin1" : "utf8",
         ...(input !== undefined ? { input } : {}),
         ...(Number.isFinite(timeoutMs) ? { timeout: Math.max(1, Math.floor(timeoutMs)) } : {}),
