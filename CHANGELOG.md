@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.81] - 2026-10-24
+
+Pins OpenClaw 2026.10.7 (ALPH-12, round 3). No schema move: `openclaw.schemaVersions` stays state 20 / agent 25, and `engines.node` stays `>=24.22.1 <25 || >=26.12.1`, so this pin changes no file under `lib/`.
+
+### Changed
+- **OpenClaw 2026.10.6 → 2026.10.7.** A patch release: replay-safe session recovery, safer update activation, database and backup durability fixes, Gemini 4 Argon. The restart-drain module (`gateway-drain`), the SIGTERM-during-drain handling and the `sessions.list` row projection are unchanged; `sessions.list` adds only timing diagnostics. `@openclaw/fs-safe` moves 0.25.0 → 0.26.0 with the pin. On real 2026.10.6 state, 2026.10.7's `doctor --fix --non-interactive` changes no schema version, and 2026.10.6 still boots on state that 2026.10.7 wrote.
+- **`tests/live/database-fixture.js`** records 2026.10.7 as state 20 / agent 25.
+
+### Fixed
+- **`tests/live/restart-exec-turn.e2e.test.js` recognizes 2026.10.7's restart-recovery note.** 2026.10.7 shortened OpenClaw's note to the model from "Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work" to "Your previous turn was interrupted while OpenClaw was waiting on tool/model work. This can happen after a Gateway restart or a tool execution timeout." The test's mock model keyed on "interrupted by a gateway restart", so it never acted on the note, and every restart class looked like a lost turn. The pattern now matches both wordings.
+
 ## [0.10.80] - 2026-10-24
 
 A new guard keeps `node_modules` out of the tree (ALPH-14 follow-up to #200).

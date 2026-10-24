@@ -51,7 +51,9 @@ const describeLive = kLiveEnabled ? describe : describe.skip;
 const kCaseTimeoutMs = 12 * 60 * 1000;
 // Longer than the routine drain (180 s), so every class interrupts the exec.
 const kExecSleepSeconds = 300;
-const kRecoveryNotePattern = /interrupted by a gateway restart/i;
+// 2026.10.6: "…interrupted by a gateway restart while OpenClaw was waiting on
+// tool/model work"; 2026.10.7 dropped "by a gateway restart" from the note.
+const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work/i;
 const kNothingToRecoverPattern = /requires a restart-tombstoned session|Session is not recoverable/i;
 
 const textOf = (content) =>
