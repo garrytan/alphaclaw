@@ -8,6 +8,8 @@ const { createGatewayMemoryMonitor } = require("../../lib/server/gateway-memory-
 const kMb = 1024 * 1024;
 
 describe("default gateway memory sample failure isolation", () => {
+  // The PSI and limit-counter reader (ALPH-25) would read the host's cgroup.
+  beforeEach(() => { vi.spyOn(systemResources, "parseCgroupPressure").mockReturnValue({ psi: null, events: null }); });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it("keeps proc/cgroup protection available when the telemetry reader throws", () => {

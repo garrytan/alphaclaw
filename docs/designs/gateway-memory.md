@@ -41,7 +41,39 @@ will kill it if it keeps growing. The watchdog neither kills the child nor resta
 the gateway: the kernel picks the child anyway (OpenClaw sets its tool children's
 `oom_score_adj` to 1000), and a restart would end it too. `tests/server/gateway-memory-incident-replay.test.js`
 replays the Oct 22 incident (worker flat at 3837 MB, one child growing to 2754 MB
-at 2021 MB/h, group 7239 MB against an 8384 MB budget). Static process roles do not
+at 2021 MB/h, group 7239 MB against an 8384 MB budget).
+
+**Container pressure (ALPH-25).** The pressure figure is non-reclaimable memory:
+`memory.current - file + shmem` from `memory.stat` (v1: `usage - total_cache +
+total_shmem`), else the docker-style working set (#125), else raw usage; the
+sample names its basis (`cgroupUsageBasis`) and carries the other two figures.
+`/api/watchdog/resources` `memory.usedBytes`/`percent` use the same figure, so
+the bar and the alert agree. The 90% latch also needs reclaim evidence on each
+confirming sample: PSI `some avg60` at 5% or more (`memory.pressure`), or
+`memory.events` `high`/`max` (v1: `memory.failcnt`) rising since the previous
+sample. With neither readable the fraction decides alone and the
+`container_critical` event says `pressureBasis: "fraction_only"`. The readout is
+on the memory sample as `cgroupPressure` (`psi`, `events`). What happens at the
+limit comes from the same counters and the platform markers
+(`gateway-memory/container-limit.js`): `oom_kill > 0` means the kernel kills
+processes here; otherwise Render restarts the whole container (Railway and Fly.io
+likely do), and without a marker the container is likely to restart. While the
+container is at 90% or more, a bounded census of every pid in its cgroup
+(`container-census.js`: `cgroup.procs` of the cgroup root and descendants, else
+`/proc`; 8192 pids, 50 ms) finds the largest process. When the gateway's own
+group holds under half of the usage and a complete gateway census (fresh, at most
+128 processes) does not hold that process (and it holds at least a quarter of
+the usage), the alert is about it; without a complete census it is named only
+as the largest process in the container. The outside alert gives its
+command under the same plain-token rule, its RSS, its growth between two
+censuses, and the time to the limit from the container's own slope. Each
+sample at 90% or more is kept in `container-pressure.json` in the managed dir
+(`container-restart-record.js`; cleared on the first sample below 90% and on a
+clean shutdown). At the next boot, an open record from another process,
+sampled within 5 minutes before this process started, at 95% or more or with
+`memory.events` `max` (v1 `failcnt`) rising in that sample, becomes the
+`container_restarted_at_limit` event (no command in the row) and one owner
+notice naming the largest process. Static process roles do not
 identify MCP sessions, activity, or orphaned children.
 
 RSS counts shared pages in every process. It is not an additive decomposition of
