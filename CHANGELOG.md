@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.84] - 2026-10-24
+
+ALPH-27.
+
+### Fixed
+- **The restart-required banner outlived the restart that applied it.** Reasons are persisted, and a new AlphaClaw process reloads them at boot. The only clear outside a restart operation was an in-memory down→up observation, which a fresh boot misses unless a client happens to poll while its gateway is still coming up. So a reason like `env_vars_changed` could survive an upgrade boot and several container restarts, each of which had launched the gateway with the change. Now, once a managed gateway launch answers `/readyz` ready, every reason recorded before that launch's spawn is cleared: `gateway run` reads the config and env as they are at spawn. A reason recorded after the spawn, or in the same millisecond, stays. So do the reasons when the launch never reaches ready, exits or is replaced first, or a process outside its tree holds the port, and when the gateway was adopted rather than launched by this process. A running restart is still decided by its own completion, and a fresh failed restart of this process by the watchdog's recovery verdict. A failed restart persisted by an earlier process no longer holds anything: the watchdog note that could have recovered it died with that process. The clear is logged and recorded as a `restart_required` / `cleared` watchdog event with `by`: `boot_launch` for the first gateway this process brought to ready, `gateway_launch` for a later one (alongside `markRecovered`'s `watchdog_repair` / `restart_child`).
+
+### Changed
+- Managed gateway launch notices carry `launchedAt`, the spawn time, on both the "listening" notice and the cold restart's post-ready notice. `gateway.js` exports `isManagedLaunchCurrent(generation)`: that generation's child is live and no listener outside its tree holds the port.
+
+### Tests
+- `restart-required-state.test.js` reproduces the stale banner: a reason persisted by one process stays through a fresh boot whose polls always see the gateway up (the same scenario against v0.10.83 kept `env_vars_changed` through four simulated boots). It also covers reasons recorded after the spawn or in its millisecond, a CLI flag, a running and a fresh failed restart, a failed restart persisted by an earlier process, and a launch with no spawn time. The new `restart-required-launch-clear.test.js` covers `boot_launch` then `gateway_launch`, a launch that never reaches ready, a launch that exits or is replaced first, adopted and detached notices, and the cold restart's double notice. `gateway.test.js` and `gateway-restart-ladder.test.js` check `launchedAt` on managed notices, and `gateway.test.js` checks that a foreign port listener fails `isManagedLaunchCurrent`.
+
 ## [0.10.83] - 2026-10-24
 
 Pins OpenClaw 2026.10.7 (ALPH-12, round 3). No schema move: `openclaw.schemaVersions` stays state 20 / agent 25, and `engines.node` stays `>=24.22.1 <25 || >=26.12.1`, so this pin changes no file under `lib/`.

@@ -469,6 +469,104 @@ describe("server/restart-required-state (failed-restart recovery truth, bug #137
   });
 });
 
+describe("server/restart-required-state (reasons a ready launch already applied)", () => {
+  it("repro: a reason persisted by a previous process survives a fresh boot whose polls only ever see the gateway up", async () => {
+    const dir = makeStateDir();
+    const before = makeStore({ stateDir: dir, now: () => 1_000 });
+    before.markRequired("env_vars_changed");
+
+    // New AlphaClaw process: the gateway it launched at 5 s is up on every
+    // poll, so the down→up heuristic never fires.
+    const booted = makeStore({ stateDir: dir, now: () => 9_000 });
+    booted.reconcileOnBoot();
+    for (let poll = 0; poll < 3; poll += 1) {
+      expect((await booted.getSnapshot()).reasons.map((r) => r.code)).toEqual(["env_vars_changed"]);
+    }
+
+    const cleared = booted.markAppliedByLaunch({ by: "boot_launch", launchedAt: 5_000, at: 8_000 });
+    expect(cleared).toEqual({ by: "boot_launch", at: 8_000, launchedAt: 5_000, codes: ["env_vars_changed"] });
+    expect((await booted.getSnapshot()).restartRequired).toBe(false);
+    expect(fs.existsSync(path.join(dir, "alphaclaw-restart-reasons.json"))).toBe(false);
+    // And it stays cleared for the next process.
+    expect((await makeStore({ stateDir: dir }).getSnapshot()).restartRequired).toBe(false);
+  });
+
+  it("keeps a reason recorded after the launch's spawn, a same-code refresh included", async () => {
+    let nowMs = 1_000;
+    const store = makeStore({ now: () => nowMs });
+    store.markRequired("env_vars_changed");
+    store.markRequired("config_file_edited");
+    // The gateway spawns at 5 s; the env is edited again at 6 s and a webhook
+    // mapping changes at 7 s, before the launch reaches ready.
+    nowMs = 6_000;
+    store.markRequired("env_vars_changed");
+    nowMs = 7_000;
+    store.markRequired("webhook_mappings_changed");
+
+    const cleared = store.markAppliedByLaunch({ by: "gateway_launch", launchedAt: 5_000 });
+    expect(cleared.codes).toEqual(["config_file_edited"]);
+    const snapshot = await store.getSnapshot();
+    expect(snapshot.reasons.map((r) => r.code).sort()).toEqual(["env_vars_changed", "webhook_mappings_changed"]);
+    expect(snapshot.reason).toBe("webhook_mappings_changed");
+    // Nothing applied by a launch older than every reason.
+    expect(store.markAppliedByLaunch({ by: "gateway_launch", launchedAt: 5_500 })).toBeNull();
+  });
+
+  it("folds in a CLI flag written before the spawn and clears it with the reason", async () => {
+    const flagStore = nullFlagStore();
+    flagStore.read.mockReturnValue({ reason: "telegram_actions_enabled", source: "cli", markedAt: 2_000 });
+    const store = makeStore({ flagStore, now: () => 9_000 });
+    expect(store.markAppliedByLaunch({ by: "boot_launch", launchedAt: 5_000 }).codes).toEqual(["telegram_actions_enabled"]);
+    expect(flagStore.clear).toHaveBeenCalled();
+  });
+
+  it("leaves a running restart to completeRestart and a fresh failed one to markRecovered", async () => {
+    let nowMs = 100_000;
+    const store = makeStore({ now: () => nowMs });
+    store.markRequired("env_vars_changed");
+    const { operationId } = store.beginRestart();
+    expect(store.markAppliedByLaunch({ launchedAt: 110_000 })).toBeNull();
+    store.completeRestart({ operationId, ok: false, errorSummary: "launch failed", code: "launch_failed" });
+    nowMs = 120_000;
+    expect(store.markAppliedByLaunch({ launchedAt: 115_000 })).toBeNull();
+    expect((await store.getSnapshot()).restartRequired).toBe(true);
+    // Once the failure no longer holds (15 minutes), a later ready launch counts.
+    nowMs += 15 * 60 * 1000 + 1;
+    expect(store.markAppliedByLaunch({ launchedAt: nowMs - 1_000 }).codes).toEqual(["env_vars_changed"]);
+  });
+
+  it("refuses a launch with no spawn time and records an unknown 'by' as gateway_launch", () => {
+    const store = makeStore({ now: () => 9_000 });
+    store.markRequired("env_vars_changed");
+    expect(store.markAppliedByLaunch({ by: "boot_launch" })).toBeNull();
+    expect(store.markAppliedByLaunch({ by: "boot_launch", launchedAt: 0 })).toBeNull();
+    expect(store.markAppliedByLaunch({ by: "watchdog_repair", launchedAt: 9_001 }).by).toBe("gateway_launch");
+  });
+
+  it("a reason recorded in the spawn's own millisecond waits for the next launch", () => {
+    const store = makeStore({ now: () => 5_000 });
+    store.markRequired("env_vars_changed");
+    expect(store.markAppliedByLaunch({ launchedAt: 5_000 })).toBeNull();
+    expect(store.markAppliedByLaunch({ launchedAt: 5_001 }).codes).toEqual(["env_vars_changed"]);
+  });
+
+  it("a failed restart persisted by an earlier process does not hold the new process's boot launch", async () => {
+    const dir = makeStateDir();
+    const before = makeStore({ stateDir: dir, now: () => 100_000, getBootId: () => "boot-A" });
+    before.markRequired("env_vars_changed");
+    const { operationId } = before.beginRestart();
+    before.completeRestart({ operationId, ok: false, errorSummary: "stop failed", code: "stop_failed" });
+
+    // AlphaClaw restarts two minutes later: the watchdog's note died with the
+    // old process, so nothing would ever call markRecovered for it.
+    const booted = makeStore({ stateDir: dir, now: () => 220_000, getBootId: () => "boot-B" });
+    booted.reconcileOnBoot();
+    expect(booted.getLastRestartOperation().status).toBe("failed");
+    expect(booted.markAppliedByLaunch({ by: "boot_launch", launchedAt: 210_000 }).codes).toEqual(["env_vars_changed"]);
+    expect((await booted.getSnapshot()).restartRequired).toBe(false);
+  });
+});
+
 describe("server/restart-required-state (state DB schema stamp, #76 A2)", () => {
   const flushAsync = async () => {
     for (let index = 0; index < 3; index += 1) {
