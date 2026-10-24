@@ -23,6 +23,14 @@ A data upgrade that stopped because the workspace folder moved is no longer a de
 ### Tests
 - `doctor-workspace-move.test.js` classifies real 2026.10.7 output (fixtures) in each form, split and interleaved chunks, `~` and paths with spaces, and the blocked case. `routes-upgrade-retry.test.js`: the confirm runs `doctor --fix --force` after the stop and before the re-prepared launch, an agent actor gets 403 with nothing stopped, the manifest denies the op, other paths are refused, and Retry never passes `--force`. Upgrade-status, boot-migration, runner and upgrade-alert cases cover the row, the member view, the remembered failure, the notice and the dialog. `state-dir-symlink-writes.test.js` proves `writeFileAtomic`, `updateOpenclawConfig` and `updateAlphaclawConfig` write into the real directory through a symlinked state dir and keep the symlink. Live: `tests/live/workspace-alias-move.e2e.test.js` reproduces the stop on the pinned OpenClaw, rebinds it with `--force` and pins the set of doctor modules `--force` reaches.
 
+## [0.10.90] - 2026-10-24
+
+### Fixed
+- **A container filled by another process could make a small gateway worker look critical, and restart it.** Container pressure counts toward the worker's verdict only when the worker is what fills the container. That was judged against the worker's own process group, which holds only the gateway's tree. A process outside that tree could fill a 100 GiB container to 94%. The worker, about 3 GB with its heap far from its limit, dominated its small group, and its RSS climbed at about 4.4 GB/h while it re-faulted pages reclaimed under the pressure. The fast path then latched `leak_suspected` and `leak_critical` together, with restart authority `worker_container_oom`, and an armed auto-restart restarted the gateway. The worker now also has to hold at least half of the container's working set. The heap gate already reads the limit V8 reports from inside the worker, not the configured heap, and a test now pins that.
+
+### Tests
+- `gateway-memory-thrash-replay.test.js` drives the real watchdog tick and the default sample reader through that shape: a 102,400 MB container at 94% from an outside process, a worker climbing to 3,036 MB at 73 MB/min, a 4,144 MB heap limit reported by the worker against a configured 8,192 MB. On the previous code it latched, went critical, restarted once and sent the critical, restart and brake notices. Now there is no leak event, no restart and no gateway memory notice, and the heap fraction is used ÷ the worker's own limit. Detector-level cases cover the same shape, and a 3 GB worker, flat or growing, beside a 60 GB co-resident process with the container at 97%: no restart authority, no critical. Both fail on the previous code. The container side uses the working set (usage minus inactive page cache), the measure the sample already carries.
+
 ## [0.10.89] - 2026-10-24
 
 ### Fixed
