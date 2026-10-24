@@ -250,6 +250,75 @@ describe("git-sync against real git (issue #140)", () => {
     expect(result.exitCode).toBe(1);
   });
 
+  describe("the sync's commit identity", () => {
+    // A box with no commit identity anywhere: no GIT_AUTHOR_* or
+    // GIT_COMMITTER_* (they would override any config) and no global config.
+    const kNoIdentityEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: undefined,
+      GIT_AUTHOR_EMAIL: undefined,
+      GIT_COMMITTER_NAME: undefined,
+      GIT_COMMITTER_EMAIL: undefined,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const gitWithoutIdentity = (args, { input, literalPathspecs = false, bytes = false, cwd = live } = {}) =>
+      execFileSync("git", args, {
+        cwd,
+        encoding: bytes ? "latin1" : "utf8",
+        stdio: "pipe",
+        ...(input !== undefined ? { input } : {}),
+        env: { ...kNoIdentityEnv, ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}) },
+      });
+    const syncWithoutIdentity = () => sync({ git: gitWithoutIdentity });
+    const readConfig = () => ({
+      bytes: fs.readFileSync(path.join(live, ".git", "config")),
+      list: sh(live, ["config", "--local", "--list"]),
+    });
+    const identityOf = (rev) => sh(live, ["log", "-1", "--format=%an <%ae>|%cn <%ce>", rev]).trim();
+    const kSyncIdentity = "AlphaClaw Agent <agent@alphaclaw.md>|AlphaClaw Agent <agent@alphaclaw.md>";
+
+    it("commits under its own identity and leaves the repository config byte-identical", () => {
+      const before = readConfig();
+      write(live, "workspace/notes.md", "b\n");
+
+      expect(syncWithoutIdentity()).toMatchObject({ code: "ok", committed: true, pushed: true });
+
+      expect(identityOf("HEAD")).toBe(kSyncIdentity);
+      expect(readConfig()).toEqual(before);
+      expect(() => sh(live, ["config", "--local", "--get", "user.name"])).toThrow();
+    });
+
+    it("keeps an identity the operator set, for the operator's own commits too", () => {
+      sh(live, ["config", "user.name", "Operator"]);
+      sh(live, ["config", "user.email", "operator@example.com"]);
+      const before = readConfig();
+      write(live, "workspace/notes.md", "b\n");
+
+      expect(syncWithoutIdentity()).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(identityOf("HEAD")).toBe(kSyncIdentity);
+      expect(readConfig()).toEqual(before);
+
+      write(live, "workspace/mine.md", "mine\n");
+      sh(live, ["add", "workspace/mine.md"]);
+      sh(live, ["commit", "-qm", "operator"], { env: kNoIdentityEnv });
+      expect(identityOf("HEAD")).toBe("Operator <operator@example.com>|Operator <operator@example.com>");
+    });
+
+    it("signs the merge commit it builds when the remote moved, config untouched", () => {
+      const before = readConfig();
+      pushFromOther("workspace/theirs.md", "theirs\n");
+      write(live, "workspace/notes.md", "b\n");
+
+      expect(syncWithoutIdentity()).toMatchObject({ code: "ok", pushed: true, integration: "merge" });
+
+      expect(sh(remote, ["rev-list", "--parents", "-n", "1", "main"]).trim().split(" ")).toHaveLength(3);
+      expect(sh(remote, ["log", "-1", "--format=%an <%ae>|%cn <%ce>", "main"]).trim()).toBe(kSyncIdentity);
+      expect(identityOf("HEAD^1")).toBe(kSyncIdentity);
+      expect(readConfig()).toEqual(before);
+    });
+  });
+
   // Each of these made git refuse the whole commit, so every later run
   // failed the same way and nothing was pushed again.
   describe("paths git cannot take as given", () => {
