@@ -16,6 +16,7 @@ const {
 // The incumbent verdict gateway.js THROWS from a cold restart (P1 review fix):
 // the mitigation must treat it as the failed restart it is.
 const { GatewayStopError } = require("../../lib/server/gateway");
+const containerCensus = require("../../lib/server/gateway-memory/container-census");
 
 const kMb = 1024 * 1024;
 const kStartMs = 1_700_000_000_000;
@@ -115,6 +116,8 @@ describe("server/watchdog memory monitor", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(kStartMs);
+    // A full container triggers the container census (ALPH-25); keep it off the host's /proc.
+    vi.spyOn(containerCensus, "readLargestContainerProcess").mockReturnValue({ status: "unavailable", largest: null });
   });
 
   afterEach(() => {

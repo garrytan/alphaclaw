@@ -15,6 +15,7 @@ process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 const systemResources = require("../../lib/server/system-resources");
 const collector = require("../../lib/server/gateway-memory/process-snapshot");
 const processCommand = require("../../lib/server/gateway-memory/process-command");
+const containerCensus = require("../../lib/server/gateway-memory/container-census");
 const telemetry = require("../../lib/server/gateway-memory/telemetry");
 const autotune = require("../../lib/server/autotune");
 const { createWatchdog } = require("../../lib/server/watchdog");
@@ -34,6 +35,12 @@ const kChildSlopeMbPerMs = 2021 / 3_600_000;
 // when the child alert is due.
 const kContainerLimitMb = 8192;
 const kContainerOtherMb = 400;
+// Also chosen (ALPH-25): the kernel has killed a process in this container
+// before and is reclaiming, so the alert is due and says the kernel kills.
+const kContainerPressure = {
+  psi: { some: { avg10: 15, avg60: 12, avg300: 4 }, full: { avg10: 4, avg60: 3, avg300: 1 } },
+  events: { source: "memory.events", high: 0, max: 120, oom: 1, oomKill: 1 },
+};
 
 const childMbAt = (nowMs) => 2754 + (nowMs - kIncidentMs) * kChildSlopeMbPerMs;
 // Deterministic ±3 MB jitter: a flat worker is never perfectly flat.
@@ -85,6 +92,8 @@ const createStack = ({ workerVerified }) => {
 const replay = async (stack, { untilMs, processFor = processAt }) => {
   const readProcess = vi.spyOn(collector, "getGatewayProcessSnapshot");
   const readCgroup = vi.spyOn(systemResources, "parseCgroupMemory");
+  vi.spyOn(systemResources, "parseCgroupPressure").mockReturnValue(kContainerPressure);
+  vi.spyOn(containerCensus, "readLargestContainerProcess").mockReturnValue({ status: "unavailable", largest: null });
   for (let tick = 0; kStartMs + tick * kTickMs <= untilMs; tick += 1) {
     const nowMs = kStartMs + tick * kTickMs;
     vi.setSystemTime(nowMs);
@@ -130,7 +139,7 @@ describe("Oct 22 memory incident replay", () => {
     const alerts = stack.messages().filter((message) => message.includes("Container memory critical"));
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toContain("a tool process, not the gateway");
-    expect(alerts[0]).toMatch(/`bun`, a process the gateway started, is using \d+ MB\. The container working set is \d+ MB of its 8192 MB limit \(\d+%\), and the gateway worker is 38\d\d MB\./);
+    expect(alerts[0]).toMatch(/`bun`, a process the gateway started, is using \d+ MB\. The container is using \d+ MB of its 8192 MB limit \(\d+%, not counting inactive page cache\), and the gateway worker is 38\d\d MB\./);
     expect(alerts[0]).toContain("the kernel will kill it when the container runs out of memory");
     expect(alerts[0]).toContain("will not restart the gateway");
     expect(alerts[0]).not.toContain(String(kChildPid));

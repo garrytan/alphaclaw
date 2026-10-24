@@ -8,7 +8,8 @@ const { createContainerMemoryMonitor } = require("../../lib/server/gateway-memor
 const kLimit = 6_442_450_944;
 const kCurrent = 6_043_295_744;
 const kInactive = 2_545_434_624;
-const v2Stat = (inactive) => `anon 2790506496\nfile 2805374976\ninactive_anon 0\ninactive_file ${inactive}\nactive_file 259940352\n`;
+const kFile = 2_805_374_976;
+const v2Stat = (inactive, file = kFile) => `anon 2790506496\nfile ${file}\ninactive_anon 0\ninactive_file ${inactive}\nactive_file 259940352\n`;
 
 const mockCgroup = (files) => {
   const real = fs.readFileSync;
@@ -42,7 +43,7 @@ describe("container working set excludes inactive page cache (#125)", () => {
   it("subtracts inactive_file on cgroup v2 and keeps raw usage alongside", () => {
     mockCgroup(v2(v2Stat(kInactive)));
     expect(parseCgroupMemory()).toEqual({
-      usedBytes: kCurrent, workingSetBytes: kCurrent - kInactive, totalBytes: kLimit,
+      usedBytes: kCurrent, workingSetBytes: kCurrent - kInactive, nonReclaimableBytes: kCurrent - kFile, totalBytes: kLimit,
     });
   });
 
@@ -50,9 +51,9 @@ describe("container working set excludes inactive page cache (#125)", () => {
     mockCgroup({
       "/sys/fs/cgroup/memory/memory.usage_in_bytes": "1000",
       "/sys/fs/cgroup/memory/memory.limit_in_bytes": "2000",
-      "/sys/fs/cgroup/memory/memory.stat": "cache 500\ninactive_file 1\ntotal_inactive_file 400\n",
+      "/sys/fs/cgroup/memory/memory.stat": "cache 500\ninactive_file 1\ntotal_cache 500\ntotal_inactive_file 400\n",
     });
-    expect(parseCgroupMemory()).toEqual({ usedBytes: 1000, workingSetBytes: 600, totalBytes: 2000 });
+    expect(parseCgroupMemory()).toEqual({ usedBytes: 1000, workingSetBytes: 600, nonReclaimableBytes: 500, totalBytes: 2000 });
   });
 
   it("marks the working set unavailable (null, never zero) when memory.stat is missing or malformed", () => {
@@ -72,15 +73,15 @@ describe("container working set excludes inactive page cache (#125)", () => {
     mockCgroup(v2(v2Stat(kInactive)));
     const cached = containerStateAfterTwoReads();
     expect(cached.state).toBe("normal");
-    expect(cached.usedBytes).toBe(kCurrent - kInactive);
+    expect(cached.usedBytes).toBe(kCurrent - kFile);
 
     vi.restoreAllMocks();
     mockCgroup(v2(null));
     expect(containerStateAfterTwoReads().state).toBe("critical");
   });
 
-  it("still latches when the working set itself is above 90%", () => {
-    mockCgroup(v2(v2Stat(100 * 1024 * 1024)));
+  it("still latches when non-reclaimable memory itself is above 90%", () => {
+    mockCgroup(v2(v2Stat(100 * 1024 * 1024, 200 * 1024 * 1024)));
     expect(containerStateAfterTwoReads().state).toBe("critical");
   });
 });
