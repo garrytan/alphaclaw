@@ -13,7 +13,7 @@ Versions follow this repository's `package.json` release counter.
 ### Tests
 - `gateway-memory-thrash-replay.test.js` drives the real watchdog tick and the default sample reader through that shape: a 102,400 MB container at 94% from an outside process, a worker climbing to 3,036 MB at 73 MB/min, a 4,144 MB heap limit reported by the worker against a configured 8,192 MB. On the previous code it latched, went critical, restarted once and sent the critical, restart and brake notices. Now there is no leak event, no restart and no gateway memory notice, and the heap fraction is used ÷ the worker's own limit. Detector-level cases cover the same shape, and a 3 GB worker, flat or growing, beside a 60 GB co-resident process with the container at 97%: no restart authority, no critical. Both fail on the previous code. The container side uses the working set (usage minus inactive page cache), the measure the sample already carries.
 
-## [0.10.85] - 2026-10-24
+## [0.10.89] - 2026-10-24
 
 ### Fixed
 - **A memory budget or restart allowance set from Watchdog → Settings or `PUT /api/watchdog/memory` was never saved.** The server forwarded only `enabled` and `autoRestart` to the `alphaclaw.json` writer and dropped `budgetMb` and `maxRestartsPerDay`. The request still answered `ok: true`, and its `settings` showed the old values, which were the ones in force. Both fields are now stored. A PUT whose stored value differs from the request now answers `500 setting_not_stored` with the field and the stored settings, so a dropped field can't pass as success again.
@@ -26,6 +26,16 @@ Versions follow this repository's `package.json` release counter.
 
 ### Tests
 - `e2e-server-lifecycle.test.js` boots the real `lib/server.js`, PUTs a budget and an allowance, and reads them back from the GET and from `alphaclaw.json`; it fails on the previous wiring. `watchdog-memory-budget-write.test.js` wires the route, the config writer, the watchdog's settings read and the monitor on one state directory: a 4,500 MB budget above the 3,840 MB container share is stored, reported and used by the next evaluation, and clearing it returns to the share. Route cases cover `setting_not_stored` and each `reason`; a monitor case covers `previewCap`.
+## [0.10.85] - 2026-10-24
+
+ALPH-27 follow-up to 0.10.84.
+
+### Fixed
+- **`/api/restart-status` and `/api/env` kept saying a restart was required after a crash relaunch had applied an env change.** `routes/system.js` kept its own in-memory "env changed" flag next to the restart-required store's `env_vars_changed` reason, and only a restart or dismiss reset it. A ready launch started after the save (0.10.84) or the down→up check cleared the store's reason, but not the flag, so the routes disagreed with the banner. The flag is gone: `/api/env`, the env save and the config route read the store's `env_vars_changed` reason through the new `hasReason(code)`, and `/api/restart-status` and its dismiss answer from the store's snapshot alone.
+
+### Tests
+- `routes-system.test.js` drives the env cases with a real restart-required store: the save → restart cycle, a crash relaunch (a launch spawned before the save keeps it on both routes, one spawned after clears it on both), and dismiss. `restart-required-state.test.js` covers `hasReason`.
+
 ## [0.10.84] - 2026-10-24
 
 ALPH-27.

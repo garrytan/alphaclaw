@@ -7,6 +7,7 @@ const nodePath = require("path");
 const { EventEmitter } = require("events");
 
 const { registerSystemRoutes } = require("../../lib/server/routes/system");
+const { createRestartRequiredState } = require("../../lib/server/restart-required-state");
 // The restart primitive's failure classes — thrown by gateway.js's cold
 // restart, caught by runRestartOperation by instanceof (same module instance).
 const {
@@ -460,8 +461,21 @@ describe("server/routes/system", () => {
     expect(deps.authProfiles.upsertApiKeyProfileForEnvVar).not.toHaveBeenCalled();
   });
 
+  // The env routes read the restart-required store itself (its
+  // env_vars_changed reason), so every test below drives a real one.
+  const withRealRestartStore = (deps) => {
+    const stateDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), "routes-system-restart-"));
+    deps.restartRequiredState = createRestartRequiredState({
+      isGatewayRunning: async () => true,
+      flagStore: { read: () => null, write: () => {}, clear: () => {} },
+      stateDir,
+    });
+    return deps.restartRequiredState;
+  };
+
   it("keeps restartRequired true until gateway restart", async () => {
     const deps = createSystemDeps();
+    withRealRestartStore(deps);
     const app = createApp(deps);
 
     const firstSave = await request(app).put("/api/env").send({
@@ -495,6 +509,41 @@ describe("server/routes/system", () => {
     const envAfterRestart = await request(app).get("/api/env");
     expect(envAfterRestart.status).toBe(200);
     expect(envAfterRestart.body.restartRequired).toBe(false);
+    expect((await request(app).get("/api/restart-status")).body.restartRequired).toBe(false);
+  });
+
+  it("a ready launch started after the env save clears it on /api/env and /api/restart-status alike (crash relaunch)", async () => {
+    const deps = createSystemDeps();
+    const store = withRealRestartStore(deps);
+    const app = createApp(deps);
+
+    const save = await request(app).put("/api/env").send({ vars: [{ key: "OPENAI_API_KEY", value: "abc" }] });
+    expect(save.body.restartRequired).toBe(true);
+    // A launch spawned BEFORE the save did not apply it.
+    expect(store.markAppliedByLaunch({ by: "gateway_launch", launchedAt: Date.now() - 60_000 })).toBeNull();
+    expect((await request(app).get("/api/env")).body.restartRequired).toBe(true);
+    expect((await request(app).get("/api/restart-status")).body.restartRequired).toBe(true);
+
+    // The watchdog relaunches the crashed gateway after the save; it reaches ready.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    expect(store.markAppliedByLaunch({ by: "gateway_launch", launchedAt: Date.now() }).codes).toEqual(["env_vars_changed"]);
+    expect((await request(app).get("/api/env")).body.restartRequired).toBe(false);
+    const status = await request(app).get("/api/restart-status");
+    expect(status.body.restartRequired).toBe(false);
+    expect(status.body.reasons).toEqual([]);
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("dismissing the banner clears the env save's restart need too", async () => {
+    const deps = createSystemDeps();
+    withRealRestartStore(deps);
+    const app = createApp(deps);
+
+    await request(app).put("/api/env").send({ vars: [{ key: "OPENAI_API_KEY", value: "abc" }] });
+    expect((await request(app).get("/api/env")).body.restartRequired).toBe(true);
+    const dismiss = await request(app).post("/api/restart-status/dismiss");
+    expect(dismiss.body.restartRequired).toBe(false);
+    expect((await request(app).get("/api/env")).body.restartRequired).toBe(false);
   });
 
   it("returns 400 when vars payload is missing", async () => {

@@ -129,7 +129,7 @@ cap. `GET` and `PUT /api/watchdog/memory` return the stored settings beside
 evaluation used (`lastEvaluated`), and a `reason` when the stored budget is not
 enforced (`detection_disabled`, `config_unreadable`, `memory_limit_unknown`). A
 PUT whose stored value differs from the request answers `500 setting_not_stored`
-with the field: before v0.10.85 the server dropped `budgetMb` and
+with the field: before this change the server dropped `budgetMb` and
 `maxRestartsPerDay` on the way to `alphaclaw.json` and answered `ok: true`.
 
 **Critical (ALPH-22)** needs all three gates on the verified worker, held for
