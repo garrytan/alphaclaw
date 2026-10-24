@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.94] - 2026-10-24
+
+### Fixed
+- **git-sync failed on a managed directory whose real gitdir sits in `.openclaw/.git` with `core.worktree` pointing at a bigger repository's root.** v0.10.86 runs `git add` and `git commit` from the repository's top level, and from there git cannot find a gitdir that lives in `<top>/.openclaw/.git`, so every run on a box whose state dir is a subdirectory of a bigger repo with that layout failed with `fatal: not a git repository` and nothing was pushed. The sync now resolves the git dir (`rev-parse --absolute-git-dir`, falling back to `--git-dir`) and the work tree once from the managed directory and passes them as `GIT_DIR` and `GIT_WORK_TREE` on every repository run, so all layouts the CLI accepts behave the same. The nested-repository probe keeps git's own discovery.
+- **git-sync could delete a bigger repository's files when `.openclaw/.git` borrowed its `.git` without `core.worktree`.** With `.openclaw/.git` a symlink (or gitfile) to an ancestor's `.git` and no `core.worktree`, git takes `.openclaw` for the work tree, so the sync committed and pushed every file outside it as deleted and moved the managed files to the repository root. When the gitdir is an ancestor's `.git` and `core.worktree` is unset, that ancestor is now the work tree, and the commit carries `.openclaw/`-prefixed paths only. The CLI still refuses a managed directory without its own `.openclaw/.git`, so an ancestor repository alone is never synced and its `origin` is never rewritten.
+
+### Tests
+- `git-sync-real-git.test.js` runs four layouts against real git: a symlinked `.git` with and without `core.worktree` on the outer repository, an empty `.git` directory git skips, and the real gitdir with `core.worktree` at the outer root. Each commits and pushes new and changed managed files with `.openclaw/` paths and nothing else (a `.openclaw.update-captures/` copy beside it, a change and an untracked file outside it stay put), holds back a file over the size limit, and keeps the writer lock and the in-progress-operation check on the real gitdir. The core.worktree and the symlink-without-core.worktree cases fail on v0.10.88. A fifth case drives a state dir that is itself a symlink to a subdirectory of the bigger repository, whose `.git` is a relative `../.git` symlink and whose repository sets `core.worktree`; the update capture beside the subdirectory and a file over the size limit stay out of the commit. `git-sync-run.test.js` asserts the `GIT_DIR`/`GIT_WORK_TREE` env on status, add and commit; `tests/bin/git-sync-cli.test.js` asserts the CLI refuses a managed directory without `.git` inside a larger repository and leaves that repository's `origin` and history alone.
+
 ## [0.10.93] - 2026-10-24
 
 ### Fixed

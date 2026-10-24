@@ -44,6 +44,7 @@ const happyOutputs = (overrides = {}) => ({
   config: (args) => (args.includes("user.name") ? "AlphaClaw Agent\n" : "agent@alphaclaw.md\n"),
   status: " M openclaw.json\0",
   "rev-parse": (args) => {
+    if (args.includes("--absolute-git-dir")) return "/tmp/openclaw/.git\n";
     if (args.includes("--git-dir")) return ".git\n";
     if (args.includes("--show-toplevel")) return "/tmp/openclaw\n";
     if (args.includes("--show-prefix")) return "\n";
@@ -130,6 +131,7 @@ describe("lib/cli/git-sync performGitSync", () => {
       outputs: happyOutputs({
         status: "?? .openclaw/workspace/new.md\0",
         "rev-parse": (args) => {
+          if (args.includes("--absolute-git-dir")) return "/data/.openclaw/.git\n";
           if (args.includes("--show-toplevel")) return "/data\n";
           if (args.includes("--show-prefix")) return ".openclaw/\n";
           return happyOutputs()["rev-parse"](args);
@@ -137,12 +139,14 @@ describe("lib/cli/git-sync performGitSync", () => {
       }),
     });
     performGitSync({ git, ...baseInput({ openclawDir: "/data/.openclaw" }) });
+    const repoEnv = { GIT_DIR: "/data/.openclaw/.git", GIT_WORK_TREE: "/data" };
     const status = calls.find((c) => c.args[0] === "status");
     expect(status.args.slice(-2)).toEqual(["--", "."]);
     expect(status.opts.cwd).toBeUndefined();
+    expect(status.opts.env).toEqual(repoEnv);
     for (const subcommand of ["add", "commit"]) {
       const call = calls.find((c) => c.args[0] === subcommand);
-      expect(call.opts).toMatchObject({ cwd: "/data", literalPathspecs: true, bytes: true, input: ".openclaw/workspace/new.md\0" });
+      expect(call.opts).toMatchObject({ cwd: "/data", env: repoEnv, literalPathspecs: true, bytes: true, input: ".openclaw/workspace/new.md\0" });
     }
   });
 

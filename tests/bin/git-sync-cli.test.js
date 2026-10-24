@@ -83,6 +83,27 @@ describe("bin/alphaclaw git-sync (issue #140)", () => {
     });
   });
 
+  it("refuses a managed directory without its own .git even inside a larger repository, leaving that repository alone", () => {
+    fs.rmSync(path.join(openclawDir, ".git"), { recursive: true, force: true });
+    execFileSync("git", ["init", "-q", "-b", "main", rootDir]);
+    execFileSync("git", ["-C", rootDir, "remote", "add", "origin", "https://example.invalid/outer.git"]);
+
+    const result = runCli(["-m", "sync", "--json"], {
+      GITHUB_TOKEN: "ghp_test",
+      GITHUB_WORKSPACE_REPO: "owner/repo",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`No git repository at ${openclawDir}`);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      gitSync: expect.objectContaining({ outcome: "failed", code: "not_configured", committed: false, pushed: false }),
+    });
+    expect(execFileSync("git", ["-C", rootDir, "remote", "get-url", "origin"], { encoding: "utf8" }).trim()).toBe(
+      "https://example.invalid/outer.git",
+    );
+    expect(spawnSync("git", ["-C", rootDir, "rev-parse", "--verify", "-q", "HEAD"]).status).not.toBe(0);
+  });
+
   it("rejects an unknown trigger and non-numeric budgets as usage errors (exit 2)", () => {
     expect(runCli(["-m", "sync", "--trigger", "cron"]).status).toBe(2);
     expect(runCli(["-m", "sync", "--lock-wait", "soon"]).status).toBe(2);
