@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.85] - 2026-10-24
+
+ALPH-27 follow-up to 0.10.84.
+
+### Fixed
+- **`/api/restart-status` and `/api/env` kept saying a restart was required after a crash relaunch had applied an env change.** `routes/system.js` kept its own in-memory "env changed" flag next to the restart-required store's `env_vars_changed` reason, and only a restart or dismiss reset it. A ready launch started after the save (0.10.84) or the down→up check cleared the store's reason, but not the flag, so the routes disagreed with the banner. The flag is gone: `/api/env`, the env save and the config route read the store's `env_vars_changed` reason through the new `hasReason(code)`, and `/api/restart-status` and its dismiss answer from the store's snapshot alone.
+
+### Tests
+- `routes-system.test.js` drives the env cases with a real restart-required store: the save → restart cycle, a crash relaunch (a launch spawned before the save keeps it on both routes, one spawned after clears it on both), and dismiss. `restart-required-state.test.js` covers `hasReason`.
+
 ## [0.10.84] - 2026-10-24
 
 ALPH-27.
