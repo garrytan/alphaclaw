@@ -33,7 +33,7 @@ export default defineConfig({
     // leaked ~3k directories per full run into the shared /tmp (measured:
     // 139k entries / 7 GB on a dev box). Runs in the main process before any
     // fork spawns, so every worker inherits it — see tests/setup-tmpdir.js.
-    globalSetup: ["tests/setup-tmpdir.js"],
+    globalSetup: ["tests/setup-tmpdir.js", "tests/setup-host-paths-guard.js"],
     // Tests that touch the openclaw plugin-sdk pay a >5s dynamic-import cost
     // on first load per worker, which flakes under parallel machine load.
     testTimeout: 30000,
