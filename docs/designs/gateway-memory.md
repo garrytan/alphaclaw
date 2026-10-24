@@ -154,6 +154,16 @@ with an 8 GB heap, which the overseer still accepts in historical records). The
 previous co-resident formula `cgroupUsed - groupRSS` is removed. The old `projectedExhaustionAt` field
 aliases projected group-budget crossing; new code uses `projectedBudgetCrossingAt`.
 
+The budget is never clamped: an operator budget above the derived share is the
+cap. `GET` and `PUT /api/watchdog/memory` return the stored settings beside
+`effectiveCap`, the cap the next evaluation uses with the stored budget
+(`effectiveCapMb`, `capSource`, `capPhysicalMb`, `capFraction`), the cap the last
+evaluation used (`lastEvaluated`), and a `reason` when the stored budget is not
+enforced (`detection_disabled`, `config_unreadable`, `memory_limit_unknown`). A
+PUT whose stored value differs from the request answers `500 setting_not_stored`
+with the field: before this change the server dropped `budgetMb` and
+`maxRestartsPerDay` on the way to `alphaclaw.json` and answered `ok: true`.
+
 **Critical (ALPH-22)** needs all three gates on the verified worker, held for
 three consecutive fresh evaluations (the fast path also needs RSS rising on each):
 
@@ -165,7 +175,8 @@ three consecutive fresh evaluations (the fast path also needs RSS rising on each
    group PSS total goes stale with `membership_changed`.
 3. **Heap:** when heap telemetry is fresh, heap used is at 70% of the limit, or
    post-GC floors are rising (`possible_heap_retention`), or the worker itself
-   has the container at 90% (it dominates the group and is growing).
+   has the container at 90% (it dominates the group and the container, and is
+   growing).
 
 A group series (the worker is not verified) can latch `leak_suspected`, labelled
 as the group with its tool children, but never goes critical and never counts
@@ -185,8 +196,33 @@ own crossing (heap used toward its limit at the worker slope) and takes the
 short ladder at 97% of the heap limit. SIGKILL stays the ladder's last step,
 and the rate brake is unchanged.
 
+**A restart that did not help (ALPH-26).** For an hour after a memory restart the
+watchdog compares the new worker with the one it replaced: private memory with
+private memory when both were measured, otherwise RSS with RSS, and for a
+`heap_near_limit` restart also V8 heap used. Two fresh samples in a row at 90% or
+more of the trigger level record `mitigation_ineffective`: the restart only
+bought minutes, so the growth comes from the workload. Memory restarts then pause
+for 24 hours and for the episode they first hold back (`mitigation_skipped`
+`restart_ineffective`, once per episode), the pause is persisted beside the brake
+stamps in `memory-mitigation-state.json`, and the owner gets one notice saying the
+restart did not help and until when restarts are paused, with no manual-restart
+advice. The critical notice's restart line says the same while the pause holds.
+A restart whose worker stays below that level for the hour logs
+`mitigation_outcome` `held`. The watch itself is in memory: if AlphaClaw restarts
+inside that hour, the check is skipped.
+
+With auto-restart off, a verified-worker critical that reaches a restart authority
+on fresh evidence logs one `restart_would_have_run` event per episode (authority,
+worker memory, group RSS, slope, cap, heap, container pressure, gates and
+evidence) and no notification, so the policy can be judged before it is armed.
+
 Worker growth retains its existing grace, confirmation, recovery and restart
-interlocks. Fresh container pressure counts only for a dominant, growing worker. Container pressure also has its own two-read 90% latch and three-read
+interlocks. Fresh container pressure counts only for a dominant, growing worker:
+the worker holds at least half of its process group's RSS and at least half of
+the container's working set, and its slope is at least 64 MB/h. Before this change
+only the group share was checked, so a container filled by a process outside the
+gateway tree counted against a 3 GB worker whose RSS re-faulted in a burst under
+the pressure, and the fast path went critical with `worker_container_oom`. Container pressure also has its own two-read 90% latch and three-read
 recovery, independent of gateway presence. Container-only pressure never permits
 a gateway restart. Duplicate, stale, partial or out-of-order process evidence
 cannot confirm mitigation; missing evidence cannot clear a critical verdict.
@@ -210,6 +246,13 @@ the critical slot. A critical that clears inside the hold gets one combined
 notified clears in place, one ✅ follow-up names its duration, its peak and any
 restarts. An episode that ends with the process (a restart or crash) closes
 without a follow-up, because the restart path reports its own outcome.
+
+Every memory notice with numbers gives the worker's RSS against the budget, then
+three labelled lines: the worker's V8 heap as a % of the limit it reports (stale
+or unavailable said so), its private memory (USS and PSS from the PSS sampler,
+with the sample's age and "stale" when it is old), and the process group RSS,
+labelled as not the worker's own memory. The cleared notices add the same lines
+from the recovered readings.
 
 The brake notice ("automatic restart is paused") states how many memory
 restarts the window holds, the limit and spacing, and the UTC time the brake

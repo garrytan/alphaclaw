@@ -5,6 +5,50 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.92] - 2026-10-24
+
+### Changed
+- **Memory notices show the worker, and label the group.** The 🟡 rising, 🔴 critical, 🟡 restarting and brake notices now give the gateway worker's RSS against the budget, then three labelled lines:
+  - **Worker heap:** V8 heap used as a % of the limit the worker reports, marked stale when the telemetry isn't fresh, or "unavailable".
+  - **Worker private memory:** USS and PSS from the PSS sampler, shown with its age and marked stale when the sample is old instead of being hidden.
+  - **Process group RSS (worker + launcher + tool children):** marked "not the worker's own memory".
+
+  The ✅ cleared and "spiked and recovered" notices add the same block under "Now:", from the recovered readings rather than the episode's frozen evidence. Container PSI is not shown: no PSI read is on main yet.
+
+### Tests
+- `watchdog-memory.test.js` covers the fresh labels, a stale private sample with its age, a stale heap, unavailable heap and private memory, the group-basis label, the cleared and spiked-and-recovered numbers, and the restarting and brake notices (no manual-restart advice).
+- `gateway-memory-page-cache-replay.test.js` feeds real cgroup v2 file contents through `parseCgroupMemory`'s own parsing: memory.current 103.2 GiB, memory.max 107.4 GiB, anon 6.4, file 85.7 (inactive 60.5, active 25.2), kernel 4.1 (slab 3.9), zero PSI and memory.events. With 8.0 GiB of process RSS and a flat 7.4 GiB worker over 120 ticks with auto-restart armed, there is no leak event, no restart and no gateway memory notice. The working set is 42.7 GiB (40%), so the container alert stays normal too.
+
+## [0.10.91] - 2026-10-24
+
+### Added
+- **The watchdog stops repeating a memory restart that didn't help.** For an hour after a memory-mitigation restart, it compares the new gateway worker with the one it replaced. It compares private memory with private memory when both were measured, otherwise RSS with RSS, and V8 heap used too for a restart the heap triggered. Two fresh samples in a row at 90% or more of the trigger level record `mitigation_ineffective`, because the restart only bought minutes. Memory restarts then pause for 24 hours and for the episode they first hold back: `mitigation_skipped` with reason `restart_ineffective`, once per episode. The pause is persisted in `memory-mitigation-state.json`, so it survives an AlphaClaw restart. The owner gets one notice ("The memory restart did not help") with the trigger level, the regrowth, how fast it came back and when the pause lifts, and no manual-restart advice. While the pause holds, the 🔴 critical notice says restarts are paused and why. A restart whose worker stays lower for the hour logs `mitigation_outcome` `held`. The restart ladder, the rate brake and the restart authorities are unchanged.
+- **With auto-restart off, the watchdog records what it would have done.** When a verified-worker critical reaches a restart authority (`heap_near_limit`, `worker_container_oom` or `operator_budget`) on fresh evidence but auto-restart is off, it logs one `restart_would_have_run` memory event per episode. The event has the authority, the worker's memory and measure, its group RSS, slope, cap and source, heap, container pressure, the critical gates and the evidence. There's no notification for it. Operators can judge the policy from these events before arming it.
+
+### Tests
+- `watchdog-memory.test.js` covers four cases. A replacement worker back at 370 MB within 18 minutes records one `mitigation_ineffective` and sends one notice; the next critical, 40 minutes later and past the spacing, doesn't restart and logs one skip; a day later in a new episode it restarts. A worker that stays low for the hour logs `held`, and the next critical restarts. Alternating high and low samples are not regrowth. A persisted pause holds after the watchdog is recreated, and claims the episode it held back. With auto-restart off, a heap-authority critical logs one `restart_would_have_run` and sends no notice for it; a critical without an authority logs none.
+
+## [0.10.90] - 2026-10-24
+
+### Fixed
+- **A container filled by another process could make a small gateway worker look critical, and restart it.** Container pressure counts toward the worker's verdict only when the worker is what fills the container. That was judged against the worker's own process group, which holds only the gateway's tree. A process outside that tree could fill a 100 GiB container to 94%. The worker, about 3 GB with its heap far from its limit, dominated its small group, and its RSS climbed at about 4.4 GB/h while it re-faulted pages reclaimed under the pressure. The fast path then latched `leak_suspected` and `leak_critical` together, with restart authority `worker_container_oom`, and an armed auto-restart restarted the gateway. The worker now also has to hold at least half of the container's working set. The heap gate already reads the limit V8 reports from inside the worker, not the configured heap, and a test now pins that.
+
+### Tests
+- `gateway-memory-thrash-replay.test.js` drives the real watchdog tick and the default sample reader through that shape: a 102,400 MB container at 94% from an outside process, a worker climbing to 3,036 MB at 73 MB/min, a 4,144 MB heap limit reported by the worker against a configured 8,192 MB. On the previous code it latched, went critical, restarted once and sent the critical, restart and brake notices. Now there is no leak event, no restart and no gateway memory notice, and the heap fraction is used ÷ the worker's own limit. Detector-level cases cover the same shape, and a 3 GB worker, flat or growing, beside a 60 GB co-resident process with the container at 97%: no restart authority, no critical. Both fail on the previous code. The container side uses the working set (usage minus inactive page cache), the measure the sample already carries.
+
+## [0.10.89] - 2026-10-24
+
+### Fixed
+- **A memory budget or restart allowance set from Watchdog → Settings or `PUT /api/watchdog/memory` was never saved.** The server forwarded only `enabled` and `autoRestart` to the `alphaclaw.json` writer and dropped `budgetMb` and `maxRestartsPerDay`. The request still answered `ok: true`, and its `settings` showed the old values, which were the ones in force. Both fields are now stored. A PUT whose stored value differs from the request now answers `500 setting_not_stored` with the field and the stored settings, so a dropped field can't pass as success again.
+
+### Added
+- **The memory settings say what is enforced.** `GET` and `PUT /api/watchdog/memory` return `effectiveCap` beside the stored settings: the cap the next memory evaluation uses with the stored budget (`effectiveCapMb`, `capSource`: `budget`, `container_share`, `host_share` or `none`, plus `capPhysicalMb` and `capFraction` for a share), the cap the last evaluation used, `appliesFrom: "next_evaluation"`, and a `reason` when the stored budget is not what the watchdog enforces (`detection_disabled`, `config_unreadable`, `memory_limit_unknown`). A budget above the derived share is the cap; it is never clamped.
+
+### Changed
+- The `watchdog.memory.update` budget text in the admin manifest, the settings tooltip, the admin skill and the README still described the pre-v0.10.72 budget ("configured heap plus 192 MiB… the tighter budget applies"). They now describe the real one: the operator's budget, else 75% of the smaller of the container limit and host memory. `watchdog.memory.read` documents `effectiveCap`.
+
+### Tests
+- `e2e-server-lifecycle.test.js` boots the real `lib/server.js`, PUTs a budget and an allowance, and reads them back from the GET and from `alphaclaw.json`; it fails on the previous wiring. `watchdog-memory-budget-write.test.js` wires the route, the config writer, the watchdog's settings read and the monitor on one state directory: a 4,500 MB budget above the 3,840 MB container share is stored, reported and used by the next evaluation, and clearing it returns to the share. Route cases cover `setting_not_stored` and each `reason`; a monitor case covers `previewCap`.
 ## [0.10.88] - 2026-10-24
 
 ### Added

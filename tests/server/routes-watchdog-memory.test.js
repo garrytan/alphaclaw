@@ -40,6 +40,8 @@ const createDeps = (overrides = {}) => ({
       autoRestart: patch.autoRestart ?? false,
       effectiveAutoRestart:
         (patch.enabled ?? true) && (patch.autoRestart ?? false),
+      ...("budgetMb" in patch ? { budgetMb: patch.budgetMb } : {}),
+      ...("maxRestartsPerDay" in patch ? { maxRestartsPerDay: patch.maxRestartsPerDay } : {}),
     },
   })),
   ...overrides,
@@ -61,6 +63,8 @@ describe("GET /api/watchdog/memory", () => {
     expect(res.body).toEqual({
       ok: true,
       settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false },
+      // No cap preview from a watchdog without getMemoryCapPreview.
+      effectiveCap: null,
       // Fast-leak profile bounds ride along so the UI can validate locally.
       bounds: {
         budgetMb: { min: 256, max: 1048576 },
@@ -246,6 +250,59 @@ describe("PUT /api/watchdog/memory", () => {
       .send({ enabled: false });
     expect(res.status).toBe(409);
     expect(res.body).toEqual({ ok: false, error: "config_unreadable" });
+  });
+
+  it("answers 500 setting_not_stored when the updater did not store a requested field", async () => {
+    // The pre-fix server wiring forwarded only enabled/autoRestart, so a
+    // budget PUT answered ok:true with the old budget still stored.
+    const deps = createDeps({
+      updateWatchdogMemorySettings: vi.fn(() => ({
+        changed: false,
+        settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false, budgetMb: null, maxRestartsPerDay: 2 },
+      })),
+    });
+    const res = await request(createApp(deps)).put("/api/watchdog/memory").send({ budgetMb: 4096 });
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ ok: false, error: "setting_not_stored", field: "budgetMb", settings: { budgetMb: null } });
+  });
+
+  it("returns the stored budget and the cap the next evaluation uses, honoring a budget above the derived share", async () => {
+    const getMemoryCapPreview = vi.fn((budgetMb) => budgetMb
+      ? { effectiveCapMb: budgetMb, capSource: "budget", capPhysicalMb: null, capFraction: null,
+        lastEvaluated: { effectiveCapMb: 3840, capSource: "container_share", evaluatedAt: "2026-10-24T00:00:00.000Z" } }
+      : { effectiveCapMb: 3840, capSource: "container_share", capPhysicalMb: 5120, capFraction: 0.75, lastEvaluated: null });
+    const deps = createDeps({
+      watchdog: { getStatus: vi.fn(() => ({})), getMemoryTrend: vi.fn(() => ({ ...kTrend })), getMemoryCapPreview },
+    });
+    const app = createApp(deps);
+    let res = await request(app).put("/api/watchdog/memory").send({ budgetMb: 4500 });
+    expect(res.status).toBe(200);
+    expect(res.body.settings.budgetMb).toBe(4500);
+    expect(res.body.effectiveCap).toEqual({
+      effectiveCapMb: 4500, capSource: "budget", capPhysicalMb: null, capFraction: null,
+      lastEvaluated: { effectiveCapMb: 3840, capSource: "container_share", evaluatedAt: "2026-10-24T00:00:00.000Z" },
+      appliesFrom: "next_evaluation", reason: null,
+    });
+    expect(getMemoryCapPreview).toHaveBeenLastCalledWith(4500);
+    res = await request(app).put("/api/watchdog/memory").send({ budgetMb: null });
+    expect(res.body.effectiveCap).toMatchObject({ effectiveCapMb: 3840, capSource: "container_share", capPhysicalMb: 5120, reason: null });
+  });
+
+  it("names why the stored budget is not what the watchdog enforces", async () => {
+    const preview = { effectiveCapMb: 4500, capSource: "budget", capPhysicalMb: null, capFraction: null, lastEvaluated: null };
+    const withPreview = (getMemoryCapPreview, settings) => createDeps({
+      watchdog: { getStatus: vi.fn(() => ({})), getMemoryTrend: vi.fn(() => ({ ...kTrend })), getMemoryCapPreview },
+      readWatchdogMemorySettings: vi.fn(() => settings),
+    });
+    let res = await request(createApp(withPreview(() => preview,
+      { enabled: false, autoRestart: false, effectiveAutoRestart: false, budgetMb: 4500 }))).get("/api/watchdog/memory");
+    expect(res.body.effectiveCap.reason).toBe("detection_disabled");
+    res = await request(createApp(withPreview(() => ({ ...preview, effectiveCapMb: null, capSource: "none" }),
+      { enabled: true, autoRestart: false, effectiveAutoRestart: false, budgetMb: null }))).get("/api/watchdog/memory");
+    expect(res.body.effectiveCap).toMatchObject({ capSource: "none", reason: "memory_limit_unknown" });
+    res = await request(createApp(withPreview(() => ({ ...preview, effectiveCapMb: null, capSource: "none" }),
+      { enabled: false, autoRestart: false, effectiveAutoRestart: false, budgetMb: null, configUnreadable: true }))).get("/api/watchdog/memory");
+    expect(res.body.effectiveCap.reason).toBe("config_unreadable");
   });
 
   it("503s when the updater is not wired", async () => {
