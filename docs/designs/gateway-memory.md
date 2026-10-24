@@ -143,7 +143,8 @@ three consecutive fresh evaluations (the fast path also needs RSS rising on each
    group PSS total goes stale with `membership_changed`.
 3. **Heap:** when heap telemetry is fresh, heap used is at 70% of the limit, or
    post-GC floors are rising (`possible_heap_retention`), or the worker itself
-   has the container at 90% (it dominates the group and is growing).
+   has the container at 90% (it dominates the group and the container, and is
+   growing).
 
 A group series (the worker is not verified) can latch `leak_suspected`, labelled
 as the group with its tool children, but never goes critical and never counts
@@ -164,7 +165,12 @@ short ladder at 97% of the heap limit. SIGKILL stays the ladder's last step,
 and the rate brake is unchanged.
 
 Worker growth retains its existing grace, confirmation, recovery and restart
-interlocks. Fresh container pressure counts only for a dominant, growing worker. Container pressure also has its own two-read 90% latch and three-read
+interlocks. Fresh container pressure counts only for a dominant, growing worker:
+the worker holds at least half of its process group's RSS and at least half of
+the container's working set, and its slope is at least 64 MB/h. Before v0.10.85
+only the group share was checked, so a container filled by a process outside the
+gateway tree counted against a 3 GB worker whose RSS re-faulted in a burst under
+the pressure, and the fast path went critical with `worker_container_oom`. Container pressure also has its own two-read 90% latch and three-read
 recovery, independent of gateway presence. Container-only pressure never permits
 a gateway restart. Duplicate, stale, partial or out-of-order process evidence
 cannot confirm mitigation; missing evidence cannot clear a critical verdict.

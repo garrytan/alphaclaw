@@ -778,6 +778,29 @@ describe("enforcement basis (ALPH-17)", () => {
     expect(snapshot).toMatchObject({ state: "critical", capSource: "container_share" });
   });
 
+  it("a container thrashing on a process outside the gateway never pushes a small worker into critical", () => {
+    // 100 GiB container at 94% from a co-resident process. The gateway tree
+    // is the worker plus a small launcher, so the worker dominates its own
+    // group. Worker RSS re-faults after reclaim: 2,900 MB flat, then a burst
+    // at about 4.4 GB/h to 3,046 MB. Heap far from its limit, cap 76,800 MB.
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const rssMbAt = (i) => (i < 20 ? 2754 + (i % 2) : 2754 + (i - 19) * 73);
+    const heapAt = (i) => ({ status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: mb(1100), limitBytes: mb(4144) });
+    const { transitions, snapshot } = drive(monitor, {
+      ticks: 23,
+      rssAt: (i) => mb(rssMbAt(i)),
+      capAt: (i) => ({ rssBasis: "worker", groupRssBytes: mb(rssMbAt(i) + 60), containerLimitBytes: mb(102_400),
+        cgroupUsedBytes: mb(96_256), hostTotalBytes: mb(126_000), heap: heapAt(i) }),
+    });
+    expect(snapshot).toMatchObject({ effectiveCapMb: 76_800, capSource: "container_share" });
+    expect(snapshot.containerPressureFraction).toBeGreaterThan(0.9);
+    expect(snapshot.slopeMbPerHour).toBeGreaterThan(64);
+    expect(transitions).toHaveLength(0);
+    expect(snapshot.state).not.toBe("critical");
+    expect(snapshot.restartAuthority).toBeNull();
+    expect(snapshot.criticalGates).toMatchObject({ floor: false });
+  });
+
   it("without a complete census (no group RSS) the container does not count toward a worker verdict", () => {
     const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
     const { transitions } = drive(monitor, {
