@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.87] - 2026-10-24
+
+### Changed
+- **Memory notices show the worker, and label the group.** The 🟡 rising, 🔴 critical, 🟡 restarting and brake notices now give the gateway worker's RSS against the budget, then three labelled lines:
+  - **Worker heap:** V8 heap used as a % of the limit the worker reports, marked stale when the telemetry isn't fresh, or "unavailable".
+  - **Worker private memory:** USS and PSS from the PSS sampler, shown with its age and marked stale when the sample is old instead of being hidden.
+  - **Process group RSS (worker + launcher + tool children):** marked "not the worker's own memory".
+
+  The ✅ cleared and "spiked and recovered" notices add the same block under "Now:", from the recovered readings rather than the episode's frozen evidence. Container PSI is not shown: no PSI read is on main yet.
+
+### Tests
+- `watchdog-memory.test.js` covers the fresh labels, a stale private sample with its age, a stale heap, unavailable heap and private memory, the group-basis label, the cleared and spiked-and-recovered numbers, and the restarting and brake notices (no manual-restart advice).
+- `gateway-memory-page-cache-replay.test.js` feeds real cgroup v2 file contents through `parseCgroupMemory`'s own parsing: memory.current 103.2 GiB, memory.max 107.4 GiB, anon 6.4, file 85.7 (inactive 60.5, active 25.2), kernel 4.1 (slab 3.9), zero PSI and memory.events. With 8.0 GiB of process RSS and a flat 7.4 GiB worker over 120 ticks with auto-restart armed, there is no leak event, no restart and no gateway memory notice. The working set is 42.7 GiB (40%), so the container alert stays normal too.
+
 ## [0.10.86] - 2026-10-24
 
 ### Added
