@@ -167,7 +167,7 @@ and the rate brake is unchanged.
 Worker growth retains its existing grace, confirmation, recovery and restart
 interlocks. Fresh container pressure counts only for a dominant, growing worker:
 the worker holds at least half of its process group's RSS and at least half of
-the container's working set, and its slope is at least 64 MB/h. Before v0.10.85
+the container's working set, and its slope is at least 64 MB/h. Before v0.10.86
 only the group share was checked, so a container filled by a process outside the
 gateway tree counted against a 3 GB worker whose RSS re-faulted in a burst under
 the pressure, and the fast path went critical with `worker_container_oom`. Container pressure also has its own two-read 90% latch and three-read
