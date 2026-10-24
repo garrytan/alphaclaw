@@ -84,7 +84,7 @@ describe("fixed notification delivery deadlines", () => {
       await h.outbox.flush({ deliver });
       expect(h.insertEvent).toHaveBeenCalledOnce();
       expect(h.outbox.listEvents()[0]).toMatchObject({ suppressedReason: "expired", expiryRecordedAt: null });
-      expect(watchdogDb.getRecentEvents({ includeRoutine: true })).toHaveLength(insertBeforeFailure ? 1 : 0);
+      expect(watchdogDb.getRecentEvents({ includeRoutine: true }).events).toHaveLength(insertBeforeFailure ? 1 : 0);
 
       watchdogDb.closeWatchdogDb();
       watchdogDb.initWatchdogDb({ rootDir: h.openclawDir });
@@ -98,7 +98,7 @@ describe("fixed notification delivery deadlines", () => {
       // confirmed existing row is enough to persist the outbox audit stamp.
       expect(h.insertEvent.mock.results[1].value === 0).toBe(insertBeforeFailure);
       expect(restarted.listEvents()[0]).toMatchObject({ suppressedReason: "expired", expiryRecordedAt: h.clock.now });
-      expect(watchdogDb.getRecentEvents({ includeRoutine: true })).toEqual([
+      expect(watchdogDb.getRecentEvents({ includeRoutine: true }).events).toEqual([
         expect.objectContaining({ eventType: "notification_expired", details: expect.objectContaining({ id: "review" }) }),
       ]);
     } finally {
