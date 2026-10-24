@@ -131,6 +131,18 @@ describe("server/restart-required-state (reasons)", () => {
     expect((await store.getSnapshot()).reasons).toHaveLength(1);
   });
 
+  it("hasReason answers from the reasons list, a reloaded one included", () => {
+    const dir = makeStateDir();
+    const store = makeStore({ stateDir: dir });
+    expect(store.hasReason("env_vars_changed")).toBe(false);
+    store.markRequired("env_vars_changed");
+    expect(store.hasReason("env_vars_changed")).toBe(true);
+    expect(store.hasReason("config_file_edited")).toBe(false);
+    expect(makeStore({ stateDir: dir }).hasReason("env_vars_changed")).toBe(true);
+    store.clearRequired();
+    expect(store.hasReason("env_vars_changed")).toBe(false);
+  });
+
   it("clearRequired clears all reasons, the flag, and the persisted file", async () => {
     const stateDir = makeStateDir();
     const flagStore = nullFlagStore();

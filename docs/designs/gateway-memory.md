@@ -129,7 +129,7 @@ cap. `GET` and `PUT /api/watchdog/memory` return the stored settings beside
 evaluation used (`lastEvaluated`), and a `reason` when the stored budget is not
 enforced (`detection_disabled`, `config_unreadable`, `memory_limit_unknown`). A
 PUT whose stored value differs from the request answers `500 setting_not_stored`
-with the field: before v0.10.85 the server dropped `budgetMb` and
+with the field: before this change the server dropped `budgetMb` and
 `maxRestartsPerDay` on the way to `alphaclaw.json` and answered `ok: true`.
 
 **Critical (ALPH-22)** needs all three gates on the verified worker, held for
@@ -187,7 +187,7 @@ evidence) and no notification, so the policy can be judged before it is armed.
 Worker growth retains its existing grace, confirmation, recovery and restart
 interlocks. Fresh container pressure counts only for a dominant, growing worker:
 the worker holds at least half of its process group's RSS and at least half of
-the container's working set, and its slope is at least 64 MB/h. Before v0.10.86
+the container's working set, and its slope is at least 64 MB/h. Before this change
 only the group share was checked, so a container filled by a process outside the
 gateway tree counted against a 3 GB worker whose RSS re-faulted in a burst under
 the pressure, and the fast path went critical with `worker_container_oom`. Container pressure also has its own two-read 90% latch and three-read
