@@ -431,6 +431,19 @@ describe("frontend/restart-progress-card", () => {
         }),
       });
       expect(treeText(quiet)).toContain("no output for 2m 30s, still running");
+      const measured = renderCard({
+        operation: upgradeOp({
+          phase: "running",
+          steps: [
+            step("upgrading_data", "running", { at: kNow - 300_000 }),
+            step("upgrading_data", "running", {
+              at: kNow - 10_000,
+              detail: { sinceOutputMs: 150_000, words: "Making a recovery copy: 4.1 of 16.0 GB" },
+            }),
+          ],
+        }),
+      });
+      expect(treeText(measured)).toContain("running OpenClaw's doctor --fix — making a recovery copy: 4.1 of 16.0 GB");
     });
 
     it("succeeded with a completed Doctor: 'OpenClaw data upgraded in …'", () => {

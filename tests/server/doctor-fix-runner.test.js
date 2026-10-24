@@ -52,6 +52,7 @@ const createRunner = (openclawDir, overrides = {}) => {
     notifier,
     logger,
     ...(overrides.nowFn ? { nowFn: overrides.nowFn } : {}),
+    ...(overrides.readProgress ? { readProgress: overrides.readProgress } : {}),
   });
   return { run, runStream, notifier, doctorGuard, logger };
 };
@@ -270,6 +271,51 @@ describe("server/doctor-fix-runner heartbeat", () => {
     // Long after settle: still exactly two.
     await vi.advanceTimersByTimeAsync(kDoctorHeartbeatMs * 10);
     expect(heartbeatLines(logger)).toHaveLength(2);
+  });
+
+  it("reads Doctor's phase on every heartbeat, logs it and hands it to onProgress (ALPH-23)", async () => {
+    const openclawDir = mkOpenclawDir();
+    const runStream = scriptedRunStream({
+      outputs: [
+        { at: 0, text: "┌  OpenClaw doctor\n" },
+        { at: 40_000, text: "[gateway] startup trace: doctor.database-preflight 822.3ms total=412490.8ms\n" },
+      ],
+      settleAt: 70_000,
+      result: { ok: true, tail: "" },
+    });
+    const readProgress = vi.fn(({ phase }) => ({ phase, words: phase === "capture" ? "Making a recovery copy: 4.1 of 16.0 GB" : "Backing up each database" }));
+    const { run, logger } = createRunner(openclawDir, { runStream, readProgress });
+    const onProgress = vi.fn();
+
+    const pending = run({ onProgress });
+    await vi.advanceTimersByTimeAsync(70_000);
+    await pending;
+
+    expect(readProgress).toHaveBeenNthCalledWith(1, expect.objectContaining({ phase: "capture", migrated: 0, startedAtMs: expect.any(Number) }));
+    expect(heartbeatLines(logger)).toEqual([
+      '[alphaclaw] doctor heartbeat elapsed=30s sinceOutput=30s last="┌  OpenClaw doctor" progress="Making a recovery copy: 4.1 of 16.0 GB"',
+      '[alphaclaw] doctor heartbeat elapsed=60s sinceOutput=20s last="[gateway] startup trace: doctor.database-preflight 822.3ms total=412490.8ms" progress="Backing up each database"',
+    ]);
+    expect(onProgress).toHaveBeenLastCalledWith({
+      elapsedMs: 60_000,
+      sinceOutputMs: 20_000,
+      progress: { phase: "backup", words: "Backing up each database" },
+    });
+  });
+
+  it("keeps the heartbeat when the progress reader throws", async () => {
+    const openclawDir = mkOpenclawDir();
+    const runStream = scriptedRunStream({ settleAt: 40_000, result: { ok: true, tail: "" } });
+    const { run, logger } = createRunner(openclawDir, {
+      runStream,
+      readProgress: () => {
+        throw new Error("EACCES");
+      },
+    });
+    const pending = run();
+    await vi.advanceTimersByTimeAsync(40_000);
+    await pending;
+    expect(heartbeatLines(logger)).toEqual(['[alphaclaw] doctor heartbeat elapsed=30s sinceOutput=30s last="-"']);
   });
 
   it('reports last="-" and sinceOutput=elapsed before doctor has printed anything', async () => {

@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.77] - 2026-10-24
+
+The boot card and the Retry upgrade card now say what OpenClaw's data upgrade is doing, with measured progress through the parts where OpenClaw prints nothing (ALPH-23, PR 2 of 3).
+
+### Changed
+- **Doctor's phase in plain words.** While `openclaw doctor --fix` upgrades OpenClaw's data, the boot card shows one line that follows the run's phases. The Retry upgrade card shows the same line, and the Doctor heartbeat logs it as `progress="…"`:
+  - "Making a recovery copy: 4.1 of 16.0 GB" while the recovery copy is made.
+  - "Backing up each database: 9.3 of 16.0 GB" during the per-database backups.
+  - "Migrating agent databases: 7 of 20" during the migration.
+  - "Checking sessions and transcripts" for Doctor's own checks at the end.
+- **How it is measured.** The phase comes from the few lines OpenClaw 2026.10.6 prints between its silent stretches. On a 16 GB state it prints nothing for the first 7 minutes. The progress is the size of this run's own copy under `<state>.update-captures/`, or of its `.pre-startup-migration-*.bak` files (including the ones still staged in `.sqlite-publish-*`), against the measured state. An older copy left by an interrupted run is not counted. The readings ride the existing 30 s Doctor heartbeat.
+- **Moving bytes count as activity.** The boot card no longer shows "No output for 4m — still running" while the recovery copy is visibly growing. It still shows the warning when nothing moves.
+
+### Tests
+- `doctor-progress.test.js` walks the phase tracker over the lines and order of a real 2026.10.6 run. It also measures this run's copy while ignoring an orphaned one, and counts finished and staged backups.
+- The runner, timeline, boot card and Retry upgrade card cases cover the heartbeat line and `onProgress` payload, activity on change only, the human-only projection and the rendered text.
+
 ## [0.10.76] - 2026-10-24
 
 Every `openclaw doctor --fix` time limit now grows with the OpenClaw state it has to copy and check. The boot upgrade, Retry upgrade and the watchdog repair no longer kill a Doctor that is still working on a large state (ALPH-23, PR 1 of 3).

@@ -121,6 +121,28 @@ describe("boot timeline: genuine activity only", () => {
   });
 });
 
+describe("boot timeline: Doctor progress (ALPH-23)", () => {
+  it("shows Doctor's phase to humans only, and counts a changed progress as activity", () => {
+    const { timeline, now, advance } = makeTimeline();
+    timeline.noteDoctorProgress({ phase: "capture", words: "Making a recovery copy: 1.0 of 16.0 GB" });
+    expect(timeline.snapshot().doctorProgress).toBeNull();
+    timeline.noteDoctorStart({});
+    const before = timeline.snapshot().activitySeq;
+    advance(100_000);
+    timeline.noteDoctorProgress({ phase: "capture", words: "Making a recovery copy: 1.0 of 16.0 GB" });
+    expect(timeline.snapshot().activitySeq).toBe(before + 1);
+    advance(30_000);
+    timeline.noteDoctorProgress({ phase: "capture", words: "Making a recovery copy: 1.0 of 16.0 GB" });
+    expect(timeline.snapshot().activitySeq).toBe(before + 1);
+    advance(100_000);
+    expect(projectBootProgressPublic(timeline.snapshot(), { now: now() }).stalled).toBe(true);
+    timeline.noteDoctorProgress({ phase: "capture", words: "Making a recovery copy: 5.5 of 16.0 GB" });
+    const human = projectBootProgressHuman(timeline.snapshot(), { now: now() });
+    expect(human).toMatchObject({ stalled: false, doctorProgress: { phase: "capture", words: "Making a recovery copy: 5.5 of 16.0 GB" } });
+    expect(projectBootProgressPublic(timeline.snapshot(), { now: now() })).not.toHaveProperty("doctorProgress");
+  });
+});
+
 describe("boot timeline: terminal table", () => {
   const launched = () => {
     const ctx = makeTimeline();

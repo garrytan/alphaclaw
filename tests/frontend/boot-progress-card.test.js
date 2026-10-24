@@ -24,6 +24,19 @@ const frame = (overrides = {}) => ({
 });
 
 describe("boot progress card model", () => {
+  it("shows Doctor's phase while OpenClaw's data upgrade runs (ALPH-23)", () => {
+    const model = buildBootCardModel({
+      bootProgress: frame({ doctorProgress: { phase: "capture", words: "Making a recovery copy: 4.1 of 16.0 GB" } }),
+      nowMs: t0 + 42_000,
+    });
+    expect(model.doctorProgress).toBe("Making a recovery copy: 4.1 of 16.0 GB");
+    const launched = buildBootCardModel({
+      bootProgress: frame({ stage: "gateway", doctorProgress: { phase: "checks", words: "Checking sessions and transcripts" } }),
+      nowMs: t0 + 42_000,
+    });
+    expect(launched.doctorProgress).toBeNull();
+  });
+
   it("shows elapsed only without three comparable samples", () => {
     const model = buildBootCardModel({ bootProgress: frame(), nowMs: t0 + 42_000 });
     expect(model).toMatchObject({ kind: "running", headline: "Upgrading OpenClaw", stageLabel: "Upgrading OpenClaw data" });
