@@ -354,6 +354,22 @@ attributable, pre-launch snapshot reasons. While a fresh failed restart stands
 unrecovered (≤ 15 min) the legacy down→up heuristic is held. The record also
 keeps the streamed step `timeline` (≤ 32 + `timelineOmitted`; admin-only).
 
+**v0.10.85 (ALPH-27).** A managed launch that reaches `/readyz` ready applied
+every restart-required reason recorded before its spawn: `gateway run`
+reads the config and env as they are at spawn. Managed launch notices carry
+`launchedAt` (the spawn time); `restart-required-launch-clear.js` waits for that
+generation to answer ready while `isManagedLaunchCurrent(generation)` holds
+(child live, no listener outside its tree), then
+`restart-required-state.markAppliedByLaunch` clears the reasons whose
+`addedAt < launchedAt` and records `by ∈ boot_launch | gateway_launch` (the
+first gateway this AlphaClaw process brought to ready, or a later one) in one
+`restart_required`/`cleared` watchdog event. This is the clear a fresh process
+needs: boot reloads the persisted reasons, and the down→up heuristic only sees
+a launch a client happened to poll through. Adopted and detached gateways carry
+no spawn time and clear nothing; a running restart stays with
+`completeRestart` and a fresh failed one of this process (same `bootId`) with
+`markRecovered`.
+
 Interruption policy is one policy for every trigger: ask → term → kill. The
 automated triggers (`replace`, memory mitigation) already target an unhealthy
 or about-to-OOM gateway. Shutdown (`stopGatewayForShutdown`) runs the ladder
