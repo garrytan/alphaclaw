@@ -220,8 +220,46 @@ describe("server/env", () => {
     expect(env.reloadEnv()).toBe(true);
     expect(process.env.OPENAI_API_KEY).toBeUndefined();
     expect(logSpy).toHaveBeenCalledWith(
-      "[alphaclaw] Env cleared: OPENAI_API_KEY",
+      "[alphaclaw] Env updated: removed OPENAI_API_KEY",
     );
+  });
+
+  it("logs env changes as key names only, never values, whatever the key is called", () => {
+    const saved = {
+      APP_DATABASE_URL: process.env.APP_DATABASE_URL,
+      PLAIN_SETTING: process.env.PLAIN_SETTING,
+    };
+    process.env.OPENAI_API_KEY = "sk-old-value-0000000000";
+    process.env.BRIGHTDATA_API_KEY = "bright-old";
+    fs.writeFileSync(
+      path.join(tmpDir, ".env"),
+      [
+        "APP_DATABASE_URL=postgres://app:hunter2-db-password@db.internal:5432/app",
+        "PLAIN_SETTING=plain-visible-value",
+        "OPENAI_API_KEY=sk-new-value-1111111111",
+        "BRIGHTDATA_API_KEY=",
+      ].join("\n"),
+    );
+    const env = loadEnvModule(tmpDir);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(env.reloadEnv()).toBe(true);
+      const lines = logSpy.mock.calls.map(([line]) => String(line));
+      expect(lines).toEqual([
+        "[alphaclaw] Env updated: added APP_DATABASE_URL, PLAIN_SETTING; changed OPENAI_API_KEY; removed BRIGHTDATA_API_KEY",
+      ]);
+      for (const value of ["hunter2", "plain-visible-value", "sk-new-value", "sk-old-value", "bright-old"]) {
+        expect(lines.join("\n")).not.toContain(value);
+      }
+      expect(process.env.APP_DATABASE_URL).toBe(
+        "postgres://app:hunter2-db-password@db.internal:5432/app",
+      );
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("reloads when the watcher fires and the env file is unreadable", () => {

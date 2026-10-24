@@ -424,3 +424,62 @@ describe("server/log-writer", () => {
     expect(content.match(/single line/g)).toHaveLength(1);
   });
 });
+
+describe("server/log-writer credential redaction", () => {
+  let rootDir;
+  let stdoutSpy;
+
+  beforeEach(() => {
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-log-writer-redact-"));
+    stdoutSpy = vi.fn(() => true);
+    process.stdout.write = stdoutSpy;
+    process.stderr.write = vi.fn(() => true);
+  });
+
+  afterEach(async () => {
+    await __flushForTests().catch(() => {});
+    process.stdout.write = realStdoutWrite;
+    process.stderr.write = realStderrWrite;
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  it("masks a credential URL before it reaches the console or process.log", async () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    process.stdout.write("[gateway] connecting to postgres://app:hunter2-db-password@db.internal:5432/app\n");
+    process.stdout.write(Buffer.from("[gateway] slack xoxb-1234567890-abcdefghijkl ready\n"));
+    await __flushForTests();
+
+    const content = fs.readFileSync(getLogPath(), "utf8");
+    expect(content).toContain("postgres://***@db.internal:5432/app");
+    expect(content).not.toContain("hunter2");
+    expect(content).not.toContain("xoxb-1234567890");
+    const passthrough = stdoutSpy.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(passthrough).toContain("postgres://***@db.internal:5432/app");
+    expect(passthrough).not.toContain("hunter2");
+    expect(passthrough).not.toContain("xoxb-1234567890");
+  });
+
+  it("passes a chunk with nothing to mask through untouched (same object)", () => {
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    const chunk = Buffer.from("plain line\n");
+    process.stdout.write(chunk);
+    expect(stdoutSpy.mock.calls.at(-1)[0]).toBe(chunk);
+  });
+
+  it("masks credentials already in process.log when the tail or a delta is read", async () => {
+    fs.mkdirSync(path.join(rootDir, "logs"), { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDir, "logs", "process.log"),
+      "2026-10-01T00:00:00.000Z [alphaclaw] Env updated: APP_DB_URL=mysql://root:old-leaked-password@db/app\n",
+    );
+    initLogWriter({ rootDir, maxBytes: 1024 * 1024 });
+    const tail = readLogTail(65536);
+    expect(tail).toContain("mysql://***@db/app");
+    expect(tail).not.toContain("old-leaked-password");
+    const delta = readLogDelta({ gen: getLogGeneration(), offset: 0 });
+    expect(delta.data).toContain("mysql://***@db/app");
+    expect(delta.data).not.toContain("old-leaked-password");
+    expect(delta.offset).toBe(fs.statSync(getLogPath()).size);
+  });
+});
+

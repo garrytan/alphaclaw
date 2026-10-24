@@ -363,7 +363,104 @@ const scanUnattributedRestarts = (rawText, relPath) => {
   return hits;
 };
 
+// Guard (g): no log line carries an env value. The env-change line printed
+// KEY=value for every key not named like a token, so database URLs with
+// embedded passwords went to the log in the clear. A console/logger call
+// whose evaluated arguments read an env value (process.env.X, env[...],
+// envMap.get(...), a KEY=${value} pair, a whole-env dump) is flagged unless
+// the value goes through a redactor first.
+const kLogCallRe = /\b(console\.(?:log|warn|error|info|debug)|logger\.(?:log|warn|error|info|debug))\s*(?:\?\.\s*)?\(/g;
+const kRedactorCallRe = /\b(?:redactEnvValue|redactSecretText|redactSecretShapes|redactCommandLine|redactLine|redactSecrets|scrubTokenParams)\s*\(/g;
+const kEnvValueSources = [
+  /process\.env\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\])/,
+  /\b(?:env|childEnv|spawnEnv|gatewayEnv\(\))\s*(?:\.\s*[A-Z_][A-Z0-9_]*\b|\[[^\]]*\])/,
+  /\benvMap\.get\([^)]*\)/,
+  /\b(?:envVars|envFileVars|fileVars)\b(?!\.length)/,
+  /\breadEnvFile(?:Strict)?\(\)/,
+  /\b(?:Object\.(?:entries|values)|JSON\.stringify)\(\s*(?:process\.)?env\b/,
+];
+
+// The code a call evaluates, from just after its "(" to the matching ")":
+// string literal contents dropped, template ${...} interpolations kept.
+const readCode = (text, start, closer) => {
+  let code = "";
+  let depth = 0;
+  let i = start;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'") {
+      i += 1;
+      while (i < text.length && text[i] !== ch) i += text[i] === "\\" ? 2 : 1;
+      code += '""';
+      i += 1;
+      continue;
+    }
+    if (ch === "\x60") {
+      i += 1;
+      while (i < text.length && text[i] !== "\x60") {
+        if (text[i] === "\\") {
+          i += 2;
+        } else if (text[i] === "$" && text[i + 1] === "{") {
+          const inner = readCode(text, i + 2, "}");
+          code += ` (${inner.code}) `;
+          i = inner.end + 1;
+        } else {
+          i += 1;
+        }
+      }
+      code += "\x60\x60";
+      i += 1;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0 && ch === closer) return { code, end: i };
+      depth -= 1;
+    }
+    code += ch;
+    i += 1;
+  }
+  return { code, end: i };
+};
+
+const stripRedactorCalls = (code) => {
+  let out = code;
+  for (let guard = 0; guard < 50; guard += 1) {
+    kRedactorCallRe.lastIndex = 0;
+    const m = kRedactorCallRe.exec(out);
+    if (!m) break;
+    const inner = readCode(out, m.index + m[0].length, ")");
+    out = `${out.slice(0, m.index)}REDACTED${out.slice(inner.end + 1)}`;
+  }
+  return out;
+};
+
+const scanEnvValueLogs = (rawText, relPath) => {
+  const text = stripComments(rawText);
+  const hits = [];
+  const ordinals = new Map();
+  for (const m of text.matchAll(kLogCallRe)) {
+    const argsStart = m.index + m[0].length;
+    const { code, end } = readCode(text, argsStart, ")");
+    const rawArgs = text.slice(argsStart, end);
+    const evaluated = stripRedactorCalls(code);
+    let source = kEnvValueSources.map((re) => evaluated.match(re)?.[0]).find(Boolean);
+    if (!source && /\$\{\s*\w*(?:key|name)\s*\}=\$\{(?!\s*(?:redact|kMask))/i.test(rawArgs)) source = "${key}=${value}";
+    if (!source) continue;
+    const label = `${m[1]}(${source.replace(/\s+/g, "")})`;
+    const n = (ordinals.get(label) || 0) + 1;
+    ordinals.set(label, n);
+    hits.push({
+      key: `${relPath}::${label}${n > 1 ? `#${n}` : ""}`,
+      file: relPath,
+      line: lineOf(text, m.index),
+    });
+  }
+  return hits;
+};
+
 module.exports = {
+  scanEnvValueLogs,
   scanUnattributedRestarts,
   scanConfigWriters,
   scanShellStrings,
