@@ -254,6 +254,12 @@ with the sample's age and "stale" when it is old), and the process group RSS,
 labelled as not the worker's own memory. The cleared notices add the same lines
 from the recovered readings.
 
+The 🟡 rising, 🔴 critical, brake and "did not help" notices also give the
+container's memory PSI from the latest sample (`memory.pressure` avg60, some and
+full: the share of the last minute that tasks stalled on memory). The line is
+omitted when PSI is unreadable (cgroup v1, or no `memory.pressure` file), never
+shown as zero.
+
 The brake notice ("automatic restart is paused") states how many memory
 restarts the window holds, the limit and spacing, and the UTC time the brake
 lifts. No memory notice advises a manual restart: repeated restarts are the
