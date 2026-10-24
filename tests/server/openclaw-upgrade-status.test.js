@@ -223,6 +223,6 @@ describe("openclaw-upgrade-status: disk space row (ALPH-23)", () => {
       installedVersion: kPin,
       isAdmin: true,
     });
-    expect(status.alert).toMatchObject({ kind: "interrupted", sentence: expect.stringContaining(refuse.sentences[0]) });
+    expect(status.alert).toMatchObject({ kind: "interrupted", sentence: expect.stringContaining(refuse.sentences[0]), detail: null });
   });
 });

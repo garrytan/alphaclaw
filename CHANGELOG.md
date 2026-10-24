@@ -19,10 +19,14 @@ Before OpenClaw's data upgrade for a new pin starts, AlphaClaw checks that it fi
   - The state is larger than the Doctor limit is sized for (about 155 GB under the 6-hour cap).
 
   The Retry upgrade confirm repeats the warnings and, when no earlier run is on record, gives an expected duration of about 50 s per GiB.
+- **The refusal shows no OpenClaw output.** OpenClaw never ran, so the data upgrade card hides "What OpenClaw said" for an `insufficient_disk` outcome.
+
+### Fixed
+- **Free space before the first snapshot.** The snapshot preflight measured free space at `<state>.update-captures`, which does not exist until the first capture. Free space then read as unknown, the 2x-state check never ran, and the card offered no size advice. It now measures the nearest existing parent, which is on the same volume.
 
 ### Tests
 - `upgrade-disk-check.test.js` covers the thresholds against the measured 16 GB VM, the warnings, the refusal, the size limit and an unmeasured disk.
-- Runner, status, route and boot-migration cases cover the refusal before Doctor starts and the recorded outcome. They also check that a completed upgrade skips the check, that a warning still runs Doctor, the 409 before the gateway stops, the dismissible row and the notification wording. The frontend case covers the confirm's duration and warnings.
+- A preflight case fails on the old missing-folder free-space read. Runner, status, route and boot-migration cases cover the refusal before Doctor starts and the recorded outcome. They also check that a completed upgrade skips the check, that a warning still runs Doctor, the 409 before the gateway stops, the dismissible row and the notification wording. The frontend case covers the confirm's duration and warnings.
 
 ## [0.10.77] - 2026-10-24
 

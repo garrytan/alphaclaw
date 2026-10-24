@@ -110,4 +110,16 @@ describe("openclaw-capture-preflight: evaluateCapturePreflight on a real tree", 
       failingRule: kFailingRules.unsupported,
     });
   });
+
+  it("measures free space beside a capture root that does not exist yet (ALPH-23)", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "capture-preflight-fresh-"));
+    const stateDir = path.join(root, ".openclaw");
+    fs.mkdirSync(path.join(stateDir, "state"), { recursive: true });
+    const db = path.join(stateDir, "state", "openclaw.sqlite");
+    fs.writeFileSync(db, Buffer.alloc(4096));
+    const verdict = evaluateCapturePreflight({ stateDir, databaseFiles: [db] });
+    expect(fs.existsSync(verdict.captureRoot)).toBe(false);
+    expect(verdict.freeBytes).toBe(Number(fs.statfsSync(root).bavail) * Number(fs.statfsSync(root).bsize));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 });
