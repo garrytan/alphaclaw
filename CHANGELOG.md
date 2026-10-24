@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.79] - 2026-10-24
+
+The crash-guard SIGTERM test no longer races the child's own startup output (ALPH-14 follow-up).
+
+### Fixed
+- **`e2e-crash-guards.test.js` "exits 0 through the full drain on a real SIGTERM" was flaky.** The child prints `CHILD_PORT=<n>` and `[alphaclaw] Express listening on :<n>` from two `listening` handlers, as two separate writes. The test checked for the second line as soon as the first arrived, so a read that landed between the two writes failed with only the port line in stdout (seen once on `test (26)` for #216). It now waits for the line through `waitForStdout`, like the other cases. 20 consecutive local runs passed.
+
 ## [0.10.78] - 2026-10-24
 
 Before OpenClaw's data upgrade for a new pin starts, AlphaClaw checks that it fits. It warns when it might not, and refuses when the disk is too full for the backups (ALPH-23, PR 3 of 3).

@@ -265,7 +265,11 @@ describe("server lifecycle crash guards (real child process)", () => {
   it("exits 0 through the full drain on a real SIGTERM", async () => {
     const record = startChild("sigterm");
     await waitForPort(record);
-    expect(record.stdout).toContain("Express listening");
+    await waitForStdout(
+      record,
+      (stdout) => stdout.includes("Express listening"),
+      "Express listening line",
+    );
 
     record.child.kill("SIGTERM");
     const exit = await waitForExit(record);
