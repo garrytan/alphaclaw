@@ -54,8 +54,8 @@ const createBehaviorHarness = ({ repoRoot }) => {
       '  printf "GIT_ASKPASS=%s\\n" "${GIT_ASKPASS:-}"',
       '  printf "GIT_TERMINAL_PROMPT=%s\\n" "${GIT_TERMINAL_PROMPT:-}"',
       '  if [ -n "${GIT_ASKPASS:-}" ]; then',
-      '    printf "ASKPASS_USER=%s\\n" "$("$GIT_ASKPASS" "Username for https://github.com")"',
-      '    printf "ASKPASS_PASS=%s\\n" "$("$GIT_ASKPASS" "Password for https://github.com")"',
+      `    printf "ASKPASS_USER=%s\\n" "$("$GIT_ASKPASS" "Username for 'https://github.com': ")"`,
+      `    printf "ASKPASS_PASS=%s\\n" "$("$GIT_ASKPASS" "Password for 'https://github.com': ")"`,
       "  fi",
       `} > ${shellQuote(logPath)}`,
       "",
@@ -258,8 +258,7 @@ describe("server git shim scripts", () => {
   it("contains valid shell syntax for git askpass script", () => {
     execFileSync("sh", ["-n", kGitAskPassPath], { stdio: "pipe" });
     const content = fs.readFileSync(kGitAskPassPath, "utf8");
-    expect(content).toContain("*Username*)");
-    expect(content).toContain("*Password*)");
+    expect(content).toContain("host=${authority##*@}");
   });
 
   // H9: the askpass must answer with the token only for github.com, parsing the
@@ -303,6 +302,85 @@ describe("server git shim scripts", () => {
           }),
         ),
       ).toBe("x-access-token");
+    });
+
+    const ask = (prompt) =>
+      String(
+        execFileSync("sh", [kGitAskPassPath, prompt], {
+          env: { ...cleanProcessEnv(), GITHUB_TOKEN: "ghp_secret" },
+          stdio: "pipe",
+        }),
+      );
+
+    it.each([
+      "https://github.com",
+      "https://github.com/org/repo.git",
+      "https://x-access-token@github.com",
+      "https://user@github.com:443/org/repo.git",
+    ])("answers Git's exact HTTPS prompts for %s", (url) => {
+      expect(ask(`Username for '${url}': `)).toBe("x-access-token");
+      expect(ask(`Password for '${url}': `)).toBe("ghp_secret");
+    });
+
+    it.each([
+      "https://attacker.invalid",
+      "https://github.com.attacker.invalid",
+      "https://evilgithub.com",
+      "https://github.com@attacker.invalid",
+      "https://attacker.invalid/github.com",
+      "https://attacker.invalid/path@github.com",
+      "https://attacker.invalid?@github.com",
+      "https://attacker.invalid#@github.com",
+      "https://github.com:8443",
+      "http://github.com",
+      "https://github.com\\@attacker.invalid",
+      "https://github.com\n.attacker.invalid",
+    ])("answers nothing for an untrusted authority: %s", (url) => {
+      expect(ask(`Username for '${url}': `)).toBe("");
+      expect(ask(`Password for '${url}': `)).toBe("");
+    });
+
+    it.each([
+      "",
+      "Password",
+      "Password for https://github.com",
+      "prefix Password for 'https://github.com': ",
+    ])("answers nothing for a malformed prompt: %j", (prompt) => {
+      expect(ask(prompt)).toBe("");
+    });
+
+    it("answers real Git credential prompts without contacting a server", () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-askpass-"));
+      const script = path.join(dir, "askpass");
+      fs.copyFileSync(kGitAskPassPath, script);
+      fs.chmodSync(script, 0o700);
+      try {
+        const env = {
+          ...cleanProcessEnv(),
+          GIT_ASKPASS: script,
+          GIT_TERMINAL_PROMPT: "0",
+          GITHUB_TOKEN: "ghp_secret",
+          LC_ALL: "C",
+        };
+        const args = ["-c", "credential.helper=", "credential", "fill"];
+        const fill = (host) =>
+          execFileSync("git", args, {
+            env,
+            encoding: "utf8",
+            stdio: ["pipe", "pipe", "pipe"],
+            input: `protocol=https\nhost=${host}\n\n`,
+          });
+        const granted = fill("github.com");
+        expect(granted).toContain("username=x-access-token");
+        expect(granted).toContain("password=ghp_secret");
+        for (const host of ["attacker.invalid", "github.com.attacker.invalid"]) {
+          const denied = fill(host);
+          expect(denied).not.toContain("ghp_secret");
+          expect(denied).not.toContain("x-access-token");
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

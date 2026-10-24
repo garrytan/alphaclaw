@@ -5,6 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+<<<<<<< HEAD
 ## [0.10.81] - 2026-10-24
 
 Pins OpenClaw 2026.10.7 (ALPH-12, round 3). No schema move: `openclaw.schemaVersions` stays state 20 / agent 25, and `engines.node` stays `>=24.22.1 <25 || >=26.12.1`, so this pin changes no file under `lib/`.
@@ -15,6 +16,30 @@ Pins OpenClaw 2026.10.7 (ALPH-12, round 3). No schema move: `openclaw.schemaVers
 
 ### Fixed
 - **`tests/live/restart-exec-turn.e2e.test.js` recognizes 2026.10.7's restart-recovery note.** 2026.10.7 shortened OpenClaw's note to the model from "Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work" to "Your previous turn was interrupted while OpenClaw was waiting on tool/model work. This can happen after a Gateway restart or a tool execution timeout." The test's mock model keyed on "interrupted by a gateway restart", so it never acted on the note, and every restart class looked like a lost turn. The pattern now matches both wordings.
+=======
+## [0.10.82] - 2026-10-24
+
+Adapted from upstream chrysb/alphaclaw `082bc1fd` ("Fix agent-scoped model selection and canonical roster writes"). Only the parts the fork lacked were ported.
+
+### Fixed
+- **A model chosen in AlphaClaw can be blocked by OpenClaw 2026.10's model allowlist.** OpenClaw restricts the models an agent may run. The list is the agent's own `modelPolicy.allow`, else `agents.defaults.modelPolicy.allow`, which Doctor creates from the old `agents.defaults.models` keys on upgrade. Before that migration, the `agents.defaults.models` keys act as the list. A configured primary outside the list is not refused: OpenClaw quietly runs an allowed model instead. So picking a model that wasn't on the list at upgrade time on the Models tab, or as an agent's model, had no effect. Saving a primary now adds it to the list that governs it. An empty list (any model allowed) and a matching `provider/*` entry are left alone. On a migrated config, the models map is no longer touched.
+- **Adding a second agent froze main's model.** The implicit main agent carried a copy of the default model in memory. The first save of a second agent wrote that copy as main's own model, so later default-model changes no longer reached main. Main now has no model of its own unless one is set for it.
+- **Changing an agent's model dropped its fallbacks.** `PATCH /api/agents/:id` with `{ model: { primary } }` replaced the whole model object. It now changes the primary and keeps the agent's `fallbacks`.
+
+### Tests
+- `auth-profiles.test.js` covers the defaults allowlist, an empty list, a provider wildcard, a migrated models map and a pre-migration models map. `agents-service.test.js` covers main's model after a second agent is created, fallbacks surviving a primary change, and the allowlist for an agent under the defaults policy, under its own policy and at creation. All five new cases fail on the previous code. On OpenClaw 2026.10.6, `openclaw models status --json` lists the saved primary under `allowed`.
+
+## [0.10.81] - 2026-10-24
+
+Ported from upstream chrysb/alphaclaw `4aef80fe` ("Restrict Git credential prompts to GitHub HTTPS").
+
+### Security
+- **The Git askpass helper answers only Git's exact HTTPS prompt for github.com.** It used to take the host from the text after the last `@` up to the first `/`. That leaked `GITHUB_TOKEN` for a URL whose host is another server: `https://evil.example?@github.com` and `https://evil.example#@github.com` both parsed as github.com, and `http://github.com` sent the token in cleartext. It also answered the username prompt for any host. Now a prompt must have Git's exact `Username for '<url>': ` / `Password for '<url>': ` form. The URL must be `https://` with no whitespace, backslash, `?`, `#` or quote, and its authority's host must be `github.com` or `github.com:443`. Anything else gets an empty answer.
+- **One copy of the helper.** `lib/git-askpass-script.js` (used by the CLI git sync, the config restore and GitHub onboarding) now reads `lib/scripts/git-askpass`, which the git shim installs, instead of keeping its own embedded copy.
+
+### Tests
+- `git-shim.test.js` drives the helper with real Git prompts for trusted and untrusted authorities and malformed prompts, and runs `git credential fill` against it without contacting a server. `git-askpass-script.test.js` adds the query, cleartext and foreign-username cases.
+>>>>>>> origin/main
 
 ## [0.10.80] - 2026-10-24
 

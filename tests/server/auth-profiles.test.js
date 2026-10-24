@@ -322,6 +322,64 @@ describe("server/auth-profiles", () => {
     expect(config.gateway.port).toBe(18789);
   });
 
+  it("adds a new primary to OpenClaw's model allowlist so it is not swapped for an allowed model", () => {
+    const configPath = path.join(tmpDir, ".openclaw", "openclaw.json");
+    const config = readJson("openclaw.json");
+    config.meta = { migrations: { modelPolicyAllowlist: true } };
+    config.agents.defaults.modelPolicy = { allow: ["anthropic/claude-opus-4-6"] };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    ap.setModelConfig({
+      primary: "openai/gpt-6-astra",
+      configuredModels: { "openai/gpt-6-astra": {}, "anthropic/claude-opus-4-6": {} },
+    });
+    expect(readJson("openclaw.json").agents.defaults.modelPolicy.allow).toEqual([
+      "anthropic/claude-opus-4-6",
+      "openai/gpt-6-astra",
+    ]);
+
+    ap.setModelConfig({ primary: "anthropic/claude-opus-4-6" });
+    expect(readJson("openclaw.json").agents.defaults.modelPolicy.allow).toEqual([
+      "anthropic/claude-opus-4-6",
+      "openai/gpt-6-astra",
+    ]);
+  });
+
+  it("leaves an empty allowlist, a provider wildcard and migrated models maps alone", () => {
+    const configPath = path.join(tmpDir, ".openclaw", "openclaw.json");
+    const write = (mutate) => {
+      const config = readJson("openclaw.json");
+      mutate(config);
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    };
+
+    write((config) => { config.agents.defaults.modelPolicy = { allow: [] }; });
+    ap.setModelConfig({ primary: "openai/gpt-6-astra" });
+    expect(readJson("openclaw.json").agents.defaults.modelPolicy.allow).toEqual([]);
+
+    write((config) => { config.agents.defaults.modelPolicy = { allow: ["openai/*"] }; });
+    ap.setModelConfig({ primary: "openai/gpt-6.1-sol" });
+    expect(readJson("openclaw.json").agents.defaults.modelPolicy.allow).toEqual(["openai/*"]);
+
+    write((config) => {
+      delete config.agents.defaults.modelPolicy;
+      config.meta = { migrations: { modelPolicyAllowlist: true } };
+    });
+    ap.setModelConfig({ primary: "google/gemini-3.1-pro", configuredModels: { "openai/gpt-6-astra": {} } });
+    expect(readJson("openclaw.json").agents.defaults.models).toEqual({ "openai/gpt-6-astra": {} });
+  });
+
+  it("adds a new primary to a pre-migration models map, which OpenClaw still reads as the allowlist", () => {
+    ap.setModelConfig({
+      primary: "openai/gpt-6-astra",
+      configuredModels: { "anthropic/claude-opus-4-6": {} },
+    });
+    expect(readJson("openclaw.json").agents.defaults.models).toEqual({
+      "anthropic/claude-opus-4-6": {},
+      "openai/gpt-6-astra": {},
+    });
+  });
+
   it("preserves the Codex runtime marker when model settings are saved", () => {
     ap.upsertCodexProfile({
       access: "codex-access",
