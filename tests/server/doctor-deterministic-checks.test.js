@@ -604,21 +604,59 @@ describe("server/doctor/deterministic-checks", () => {
         lock: "acquired",
         ...overrides,
       }));
+    const nowMs = Date.parse("2026-10-12T11:00:00.000Z");
     status({});
-    const card = findCard(build({}), "det:git-sync-blocked:in_progress_operation:2026-10-12T10:00:00.000Z");
+    const card = findCard(build({ nowMs }), "det:git-sync-blocked:in_progress_operation:2026-10-12T10:00:00.000Z");
     expect(card).toMatchObject({ priority: "P1", category: "workspace state", targetPaths: [] });
     expect(card.evidence.map((item) => item.text)).toContain(".git/rebase-merge, 7200s old; no live git process in the repo");
     expect(card.fixPrompt).toContain("Never delete files, reset, or force push");
 
     status({ code: "lock_timeout", staleState: null, consecutiveFailures: 2 });
-    expect(build({}).some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);
+    expect(build({ nowMs }).some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);
     status({ code: "lock_timeout", staleState: null, consecutiveFailures: 3 });
-    expect(findCard(build({}), "det:git-sync-blocked:lock_timeout:2026-10-12T10:00:00.000Z")).toBeDefined();
+    expect(findCard(build({ nowMs }), "det:git-sync-blocked:lock_timeout:2026-10-12T10:00:00.000Z")).toBeDefined();
 
     status({ outcome: "ok", code: "ok", firstFailureAt: null, consecutiveFailures: 0, lock: "unavailable" });
-    const cards = build({});
+    const cards = build({ nowMs });
     expect(cards.some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);
     expect(findCard(cards, "det:git-sync-lock-unavailable")).toBeDefined();
+  });
+
+  it("flags a failing git sync once it has lasted a day, naming the git error, and drops the card on success", () => {
+    const status = (overrides) =>
+      write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({
+        outcome: "failed",
+        code: "failed",
+        detail: "error: pathspec 'workspace/a.md' did not match any file(s) known to git",
+        firstFailureAt: "2026-10-12T10:00:00.000Z",
+        consecutiveFailures: 1,
+        lock: "acquired",
+        ...overrides,
+      }));
+    const key = "det:git-sync-blocked:failed:2026-10-12T10:00:00.000Z";
+    status({});
+    expect(findCard(build({ nowMs: Date.parse("2026-10-13T09:59:00.000Z") }), key)).toBeUndefined();
+    const card = findCard(build({ nowMs: Date.parse("2026-10-13T10:00:00.000Z") }), key);
+    expect(card).toMatchObject({ priority: "P1", title: "Git sync failed — workspace changes are not being backed up" });
+    expect(card.summary).toContain('Git could not match "workspace/a.md", a path the sync asked it to commit.');
+
+    status({ outcome: "ok", code: "ok", firstFailureAt: null, consecutiveFailures: 0 });
+    expect(build({ nowMs: Date.parse("2026-10-13T11:00:00.000Z") }).some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);
+  });
+
+  it("flags new files the sync holds back as too large, per episode", () => {
+    write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({
+      outcome: "warning",
+      code: "held_back",
+      consecutiveFailures: 0,
+      heldBack: { since: "2026-10-12T10:00:00.000Z", runs: 1, paths: [{ path: "workspace/dump/", bytes: 120 * 1024 * 1024 }] },
+    }));
+    const card = findCard(build({}), "det:git-sync-held-back:2026-10-12T10:00:00.000Z");
+    expect(card).toMatchObject({ priority: "P2", category: "workspace state", targetPaths: [] });
+    expect(card.evidence).toEqual([{ type: "text", text: "held back: workspace/dump/ (120.0 MB)" }]);
+
+    write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({ outcome: "ok", code: "ok", heldBack: null }));
+    expect(build({}).some((c) => c.sourceKey.startsWith("det:git-sync-held-back:"))).toBe(false);
   });
 
   it("flags a live tree that stays behind GitHub after three runs", () => {

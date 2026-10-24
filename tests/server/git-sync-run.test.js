@@ -45,6 +45,8 @@ const happyOutputs = (overrides = {}) => ({
   status: " M openclaw.json\0",
   "rev-parse": (args) => {
     if (args.includes("--git-dir")) return ".git\n";
+    if (args.includes("--show-toplevel")) return "/tmp/openclaw\n";
+    if (args.includes("--show-prefix")) return "\n";
     if (args.includes("--short")) return "abc1234\n";
     if (args.some((arg) => arg.startsWith("refs/remotes/origin/"))) return "remote-sha\n";
     return "local-sha\n";
@@ -57,7 +59,11 @@ const happyOutputs = (overrides = {}) => ({
 });
 
 const baseInput = (overrides = {}) => ({
-  fsModule: { existsSync: () => false, statSync: () => ({ mtimeMs: 0 }) },
+  fsModule: {
+    existsSync: () => false,
+    statSync: () => ({ mtimeMs: 0 }),
+    lstatSync: () => ({ isDirectory: () => false }),
+  },
   openclawDir: "/tmp/openclaw",
   githubRepo: "owner/repo",
   originUrl: "https://github.com/owner/repo.git",
@@ -117,6 +123,27 @@ describe("lib/cli/git-sync performGitSync", () => {
     expect(add.args).toEqual(["add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"]);
     expect(add.opts.input).toBe("workspace/new.md\0");
     expect(calls.find((c) => c.args[0] === "commit").opts.input).toBe("workspace/new.md\0openclaw.json\0");
+  });
+
+  it("scans only the managed directory and runs add and commit from the repository's top level", () => {
+    const { git, calls } = createRunner({
+      outputs: happyOutputs({
+        status: "?? .openclaw/workspace/new.md\0",
+        "rev-parse": (args) => {
+          if (args.includes("--show-toplevel")) return "/data\n";
+          if (args.includes("--show-prefix")) return ".openclaw/\n";
+          return happyOutputs()["rev-parse"](args);
+        },
+      }),
+    });
+    performGitSync({ git, ...baseInput({ openclawDir: "/data/.openclaw" }) });
+    const status = calls.find((c) => c.args[0] === "status");
+    expect(status.args.slice(-2)).toEqual(["--", "."]);
+    expect(status.opts.cwd).toBeUndefined();
+    for (const subcommand of ["add", "commit"]) {
+      const call = calls.find((c) => c.args[0] === subcommand);
+      expect(call.opts).toMatchObject({ cwd: "/data", literalPathspecs: true, bytes: true, input: ".openclaw/workspace/new.md\0" });
+    }
   });
 
   it("scopes the candidate listing to --file or ALPHACLAW_GIT_SYNC_PATHS behind `--`", () => {
@@ -313,6 +340,7 @@ describe("git-sync helpers", () => {
     expect(parseStatusEntries(" M a.md\0?? b.md\0A  c.md\0MM d.md\0 D e.md\0 A f.md\0")).toEqual({
       candidates: ["a.md", "b.md", "d.md", "e.md", "f.md"],
       untracked: ["b.md"],
+      deleted: ["e.md"],
       skippedStaged: 1,
     });
   });
