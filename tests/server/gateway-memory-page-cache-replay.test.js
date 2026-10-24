@@ -125,9 +125,11 @@ describe("a page-cache-heavy container with a flat gateway worker", () => {
   });
 
   it("two hours armed: no leak verdict, no restart, no gateway memory notice", async () => {
-    // The fixture parses to the working set (current minus inactive_file).
+    // The fixture parses to the working set (current minus inactive_file) and
+    // the non-reclaimable usage (current minus all file pages plus shmem).
     expect(systemResources.parseCgroupMemory()).toEqual({
       usedBytes: gb(103.2), workingSetBytes: gb(103.2) - gb(60.5), totalBytes: gb(107.4),
+      nonReclaimableBytes: gb(103.2) - gb(85.7),
     });
     const stack = createStack();
     const readProcess = vi.spyOn(collector, "getGatewayProcessSnapshot");
@@ -152,7 +154,7 @@ describe("a page-cache-heavy container with a flat gateway worker", () => {
       memoryMeasure: "private", restartAuthority: null });
     expect(Math.abs(trend.rssMb - kWorkerMb)).toBeLessThanOrEqual(3);
     expect(Math.abs(trend.groupRssMb - kGroupMb)).toBeLessThanOrEqual(3);
-    expect(trend.containerPressureFraction).toBeCloseTo((103.2 - 60.5) / 107.4, 2);
+    expect(trend.containerPressureFraction).toBeCloseTo((103.2 - 85.7) / 107.4, 2);
     expect(trend.heap).toMatchObject({ status: "fresh", limitMb: kHeapLimitMb });
     expect(trend.heap.fraction).toBeLessThan(0.3);
 
