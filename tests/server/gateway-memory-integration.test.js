@@ -8,6 +8,7 @@ const path = require("node:path");
 const kRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memory-attribution-integration-"));
 process.env.ALPHACLAW_ROOT_DIR = kRoot;
 const { createWatchdog } = require("../../lib/server/watchdog");
+const containerCensus = require("../../lib/server/gateway-memory/container-census");
 const { createGatewayProcessCollector } = require("../../lib/server/gateway-memory/process-snapshot");
 const { withGatewayMemoryDetails } = require("../../lib/server/gateway-memory/resources");
 const telemetryModule = require("../../lib/server/gateway-memory/telemetry");
@@ -118,6 +119,7 @@ const messages = (harness) => harness.notifier.notify.mock.calls.map(([message])
 
 describe("gateway memory attribution across operational surfaces", () => {
   beforeEach(() => {
+    vi.spyOn(containerCensus, "readLargestContainerProcess").mockReturnValue({ status: "unavailable", largest: null });
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(kStart);
     process.env.WATCHDOG_AUTO_REPAIR = "false";

@@ -214,6 +214,18 @@ describe("describeEvent", () => {
     expect(refused.detail).toBe("incident review refused: cli flags unverifiable");
   });
 
+  it("ALPH-25 phrases the container_restarted_at_limit boot cause without a process name", async () => {
+    const { describeEvent } = await loadIncidentHelpers();
+    const gb = 1024 ** 3;
+    expect(describeEvent({ eventType: "memory", status: "warning", details: {
+      kind: "container_restarted_at_limit", usedBytes: 97 * gb, limitBytes: 100 * gb, largestProcess: { rssBytes: 64 * gb },
+    } })).toMatchObject({
+      label: "Memory monitor",
+      detail: "AlphaClaw restarted after the container hit its memory limit (97.0 GB of 100 GB); largest process 64.0 GB",
+      tone: "danger",
+    });
+  });
+
   // #87 (E5): the detached Doctor's evidence row, the event-loop telemetry
   // row and the two new health_check/ok markers (transitional readiness, held
   // recovery) would otherwise render as bare labels in the timeline.
