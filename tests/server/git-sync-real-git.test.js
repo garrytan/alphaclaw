@@ -31,18 +31,7 @@ const sh = (cwd, args, opts = {}) =>
     ...opts,
   });
 
-// The environment of a box with no commit identity anywhere: no GIT_AUTHOR_*
-// or GIT_COMMITTER_* (they would override any config) and no global config.
-const kNoIdentityEnv = {
-  GIT_AUTHOR_NAME: undefined,
-  GIT_AUTHOR_EMAIL: undefined,
-  GIT_COMMITTER_NAME: undefined,
-  GIT_COMMITTER_EMAIL: undefined,
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_NOSYSTEM: "1",
-};
-
-const createRunner = (repoDir, baseEnv = kGitEnv) => (args, { input, literalPathspecs = false, bytes = false, cwd = repoDir, timeoutMs } = {}) =>
+const createRunner = (repoDir) => (args, { input, literalPathspecs = false, bytes = false, cwd = repoDir, timeoutMs } = {}) =>
   execFileSync("git", args, {
     cwd,
     encoding: bytes ? "latin1" : "utf8",
@@ -51,7 +40,7 @@ const createRunner = (repoDir, baseEnv = kGitEnv) => (args, { input, literalPath
     ...(Number.isFinite(timeoutMs) ? { timeout: Math.floor(timeoutMs) } : {}),
     env: {
       ...process.env,
-      ...baseEnv,
+      ...kGitEnv,
       ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}),
     },
   });
@@ -260,10 +249,27 @@ describe("git-sync against real git (issue #140)", () => {
     expect(result.exitCode).toBe(1);
   });
 
-  // Each of these made git refuse the whole commit, so every later run
-  // failed the same way and nothing was pushed again.
   describe("the sync's commit identity", () => {
-    const syncWithoutIdentity = () => sync({ git: createRunner(live, kNoIdentityEnv) });
+    // A box with no commit identity anywhere: no GIT_AUTHOR_* or
+    // GIT_COMMITTER_* (they would override any config) and no global config.
+    const kNoIdentityEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: undefined,
+      GIT_AUTHOR_EMAIL: undefined,
+      GIT_COMMITTER_NAME: undefined,
+      GIT_COMMITTER_EMAIL: undefined,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const gitWithoutIdentity = (args, { input, literalPathspecs = false, bytes = false, cwd = live } = {}) =>
+      execFileSync("git", args, {
+        cwd,
+        encoding: bytes ? "latin1" : "utf8",
+        stdio: "pipe",
+        ...(input !== undefined ? { input } : {}),
+        env: { ...kNoIdentityEnv, ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}) },
+      });
+    const syncWithoutIdentity = () => sync({ git: gitWithoutIdentity });
     const readConfig = () => ({
       bytes: fs.readFileSync(path.join(live, ".git", "config")),
       list: sh(live, ["config", "--local", "--list"]),
@@ -294,7 +300,7 @@ describe("git-sync against real git (issue #140)", () => {
 
       write(live, "workspace/mine.md", "mine\n");
       sh(live, ["add", "workspace/mine.md"]);
-      sh(live, ["commit", "-qm", "operator"], { env: { ...process.env, ...kNoIdentityEnv } });
+      sh(live, ["commit", "-qm", "operator"], { env: kNoIdentityEnv });
       expect(identityOf("HEAD")).toBe("Operator <operator@example.com>|Operator <operator@example.com>");
     });
 
@@ -312,6 +318,8 @@ describe("git-sync against real git (issue #140)", () => {
     });
   });
 
+  // Each of these made git refuse the whole commit, so every later run
+  // failed the same way and nothing was pushed again.
   describe("paths git cannot take as given", () => {
     const rawName = (dir, ...parts) => Buffer.concat([Buffer.from(`${dir}${path.sep}`), ...parts]);
     const kLatin1Name = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x6d, 0x64]);
