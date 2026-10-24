@@ -952,6 +952,7 @@ describe("server/routes/system", () => {
       liveTreeBehindCount: 0,
       liveTreeBehindSince: null,
       heldBackCount: 0,
+      nestedRepoCount: 0,
     });
     expect(JSON.stringify(res.body)).not.toContain("812");
   });
