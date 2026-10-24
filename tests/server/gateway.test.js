@@ -2418,6 +2418,7 @@ describe("server/gateway restart behavior", () => {
       const launchHandler = vi.fn();
       gateway.setGatewayLaunchHandler(launchHandler);
 
+      const beforeSpawn = Date.now();
       await gateway.requestGatewayLaunch({ reconcileIncumbent: false });
       const onStdout = child.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
       onStdout(Buffer.from("Gateway listening on ws://127.0.0.1:18789\n"));
@@ -2430,8 +2431,22 @@ describe("server/gateway restart behavior", () => {
         rootPid: 1234,
         startTicks: 4242,
         generation: 1,
+        launchedAt: expect.any(Number),
         supervision: "managed",
       });
+      // launchedAt is the spawn time (the restart-required launch clear's floor).
+      const { launchedAt, startedAt } = launchHandler.mock.calls[0][0];
+      expect(launchedAt).toBeGreaterThanOrEqual(beforeSpawn);
+      expect(launchedAt).toBeLessThanOrEqual(startedAt);
+      expect(gateway.isManagedLaunchCurrent(1)).toBe(true);
+      expect(gateway.isManagedLaunchCurrent(2)).toBe(false);
+      expect(gateway.isManagedLaunchCurrent(null)).toBe(false);
+      // A port held by a process outside the child's tree is not this launch.
+      const listeners = vi.spyOn(require("../../lib/server/gateway-identity"), "findPortListenerPids").mockReturnValue([9999]);
+      expect(gateway.isManagedLaunchCurrent(1)).toBe(false);
+      listeners.mockReturnValue([1234]);
+      expect(gateway.isManagedLaunchCurrent(1)).toBe(true);
+      listeners.mockRestore();
       gateway.setGatewayLaunchHandler(null);
     });
 
