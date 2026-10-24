@@ -5,8 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-<<<<<<< HEAD
-## [0.10.81] - 2026-10-24
+## [0.10.83] - 2026-10-24
 
 Pins OpenClaw 2026.10.7 (ALPH-12, round 3). No schema move: `openclaw.schemaVersions` stays state 20 / agent 25, and `engines.node` stays `>=24.22.1 <25 || >=26.12.1`, so this pin changes no file under `lib/`.
 
@@ -16,7 +15,7 @@ Pins OpenClaw 2026.10.7 (ALPH-12, round 3). No schema move: `openclaw.schemaVers
 
 ### Fixed
 - **`tests/live/restart-exec-turn.e2e.test.js` recognizes 2026.10.7's restart-recovery note.** 2026.10.7 shortened OpenClaw's note to the model from "Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work" to "Your previous turn was interrupted while OpenClaw was waiting on tool/model work. This can happen after a Gateway restart or a tool execution timeout." The test's mock model keyed on "interrupted by a gateway restart", so it never acted on the note, and every restart class looked like a lost turn. The pattern now matches both wordings.
-=======
+
 ## [0.10.82] - 2026-10-24
 
 Adapted from upstream chrysb/alphaclaw `082bc1fd` ("Fix agent-scoped model selection and canonical roster writes"). Only the parts the fork lacked were ported.
@@ -39,7 +38,6 @@ Ported from upstream chrysb/alphaclaw `4aef80fe` ("Restrict Git credential promp
 
 ### Tests
 - `git-shim.test.js` drives the helper with real Git prompts for trusted and untrusted authorities and malformed prompts, and runs `git credential fill` against it without contacting a server. `git-askpass-script.test.js` adds the query, cleartext and foreign-username cases.
->>>>>>> origin/main
 
 ## [0.10.80] - 2026-10-24
 
