@@ -110,6 +110,9 @@ describe("server/system-resources", () => {
       usedBytes: 1073741824,
       totalBytes: 2147483648,
       percent: 50,
+      basis: "raw",
+      rawUsedBytes: 1073741824,
+      workingSetBytes: null,
     });
     // First sample with a cgroup counter: no previous snapshot to diff against.
     expect(first.cpu).toEqual({ percent: null, cores: 2, hostCores: 8 });
@@ -152,6 +155,9 @@ describe("server/system-resources", () => {
       usedBytes: 500000000,
       totalBytes: 1_000_000_000,
       percent: 50,
+      basis: "raw",
+      rawUsedBytes: 500000000,
+      workingSetBytes: null,
     });
     expect(first.cpu.cores).toBe(1.5);
     expect(first.cpu.percent).toBeNull();
@@ -292,6 +298,9 @@ describe("server/system-resources", () => {
       usedBytes: 250,
       totalBytes: 1000,
       percent: 25,
+      basis: "raw",
+      rawUsedBytes: 250,
+      workingSetBytes: null,
     });
     // cpu.stat exists but has no usage_usec, so loadavg supplies the percent.
     expect(resources.cpu.percent).toBe(25);
