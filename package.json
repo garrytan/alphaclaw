@@ -44,7 +44,7 @@
     "express": "^4.21.0",
     "http-proxy-3": "1.20.10",
     "lil-http-terminator": "1.2.3",
-    "openclaw": "2026.10.6",
+    "openclaw": "2026.10.7",
     "ws": "^8.19.0"
   },
   "devDependencies": {
