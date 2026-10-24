@@ -515,6 +515,35 @@ describe("server/watchdog memory monitor", () => {
       });
     });
 
+    it("auto-restart off: one restart_would_have_run event per episode with the authority, and no notice for it", async () => {
+      const restart = vi.fn(async () => ({ ok: true }));
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false },
+        restartGatewayForMitigation: restart,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness, 12);
+      expect(restart).not.toHaveBeenCalled();
+      const would = memoryEvents(harness.insertWatchdogEvent).filter((e) => e.details.kind === "restart_would_have_run");
+      expect(would).toHaveLength(1);
+      expect(would[0].details).toMatchObject({ restartAuthority: "heap_near_limit", capSource: "container_share",
+        heap: { status: "fresh", limitMb: 1000 } });
+      expect(would[0].details.episodeId).toMatch(/^\d+-\d+$/);
+      expect(notifications(harness.notifier).some((m) => /would have/i.test(m))).toBe(false);
+    });
+
+    it("auto-restart off with no restart authority records nothing it would have done", async () => {
+      const harness = createHarness({ settings: { enabled: true, autoRestart: false, effectiveAutoRestart: false },
+        restartGatewayForMitigation: vi.fn(async () => ({ ok: true })) });
+      launchGateway(harness);
+      await driveTicks(harness, { ticks: 10, sampleAt: (i) => ({
+        rssBytes: (365 + 4 * i) * kMb, cgroupUsedBytes: (365 + 4 * i) * kMb, containerLimitBytes: 540 * kMb,
+        heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 750 * kMb, limitBytes: 1000 * kMb },
+      }) });
+      expect(harness.watchdog.getStatus().memory.trendState).toBe("critical");
+      expect(memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind)).not.toContain("restart_would_have_run");
+    });
+
     it("default OFF: critical never restarts", async () => {
       const restart = vi.fn(async () => ({ ok: true }));
       const harness = createHarness({

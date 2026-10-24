@@ -179,6 +179,11 @@ A restart whose worker stays below that level for the hour logs
 `mitigation_outcome` `held`. The watch itself is in memory: if AlphaClaw restarts
 inside that hour, the check is skipped.
 
+With auto-restart off, a verified-worker critical that reaches a restart authority
+on fresh evidence logs one `restart_would_have_run` event per episode (authority,
+worker memory, group RSS, slope, cap, heap, container pressure, gates and
+evidence) and no notification, so the policy can be judged before it is armed.
+
 Worker growth retains its existing grace, confirmation, recovery and restart
 interlocks. Fresh container pressure counts only for a dominant, growing worker:
 the worker holds at least half of its process group's RSS and at least half of
