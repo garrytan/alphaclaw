@@ -8,6 +8,7 @@ const {
   kMemberLine,
   readDismissals,
   readRetryEligibility,
+  readWorkspaceMoveEligibility,
   snapshotDismissKey,
 } = require("../../lib/server/openclaw-upgrade-status");
 const { evaluateUpgradeDiskCheck } = require("../../lib/server/upgrade-disk-check");
@@ -257,5 +258,66 @@ describe("openclaw-upgrade-status: disk space row (ALPH-23)", () => {
 
     const unmeasured = evaluateUpgradeDiskCheck({ stateBytes: 4.2e9, freeBytes: null });
     expect(buildUpgradeStatus({ record, installedVersion: kPin, diskCheck: unmeasured, isAdmin: true }).alert.sentence).toContain("recorded sentence");
+  });
+});
+
+describe("openclaw-upgrade-status: the workspace moved (OpenClaw's workspace-alias stop)", () => {
+  const move = { aliasPath: "/data/.openclaw/workspace", from: "/data/.openclaw/workspace", to: "/data/repo/sub/workspace" };
+  const detail = "Failing check workspace-state (step-threw): Workspace path $OPENCLAW_HOME/.openclaw/workspace now resolves to …";
+  const moved = (extra = {}) => failed({ reason: "workspace_moved", detail, captureState: "available", workspaceMove: { ...move, ...extra } });
+
+  it("admin: its own row names both paths, says not to confirm by mistake, offers Confirm instead of Retry", () => {
+    const record = { lastOutcome: moved(), failed: { key, reason: "workspace_moved", workspaceMove: move, at: 3 } };
+    const status = buildUpgradeStatus({ record, installedVersion: kPin, currentKey: key, isAdmin: true });
+    expect(status.alert).toMatchObject({
+      kind: "failed",
+      reason: "workspace_moved",
+      headline: "OpenClaw's data upgrade is waiting for you to confirm the workspace moved",
+      sentence:
+        "The workspace folder's real location changed from /data/.openclaw/workspace to /data/repo/sub/workspace, and OpenClaw needs a confirmation before it rebinds its saved records to the new location. Don't confirm unless the folder really moved; if the path points somewhere new by mistake, restore the original link instead.",
+      workspaceMove: move,
+      detail,
+      actions: ["confirm_workspace_move", "view_logs", "back_up"],
+      unchanged: false,
+    });
+    expect(status.retry).toMatchObject({ available: false, unchanged: false });
+  });
+
+  it("names the configured path when it differs, and reads the remembered failure after a restart", () => {
+    const record = { failed: { key, reason: "workspace_moved", detail, workspaceMove: { aliasPath: "/data/ws", from: "/data/old/ws", to: "/data/new/ws" }, at: 3 } };
+    const status = buildUpgradeStatus({ record, installedVersion: kPin, isAdmin: true });
+    expect(status.alert.sentence).toMatch(/^The workspace folder's real location changed from \/data\/old\/ws to \/data\/new\/ws \(configured as \/data\/ws\),/);
+    expect(status.alert.actions).toContain("confirm_workspace_move");
+  });
+
+  it("a move OpenClaw refuses to rebind gets OpenClaw's reason and no Confirm", () => {
+    const status = buildUpgradeStatus({ record: { lastOutcome: moved({ blocked: "The original workspace still exists." }) }, installedVersion: kPin, isAdmin: true });
+    expect(status.alert.sentence).toMatch(/OpenClaw won't rebind them as things stand: The original workspace still exists\.$/);
+    expect(status.alert.actions).toEqual(["view_logs", "back_up"]);
+  });
+
+  it("members see the plain sentence, never the paths or the action", () => {
+    const status = buildUpgradeStatus({ record: { lastOutcome: moved() }, installedVersion: kPin, isAdmin: false });
+    expect(status.alert).toEqual({
+      kind: "failed",
+      tone: "error",
+      headline: "OpenClaw's data upgrade is waiting for you to confirm the workspace moved",
+      sentence: "The workspace folder's real location changed, and OpenClaw needs a confirmation before it rebinds its saved records.",
+      memberLine: kMemberLine,
+      at: 10,
+      actions: [],
+    });
+    expect(JSON.stringify(status)).not.toContain("/data/");
+  });
+
+  it("Confirm is eligible only for the move the operator saw, while the pin is unfinished", () => {
+    const record = { lastOutcome: moved() };
+    const confirmed = { from: move.from, to: move.to };
+    expect(readWorkspaceMoveEligibility({ record, installedVersion: kPin, confirmed })).toEqual({ ok: true, workspaceMove: move });
+    expect(readWorkspaceMoveEligibility({ record, installedVersion: kPin, confirmed: { ...confirmed, to: "/elsewhere" } })).toMatchObject({ ok: false, code: "workspace_move_changed" });
+    expect(readWorkspaceMoveEligibility({ record: { lastOutcome: failed() }, installedVersion: kPin, confirmed })).toMatchObject({ ok: false, code: "no_workspace_move" });
+    expect(readWorkspaceMoveEligibility({ record: { ...record, completedForVersion: kPin }, installedVersion: kPin, confirmed })).toMatchObject({ ok: false, code: "upgrade_complete" });
+    expect(readWorkspaceMoveEligibility({ record: { lastOutcome: moved({ blocked: "The original workspace still exists." }) }, installedVersion: kPin, confirmed })).toMatchObject({ ok: false, code: "workspace_move_blocked" });
+    expect(readWorkspaceMoveEligibility({ record, installedVersion: null, confirmed })).toMatchObject({ ok: false, code: "version_unknown" });
   });
 });

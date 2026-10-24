@@ -44,7 +44,7 @@ const failedRecord = (extra = {}) => ({
 
 const kFailingDoctor = { ok: false, code: 1, stdout: "Failing check plugins: still broken\n", stderr: "" };
 
-const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, lockActive = null, resolveDoctorTimeoutMs = null, checkUpgradeDisk = null } = {}) => {
+const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, lockActive = null, resolveDoctorTimeoutMs = null, checkUpgradeDisk = null, actor = null } = {}) => {
   const dirs = makeDirs();
   writeRecord(dirs.managedDir, record);
   const order = [];
@@ -133,6 +133,7 @@ const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, 
   };
   const app = express();
   app.use(express.json());
+  if (actor) app.use((req, res, next) => { req.alphaclawActor = actor; next(); });
   registerSystemRoutes({ app, agentSessionsCacheTtlMs: 0, ...deps });
   const settle = async () => {
     for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
@@ -311,5 +312,86 @@ describe("POST /api/openclaw/boot-migration/retry", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("POST /api/openclaw/boot-migration/confirm-workspace-move", () => {
+  const kMove = { aliasPath: "/data/.openclaw/workspace", from: "/data/.openclaw/workspace", to: "/data/repo/sub/workspace" };
+  const movedRecord = () =>
+    failedRecord({
+      lastOutcome: {
+        ...failedRecord().lastOutcome,
+        reason: "workspace_moved",
+        detail: "Failing check workspace-state (step-threw): Workspace path …",
+        workspaceMove: kMove,
+      },
+    });
+  const kRoute = "/api/openclaw/boot-migration/confirm-workspace-move";
+  const kBody = { from: kMove.from, to: kMove.to };
+
+  it("runs doctor --fix --force in Retry's stopped-gateway window, then converges, re-prepares and relaunches", async () => {
+    const restartGateway = vi.fn(async (options) => {
+      h.order.push("stopped");
+      const afterStop = await options.afterStop();
+      h.order.push(`launch:${afterStop.reprepare ? "reprepared" : "stale"}`);
+      return { durationMs: 1000, downtimeMs: 900, how: "graceful" };
+    });
+    const h = createHarness({ record: movedRecord(), restartGateway });
+    const res = await request(h.app).post(kRoute).send(kBody);
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ok: true, operationId: "op-up", kind: "openclaw_upgrade" });
+    await h.settle();
+    expect(h.deps.gatewayLifecycleLock.tryAcquire).toHaveBeenCalledWith("openclaw_upgrade", expect.objectContaining({ leaseMs: kOpenclawBootMigrationLeaseMs }));
+    expect(h.deps.runDoctorFix).toHaveBeenCalledTimes(1);
+    expect(h.deps.runDoctorFix).toHaveBeenCalledWith(expect.objectContaining({ force: true, source: "workspace_move", operation: expect.any(Object) }));
+    expect(h.order).toEqual(["stopped", "doctor", "converge", "launch:reprepared", "released", "settled"]);
+    expect(restartGateway).toHaveBeenCalledWith(expect.objectContaining({ source: "api:upgrade", reason: "actor=unknown confirm=workspace_move" }));
+    expect(h.deps.watchdog.onExpectedRestart).toHaveBeenCalledTimes(1);
+    expect(h.deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: true, upgrade: expect.objectContaining({ doctor: "ok" }), retryTarget: null }),
+    );
+  });
+
+  it("is human-only: an agent actor is refused before anything stops, and the manifest denies the op", async () => {
+    const h = createHarness({ record: movedRecord(), actor: { type: "agent" } });
+    const res = await request(h.app).post(kRoute).send(kBody);
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ ok: false, code: "denied" });
+    await h.settle();
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    expect(h.deps.runDoctorFix).not.toHaveBeenCalled();
+    expect(h.deps.restartRequiredState.beginRestart).not.toHaveBeenCalled();
+    const { getManifest } = require("../../lib/server/admin-manifest");
+    const op = getManifest().ops.find((entry) => entry.path === kRoute);
+    expect(op).toMatchObject({ method: "POST", tier: "denied" });
+  });
+
+  it("confirms only the move the operator saw, and only while OpenClaw is waiting for one", async () => {
+    const changed = createHarness({ record: movedRecord() });
+    const changedRes = await request(changed.app).post(kRoute).send({ ...kBody, to: "/somewhere/else" });
+    expect(changedRes.status).toBe(409);
+    expect(changedRes.body.code).toBe("workspace_move_changed");
+    const missing = await request(changed.app).post(kRoute).send({});
+    expect(missing.body.code).toBe("workspace_move_changed");
+
+    const other = createHarness();
+    const otherRes = await request(other.app).post(kRoute).send(kBody);
+    expect(otherRes.status).toBe(409);
+    expect(otherRes.body.code).toBe("no_workspace_move");
+
+    const busy = createHarness({ record: movedRecord(), lockActive: { kind: "repair" } });
+    expect((await request(busy.app).post(kRoute).send(kBody)).body.code).toBe("operation_in_progress");
+    for (const h of [changed, other, busy]) {
+      await h.settle();
+      expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    }
+  });
+
+  it("Retry upgrade itself never passes --force", async () => {
+    const h = createHarness({ record: movedRecord() });
+    expect((await request(h.app).post("/api/openclaw/boot-migration/retry").send({})).status).toBe(202);
+    await h.settle();
+    expect(h.deps.runDoctorFix).toHaveBeenCalledWith(expect.not.objectContaining({ force: true }));
+    expect(h.deps.runDoctorFix).toHaveBeenCalledWith(expect.objectContaining({ source: "retry" }));
   });
 });
