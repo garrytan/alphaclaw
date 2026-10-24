@@ -116,6 +116,14 @@ describe("lib/server.js composition pins (lane C / lane A hand-offs)", () => {
     expect(serverSource.slice(launchHandler, launchHandler + 160)).toMatch(
       /watchdog\.onGatewayLaunch\(payload\);\s+void sessionWedgeSweep\.onGatewayLaunch\(payload\);/,
     );
+    // Then the restart-required launch clear (reasons a ready launch applied).
+    expect(serverSource.slice(launchHandler, launchHandler + 220)).toMatch(
+      /void sessionWedgeSweep\.onGatewayLaunch\(payload\);\s+void restartRequiredLaunchClear\.onGatewayLaunch\(payload\);/,
+    );
+    const launchClear = serverSource.indexOf("const restartRequiredLaunchClear = createRestartRequiredLaunchClear({");
+    expect(launchClear).toBeGreaterThan(serverSource.indexOf("const restartRequiredState = createRestartRequiredState({"));
+    expect(launchClear).toBeLessThan(launchHandler);
+    expect(serverSource.slice(launchClear, launchClear + 300)).toContain("isLaunchCurrent: isManagedLaunchCurrent,");
     expect(hookHandler).toBeGreaterThan(launchHandler);
     const block = serverSource.slice(hookHandler, hookHandler + 400);
     expect(block).toContain("createGatewayPrelaunchHookHandler({");
