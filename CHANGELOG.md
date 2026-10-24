@@ -14,6 +14,19 @@ Versions follow this repository's `package.json` release counter.
 ### Tests
 - `git-sync-real-git.test.js`: 15,000 new files, whose status listing is over 1 MiB, are committed and pushed. With Node's default buffer the run fails with the overflow sentence, not the listing. A push that fails with only stdout stores "git exited with status 1 and no error message". `tests/bin/git-sync-cli.test.js` syncs 15,000 new files through the CLI's own runner to a local remote (`url.<remote>.insteadOf` through `GIT_CONFIG_*`). Both bulk tests and the overflow-detail test fail on v0.10.88.
 
+## [0.10.89] - 2026-10-24
+
+### Fixed
+- **A memory budget or restart allowance set from Watchdog → Settings or `PUT /api/watchdog/memory` was never saved.** The server forwarded only `enabled` and `autoRestart` to the `alphaclaw.json` writer and dropped `budgetMb` and `maxRestartsPerDay`. The request still answered `ok: true`, and its `settings` showed the old values, which were the ones in force. Both fields are now stored. A PUT whose stored value differs from the request now answers `500 setting_not_stored` with the field and the stored settings, so a dropped field can't pass as success again.
+
+### Added
+- **The memory settings say what is enforced.** `GET` and `PUT /api/watchdog/memory` return `effectiveCap` beside the stored settings: the cap the next memory evaluation uses with the stored budget (`effectiveCapMb`, `capSource`: `budget`, `container_share`, `host_share` or `none`, plus `capPhysicalMb` and `capFraction` for a share), the cap the last evaluation used, `appliesFrom: "next_evaluation"`, and a `reason` when the stored budget is not what the watchdog enforces (`detection_disabled`, `config_unreadable`, `memory_limit_unknown`). A budget above the derived share is the cap; it is never clamped.
+
+### Changed
+- The `watchdog.memory.update` budget text in the admin manifest, the settings tooltip, the admin skill and the README still described the pre-v0.10.72 budget ("configured heap plus 192 MiB… the tighter budget applies"). They now describe the real one: the operator's budget, else 75% of the smaller of the container limit and host memory. `watchdog.memory.read` documents `effectiveCap`.
+
+### Tests
+- `e2e-server-lifecycle.test.js` boots the real `lib/server.js`, PUTs a budget and an allowance, and reads them back from the GET and from `alphaclaw.json`; it fails on the previous wiring. `watchdog-memory-budget-write.test.js` wires the route, the config writer, the watchdog's settings read and the monitor on one state directory: a 4,500 MB budget above the 3,840 MB container share is stored, reported and used by the next evaluation, and clearing it returns to the share. Route cases cover `setting_not_stored` and each `reason`; a monitor case covers `previewCap`.
 ## [0.10.88] - 2026-10-24
 
 ### Added
