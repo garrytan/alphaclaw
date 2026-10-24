@@ -24,9 +24,12 @@ const createDeps = () => {
       notificationsVerbose: true,
     })),
   };
-  const getRecentEvents = vi.fn(() => [
-    { id: 1, eventType: "crash", status: "failed" },
-  ]);
+  const getRecentEvents = vi.fn(() => ({
+    events: [{ id: 1, eventType: "crash", status: "failed" }],
+    hasMore: false,
+    nextCursor: null,
+    limit: 20,
+  }));
   const readLogTail = vi.fn(() => "watchdog log line");
   const readLogDelta = vi.fn(() => ({
     gen: 3,
