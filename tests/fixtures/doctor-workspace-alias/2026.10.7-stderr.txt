@@ -1,0 +1,8 @@
+[state-migrations] Legacy state migration warnings:
+- Workspace path $OPENCLAW_HOME/.openclaw/workspace now resolves to $OPENCLAW_HOME/bigrepo/sub/workspace, but its saved setup records belong to $OPENCLAW_HOME/.openclaw/workspace. Incoming messages cannot use this workspace until it is repaired. If the same workspace moved, run `openclaw doctor --fix` and confirm the move, or use `openclaw doctor --fix --force`. Otherwise restore the original link or configure the intended workspace directly.
+Doctor stopped because a state migration refused to continue. Resolve the reported migration failure before retrying. Later repairs were not run.
+Failing check workspace-state (step-threw): Workspace path $OPENCLAW_HOME/.openclaw/workspace now resolves to $OPENCLAW_HOME/bigrepo/sub/workspace, but its saved setup records belong to $OPENCLAW_HOME/.openclaw/workspace. Incoming messages cann
+Failing check web-push (blocked-by-prior-refusal): Migration step "web-push" was not run because prior step "workspace-state" refused execution.
+Failing check node-host (blocked-by-prior-refusal): Migration step "node-host" was not run because prior step "workspace-state" refused execution.
+Failing check rescue-pending (blocked-by-prior-refusal): Migration step "rescue-pending" was not run because prior step "workspace-state" refused execution.
+Failing check skill-workshop (blocked-by-prior-refusal): Migration step "skill-workshop" was not run because prior step "workspace-state" refused execution.

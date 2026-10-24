@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.94] - 2026-10-24
+
+A data upgrade that stopped because the workspace folder moved is no longer a dead end (ALPH-32).
+
+### Fixed
+- **OpenClaw's workspace-alias stop left only a Retry that could never work.** When a workspace's real path changed after OpenClaw saved its setup records (for example when `/data/.openclaw` later became a symlink into a bigger repository), `openclaw doctor --fix --yes` stopped with `Failing check workspace-state (step-threw): Workspace path <path> now resolves to <new>, but its saved setup records belong to <old>`. The upgrade card said "One of OpenClaw's upgrade checks failed: workspace-state" and offered Retry upgrade, which runs the same command and fails the same way, because OpenClaw rebinds the records only after an interactive confirmation or `--force`. `--force` by hand refused while the gateway ran, and the watchdog relaunched a killed gateway within seconds. AlphaClaw now classifies it as its own reason, `workspace_moved`, and reads both paths from Doctor's output in any of its forms (the single-line stderr warning, the boxed and wrapped notes, the truncated `Failing check` line, the runtime `WorkspaceAliasRepointedError`), expanding OpenClaw's `$OPENCLAW_HOME`/`~` display prefixes to real paths. The paths are kept on `lastOutcome` and the remembered failure.
+
+### Added
+- **Confirm the workspace moved.** The card says the workspace folder's real location changed from `<old>` to `<new>`, that OpenClaw needs a confirmation before it rebinds its records, and not to confirm unless the folder really moved. Its confirm dialog shows both paths, the exact command and what `--force` allows. `POST /api/openclaw/boot-migration/confirm-workspace-move` (`{ from, to }`, the paths the operator saw) runs `openclaw doctor --fix --force --yes` in the stopped-gateway window Retry upgrade uses (one lifecycle lock, the expected-restart window, convergence, re-prepared relaunch), so the watchdog never relaunches mid-run. It is human-only: the admin manifest denies it (`updates.upgrade-confirm-workspace-move`, tier `denied`) and the route answers an agent actor `403 denied`. 409 codes: `workspace_move_changed` (OpenClaw now reports other paths), `no_workspace_move`, `workspace_move_blocked`, `upgrade_complete`, `operation_in_progress`, `insufficient_disk`. Nothing passes `--force` automatically, and Retry upgrade is unchanged.
+- **Moves OpenClaw won't rebind say so.** When OpenClaw refuses even a confirmed move (the original folder still exists, the destination already has records or is missing, or another configured path still points at the old location), the card shows OpenClaw's reason and no Confirm button.
+- docs/upgrade-troubleshooting.md: "The workspace folder moved".
+
+### Notes
+- `--force` has no per-check form in OpenClaw 2026.10.7 (`--only` is lint-only). In a `--fix --yes` run it also lets Doctor rebuild stale Control UI assets, but only from a source checkout (`<package>/ui/package.json`), which the npm package doesn't ship; the gateway-service repair only changes a note, and AlphaClaw installs no gateway service.
+
+### Tests
+- `doctor-workspace-move.test.js` classifies real 2026.10.7 output (fixtures) in each form, split and interleaved chunks, `~` and paths with spaces, and the blocked case. `routes-upgrade-retry.test.js`: the confirm runs `doctor --fix --force` after the stop and before the re-prepared launch, an agent actor gets 403 with nothing stopped, the manifest denies the op, other paths are refused, and Retry never passes `--force`. Upgrade-status, boot-migration, runner and upgrade-alert cases cover the row, the member view, the remembered failure, the notice and the dialog. `state-dir-symlink-writes.test.js` proves `writeFileAtomic`, `updateOpenclawConfig` and `updateAlphaclawConfig` write into the real directory through a symlinked state dir and keep the symlink. Live: `tests/live/workspace-alias-move.e2e.test.js` reproduces the stop on the pinned OpenClaw, rebinds it with `--force` and pins the set of doctor modules `--force` reaches.
+
 ## [0.10.90] - 2026-10-24
 
 ### Fixed

@@ -145,6 +145,24 @@ describe("server/openclaw-boot-migration", () => {
     expect(message).not.toContain("the watchdog repairs and reports it");
   });
 
+  it("a workspace-alias stop is remembered with both paths and the notice points to Confirm the workspace moved", async () => {
+    const box = newBox();
+    const notify = vi.fn(async () => {});
+    const stderr =
+      "Failing check workspace-state (step-threw): Workspace path /data/.openclaw/workspace now resolves to /data/repo/sub/workspace, but its saved setup records belong to /data/.openclaw/workspace. Incoming messages cann\n";
+    await expect(
+      runBootMigration({ ...box, installedVersion: "2026.10.7", runDoctorFix: async () => ({ ok: false, code: 1, stdout: "", stderr }), notify, nowFn: () => kNow, logger: silentLogger() }),
+    ).resolves.toMatchObject({ status: "failed", reason: "workspace_moved", class: "deterministic" });
+    expect(readMigrationRecord({ managedDir: box.managedDir }).failed).toMatchObject({
+      reason: "workspace_moved",
+      workspaceMove: { aliasPath: "/data/.openclaw/workspace", from: "/data/.openclaw/workspace", to: "/data/repo/sub/workspace" },
+      attempts: 1,
+    });
+    expect(notify.mock.calls[0][0]).toBe(
+      "⚠️ OpenClaw 2026.10.7: the data upgrade stopped because the workspace folder's real location changed from /data/.openclaw/workspace to /data/repo/sub/workspace, and OpenClaw needs a confirmation before it rebinds its saved records. Open the dashboard and use Confirm the workspace moved, only if the folder really moved. The gateway is starting anyway.",
+    );
+  });
+
   it("names the bridge version OpenClaw asks for when it is not 2026.9.5", async () => {
     const message = await runFailed({
       ok: false,

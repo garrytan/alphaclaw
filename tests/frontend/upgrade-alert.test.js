@@ -46,6 +46,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
 import * as preactHooks from "preact/hooks";
 import { UpgradeAlert } from "../../lib/public/js/components/upgrade-alert/index.js";
 import { RetryUpgradeDialog } from "../../lib/public/js/components/upgrade-alert/retry-upgrade-dialog.js";
+import { ConfirmWorkspaceMoveDialog } from "../../lib/public/js/components/upgrade-alert/confirm-workspace-move-dialog.js";
 import { buildSnapshotRowModel, describeBackupLine, describeRetryDowntime, describeUnchanged } from "../../lib/public/js/components/upgrade-alert/model.js";
 import { requestUpgradeRetryConfirm, consumeUpgradeRetryRequest } from "../../lib/public/js/components/upgrade-alert/retry-request.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
@@ -150,6 +151,43 @@ describe("frontend/upgrade-alert", () => {
     expect(treeText(section(tree))).toContain("An administrator needs to finish this upgrade.");
     expect(buttons(tree)).toEqual([]);
     expect(collectNodes(tree).some((n) => n.type === "details")).toBe(false);
+  });
+
+  it("workspace moved: Confirm the workspace moved instead of Retry, and the confirm names both paths, the command and what --force allows", async () => {
+    const move = { aliasPath: "/data/.openclaw/workspace", from: "/data/.openclaw/workspace", to: "/data/repo/sub/workspace" };
+    cachedData.current = {
+      ...kAdminFailed,
+      alert: {
+        ...kAdminFailed.alert,
+        reason: "workspace_moved",
+        headline: "OpenClaw's data upgrade is waiting for you to confirm the workspace moved",
+        sentence: "The workspace folder's real location changed from /data/.openclaw/workspace to /data/repo/sub/workspace, and OpenClaw needs a confirmation before it rebinds its saved records to the new location. Don't confirm unless the folder really moved; if the path points somewhere new by mistake, restore the original link instead.",
+        snapshot: null,
+        workspaceMove: move,
+        actions: ["confirm_workspace_move", "view_logs", "back_up"],
+      },
+      retry: { ...kAdminFailed.retry, available: false, unchanged: false },
+    };
+    const tree = render();
+    expect(buttons(tree)).toEqual(["Confirm the workspace moved", "View Doctor output", "Back up now"]);
+    expect(treeText(section(tree))).toContain("Don't confirm unless the folder really moved");
+    expect(treeText(section(tree))).not.toContain("Nothing has changed since this failed");
+
+    harness.reset();
+    const onConfirm = vi.fn(async () => ({ ok: true, operationId: "op" }));
+    const onCancel = vi.fn();
+    const dialog = expandTree(ConfirmWorkspaceMoveDialog({ visible: true, move, retry: { lastSuccessDurationMs: 30_000 }, onConfirm, onCancel }));
+    const confirm = collectNodes(dialog).find((n) => n.props?.confirmLabel);
+    expect(confirm.props.confirmLabel).toBe("Confirm the workspace moved");
+    expect(confirm.props.title).toBe("Confirm the workspace folder moved?");
+    const details = treeText(expandTree(confirm.props.details));
+    expect(details).toContain("/data/.openclaw/workspace");
+    expect(details).toContain("/data/repo/sub/workspace");
+    expect(details).toContain("openclaw doctor --fix --force --yes");
+    expect(details).toContain("--force also lets this run rebuild stale Control UI assets");
+    await confirm.props.onConfirm();
+    expect(onConfirm).toHaveBeenCalledWith({ from: move.from, to: move.to });
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
   it("renders nothing when there is no alert", () => {

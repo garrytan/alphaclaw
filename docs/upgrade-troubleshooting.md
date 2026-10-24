@@ -57,6 +57,45 @@ write and only stops users from replacing each other's files. Snapshots are
 written next to the state directory (`<state>.update-captures/`), are not
 part of backups, and need free space about the size of the state databases.
 
+## The workspace folder moved (`now resolves to …, but its saved setup records belong to …`)
+
+OpenClaw 2026.10's Doctor checks that each workspace still lives where its
+saved setup records say (`core/doctor/workspace-alias`). When the workspace's
+real path changed after those records were saved, for example because
+`/data/.openclaw` later became a symlink into a bigger repository, the data
+upgrade stops with `Failing check workspace-state (step-threw): Workspace path
+<path> now resolves to <new>, but its saved setup records belong to <old>`.
+OpenClaw rebinds the records only after a confirmation, and `doctor --fix
+--yes` never gives one, so Retry upgrade fails the same way every time.
+
+The upgrade card says the workspace folder's real location changed from
+`<old>` to `<new>` and offers **Confirm the workspace moved** instead of
+Retry upgrade. Confirm only if it is the same workspace and its folder really
+moved; if the path points somewhere new by mistake, restore the original link
+instead. Confirming stops the gateway, runs `openclaw doctor --fix --force
+--yes` in the same stopped window Retry upgrade uses (the watchdog does not
+relaunch the gateway mid-run), re-applies AlphaClaw's settings and starts the
+gateway again. OpenClaw moves its setup records and file-verification history
+to the new path and changes no workspace files.
+
+`--force` has no per-check form (`--only` works only with the read-only
+`--lint`). In the pinned OpenClaw it changes two things in a `--fix --yes`
+run: it confirms this move, and it lets Doctor rebuild stale Control UI
+assets, which needs OpenClaw's source checkout (`ui/package.json`); the npm
+package AlphaClaw installs has none. The gateway-service repair only prints a
+different note, and AlphaClaw installs no gateway service.
+`tests/live/workspace-alias-move.e2e.test.js` fails when a pin bump adds
+another `--force` consumer.
+
+The action is human-only: the admin manifest denies
+`POST /api/openclaw/boot-migration/confirm-workspace-move` to the agent and the
+route refuses an agent actor itself. The request repeats the two paths the
+operator saw and is refused (`workspace_move_changed`) when OpenClaw now
+reports different ones. When OpenClaw won't rebind even with a confirmation
+(the original folder still exists, the new location already has its own
+records, the destination is missing, or another configured path still points
+at the old location), the card shows OpenClaw's reason and no Confirm button.
+
 ## Configuration rejected
 
 A genuine configuration rejection names what OpenClaw rejected. On an

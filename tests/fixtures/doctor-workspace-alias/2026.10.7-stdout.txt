@@ -1,0 +1,39 @@
+┌  OpenClaw doctor
+Pre-repair state retained for manual recovery at /data/bigrepo/sub.update-captures/doctor-7a52c3d0-35ba-4e45-b822-a939d95e0327/manifest.json.
+│
+◇  Workspace ─────────────────────────────────────────────────────────────╮
+│                                                                         │
+│  Workspace path $OPENCLAW_HOME/.openclaw/workspace now resolves to      │
+│  $OPENCLAW_HOME/bigrepo/sub/workspace, but its saved setup records      │
+│  belong to $OPENCLAW_HOME/.openclaw/workspace. No records were          │
+│  transferred. If the same workspace moved, run `openclaw doctor --fix`  │
+│  and confirm the move, or use `openclaw doctor --fix --force`.          │
+│  Otherwise restore the original link or configure the intended          │
+│  workspace directly.                                                    │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ──────────────────────────────────────────────────────╮
+│                                                                        │
+│  - Workspace path $OPENCLAW_HOME/.openclaw/workspace now resolves to   │
+│    $OPENCLAW_HOME/bigrepo/sub/workspace, but its saved setup records   │
+│    belong to $OPENCLAW_HOME/.openclaw/workspace. Incoming messages     │
+│    cannot use this workspace until it is repaired. If the same         │
+│    workspace moved, run `openclaw doctor --fix` and confirm the move,  │
+│    or use `openclaw doctor --fix --force`. Otherwise restore the       │
+│    original link or configure the intended workspace directly.         │
+│                                                                        │
+├────────────────────────────────────────────────────────────────────────╯
+│
+◇  Doctor warnings ────────────────────────────────────────────────────────╮
+│                                                                          │
+│  - WorkspaceAliasRepointedError: workspace path alias points to a        │
+│    different current target:                                             │
+│    /data/.openclaw/workspace now resolves    │
+│    to /data/bigrepo/sub/workspace, but its   │
+│    stored workspace state belongs to                                     │
+│    /data/.openclaw/workspace. Run `openclaw  │
+│    doctor --fix` and confirm the move, or use `openclaw doctor --fix     │
+│    --force`.                                                             │
+│                                                                          │
+├──────────────────────────────────────────────────────────────────────────╯
