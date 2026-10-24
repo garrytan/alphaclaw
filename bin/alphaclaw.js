@@ -716,7 +716,7 @@ const runGitSync = () => {
   // owns the integration logic and is unit-tested against a fake runner.
   // Network commands abort a stalled transfer instead of hanging the run;
   // every child is bounded by the run's remaining deadline.
-  const git = (gitArgs, { withAuth = false, input, literalPathspecs = false, bytes = false, cwd = openclawDir, timeoutMs } = {}) =>
+  const git = (gitArgs, { withAuth = false, input, literalPathspecs = false, bytes = false, cwd = openclawDir, env: runEnv = {}, timeoutMs } = {}) =>
     execFileSync(
       realGitPath,
       withAuth
@@ -730,6 +730,7 @@ const runGitSync = () => {
         ...(Number.isFinite(timeoutMs) ? { timeout: Math.max(1, Math.floor(timeoutMs)) } : {}),
         env: {
           ...process.env,
+          ...runEnv,
           GITHUB_TOKEN: githubToken,
           ...(lockPath ? { ALPHACLAW_GIT_LOCK_HELD: lockPath } : {}),
           ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}),

@@ -31,7 +31,7 @@ const sh = (cwd, args, opts = {}) =>
     ...opts,
   });
 
-const createRunner = (repoDir) => (args, { input, literalPathspecs = false, bytes = false, cwd = repoDir, timeoutMs } = {}) =>
+const createRunner = (repoDir) => (args, { input, literalPathspecs = false, bytes = false, cwd = repoDir, env = {}, timeoutMs } = {}) =>
   execFileSync("git", args, {
     cwd,
     encoding: bytes ? "latin1" : "utf8",
@@ -41,6 +41,7 @@ const createRunner = (repoDir) => (args, { input, literalPathspecs = false, byte
     env: {
       ...process.env,
       ...kGitEnv,
+      ...env,
       ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}),
     },
   });
@@ -434,6 +435,119 @@ describe("git-sync against real git (issue #140)", () => {
       write(managed, "openclaw.json", "{\"x\":1}\n");
       expect(syncManaged()).toMatchObject({ code: "ok", committed: true, pushed: true });
       expect(committedNames()).toEqual([".openclaw/openclaw.json"]);
+    });
+
+    // The CLI requires .openclaw/.git, so a box whose state dir is a
+    // subdirectory of a bigger repo has one of these. With the real gitdir
+    // in .openclaw/.git and core.worktree pointing up, git run from the top
+    // level finds no repository at all.
+    const kLayouts = [
+      ["a symlinked .git", () => fs.symlinkSync(path.join("..", ".git"), path.join(managed, ".git")), () => path.join(outer, ".git")],
+      [
+        "a symlinked .git with core.worktree on the outer repo",
+        () => {
+          sh(outer, ["config", "core.worktree", outer]);
+          fs.symlinkSync(path.join("..", ".git"), path.join(managed, ".git"));
+        },
+        () => path.join(outer, ".git"),
+      ],
+      ["an empty .git directory git skips", () => fs.mkdirSync(path.join(managed, ".git")), () => path.join(outer, ".git")],
+      [
+        "the real gitdir with core.worktree at the outer root",
+        () => {
+          fs.renameSync(path.join(outer, ".git"), path.join(managed, ".git"));
+          sh(managed, ["config", "core.worktree", outer]);
+        },
+        () => path.join(managed, ".git"),
+      ],
+    ];
+    describe.each(kLayouts)("with %s", (_name, arrange, realGitDir) => {
+      beforeEach(() => arrange());
+      const managedGit = (args) =>
+        sh(outer, ["--git-dir", realGitDir(), "--work-tree", outer, "-c", "core.quotepath=false", ...args]);
+      const committedFiles = () => managedGit(["show", "--name-only", "--format=", "HEAD"]).trim().split("\n").sort();
+
+      it("commits and pushes the managed files with their .openclaw/ paths, nothing beside or outside it", () => {
+        write(managed, "workspace/notes.md", "b\n");
+        write(managed, "workspace/new.md", "new\n");
+        write(outer, "top.txt", "changed outside\n");
+        write(outer, "elsewhere.txt", "untracked outside\n");
+        write(outer, ".openclaw.update-captures/doctor-1/openclaw.json", "{\"copy\":true}\n");
+
+        const result = syncManaged();
+
+        expect(result).toMatchObject({ code: "ok", committed: true, pushed: true });
+        expect(committedFiles()).toEqual([".openclaw/workspace/new.md", ".openclaw/workspace/notes.md"]);
+        expect(sh(remote, ["show", "main:.openclaw/workspace/new.md"])).toBe("new\n");
+        expect(sh(remote, ["ls-tree", "-r", "--name-only", "main"]).trim().split("\n").sort()).toEqual([
+          ".openclaw/openclaw.json",
+          ".openclaw/workspace/new.md",
+          ".openclaw/workspace/notes.md",
+          "top.txt",
+        ]);
+        expect(managedGit(["status", "--porcelain"]).split("\n").filter(Boolean).sort()).toEqual([
+          " M top.txt",
+          "?? .openclaw.update-captures/",
+          "?? elsewhere.txt",
+        ]);
+      });
+
+      it("holds back a new file over the size limit and pushes the rest", () => {
+        write(managed, "workspace/small.md", "small\n");
+        write(managed, "workspace/big.bin", "c".repeat(2000));
+
+        const result = syncManaged({ maxUntrackedBytes: 1024 });
+
+        expect(result).toMatchObject({ code: "held_back", committed: true, pushed: true });
+        expect(result.heldBack).toEqual([{ path: ".openclaw/workspace/big.bin", bytes: 2000 }]);
+        expect(committedFiles()).toEqual([".openclaw/workspace/small.md"]);
+      });
+
+      it("keeps the writer lock and the in-progress check on the real gitdir", () => {
+        const lockPath = resolveWriterLockPath({ git: createRunner(managed), openclawDir: managed });
+        expect(fs.realpathSync(path.dirname(lockPath))).toBe(fs.realpathSync(realGitDir()));
+        fs.writeFileSync(path.join(realGitDir(), "MERGE_HEAD"), `${managedGit(["rev-parse", "HEAD"]).trim()}\n`);
+        write(managed, "workspace/notes.md", "b\n");
+
+        const result = syncManaged({ listOwners: () => [] });
+
+        expect(result).toMatchObject({ code: "in_progress_operation", committed: false, pushed: false });
+        expect(result.staleState.marker).toBe("MERGE_HEAD");
+      });
+    });
+
+    it("syncs a state dir that is itself a symlink to a subdirectory whose .git is a relative symlink, core.worktree set", () => {
+      const sub = path.join(outer, "state");
+      write(sub, "openclaw.json", "{}\n");
+      write(sub, "workspace/notes.md", "a\n");
+      sh(outer, ["add", "-A"]);
+      sh(outer, ["commit", "-qm", "state"]);
+      sh(outer, ["push", "-q", "origin", "main"]);
+      sh(outer, ["config", "core.worktree", outer]);
+      fs.symlinkSync(path.join("..", ".git"), path.join(sub, ".git"));
+      const stateDir = path.join(root, "data", ".openclaw");
+      fs.mkdirSync(path.dirname(stateDir));
+      fs.symlinkSync(sub, stateDir);
+      expect(sh(stateDir, ["rev-parse", "--show-prefix"]).trim()).toBe("state/");
+      write(stateDir, "workspace/notes.md", "b\n");
+      write(stateDir, "workspace/new.md", "new\n");
+      write(stateDir, "workspace/big.bin", "c".repeat(2000));
+      write(outer, "state.update-captures/doctor-1/openclaw.json", "{\"copy\":true}\n");
+      write(outer, "elsewhere.txt", "untracked outside\n");
+
+      const result = syncManaged({ git: createRunner(stateDir), openclawDir: stateDir, maxUntrackedBytes: 1024 });
+
+      expect(result).toMatchObject({ code: "held_back", committed: true, pushed: true });
+      expect(result.heldBack).toEqual([{ path: "state/workspace/big.bin", bytes: 2000 }]);
+      expect(committedNames()).toEqual(["state/workspace/new.md", "state/workspace/notes.md"]);
+      expect(sh(remote, ["show", "main:state/workspace/notes.md"])).toBe("b\n");
+      expect(sh(outer, ["status", "--porcelain"]).split("\n").filter(Boolean).sort()).toEqual([
+        "?? elsewhere.txt",
+        "?? state.update-captures/",
+        "?? state/workspace/big.bin",
+      ]);
+      const lockPath = resolveWriterLockPath({ git: createRunner(stateDir), openclawDir: stateDir });
+      expect(fs.realpathSync(path.dirname(lockPath))).toBe(fs.realpathSync(path.join(outer, ".git")));
     });
   });
 
