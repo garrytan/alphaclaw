@@ -498,6 +498,40 @@ describe("server/watchdog memory monitor", () => {
         expect(memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind)).not.toContain("mitigation_ineffective");
       });
 
+      it("a cached private-memory reading repeated across ticks counts once", async () => {
+        const ref = {};
+        const restart = relaunchingRestart(ref, [5252]);
+        const harness = createHarness({ settings: armed, restartGatewayForMitigation: restart });
+        ref.current = harness;
+        launchGateway(harness);
+        // The trigger was measured on private memory.
+        const calls = restart.mock.calls.length;
+        for (let i = 0; i < 12 && restart.mock.calls.length === calls; i += 1) {
+          vi.setSystemTime(kStartMs + i * kTickMs);
+          harness.readMemorySample.mockImplementation(() => asWorkerSample({
+            rssBytes: (385 + 4 * i) * kMb, workerPrivateBytes: (365 + 4 * i) * kMb,
+            process: { pss: { workerAtMs: kStartMs + i * kTickMs } },
+            cgroupUsedBytes: (385 + 4 * i) * kMb, containerLimitBytes: 540 * kMb,
+            heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 900 * kMb, limitBytes: 1000 * kMb },
+          }));
+          await harness.watchdog.checkMemoryTrend();
+        }
+        expect(restart).toHaveBeenCalledTimes(1);
+        // One transient 370 MB private reading, cached by the sampler for
+        // five ticks, while fresh RSS stays at 200 MB.
+        const cachedAtMs = kStartMs + 20 * kTickMs;
+        await driveTicks(harness, { ticks: 5, startTick: 20, sampleAt: () => ({
+          rssBytes: 200 * kMb, workerPrivateBytes: 370 * kMb, process: { pss: { workerAtMs: cachedAtMs } },
+          cgroupUsedBytes: 200 * kMb, containerLimitBytes: 540 * kMb }) });
+        expect(memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind)).not.toContain("mitigation_ineffective");
+        // A second, newer private reading at that level confirms it.
+        await driveTicks(harness, { ticks: 1, startTick: 26, sampleAt: () => ({
+          rssBytes: 390 * kMb, workerPrivateBytes: 372 * kMb, process: { pss: { workerAtMs: kStartMs + 26 * kTickMs } },
+          cgroupUsedBytes: 390 * kMb, containerLimitBytes: 540 * kMb }) });
+        const found = memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.kind === "mitigation_ineffective");
+        expect(found.details).toMatchObject({ measure: "private", regrowthMb: 372 });
+      });
+
       it("a persisted pause survives an AlphaClaw restart", async () => {
         const statePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")), "state.json");
         fs.writeFileSync(statePath, JSON.stringify({ restarts: [], ineffective: {
