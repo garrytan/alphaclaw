@@ -6,13 +6,20 @@ const os = require("os");
 describe("bin/alphaclaw port check", () => {
   let tmpDir;
   let tmpHome;
+  const kOriginalGitShimPath = process.env.ALPHACLAW_GIT_SHIM_PATH;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-test-"));
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-home-"));
+    // Every child below spreads process.env: without this, `start` installs
+    // its git auth shim at /usr/local/bin/git whenever that is writable and
+    // shadows git for the whole machine (tests/setup-host-paths-guard.js).
+    process.env.ALPHACLAW_GIT_SHIM_PATH = path.join(tmpDir, "bin", "git");
   });
 
   afterEach(() => {
+    if (kOriginalGitShimPath === undefined) delete process.env.ALPHACLAW_GIT_SHIM_PATH;
+    else process.env.ALPHACLAW_GIT_SHIM_PATH = kOriginalGitShimPath;
     try {
       if (fs.existsSync(tmpDir)) {
         fs.rmSync(tmpDir, { recursive: true, force: true });
