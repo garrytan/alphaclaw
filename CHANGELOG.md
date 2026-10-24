@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.96] - 2026-10-24
+
+### Fixed
+- **"Still failing" arrived seconds after an upgrade, before the new version had run a sync.** An episode announced by an earlier process (an older version's legacy `episode` state, or any failure announced before this process started) reminded at the first health check after boot, about the status the old version wrote. With an hourly schedule that reminder stood for up to an hour before "recovered", even when the new version fixed the problem. `lib/server/git-sync-health.js` now holds that episode's reminder and recovery line until the status file's `at` is later than the time the health loop started. The first run after that reminds once if it still fails, or sends one recovery line if it succeeds. A new episode, and an episode this process announced itself, are unchanged.
+
+### Tests
+- `git-sync-health.test.js` has three cases. A legacy episode with a stale status gives no reminder 7 s after start, and a later failing run reminds once. An episode announced two days earlier gets one recovery line from the first successful run after start. The restart case of the 24 h reminder test now waits for a run after the restart. All three fail on v0.10.89.
+
 ## [0.10.89] - 2026-10-24
 
 ### Fixed
