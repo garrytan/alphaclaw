@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.88] - 2026-10-24
+## [0.10.92] - 2026-10-24
 
 ### Changed
 - **Memory notices show the worker, and label the group.** The 🟡 rising, 🔴 critical, 🟡 restarting and brake notices now give the gateway worker's RSS against the budget, then three labelled lines:
