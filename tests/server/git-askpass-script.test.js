@@ -57,6 +57,9 @@ describe("git-askpass-script", () => {
         );
       expect(ask("Password for 'https://x@github.com': ")).toBe("ghp_secret");
       expect(ask("Password for 'https://github.com@evil.example/r': ")).toBe("");
+      expect(ask("Password for 'https://evil.example?@github.com': ")).toBe("");
+      expect(ask("Password for 'http://github.com': ")).toBe("");
+      expect(ask("Username for 'https://evil.example': ")).toBe("");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

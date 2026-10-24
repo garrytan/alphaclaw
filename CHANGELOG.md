@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.81] - 2026-10-24
+
+Ported from upstream chrysb/alphaclaw `4aef80fe` ("Restrict Git credential prompts to GitHub HTTPS").
+
+### Security
+- **The Git askpass helper answers only Git's exact HTTPS prompt for github.com.** It used to take the host from the text after the last `@` up to the first `/`. That leaked `GITHUB_TOKEN` for a URL whose host is another server: `https://evil.example?@github.com` and `https://evil.example#@github.com` both parsed as github.com, and `http://github.com` sent the token in cleartext. It also answered the username prompt for any host. Now a prompt must have Git's exact `Username for '<url>': ` / `Password for '<url>': ` form. The URL must be `https://` with no whitespace, backslash, `?`, `#` or quote, and its authority's host must be `github.com` or `github.com:443`. Anything else gets an empty answer.
+- **One copy of the helper.** `lib/git-askpass-script.js` (used by the CLI git sync, the config restore and GitHub onboarding) now reads `lib/scripts/git-askpass`, which the git shim installs, instead of keeping its own embedded copy.
+
+### Tests
+- `git-shim.test.js` drives the helper with real Git prompts for trusted and untrusted authorities and malformed prompts, and runs `git credential fill` against it without contacting a server. `git-askpass-script.test.js` adds the query, cleartext and foreign-username cases.
+
 ## [0.10.80] - 2026-10-24
 
 A new guard keeps `node_modules` out of the tree (ALPH-14 follow-up to #200).

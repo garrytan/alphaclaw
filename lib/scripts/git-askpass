@@ -1,8 +1,30 @@
 #!/usr/bin/env sh
-case "$1" in
-  *Username*) printf "%s" "x-access-token" ;;
-  *Password*)
-    u=${1#*\'}; u=${u%%\'*}; a=${u#*://}; a=${a%%/*}; host=${a##*@}; host=${host%%:*}
-    [ "$host" = github.com ] && printf "%s" "${GITHUB_TOKEN:-}" || printf "" ;;
-  *) printf "" ;;
+# GIT_ASKPASS helper. Git calls it with the whole prompt as $1, for example
+#   Password for 'https://x-access-token@github.com': 
+# Answer only Git's exact HTTPS prompt for github.com, and fail closed (empty
+# answer) on anything else. The host is read from the URL's authority, never
+# matched as a substring: "github.com" can sit in a path, a username, a query
+# or a fragment of a URL whose real host is another server (H9).
+case "${1:-}" in
+  "Username for '"*"': ") kind=username ;;
+  "Password for '"*"': ") kind=password ;;
+  *) printf ''; exit 0 ;;
+esac
+url=${1#*\'}
+url=${url%\': }
+case "$url" in
+  https://*) authority=${url#https://}; authority=${authority%%/*} ;;
+  *) printf ''; exit 0 ;;
+esac
+case "$url" in
+  *[[:space:]]*|*\\*|*\?*|*\#*|*\'*) printf ''; exit 0 ;;
+esac
+host=${authority##*@}
+case "$host" in
+  github.com|github.com:443) ;;
+  *) printf ''; exit 0 ;;
+esac
+case "$kind" in
+  username) printf '%s' 'x-access-token' ;;
+  password) printf '%s' "${GITHUB_TOKEN:-}" ;;
 esac
