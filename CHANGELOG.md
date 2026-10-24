@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.93] - 2026-10-24
+
+### Changed
+- **The injected agent prompt allows only fast-forward pulls in the workspace repository.** `hooks/bootstrap/AGENTS.md` told the agent to integrate remote changes "with `git pull --ff-only` or a merge", and a deployed agent made dozens of merge commits a week with merging pulls and hand merges. The rule is now: update only with `git pull --ff-only`; never a plain `git pull`, `git pull --rebase`, `git merge`, `git rebase` or a force push; when the fast-forward or a push is refused because histories diverged, stop and tell the user instead of reconciling; leave a merge or rebase found in progress alone and report it (it used to say "finish or abort it").
+
+### Added
+- **`ALPHACLAW_GIT_WRITER_COMMAND` names a sanctioned writer.** When set (for example `alphaclaw git-sync -m "<message>"` or another tool's own sync command), the prompt tells the agent to commit and push with it instead of raw git, to run it when `git pull --ff-only` fails, and to stop and report if it refuses. Unset, the prompt does not mention a writer. The value is validated like other prompt substitutions (one line, at most 300 characters, no backticks or `{{`); anything else is ignored with one log line. An Envars save that changes values now rewrites the bootstrap prompt files, so the setting reaches the agent's next session without an AlphaClaw restart. Documented in the README and the `alphaclaw-admin` skill's env section.
+
+### Tests
+- `onboarding-workspace.test.js` renders the shipped templates with the setting unset, blank, set, and hostile (backticks, a newline, a template token, oversized), and scans every text file under `lib/setup` for wording that allows a merging pull, a hand merge or a rebase. `routes-system.test.js` covers the prompt rewrite on an env save that changes values, and none on one that does not.
+
 ## [0.10.90] - 2026-10-24
 
 ### Fixed
