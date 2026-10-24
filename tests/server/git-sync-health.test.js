@@ -48,6 +48,20 @@ describe("git-sync status file", () => {
     expect(cleared.heldBack).toBeNull();
   });
 
+  it("keeps a nested-repository episode across failed and single-file runs and clears it on a full scan with none", () => {
+    const nestedRepos = [{ path: "workspace-research/", kind: "repository" }];
+    const nested = buildNextStatus({ previous: null, result: { code: "nested_repo", nestedRepos, pushed: true }, trigger: "scheduled", lock: "acquired", nowIso: at(0) });
+    expect(nested).toMatchObject({ outcome: "warning", consecutiveFailures: 0, nestedRepos: { since: at(0), runs: 1, paths: nestedRepos } });
+    const failed = buildNextStatus({ previous: nested, result: { code: "failed" }, trigger: "scheduled", lock: "acquired", nowIso: at(30) });
+    expect(failed.nestedRepos).toMatchObject({ since: at(0), runs: 1 });
+    const caller = buildNextStatus({ previous: failed, result: { code: "ok", nestedRepos: [], singleFile: true }, trigger: "caller", lock: "acquired", nowIso: at(40) });
+    expect(caller.nestedRepos).toMatchObject({ since: at(0) });
+    const again = buildNextStatus({ previous: caller, result: { code: "nested_repo", nestedRepos }, trigger: "scheduled", lock: "acquired", nowIso: at(50) });
+    expect(again.nestedRepos).toMatchObject({ since: at(0), runs: 2 });
+    const cleared = buildNextStatus({ previous: again, result: { code: "ok", nestedRepos: [] }, trigger: "scheduled", lock: "acquired", nowIso: at(59) });
+    expect(cleared.nestedRepos).toBeNull();
+  });
+
   it("every emitted code has an outcome, exit code and copy", () => {
     for (const [code, info] of Object.entries(kGitSyncCodes)) {
       expect(["ok", "warning", "refused", "failed"]).toContain(info.outcome);
@@ -296,6 +310,40 @@ describe("git-sync health notifications", () => {
     expect(await health.check()).toEqual({ action: "notified_held_back_cleared" });
     expect(notify.mock.calls.at(-1)[0]).toBe("✅ Git sync is no longer holding back large new files.");
     expect(recordEvent.mock.calls.at(-1)[0]).toMatchObject({ eventType: "git_sync_recovered", details: { code: "held_back" } });
+    expect(await health.check()).toEqual({ action: "none" });
+  });
+
+  it("reports nested repositories once per episode, names what is and is not backed up, reminds daily, and clears", async () => {
+    const nestedRepos = [
+      { path: "workspace-research/", kind: "repository" },
+      { path: "workspace/scripts/xmcp", kind: "pointer" },
+    ];
+    record({ code: "nested_repo", nestedRepos, pushed: true, shortHash: "abc1234" });
+    const { health, notify, recordEvent } = createHealth();
+    expect(await health.check()).toEqual({ action: "notified_nested_repo" });
+    expect(notify.mock.calls[0][0]).toBe(
+      "⚠️ Git sync has not backed up 2 nested git repositories since 2026-10-12T10:00:00Z: " +
+        "workspace-research/ (a separate repository: its content and history are not backed up), " +
+        "workspace/scripts/xmcp (a pointer only: the repository it points to is not backed up).\n" +
+        kGitSyncCodes.nested_repo.action,
+    );
+    expect(recordEvent.mock.calls[0][0]).toMatchObject({
+      eventType: "git_sync_refused",
+      status: "warning",
+      details: { code: "nested_repo", paths: nestedRepos },
+    });
+    record({ code: "nested_repo", nestedRepos });
+    expect(await health.check()).toEqual({ action: "none" });
+
+    now += 24 * 60 * 60_000;
+    record({ code: "nested_repo", nestedRepos });
+    expect(await health.check()).toEqual({ action: "reminded_nested_repo" });
+    expect(notify.mock.calls.at(-1)[0]).toMatch(/^⚠️ Still not backing up: /);
+
+    record({ code: "ok", nestedRepos: [] });
+    expect(await health.check()).toEqual({ action: "notified_nested_repo_cleared" });
+    expect(notify.mock.calls.at(-1)[0]).toBe("✅ Git sync no longer skips nested git repositories.");
+    expect(recordEvent.mock.calls.at(-1)[0]).toMatchObject({ eventType: "git_sync_recovered", details: { code: "nested_repo" } });
     expect(await health.check()).toEqual({ action: "none" });
   });
 
