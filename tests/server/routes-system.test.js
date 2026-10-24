@@ -948,10 +948,38 @@ describe("server/routes/system", () => {
       lastSuccessAt: null,
       firstFailureAt: "2026-10-12T09:07:00.000Z",
       consecutiveFailures: 2,
+      reason: "",
       liveTreeBehindCount: 0,
       liveTreeBehindSince: null,
+      heldBackCount: 0,
     });
     expect(JSON.stringify(res.body)).not.toContain("812");
+  });
+
+  it("gives a failing sync's last run the git error as one sentence, without the raw git output", async () => {
+    const deps = createSystemDeps();
+    deps.fs.existsSync.mockImplementation(() => true);
+    deps.fs.readFileSync.mockImplementation((targetPath) => {
+      if (String(targetPath).endsWith("system-sync.json")) return JSON.stringify({ enabled: true });
+      if (String(targetPath).endsWith("git-sync-status.json")) {
+        return JSON.stringify({
+          at: "2026-10-24T10:07:00.000Z",
+          outcome: "failed",
+          code: "failed",
+          detail: "error: pathspec 'workspace/a.md' did not match any file(s) known to git\nhint: raw git output",
+          firstFailureAt: "2026-10-12T09:07:00.000Z",
+          consecutiveFailures: 570,
+        });
+      }
+      throw new Error("no file");
+    });
+    const res = await request(createApp(deps)).get("/api/sync-cron");
+    expect(res.body.lastRun).toMatchObject({
+      outcome: "failed",
+      consecutiveFailures: 570,
+      reason: 'Git could not match "workspace/a.md", a path the sync asked it to commit.',
+    });
+    expect(JSON.stringify(res.body)).not.toContain("hint: raw git output");
   });
 
   it("updates sync cron config on PUT /api/sync-cron", async () => {

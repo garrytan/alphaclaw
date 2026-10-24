@@ -639,6 +639,7 @@ const runGitSync = () => {
   const deadlineAtMs =
     startedAtMs + ((deadlineSeconds ?? defaults.deadlineSeconds) - kGitSyncFinalizeReserveSeconds) * 1000;
   const syncPathsResult = parseGitSyncPaths(process.env.ALPHACLAW_GIT_SYNC_PATHS);
+  const maxNewMb = Number(String(process.env.ALPHACLAW_GIT_SYNC_MAX_NEW_MB || "").trim());
   const githubToken = String(process.env.GITHUB_TOKEN || "").trim();
   const githubRepo = resolveGithubRepoPath(
     process.env.GITHUB_WORKSPACE_REPO || "",
@@ -715,16 +716,16 @@ const runGitSync = () => {
   // owns the integration logic and is unit-tested against a fake runner.
   // Network commands abort a stalled transfer instead of hanging the run;
   // every child is bounded by the run's remaining deadline.
-  const git = (gitArgs, { withAuth = false, input, literalPathspecs = false, timeoutMs } = {}) =>
+  const git = (gitArgs, { withAuth = false, input, literalPathspecs = false, bytes = false, cwd = openclawDir, timeoutMs } = {}) =>
     execFileSync(
       realGitPath,
       withAuth
         ? ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30", ...gitArgs]
         : gitArgs,
       {
-        cwd: openclawDir,
+        cwd,
         stdio: "pipe",
-        encoding: "utf8",
+        encoding: bytes ? "latin1" : "utf8",
         ...(input !== undefined ? { input } : {}),
         ...(Number.isFinite(timeoutMs) ? { timeout: Math.max(1, Math.floor(timeoutMs)) } : {}),
         env: {
@@ -782,6 +783,7 @@ const runGitSync = () => {
       commitMessage,
       filePath: normalizedFilePath,
       syncPaths: syncPathsResult.paths,
+      ...(Number.isInteger(maxNewMb) && maxNewMb > 0 ? { maxUntrackedBytes: maxNewMb * 1024 * 1024 } : {}),
       deadlineAtMs,
     });
     recordGitSyncRun({ openclawDir, trigger, lock: lockState, result });
