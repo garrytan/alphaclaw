@@ -801,6 +801,22 @@ describe("enforcement basis (ALPH-17)", () => {
     expect(snapshot.criticalGates).toMatchObject({ floor: false });
   });
 
+  it("a 60 GB co-resident process with the container at 97% gives a 3 GB worker no restart authority, flat or growing", () => {
+    const coResident = (rssMbAt) => (i) => ({ rssBasis: "worker", groupRssBytes: mb(rssMbAt(i) + 60),
+      containerLimitBytes: mb(65_000), cgroupUsedBytes: mb(63_050), hostTotalBytes: mb(126_000) });
+    const flat = (i) => 3072 + [0, 3, -2, 1, -3, 2][i % 6];
+    const growing = (i) => 3072 + 10 * i;
+    for (const rssMbAt of [flat, growing]) {
+      const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+      const { transitions, snapshot } = drive(monitor, { ticks: 30, rssAt: (i) => mb(rssMbAt(i)), capAt: coResident(rssMbAt) });
+      expect(snapshot.containerPressureFraction).toBeGreaterThanOrEqual(0.97);
+      expect(snapshot.pressureSource).not.toBe("container");
+      expect(snapshot.restartAuthority).toBeNull();
+      expect(snapshot.state).not.toBe("critical");
+      expect(transitions.filter((t) => t.type === "escalated_critical")).toHaveLength(0);
+    }
+  });
+
   it("without a complete census (no group RSS) the container does not count toward a worker verdict", () => {
     const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
     const { transitions } = drive(monitor, {
