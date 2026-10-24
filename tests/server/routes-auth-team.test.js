@@ -66,6 +66,10 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     built.post("/api/openclaw/apply", (req, res) => res.json({ ok: true }));
     built.get("/api/usage/summary", (req, res) => res.json({ ok: true }));
     built.post("/api/cron/jobs", (req, res) => res.json({ ok: true }));
+    built.get("/api/claude-code/status", (req, res) => res.json({ ok: true }));
+    built.post("/api/claude-code/session", (req, res) => res.json({ ok: true }));
+    built.get("/api/models/config", (req, res) => res.json({ ok: true }));
+    built.get("/api/models/auth", (req, res) => res.json({ ok: true }));
     return built;
   };
 
@@ -381,6 +385,40 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
       expect(res.status, url).toBe(403);
       expect(res.body.code).toBe("admin_required");
     }
+  });
+
+  it("answers a member 404/405 for unknown routes, 403 for real and gateway paths", async () => {
+    createAdmin();
+    membersStore.createMember({
+      email: "m@example.com",
+      password: "member password",
+    });
+    const memberCookie = cookieOf(
+      await loginMember("m@example.com", "member password"),
+    );
+    const unknown = await request(app)
+      .post("/api/cron/nope")
+      .set("Cookie", memberCookie)
+      .send({});
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.code).toBe("route_not_found");
+    const wrongMethod = await request(app)
+      .delete("/api/envars")
+      .set("Cookie", memberCookie);
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.allow).toBe("GET, HEAD");
+    const gateway = await request(app)
+      .post("/api/v1/admin/rpc")
+      .set("Cookie", memberCookie)
+      .send({});
+    expect(gateway.status).toBe(403);
+    expect(gateway.body.code).toBe("admin_required");
+    const real = await request(app)
+      .post("/api/cron/jobs")
+      .set("Cookie", memberCookie)
+      .send({});
+    expect(real.status).toBe(403);
+    expect(real.body.code).toBe("admin_required");
   });
 
   it("makes a member session inert the moment team mode is turned off (F3)", async () => {

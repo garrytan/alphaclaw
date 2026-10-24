@@ -1,5 +1,7 @@
 Read health, events and logs here; `GET /api/watchdog/resources` reports resource usage. Use autotune for machine tuning.
 
+Event history: `GET /api/watchdog/events` pages newest first. Narrow with `since`/`until` (ISO-8601 with `Z`), `eventType` and `source` (comma lists), then repeat with `cursor=<nextCursor>` while `hasMore` is true. Never read watchdog.db directly.
+
 Repair/Restart open options, not mutation permission. Diagnose cannot clear holds, override Stop or grant migration consent. Follow the hold's next action; settings-migration retry is not universal. Busy requests never queue: inspect and ask before retrying.
 
 **Verify and start** is human-only, even after hold clear while recovery is pending. Never send `verifyDatabaseRecovery`/`recoveryConfirmation`, even with dangerous-tier confirmation.
