@@ -163,20 +163,32 @@ describe("GET /api/watchdog/incidents/:id", () => {
 describe("GET /api/watchdog/events byte-compatibility", () => {
   it("keeps the legacy shape (explicit projection — no incident_id leak)", async () => {
     const deps = createDeps({
-      getRecentEvents: vi.fn(() => [
-        {
-          id: 1,
-          eventType: "crash",
-          source: "exit_event",
-          status: "failed",
-          details: { code: 1 },
-          correlationId: "c1",
-          createdAt: "2026-08-29T00:00:00.000Z",
-        },
-      ]),
+      getRecentEvents: vi.fn(() => ({
+        events: [
+          {
+            id: 1,
+            eventType: "crash",
+            source: "exit_event",
+            status: "failed",
+            details: { code: 1 },
+            correlationId: "c1",
+            createdAt: "2026-08-29T00:00:00.000Z",
+          },
+        ],
+        hasMore: false,
+        nextCursor: null,
+        limit: 20,
+      })),
     });
     const res = await request(createApp(deps)).get("/api/watchdog/events");
     expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual([
+      "events",
+      "hasMore",
+      "limit",
+      "nextCursor",
+      "ok",
+    ]);
     expect(Object.keys(res.body.events[0]).sort()).toEqual([
       "correlationId",
       "createdAt",
