@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.93] - 2026-10-24
+
+### Changed
+- **Memory notices show container memory pressure.** The 🟡 rising, 🔴 critical, brake ("automatic restart is paused") and "the memory restart did not help" notices add one line with the container's PSI from the latest sample: `memory.pressure` avg60, some and full, the share of the last minute that tasks stalled on memory. When PSI can't be read (cgroup v1 or no `memory.pressure` file), the line is left out rather than shown as zero.
+
+### Tests
+- `watchdog-memory.test.js` covers the line's format (some and full, some only, unreadable), the line in the rising, critical, brake and did-not-help notices, and no line and no blank line when PSI is unreadable.
+
 ## [0.10.92] - 2026-10-24
 
 ### Changed

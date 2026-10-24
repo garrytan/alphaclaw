@@ -473,6 +473,19 @@ describe("server/watchdog memory monitor", () => {
         expect(restart).toHaveBeenCalledTimes(2);
       });
 
+      it("the did-not-help notice carries the container PSI line", async () => {
+        const ref = {};
+        const restart = relaunchingRestart(ref, [5252]);
+        const harness = createHarness({ settings: armed, restartGatewayForMitigation: restart });
+        ref.current = harness;
+        launchGateway(harness);
+        await untilRestart(harness, restart);
+        const cgroupPressure = { psi: { some: { avg10: 9, avg60: 7.5, avg300: 2 }, full: { avg10: 3, avg60: 2, avg300: 1 } }, events: null };
+        await driveTicks(harness, { ticks: 4, startTick: 20, sampleAt: () => ({ ...worker(370)(), cgroupPressure }) });
+        const notice = notifications(harness.notifier).find((m) => m.includes("The memory restart did not help"));
+        expect(notice).toContain("\nContainer memory pressure (PSI, last 60 s): some 7.5%, full 2% of the time stalled on memory.\nAutomatic memory restarts are paused until");
+      });
+
       it("a restart that holds for the hour records that it held and pauses nothing", async () => {
         const ref = {};
         const restart = relaunchingRestart(ref, [5252, 6262]);
@@ -2021,5 +2034,50 @@ describe("memory notices show the worker's heap, private memory and group RSS (A
     }
     for (const message of sent) expect(message).not.toMatch(/restart (the gateway|it) (manually|yourself)|manual restart/i);
   });
-});
 
+  const { describeContainerPsi } = require("../../lib/server/watchdog-format");
+  const kPressure = { psi: { some: { avg10: 40, avg60: 31, avg300: 10 }, full: { avg10: 20, avg60: 14, avg300: 4 } },
+    events: { source: "memory.events", high: 0, max: 3, oom: 0, oomKill: 0 } };
+  const kPsiLine = "Container memory pressure (PSI, last 60 s): some 31%, full 14% of the time stalled on memory.";
+
+  it("the container PSI line reads avg60, drops a missing full line, and is empty when PSI is unreadable", () => {
+    expect(describeContainerPsi(kPressure)).toBe(kPsiLine);
+    expect(describeContainerPsi({ psi: { some: { avg10: 1, avg60: 2.5, avg300: 0 }, full: null }, events: null }))
+      .toBe("Container memory pressure (PSI, last 60 s): some 2.5% of the time stalled on memory.");
+    expect(describeContainerPsi({ psi: null, events: kPressure.events })).toBe("");
+    expect(describeContainerPsi(null)).toBe("");
+  });
+
+  it("the leak, critical and brake notices carry the container PSI line, and omit it when PSI is unreadable", async () => {
+    const run = async (cgroupPressure) => {
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: vi.fn(async () => ({ ok: true })),
+      });
+      launchGateway(harness);
+      await driveTicks(harness, { ticks: 12, sampleAt: (i) => ({ ...workerSample(i, 100 + 5 * i), cgroupPressure }) });
+      await driveTicks(harness, {
+        ticks: 8, startTick: 12,
+        sampleAt: (i) => ({ ...workerSample(i, 365 + 4 * i, { heap: { usedMb: 900, limitMb: 1000 } }),
+          cgroupUsedBytes: (365 + 4 * i) * kMb, containerLimitBytes: 540 * kMb, cgroupPressure }),
+      });
+      return notifications(harness.notifier);
+    };
+    const sent = await run(kPressure);
+    const kinds = [/Gateway memory rising steadily/, /Gateway memory critical/, /automatic restart is paused/];
+    for (const kind of kinds) {
+      const message = sent.find((m) => kind.test(m));
+      expect(message, String(kind)).toBeDefined();
+      expect(message).toContain(`\n${kPsiLine}\n`);
+    }
+    const restarting = sent.find((m) => m.includes("Restarting gateway before it runs out of memory"));
+    expect(restarting).not.toContain("Container memory pressure");
+
+    const unreadable = await run(null);
+    for (const kind of kinds) expect(unreadable.find((m) => kind.test(m))).toBeDefined();
+    for (const message of unreadable) {
+      expect(message).not.toContain("Container memory pressure");
+      expect(message).not.toContain("\n\n");
+    }
+  });
+});
