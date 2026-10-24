@@ -548,3 +548,60 @@ describe("server/doctor-fix-runner heartbeat", () => {
     });
   });
 });
+
+describe("server/doctor-fix-runner disk refusal (ALPH-23)", () => {
+  const refusal = {
+    verdict: "refuse",
+    sentences: ["this volume has 32.0 GB free for 30.0 GB of OpenClaw state. Make at least 60.0 GB free, then use Retry upgrade."],
+  };
+  const build = ({ completedForVersion = null, check = () => refusal } = {}) => {
+    const openclawDir = mkOpenclawDir();
+    const managedDir = path.join(openclawDir, ".alphaclaw");
+    fs.mkdirSync(managedDir, { recursive: true });
+    if (completedForVersion) writeJson(managedDir, "openclaw-boot-migration.json", { completedForVersion });
+    const runStream = { runStreamed: vi.fn(async () => ({ ok: true, tail: "Doctor complete\n" })) };
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const run = createDoctorFixRunner({
+      openclawDir,
+      doctorGuard: passthroughGuard(),
+      runStream,
+      gatewayEnv: () => kGatewayEnv,
+      notifier: { notify: vi.fn() },
+      managedDir,
+      getOpenclawVersion: () => "2026.10.6",
+      checkUpgradeDisk: vi.fn(check),
+      logger,
+    });
+    return { run, runStream, logger, managedDir };
+  };
+
+  it("does not start Doctor while the pin's upgrade is pending and the backups cannot fit, and records why", async () => {
+    const { run, runStream, logger, managedDir } = build();
+    const result = await run({ source: "repair" });
+    expect(runStream.runStreamed).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, code: "insufficient_disk", stderr: refusal.sentences[0] });
+    expect(logger.warn).toHaveBeenCalledWith(`[alphaclaw] doctor --fix (repair): ${refusal.sentences[0]}`);
+    expect(readJson(managedDir, "openclaw-boot-migration.json").lastOutcome).toMatchObject({
+      status: "failed",
+      class: "transient",
+      reason: "insufficient_disk",
+      detail: refusal.sentences[0],
+      openclawVersion: "2026.10.6",
+      source: "repair",
+    });
+  });
+
+  it("runs Doctor as before once the pin's upgrade completed (no backups are taken then)", async () => {
+    const { run, runStream } = build({ completedForVersion: "2026.10.6" });
+    await expect(run()).resolves.toMatchObject({ ok: true });
+    expect(runStream.runStreamed).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs Doctor and logs the warning when the disk is only short of the recovery copy", async () => {
+    const warning = "Only 45.0 GB is free for 30.0 GB of OpenClaw state.";
+    const { run, runStream, logger } = build({ check: () => ({ verdict: "warn", sentences: [warning] }) });
+    await expect(run({ source: "boot" })).resolves.toMatchObject({ ok: true });
+    expect(runStream.runStreamed).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(`[alphaclaw] doctor --fix (boot): ${warning}`);
+  });
+});

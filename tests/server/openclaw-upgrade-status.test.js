@@ -185,3 +185,44 @@ describe("openclaw-upgrade-status: retry eligibility", () => {
     expect(readRetryEligibility({ record, installedVersion: kPin, currentKey: { ...key, configSha: "x" } })).toEqual({ ok: true, unchanged: false });
   });
 });
+
+describe("openclaw-upgrade-status: disk space row (ALPH-23)", () => {
+  const warn = { verdict: "warn", sentences: ["Only 45.0 GB is free for 30.0 GB of OpenClaw state."], stateBytes: 30e9, freeBytes: 45e9, expectedMinutes: 24 };
+  const refuse = { verdict: "refuse", sentences: ["Make at least 60.0 GB free, then use Retry upgrade."], stateBytes: 30e9, freeBytes: 30e9, expectedMinutes: 24 };
+  const completed = { completedForVersion: kPin };
+
+  it("warns admins before the next upgrade, dismissible, and gives Retry upgrade the same sentences", () => {
+    const status = buildUpgradeStatus({ record: completed, installedVersion: kPin, diskCheck: warn, isAdmin: true });
+    expect(status.alert).toMatchObject({
+      kind: "disk_space",
+      tone: "warning",
+      badgeLabel: "At risk",
+      headline: "OpenClaw's next data upgrade is at risk",
+      sentence: warn.sentences[0],
+      actions: ["dismiss"],
+    });
+    expect(status.retry.disk).toEqual({ verdict: "warn", sentences: warn.sentences, expectedMinutes: 24 });
+    const dismissed = buildUpgradeStatus({ record: completed, installedVersion: kPin, diskCheck: warn, isAdmin: true, dismissed: [status.alert.dismissKey] });
+    expect(dismissed.alert).toBeNull();
+  });
+
+  it("a refusal is an error and cannot be dismissed", () => {
+    const status = buildUpgradeStatus({ record: completed, installedVersion: kPin, diskCheck: refuse, isAdmin: true });
+    expect(status.alert).toMatchObject({ kind: "disk_space", tone: "error", headline: "OpenClaw's next data upgrade can't start", actions: [], dismissKey: null });
+  });
+
+  it("never covers a failure row, and members never see it", () => {
+    const failure = buildUpgradeStatus({ record: { lastOutcome: failed() }, installedVersion: kPin, diskCheck: refuse, isAdmin: true });
+    expect(failure.alert.kind).toBe("failed");
+    expect(buildUpgradeStatus({ record: completed, installedVersion: kPin, diskCheck: warn, isAdmin: false }).alert).toBeNull();
+  });
+
+  it("a boot that refused for disk space reads as an interrupted upgrade with AlphaClaw's sentence", () => {
+    const status = buildUpgradeStatus({
+      record: { lastOutcome: failed({ class: "transient", reason: "insufficient_disk", detail: refuse.sentences[0], captureState: "unknown" }) },
+      installedVersion: kPin,
+      isAdmin: true,
+    });
+    expect(status.alert).toMatchObject({ kind: "interrupted", sentence: expect.stringContaining(refuse.sentences[0]) });
+  });
+});

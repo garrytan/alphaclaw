@@ -182,6 +182,16 @@ describe("frontend/upgrade-alert", () => {
     expect(collectNodes(tree).find((n) => n.props?.confirmLabel)?.props.confirmLabel).toBe("Retry upgrade");
   });
 
+  it("the confirm gives the expected duration and the disk warnings for this state (ALPH-23)", () => {
+    const disk = { verdict: "warn", sentences: ["Only 45.0 GB is free for 30.0 GB of OpenClaw state."], expectedMinutes: 24 };
+    expect(describeRetryDowntime({ disk })).toContain("For this much state expect about 24 min");
+    expect(describeRetryDowntime({ lastSuccessDurationMs: 330_000, disk })).toContain("The last successful run took 5m 30s.");
+    harness.beginRender();
+    const tree = expandTree(RetryUpgradeDialog({ visible: true, retry: { unchanged: false, disk }, onRetry: vi.fn(), onCancel: vi.fn() }));
+    const details = collectNodes(tree).find((n) => n.props?.confirmLabel)?.props.details;
+    expect(JSON.stringify(details)).toContain("Only 45.0 GB is free for 30.0 GB of OpenClaw state.");
+  });
+
   it("backup line: 'verified' only with archive-bound evidence, and says which state it holds", () => {
     expect(describeBackupLine({ verified: { name: "a.tar.gz", ageMs: 3 * 86_400_000, scope: "pre_upgrade", openclawVersion: "2026.10.2" } })).toBe(
       "Newest verified backup: a.tar.gz · 3d ago · taken before this upgrade, under OpenClaw 2026.10.2",

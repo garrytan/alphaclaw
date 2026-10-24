@@ -44,7 +44,7 @@ const failedRecord = (extra = {}) => ({
 
 const kFailingDoctor = { ok: false, code: 1, stdout: "Failing check plugins: still broken\n", stderr: "" };
 
-const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, lockActive = null, resolveDoctorTimeoutMs = null } = {}) => {
+const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, lockActive = null, resolveDoctorTimeoutMs = null, checkUpgradeDisk = null } = {}) => {
   const dirs = makeDirs();
   writeRecord(dirs.managedDir, record);
   const order = [];
@@ -129,6 +129,7 @@ const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, 
     getInstalledOpenclawVersion: () => kPin,
     requireAdmin: (req, res, next) => next(),
     ...(resolveDoctorTimeoutMs ? { resolveDoctorTimeoutMs } : {}),
+    ...(checkUpgradeDisk ? { checkUpgradeDisk } : {}),
   };
   const app = express();
   app.use(express.json());
@@ -171,6 +172,19 @@ describe("POST /api/openclaw/boot-migration/retry", () => {
     expect(h.deps.restartRequiredState.beginRestart).toHaveBeenCalledWith({ kind: "openclaw_upgrade", budgetMs });
     expect(h.deps.gatewayLifecycleLock.tryAcquire).toHaveBeenCalledWith("openclaw_upgrade", expect.objectContaining({ leaseMs: budgetMs }));
     expect(h.deps.runDoctorFix).toHaveBeenCalledWith(expect.objectContaining({ source: "retry", timeoutMs: threeHoursMs }));
+  });
+
+  it("refuses before stopping the gateway when the backups would not fit (ALPH-23)", async () => {
+    const sentence = "this volume has 32.0 GB free for 30.0 GB of OpenClaw state. Make at least 60.0 GB free, then use Retry upgrade.";
+    const h = createHarness({ checkUpgradeDisk: () => ({ verdict: "refuse", sentences: [sentence] }) });
+    const res = await request(h.app).post("/api/openclaw/boot-migration/retry").send({});
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ ok: false, code: "insufficient_disk", error: sentence });
+    await h.settle();
+    expect(h.deps.restartGateway).not.toHaveBeenCalled();
+    expect(h.deps.runDoctorFix).not.toHaveBeenCalled();
+    const warned = createHarness({ checkUpgradeDisk: () => ({ verdict: "warn", sentences: ["Only 45.0 GB is free."] }) });
+    expect((await request(warned.app).post("/api/openclaw/boot-migration/retry").send({})).status).toBe(202);
   });
 
   it("a failed Doctor still relaunches doctor-free and books the upgrade as unfinished (Try again → Retry upgrade)", async () => {

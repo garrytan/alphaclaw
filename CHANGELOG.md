@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.78] - 2026-10-24
+
+Before OpenClaw's data upgrade for a new pin starts, AlphaClaw checks that it fits. It warns when it might not, and refuses when the disk is too full for the backups (ALPH-23, PR 3 of 3).
+
+### Added
+- **Pre-upgrade disk check.** AlphaClaw compares the SQLite state with the free space beside it, using the same measurements the snapshot preflight shows. On OpenClaw 2026.10.6 the data upgrade grows the volume by about twice the state:
+  - The verified recovery copy needs 2x the state plus 3x the largest database, or OpenClaw skips it.
+  - The per-database backups need about the state again and are never skipped.
+- **Refusal below 1.1x the state.** With less than 1.1x the state free, the backups cannot fit, so Doctor would fill the disk and stop with nothing migrated. AlphaClaw refuses to start it and names the free space and the space to make. The refusal covers every caller while the pin's upgrade is pending: boot, Retry upgrade, the watchdog repair and the medic. Retry upgrade refuses with a 409 before it stops the gateway. At boot the refusal is recorded like an interrupted upgrade, the alert shows AlphaClaw's sentence, and the notification says AlphaClaw did not start the upgrade. Once the upgrade has completed, no check runs.
+- **Warnings.** Admins see "OpenClaw's next data upgrade is at risk" under the Gateway card, and can dismiss it, in two cases:
+  - Less than 2x the state is free, so the upgrade will likely run without a recovery copy.
+  - The state is larger than the Doctor limit is sized for (about 155 GB under the 6-hour cap).
+
+  The Retry upgrade confirm repeats the warnings and, when no earlier run is on record, gives an expected duration of about 50 s per GiB.
+
+### Tests
+- `upgrade-disk-check.test.js` covers the thresholds against the measured 16 GB VM, the warnings, the refusal, the size limit and an unmeasured disk.
+- Runner, status, route and boot-migration cases cover the refusal before Doctor starts and the recorded outcome. They also check that a completed upgrade skips the check, that a warning still runs Doctor, the 409 before the gateway stops, the dismissible row and the notification wording. The frontend case covers the confirm's duration and warnings.
+
 ## [0.10.77] - 2026-10-24
 
 The boot card and the Retry upgrade card now say what OpenClaw's data upgrade is doing, with measured progress through the parts where OpenClaw prints nothing (ALPH-23, PR 2 of 3).

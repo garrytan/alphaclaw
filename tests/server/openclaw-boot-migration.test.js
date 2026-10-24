@@ -491,4 +491,18 @@ describe("server/openclaw-boot-migration", () => {
       { eventType: "health", id: expect.stringMatching(/^boot-migration-no-snapshot-2026\.10\.4-[0-9a-f]{12}$/) },
     );
   });
+
+  it("a disk refusal says AlphaClaw did not start the upgrade, not that OpenClaw failed (ALPH-23)", async () => {
+    const box = newBox();
+    const sentence = "this volume has 32.0 GB free for 30.0 GB of OpenClaw state. Make at least 60.0 GB free, then use Retry upgrade.";
+    const notify = vi.fn(async () => {});
+    const runDoctorFix = vi.fn(async () => ({ ok: false, stdout: "", stderr: sentence, code: "insufficient_disk" }));
+    const result = await runBootMigration({ ...box, installedVersion: "2026.10.6", runDoctorFix, notify, nowFn: () => kNow, logger: silentLogger() });
+    expect(result).toMatchObject({ status: "failed", reason: "insufficient_disk", class: "transient", detail: sentence });
+    expect(notify.mock.calls[0][0]).toBe(
+      "⚠️ OpenClaw 2026.10.6: AlphaClaw did not start OpenClaw's data upgrade. " + sentence + " " +
+        "The gateway is starting on the old data, so agents whose databases were not migrated stay unavailable until the upgrade runs.",
+    );
+    expect(readMigrationRecord(box).failed).toBeUndefined();
+  });
 });
