@@ -7,7 +7,11 @@ const path = require("path");
 const { registerSystemRoutes } = require("../../lib/server/routes/system");
 const { GatewayRestartError, GatewayStopError } = require("../../lib/server/gateway");
 const { kBootMigrationFileName, readMigrationRecord } = require("../../lib/server/openclaw-boot-migration");
-const { kOpenclawBootMigrationLeaseMs } = require("../../lib/server/constants");
+const {
+  kOpenclawBootMigrationLeaseMarginMs,
+  kOpenclawBootMigrationLeaseMs,
+  kOpenclawBootMigrationTimeoutMs,
+} = require("../../lib/server/constants");
 
 const kPin = "2026.10.4";
 
@@ -40,7 +44,7 @@ const failedRecord = (extra = {}) => ({
 
 const kFailingDoctor = { ok: false, code: 1, stdout: "Failing check plugins: still broken\n", stderr: "" };
 
-const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, lockActive = null } = {}) => {
+const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, lockActive = null, resolveDoctorTimeoutMs = null } = {}) => {
   const dirs = makeDirs();
   writeRecord(dirs.managedDir, record);
   const order = [];
@@ -124,6 +128,7 @@ const createHarness = ({ record = failedRecord(), runDoctorFix, restartGateway, 
     alphaclawVersion: "0.10.7",
     getInstalledOpenclawVersion: () => kPin,
     requireAdmin: (req, res, next) => next(),
+    ...(resolveDoctorTimeoutMs ? { resolveDoctorTimeoutMs } : {}),
   };
   const app = express();
   app.use(express.json());
@@ -153,6 +158,19 @@ describe("POST /api/openclaw/boot-migration/retry", () => {
     const done = h.events.find((evt) => evt.event === "done");
     expect(done.data.upgrade.doctor).toBe("ok");
     expect(h.deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "openclaw_upgrade", status: "ok" }));
+  });
+
+  it("sizes Retry upgrade's Doctor ceiling and its operation budget from the measured state (ALPH-23)", async () => {
+    const threeHoursMs = 3 * 60 * 60 * 1000;
+    const resolveDoctorTimeoutMs = vi.fn(() => threeHoursMs);
+    const h = createHarness({ resolveDoctorTimeoutMs });
+    await request(h.app).post("/api/openclaw/boot-migration/retry").send({});
+    await h.settle();
+    expect(resolveDoctorTimeoutMs).toHaveBeenCalledWith(kOpenclawBootMigrationTimeoutMs);
+    const budgetMs = threeHoursMs + kOpenclawBootMigrationLeaseMarginMs;
+    expect(h.deps.restartRequiredState.beginRestart).toHaveBeenCalledWith({ kind: "openclaw_upgrade", budgetMs });
+    expect(h.deps.gatewayLifecycleLock.tryAcquire).toHaveBeenCalledWith("openclaw_upgrade", expect.objectContaining({ leaseMs: budgetMs }));
+    expect(h.deps.runDoctorFix).toHaveBeenCalledWith(expect.objectContaining({ source: "retry", timeoutMs: threeHoursMs }));
   });
 
   it("a failed Doctor still relaunches doctor-free and books the upgrade as unfinished (Try again → Retry upgrade)", async () => {

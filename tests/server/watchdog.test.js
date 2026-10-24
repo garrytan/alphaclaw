@@ -99,6 +99,7 @@ const createHarness = ({
   pauseHealthHoldMs = null,
   // The streamed doctor runner (production wiring).
   repairRunner = null,
+  resolveDoctorTimeoutMs = null,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = autoRepair ? "true" : "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = notificationsDisabled
@@ -173,6 +174,7 @@ const createHarness = ({
     ...(writePersistedPause ? { writePersistedPause } : {}),
     ...(pauseHealthHoldMs != null ? { pauseHealthHoldMs } : {}),
     ...(repairRunner ? { repairRunner } : {}),
+    ...(resolveDoctorTimeoutMs ? { resolveDoctorTimeoutMs } : {}),
   });
 
   return {
@@ -358,6 +360,36 @@ describe("server/watchdog", () => {
     expect(clawCmd).toHaveBeenCalledWith(
       "doctor --fix --yes",
       expect.objectContaining({ quiet: true, timeoutMs: 600000 }),
+    );
+  });
+
+  it("sizes the crash-loop repair's Doctor ceiling from the measured state, with 10 min as the floor (ALPH-23)", async () => {
+    const resolveDoctorTimeoutMs = vi.fn((floorMs) => floorMs * 4);
+    const { watchdog, clawCmd } = createHarness({
+      autoRepair: true,
+      resolveDoctorTimeoutMs,
+      clawCmdImpl: async (command) => {
+        if (command === "doctor --fix --yes")
+          return { ok: true, stdout: "fixed" };
+        return { ok: true, stdout: "" };
+      },
+      fetchImpl: async () => {
+        throw new Error("still unhealthy");
+      },
+    });
+
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    watchdog.onGatewayExit({ code: 1, expectedExit: false });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(resolveDoctorTimeoutMs).toHaveBeenCalledWith(600000);
+    expect(clawCmd).toHaveBeenCalledWith(
+      "doctor --fix --yes",
+      expect.objectContaining({ quiet: true, timeoutMs: 2400000 }),
     );
   });
 

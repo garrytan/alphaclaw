@@ -1,6 +1,10 @@
 const { runOnboardedBootSequence } = require("../../lib/server/startup");
 const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
-const { kOpenclawBootMigrationLeaseMs } = require("../../lib/server/constants");
+const {
+  kOpenclawBootMigrationLeaseMarginMs,
+  kOpenclawBootMigrationLeaseMs,
+  kOpenclawBootMigrationTimeoutMs,
+} = require("../../lib/server/constants");
 
 describe("server/startup", () => {
   // runOnboardedBootSequence mutates the boot-phase module singleton; leave
@@ -401,6 +405,43 @@ describe("server/startup", () => {
     expect(callOrder).toEqual(["runBootMigration", "startGateway"]);
     expect(deps.runBootMigration).toHaveBeenCalledWith(expect.objectContaining({ operation: expect.objectContaining({ signal: expect.anything() }) }));
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
+  });
+
+  it("sizes the boot Doctor's ceiling and the boot lease from the measured state (ALPH-23)", async () => {
+    const release = vi.fn();
+    const acquireLifecycleLock = vi.fn(async () => release);
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+    const resolveDoctorTimeoutMs = vi.fn(() => twoHoursMs);
+    const deps = createBootDeps({
+      acquireLifecycleLock,
+      resolveDoctorTimeoutMs,
+      runBootMigration: vi.fn(async () => ({ status: "ok", ran: true })),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(resolveDoctorTimeoutMs).toHaveBeenCalledWith(kOpenclawBootMigrationTimeoutMs);
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot", {
+      leaseMs: twoHoursMs + kOpenclawBootMigrationLeaseMarginMs,
+      cleanup: expect.objectContaining({ wait: expect.any(Function) }),
+    });
+    expect(deps.runBootMigration).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: twoHoursMs }));
+  });
+
+  it("keeps the 30-min floor when the state cannot be measured", async () => {
+    const acquireLifecycleLock = vi.fn(async () => vi.fn());
+    const deps = createBootDeps({
+      acquireLifecycleLock,
+      resolveDoctorTimeoutMs: () => {
+        throw new Error("EACCES");
+      },
+      runBootMigration: vi.fn(async () => ({ status: "ok", ran: true })),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(acquireLifecycleLock).toHaveBeenCalledWith("boot", expect.objectContaining({ leaseMs: kOpenclawBootMigrationLeaseMs }));
+    expect(deps.runBootMigration).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: kOpenclawBootMigrationTimeoutMs }));
   });
 
   it("a failed doctor migration is reported and the gateway starts anyway", async () => {

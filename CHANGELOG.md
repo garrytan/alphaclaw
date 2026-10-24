@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.76] - 2026-10-24
+
+Every `openclaw doctor --fix` time limit now grows with the OpenClaw state it has to copy and check. The boot upgrade, Retry upgrade and the watchdog repair no longer kill a Doctor that is still working on a large state (ALPH-23, PR 1 of 3).
+
+### Fixed
+- **The Doctor limit is sized from the measured state.** The limit is the larger of the old fixed limit and 150 s per GiB of SQLite state, capped at 6 hours. The old fixed limit stays as the floor: 30 min for the boot upgrade and Retry upgrade, 10 min for the watchdog repair. The 150 s is three times the measured cost: OpenClaw 2026.10.6 took 46-50 s per GiB on 4 GB and 16 GB states, most of it the verified recovery copy, the per-database backups and integrity checks. More CPUs do not shorten that work. The boot lock and the Retry upgrade operation keep their 15 min margin over the new limit. The boot logs the limit it chose (`doctor --fix ceiling: N min`).
+- **Why it matters.** When the limit fires, AlphaClaw stops Doctor (SIGTERM, then SIGKILL). These results come from real 2026.10.4 state upgraded by 2026.10.6:
+  - A stop during the recovery copy left every agent database on schema 24.
+  - A stop during the migration left 2 of 20 agents on 25 and 18 on 24.
+  - The gateway then either exits 78 or serves with those agents' sessions unavailable.
+  - Each stopped run also leaves its recovery copy behind (2-4 GB on a 4 GB state), and the next Doctor does not reclaim it.
+  - A timeout counts as transient, so the next boot and every watchdog repair ran Doctor again. Each run could leave another copy and fill the disk.
+  - A Doctor run to completion afterwards repaired every case, with session counts unchanged.
+
+### Tests
+- `doctor-budget.test.js` covers the floor, the per-GiB scaling, the cap, sidecar measurement and the fallback to the floor when the state cannot be listed.
+- The boot, Retry upgrade and watchdog repair cases check that each one passes the sized limit to Doctor and sizes its lock or operation budget from it.
+
 ## [0.10.75] - 2026-10-23
 
 The per-process memory (PSS) sampler keeps its cached sample when something reads Resources without naming the gateway. On a real box it was restarting collection on every other watchdog tick, so the critical floor used worker RSS instead of worker private memory about half the time and the watchdog logged a `diagnostic_availability` event every minute (ALPH-22 follow-up).
