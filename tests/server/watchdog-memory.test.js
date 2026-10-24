@@ -409,6 +409,112 @@ describe("server/watchdog memory monitor", () => {
         .toMatchObject({ reason: "derived" });
     });
 
+    describe("a restart that did not help (ALPH-26)", () => {
+      const armed = { enabled: true, autoRestart: true, effectiveAutoRestart: true, maxRestartsPerDay: 24 };
+      const relaunchingRestart = (harnessRef, pids) => vi.fn(async () => {
+        harnessRef.current.watchdog.onGatewayLaunch({ pid: pids.shift(), startedAt: Date.now() });
+        return { ok: true };
+      });
+      const worker = (rssMb) => () => ({ rssBytes: rssMb * kMb, cgroupUsedBytes: rssMb * kMb, containerLimitBytes: 540 * kMb });
+      // criticalScenario's samples, stopping at the tick that restarts.
+      const untilRestart = async (harness, restart) => {
+        const calls = restart.mock.calls.length;
+        for (let i = 0; i < 12 && restart.mock.calls.length === calls; i += 1) {
+          vi.setSystemTime(kStartMs + i * kTickMs);
+          harness.readMemorySample.mockImplementation(() => asWorkerSample({
+            rssBytes: (365 + 4 * i) * kMb, cgroupUsedBytes: (365 + 4 * i) * kMb, containerLimitBytes: 540 * kMb,
+            heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 900 * kMb, limitBytes: 1000 * kMb },
+          }));
+          await harness.watchdog.checkMemoryTrend();
+        }
+        expect(restart).toHaveBeenCalledTimes(calls + 1);
+      };
+
+      it("the new worker back at the trigger level within the hour pauses memory restarts for the day, with one notice", async () => {
+        const ref = {};
+        const restart = relaunchingRestart(ref, [5252, 6262]);
+        const statePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")), "state.json");
+        const harness = createHarness({ settings: armed, restartGatewayForMitigation: restart, mitigationStatePath: statePath });
+        ref.current = harness;
+        launchGateway(harness);
+        await untilRestart(harness, restart);
+        const trigger = memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.kind === "mitigation_restart");
+
+        // The replacement worker is at 370 MB again 17 and 18 minutes later.
+        await driveTicks(harness, { ticks: 4, startTick: 20, sampleAt: worker(370) });
+        const ineffective = memoryEvents(harness.insertWatchdogEvent).filter((e) => e.details.kind === "mitigation_ineffective");
+        expect(ineffective).toHaveLength(1);
+        expect(ineffective[0].details).toMatchObject({ opId: trigger.details.opId, measure: "rss", regrowthMb: 370 });
+        expect(ineffective[0].details.triggerMb).toBeGreaterThanOrEqual(365);
+        const notices = notifications(harness.notifier).filter((m) => m.includes("The memory restart did not help"));
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).toContain("The new worker was back to 370 MB RSS within 18 minutes.");
+        expect(notices[0]).toMatch(/Automatic memory restarts are paused until \d{4}-\d\d-\d\dT/);
+        expect(notices[0]).not.toMatch(/restart (it|the gateway) (manually|yourself)|manual restart/i);
+        expect(JSON.parse(fs.readFileSync(statePath, "utf8")).ineffective).toMatchObject({ opId: trigger.details.opId });
+
+        // A new critical 40 minutes on (past the 30-minute spacing): no restart,
+        // one skip event, and the red alert says why.
+        await criticalScenario(harness, 8, 60);
+        expect(restart).toHaveBeenCalledTimes(1);
+        const skips = memoryEvents(harness.insertWatchdogEvent)
+          .filter((e) => e.details.kind === "mitigation_skipped" && e.details.reason === "restart_ineffective");
+        expect(skips).toHaveLength(1);
+        expect(notifications(harness.notifier).some((m) => m.includes("🔴") && m.includes("Automatic memory restarts are paused until") &&
+          m.includes("the last one did not help"))).toBe(true);
+        expect(notifications(harness.notifier).filter((m) => m.includes("The memory restart did not help"))).toHaveLength(1);
+
+        // A day later, in a new episode, restarts are allowed again.
+        harness.watchdog.onGatewayLaunch({ pid: 7272, startedAt: Date.now() });
+        await criticalScenario(harness, 8, 25 * 60);
+        expect(restart).toHaveBeenCalledTimes(2);
+      });
+
+      it("a restart that holds for the hour records that it held and pauses nothing", async () => {
+        const ref = {};
+        const restart = relaunchingRestart(ref, [5252, 6262]);
+        const harness = createHarness({ settings: armed, restartGatewayForMitigation: restart });
+        ref.current = harness;
+        launchGateway(harness);
+        await untilRestart(harness, restart);
+        await driveTicks(harness, { ticks: 64, startTick: 9, sampleAt: worker(200) });
+        const kinds = memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind);
+        expect(kinds).not.toContain("mitigation_ineffective");
+        expect(memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.kind === "mitigation_outcome").details)
+          .toMatchObject({ outcome: "held" });
+        await criticalScenario(harness, 8, 80);
+        expect(restart).toHaveBeenCalledTimes(2);
+      });
+
+      it("one high sample is not regrowth; the samples must stay up", async () => {
+        const ref = {};
+        const restart = relaunchingRestart(ref, [5252]);
+        const harness = createHarness({ settings: armed, restartGatewayForMitigation: restart });
+        ref.current = harness;
+        launchGateway(harness);
+        await untilRestart(harness, restart);
+        const spiky = [200, 380, 210, 380, 205];
+        await driveTicks(harness, { ticks: spiky.length, startTick: 9, sampleAt: (i) => worker(spiky[i - 9])() });
+        expect(memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind)).not.toContain("mitigation_ineffective");
+      });
+
+      it("a persisted pause survives an AlphaClaw restart", async () => {
+        const statePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")), "state.json");
+        fs.writeFileSync(statePath, JSON.stringify({ restarts: [], ineffective: {
+          detectedAtMs: kStartMs - 60 * 60 * 1000, untilMs: kStartMs + 23 * 60 * 60 * 1000, opId: "op-1",
+          regrowthMb: 370, regrowthAfterMs: 12 * 60 * 1000, episodeId: null,
+        } }));
+        const restart = vi.fn(async () => ({ ok: true }));
+        const harness = createHarness({ settings: armed, restartGatewayForMitigation: restart, mitigationStatePath: statePath });
+        launchGateway(harness);
+        await criticalScenario(harness);
+        expect(restart).not.toHaveBeenCalled();
+        expect(memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.reason === "restart_ineffective").details)
+          .toMatchObject({ ineffectiveOpId: "op-1" });
+        expect(JSON.parse(fs.readFileSync(statePath, "utf8")).ineffective.episodeId).toMatch(/^\d+-\d+$/);
+      });
+    });
+
     it("default OFF: critical never restarts", async () => {
       const restart = vi.fn(async () => ({ ok: true }));
       const harness = createHarness({

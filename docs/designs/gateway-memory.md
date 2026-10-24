@@ -164,6 +164,21 @@ own crossing (heap used toward its limit at the worker slope) and takes the
 short ladder at 97% of the heap limit. SIGKILL stays the ladder's last step,
 and the rate brake is unchanged.
 
+**A restart that did not help (ALPH-26).** For an hour after a memory restart the
+watchdog compares the new worker with the one it replaced: private memory with
+private memory when both were measured, otherwise RSS with RSS, and for a
+`heap_near_limit` restart also V8 heap used. Two fresh samples in a row at 90% or
+more of the trigger level record `mitigation_ineffective`: the restart only
+bought minutes, so the growth comes from the workload. Memory restarts then pause
+for 24 hours and for the episode they first hold back (`mitigation_skipped`
+`restart_ineffective`, once per episode), the pause is persisted beside the brake
+stamps in `memory-mitigation-state.json`, and the owner gets one notice saying the
+restart did not help and until when restarts are paused, with no manual-restart
+advice. The critical notice's restart line says the same while the pause holds.
+A restart whose worker stays below that level for the hour logs
+`mitigation_outcome` `held`. The watch itself is in memory: if AlphaClaw restarts
+inside that hour, the check is skipped.
+
 Worker growth retains its existing grace, confirmation, recovery and restart
 interlocks. Fresh container pressure counts only for a dominant, growing worker:
 the worker holds at least half of its process group's RSS and at least half of

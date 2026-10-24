@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.86] - 2026-10-24
+
+### Added
+- **The watchdog stops repeating a memory restart that didn't help.** For an hour after a memory-mitigation restart, it compares the new gateway worker with the one it replaced. It compares private memory with private memory when both were measured, otherwise RSS with RSS, and V8 heap used too for a restart the heap triggered. Two fresh samples in a row at 90% or more of the trigger level record `mitigation_ineffective`, because the restart only bought minutes. Memory restarts then pause for 24 hours and for the episode they first hold back: `mitigation_skipped` with reason `restart_ineffective`, once per episode. The pause is persisted in `memory-mitigation-state.json`, so it survives an AlphaClaw restart. The owner gets one notice ("The memory restart did not help") with the trigger level, the regrowth, how fast it came back and when the pause lifts, and no manual-restart advice. While the pause holds, the 🔴 critical notice says restarts are paused and why. A restart whose worker stays lower for the hour logs `mitigation_outcome` `held`. The restart ladder, the rate brake and the restart authorities are unchanged.
+
+### Tests
+- `watchdog-memory.test.js` covers four cases. A replacement worker back at 370 MB within 18 minutes records one `mitigation_ineffective` and sends one notice; the next critical, 40 minutes later and past the spacing, doesn't restart and logs one skip; a day later in a new episode it restarts. A worker that stays low for the hour logs `held`, and the next critical restarts. Alternating high and low samples are not regrowth. A persisted pause holds after the watchdog is recreated, and claims the episode it held back.
+
 ## [0.10.85] - 2026-10-24
 
 ### Fixed
