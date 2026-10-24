@@ -1863,3 +1863,163 @@ describe("one message per memory episode (ALPH-22)", () => {
   });
 });
 
+
+describe("memory notices show the worker's heap, private memory and group RSS (ALPH-26)", () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(kStartMs); });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.WATCHDOG_AUTO_REPAIR;
+    delete process.env.WATCHDOG_NOTIFICATIONS_DISABLED;
+    vi.restoreAllMocks();
+  });
+
+  const { buildMemoryStatsLine } = require("../../lib/server/watchdog-format");
+  const { kPssStaleMs } = require("../../lib/server/gateway-memory/process-pss");
+  const kLauncherMb = 60;
+  const kChildMb = 300;
+  // A verified worker with a launcher and one tool child; the PSS sampler's
+  // worker read is fresh unless the case says otherwise.
+  const workerSample = (i, workerMb, { heap = { usedMb: 50, limitMb: 1000 }, pss = "fresh", pssAgeMs = 0 } = {}) => {
+    const nowMs = kStartMs + i * kTickMs;
+    const groupMb = workerMb + kLauncherMb + kChildMb;
+    return {
+      rssBytes: workerMb * kMb, rssBasis: "worker", groupRssBytes: groupMb * kMb,
+      workerPrivateBytes: pss === "fresh" ? (workerMb - 20) * kMb : null,
+      heap: heap ? { status: heap.status ?? "fresh", atMs: nowMs, usedBytes: heap.usedMb * kMb, limitBytes: heap.limitMb * kMb } : null,
+      process: {
+        status: "fresh", atMs: nowMs, root: { pid: 4242, startTicks: "1" }, worker: { pid: 4243, startTicks: "2" },
+        groupRssBytes: groupMb * kMb, workerRssBytes: workerMb * kMb, childRssBytes: kChildMb * kMb, childCount: 1,
+        launcherRssBytes: kLauncherMb * kMb, launcherCount: 1, processCount: 3,
+        contributors: [
+          { pid: 4243, role: "gateway", rssBytes: workerMb * kMb },
+          { pid: 5000, role: "gateway_child", rssBytes: kChildMb * kMb },
+        ],
+        pss: pss === "none" ? { status: "unavailable", workerStatus: "unavailable" } : {
+          status: pss, atMs: nowMs - pssAgeMs, workerStatus: pss, workerAtMs: nowMs - pssAgeMs,
+          workerPssBytes: (workerMb - 10) * kMb, workerPrivateBytes: (workerMb - 20) * kMb,
+        },
+      },
+    };
+  };
+  const leak = (options) => (i) => workerSample(i, 100 + 5 * i, options);
+  const firstNotice = async (harness, sampleAt) => {
+    for (let i = 0; i < 40; i += 1) {
+      await driveTicks(harness, { ticks: 1, startTick: i, sampleAt });
+      if (notifications(harness.notifier).length) return { message: notifications(harness.notifier)[0], tick: i };
+    }
+    throw new Error("no memory notice");
+  };
+
+  it("labels the worker heap as a share of its limit, the worker's USS and PSS, and the group RSS as not the worker's", async () => {
+    const harness = createHarness();
+    launchGateway(harness);
+    const { message, tick } = await firstNotice(harness, leak());
+    const workerMb = 100 + 5 * tick;
+    expect(message).toContain("🟡 Gateway memory rising steadily");
+    expect(message).toContain(`Gateway worker RSS: ${workerMb}MB`);
+    expect(message).toContain("Worker heap: V8 heap 50 MB of its 1000 MB limit (5%).");
+    expect(message).toContain(`Worker private memory: USS ${workerMb - 20} MB, PSS ${workerMb - 10} MB.`);
+    expect(message).toContain(`Process group RSS (worker + launcher + tool children): ${workerMb + kLauncherMb + kChildMb} MB, not the worker's own memory.`);
+    expect(message).toContain(`Gateway worker ${workerMb} MB; tool children ${kChildMb} MB across 1 process`);
+    expect(message).not.toContain("(private ");
+  });
+
+  it("an old PSS sample is shown as stale with its age, and stale heap telemetry is marked stale", async () => {
+    const harness = createHarness();
+    launchGateway(harness);
+    const { message, tick } = await firstNotice(harness,
+      leak({ heap: { status: "stale", usedMb: 300, limitMb: 1000 }, pss: "stale", pssAgeMs: 14 * 60_000 }));
+    const workerMb = 100 + 5 * tick;
+    expect(message).toContain("Worker heap: V8 heap 300 MB of its 1000 MB limit (30%), stale: the heap telemetry is not fresh.");
+    expect(message).toContain(`Worker private memory: USS ${workerMb - 20} MB, PSS ${workerMb - 10} MB (stale, sampled 14 min ago).`);
+  });
+
+  it("no heap telemetry and no PSS reading say unavailable", async () => {
+    const harness = createHarness();
+    launchGateway(harness);
+    const { message } = await firstNotice(harness, leak({ heap: null, pss: "none" }));
+    expect(message).toContain("Worker heap: unavailable (no V8 heap telemetry).");
+    expect(message).toContain("Worker private memory: unavailable.");
+    expect(message).toContain("Process group RSS (worker + launcher + tool children):");
+  });
+
+  it("the stats line judges PSS age against the sampler's stale window and keeps the group label on a group basis", () => {
+    vi.setSystemTime(kStartMs);
+    const pss = (ageMs) => ({ process: { pss: { workerStatus: "fresh", workerAtMs: kStartMs - ageMs,
+      workerPssBytes: 500 * kMb, workerPrivateBytes: 480 * kMb } } });
+    const base = { rssMb: 600, rssBasis: "worker", groupRssMb: 900, memoryMeasure: "rss", memoryMb: 600,
+      heap: { status: "fresh", usedMb: 1100, limitMb: 4144, fraction: 0.265 } };
+    expect(buildMemoryStatsLine({ ...base, evidence: pss(kPssStaleMs) })).toContain("Worker private memory: USS 480 MB, PSS 500 MB.");
+    expect(buildMemoryStatsLine({ ...base, evidence: pss(kPssStaleMs + 60_000) }))
+      .toContain("Worker private memory: USS 480 MB, PSS 500 MB (stale, sampled 7 min ago).");
+    expect(buildMemoryStatsLine({ ...base, evidence: pss(0) })).toContain("Worker heap: V8 heap 1100 MB of its 4144 MB limit (27%).");
+    // The monitor leaves fraction null when the reading is older than its sample window.
+    expect(buildMemoryStatsLine({ ...base, heap: { ...base.heap, fraction: null } }))
+      .toContain("(27%), stale: the heap telemetry is not fresh.");
+    expect(buildMemoryStatsLine({ ...base, memoryMeasure: "private", memoryMb: 470, evidence: pss(0) }))
+      .toContain("Worker private memory: USS 470 MB, PSS 500 MB.");
+    expect(buildMemoryStatsLine({ ...base, groupRssMb: null }))
+      .toContain("Process group RSS (worker + launcher + tool children): unavailable, not the worker's own memory.");
+    const group = buildMemoryStatsLine({ ...base, rssBasis: "group", rssMb: 900, memoryMeasure: "group_rss", memoryMb: 900 });
+    expect(group).toContain("Group RSS (gateway plus its tool children): 900MB");
+    expect(group).not.toContain("Process group RSS");
+  });
+
+  it("the cleared and spiked-and-recovered notices show the recovered numbers", async () => {
+    const harness = createHarness({ memoryNoticeHoldMs: 5 * kTickMs });
+    launchGateway(harness);
+    await driveTicks(harness, { ticks: 30, sampleAt: leak() });
+    await driveTicks(harness, { ticks: 1, startTick: 30, sampleAt: (i) => workerSample(i, 60, { heap: { usedMb: 40, limitMb: 1000 } }) });
+    const cleared = notifications(harness.notifier).at(-1);
+    expect(cleared).toContain("✅ Gateway memory back to normal");
+    expect(cleared).toContain("Now:\nGateway worker RSS: 60MB");
+    expect(cleared).toContain("Worker heap: V8 heap 40 MB of its 1000 MB limit (4%).");
+    expect(cleared).toContain("Worker private memory: USS 40 MB, PSS 50 MB.");
+    expect(cleared).toContain(`Process group RSS (worker + launcher + tool children): ${60 + kLauncherMb + kChildMb} MB, not the worker's own memory.`);
+
+    const spiky = createHarness({ memoryNoticeHoldMs: 5 * kTickMs });
+    launchGateway(spiky);
+    const critical = (i) => ({ ...workerSample(i, 365 + 4 * i, { heap: { usedMb: 750, limitMb: 1000 } }),
+      cgroupUsedBytes: (365 + 4 * i) * kMb, containerLimitBytes: 540 * kMb });
+    let tick = 0;
+    while (spiky.watchdog.getMemoryTrend().state !== "critical") {
+      await driveTicks(spiky, { ticks: 1, startTick: tick, sampleAt: critical });
+      tick += 1;
+      if (tick > 40) throw new Error("never critical");
+    }
+    await driveTicks(spiky, { ticks: 1, startTick: tick, sampleAt: (i) => ({ ...workerSample(i, 60, { heap: { usedMb: 300, limitMb: 1000 } }),
+      cgroupUsedBytes: 60 * kMb, containerLimitBytes: 540 * kMb }) });
+    const sent = notifications(spiky.notifier);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("🟡 Gateway memory spiked and recovered");
+    expect(sent[0]).toContain("Now:\nGateway worker RSS: 60MB of 405MB gateway memory budget");
+    expect(sent[0]).toContain("Worker heap: V8 heap 300 MB of its 1000 MB limit (30%).");
+    expect(sent[0]).toContain("Worker private memory: USS 40 MB, PSS 50 MB.");
+    expect(sent[0]).toContain("Process group RSS (worker + launcher + tool children): 420 MB");
+  });
+
+  it("the restarting and brake notices carry the same labelled numbers and never advise a manual restart", async () => {
+    const restart = vi.fn(async () => ({ ok: true }));
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+      restartGatewayForMitigation: restart,
+    });
+    launchGateway(harness);
+    await driveTicks(harness, {
+      ticks: 8,
+      sampleAt: (i) => ({ ...workerSample(i, 365 + 4 * i, { heap: { usedMb: 900, limitMb: 1000 } }),
+        cgroupUsedBytes: (365 + 4 * i) * kMb, containerLimitBytes: 540 * kMb }),
+    });
+    expect(restart).toHaveBeenCalledTimes(1);
+    const sent = notifications(harness.notifier);
+    const restarting = sent.find((m) => m.includes("Restarting gateway before it runs out of memory"));
+    const brake = sent.find((m) => m.includes("automatic restart is paused"));
+    for (const message of [restarting, brake]) {
+      expect(message).toContain("Worker heap: V8 heap 900 MB of its 1000 MB limit (90%).");
+      expect(message).toMatch(/Worker private memory: USS \d+ MB, PSS \d+ MB\./);
+      expect(message).toMatch(/Process group RSS \(worker \+ launcher \+ tool children\): \d+ MB, not the worker's own memory\./);
+    }
+    for (const message of sent) expect(message).not.toMatch(/restart (the gateway|it) (manually|yourself)|manual restart/i);
+  });
+});
+

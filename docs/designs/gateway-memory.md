@@ -247,6 +247,13 @@ notified clears in place, one ✅ follow-up names its duration, its peak and any
 restarts. An episode that ends with the process (a restart or crash) closes
 without a follow-up, because the restart path reports its own outcome.
 
+Every memory notice with numbers gives the worker's RSS against the budget, then
+three labelled lines: the worker's V8 heap as a % of the limit it reports (stale
+or unavailable said so), its private memory (USS and PSS from the PSS sampler,
+with the sample's age and "stale" when it is old), and the process group RSS,
+labelled as not the worker's own memory. The cleared notices add the same lines
+from the recovered readings.
+
 The brake notice ("automatic restart is paused") states how many memory
 restarts the window holds, the limit and spacing, and the UTC time the brake
 lifts. No memory notice advises a manual restart: repeated restarts are the
