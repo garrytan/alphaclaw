@@ -89,6 +89,81 @@ describe("server/agents/service", () => {
     expect(agents.find((entry) => entry.id === "ops")?.default).toBe(false);
   });
 
+  it("does not save the default model as main's own model when a second agent is created", () => {
+    const fsMock = buildFsMock({
+      initialConfig: {
+        agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
+      },
+    });
+    const service = createAgentsService({ fs: fsMock, OPENCLAW_DIR: "/tmp/openclaw" });
+
+    service.createAgent({ id: "ops", name: "Ops Agent" });
+
+    const { agents } = fsMock.readConfig();
+    const main = agents.entries?.main ?? agents.list?.find((entry) => entry.id === "main");
+    expect(main).toBeTruthy();
+    expect(main).not.toHaveProperty("model");
+    expect(service.listAgents().find((entry) => entry.id === "main")).not.toHaveProperty("model");
+  });
+
+  it("keeps an agent's fallbacks when only its primary model changes", async () => {
+    const fsMock = buildFsMock({
+      initialConfig: {
+        agents: {
+          list: [
+            { id: "main", default: true },
+            {
+              id: "ops",
+              model: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["openai/gpt-6-luna"] },
+            },
+          ],
+        },
+      },
+    });
+    const service = createAgentsService({ fs: fsMock, OPENCLAW_DIR: "/tmp/openclaw" });
+
+    const updated = await service.updateAgent("ops", { model: { primary: "anthropic/claude-opus-5-5" } });
+
+    expect(updated.model).toEqual({
+      primary: "anthropic/claude-opus-5-5",
+      fallbacks: ["openai/gpt-6-luna"],
+    });
+  });
+
+  it("adds an agent's new primary to the allowlist that governs it", async () => {
+    const fsMock = buildFsMock({
+      initialConfig: {
+        meta: { migrations: { modelPolicyAllowlist: true } },
+        agents: {
+          defaults: {
+            model: { primary: "anthropic/claude-opus-5-5" },
+            modelPolicy: { allow: ["anthropic/claude-opus-5-5"] },
+          },
+          list: [
+            { id: "main", default: true },
+            { id: "ops" },
+            { id: "lab", modelPolicy: { allow: ["google/*"] } },
+          ],
+        },
+      },
+    });
+    const service = createAgentsService({ fs: fsMock, OPENCLAW_DIR: "/tmp/openclaw" });
+
+    await service.updateAgent("ops", { model: { primary: "openai/gpt-6-astra" } });
+    await service.updateAgent("lab", { model: { primary: "openai/gpt-6.1-sol" } });
+    await service.updateAgent("lab", { model: { primary: "google/gemini-3.1-pro" } });
+    service.createAgent({ id: "intake", model: { primary: "openai/gpt-6-luna" } });
+
+    const { agents } = fsMock.readConfig();
+    const find = (id) => agents.entries?.[id] ?? agents.list?.find((entry) => entry.id === id);
+    expect(agents.defaults.modelPolicy.allow).toEqual([
+      "anthropic/claude-opus-5-5",
+      "openai/gpt-6-astra",
+      "openai/gpt-6-luna",
+    ]);
+    expect(find("lab").modelPolicy.allow).toEqual(["google/*", "openai/gpt-6.1-sol"]);
+  });
+
   // H10: a mutation must fail closed on an existing-but-unparseable config
   // rather than reading it as {} and writing that back (wiping everything).
   it("refuses to wipe an unparseable openclaw.json on a write (H10)", () => {

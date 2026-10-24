@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.82] - 2026-10-24
+
+Adapted from upstream chrysb/alphaclaw `082bc1fd` ("Fix agent-scoped model selection and canonical roster writes"). Only the parts the fork lacked were ported.
+
+### Fixed
+- **A model chosen in AlphaClaw can be blocked by OpenClaw 2026.10's model allowlist.** OpenClaw restricts the models an agent may run. The list is the agent's own `modelPolicy.allow`, else `agents.defaults.modelPolicy.allow`, which Doctor creates from the old `agents.defaults.models` keys on upgrade. Before that migration, the `agents.defaults.models` keys act as the list. A configured primary outside the list is not refused: OpenClaw quietly runs an allowed model instead. So picking a model that wasn't on the list at upgrade time on the Models tab, or as an agent's model, had no effect. Saving a primary now adds it to the list that governs it. An empty list (any model allowed) and a matching `provider/*` entry are left alone. On a migrated config, the models map is no longer touched.
+- **Adding a second agent froze main's model.** The implicit main agent carried a copy of the default model in memory. The first save of a second agent wrote that copy as main's own model, so later default-model changes no longer reached main. Main now has no model of its own unless one is set for it.
+- **Changing an agent's model dropped its fallbacks.** `PATCH /api/agents/:id` with `{ model: { primary } }` replaced the whole model object. It now changes the primary and keeps the agent's `fallbacks`.
+
+### Tests
+- `auth-profiles.test.js` covers the defaults allowlist, an empty list, a provider wildcard, a migrated models map and a pre-migration models map. `agents-service.test.js` covers main's model after a second agent is created, fallbacks surviving a primary change, and the allowlist for an agent under the defaults policy, under its own policy and at creation. All five new cases fail on the previous code. On OpenClaw 2026.10.6, `openclaw models status --json` lists the saved primary under `allowed`.
+
 ## [0.10.81] - 2026-10-24
 
 Ported from upstream chrysb/alphaclaw `4aef80fe` ("Restrict Git credential prompts to GitHub HTTPS").
