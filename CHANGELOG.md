@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.93] - 2026-10-24
+
+### Fixed
+- **git-sync rewrote the repository's commit identity on every run.** Each sync set `user.name` and `user.email` in the repository's `.git/config` to `AlphaClaw Agent` / `agent@alphaclaw.md` whenever they differed, so the agent's own commits and merges in the checkout showed up under the sync's name and an identity the operator set was overwritten. The sync now passes its identity on the command line of its own commit and merge-commit runs only (`git -c user.name=… -c user.email=… commit` / `commit-tree`) and never writes the repository config. An identity already in the config (set by an operator, by onboarding, or by an earlier version) is left as it is. The `deadline_exceeded` detail still names the git subcommand, not `-c`.
+
+### Tests
+- `git-sync-real-git.test.js` runs the sync with no identity in the environment or in global config. The repository config (`.git/config` bytes and `git config --local --list`) is identical before and after a sync, an operator-set identity survives and still signs the operator's own commits, and both the sync's commit and the merge commit it builds when the remote moved carry `AlphaClaw Agent <agent@alphaclaw.md>` as author and committer. All three fail on v0.10.88. `git-sync-run.test.js` asserts that no `config` run happens and that `commit` and `commit-tree` carry the identity.
+
 ## [0.10.88] - 2026-10-24
 
 ### Added

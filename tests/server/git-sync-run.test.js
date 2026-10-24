@@ -22,8 +22,14 @@ const gitError = (message, { status = 1, stdout = "" } = {}) => {
 
 const createRunner = ({ outputs = {}, fail = {} } = {}) => {
   const calls = [];
-  const git = (args, opts = {}) => {
-    calls.push({ args: [...args], opts });
+  const git = (gitArgs, opts = {}) => {
+    const config = [];
+    let args = [...gitArgs];
+    while (args[0] === "-c") {
+      config.push(args[1]);
+      args = args.slice(2);
+    }
+    calls.push({ args, config, opts });
     const key = args[0];
     const failure = typeof fail[key] === "function" ? fail[key](args, calls) : fail[key];
     if (failure) throw failure instanceof Error ? failure : gitError(`fatal: ${key} exploded`);
@@ -41,7 +47,6 @@ const happyOutputs = (overrides = {}) => ({
   "--version": "git version 2.39.5\n",
   "symbolic-ref": "main\n",
   remote: "https://github.com/owner/repo.git\n",
-  config: (args) => (args.includes("user.name") ? "AlphaClaw Agent\n" : "agent@alphaclaw.md\n"),
   status: " M openclaw.json\0",
   "rev-parse": (args) => {
     if (args.includes("--git-dir")) return ".git\n";
@@ -88,6 +93,7 @@ describe("lib/cli/git-sync performGitSync", () => {
       "commit", "--only", "-m", "hourly sync", "--pathspec-from-file=-", "--pathspec-file-nul",
     ]);
     expect(commit.opts).toMatchObject({ input: "openclaw.json\0", literalPathspecs: true });
+    expect(commit.config).toEqual(["user.name=AlphaClaw Agent", "user.email=agent@alphaclaw.md"]);
     expect(calls.find((c) => c.args[0] === "fetch").args).toEqual([
       "fetch", "origin", "--", "+refs/heads/main:refs/remotes/origin/main",
     ]);
@@ -100,20 +106,20 @@ describe("lib/cli/git-sync performGitSync", () => {
     expect(input.log).toHaveBeenCalledWith(expect.stringContaining("Git sync complete (abc1234)"));
   });
 
-  it("only rewrites origin and the identity when they differ", () => {
+  it("only rewrites origin when it differs and never touches the repository's identity config", () => {
     const { git, calls } = createRunner({
-      outputs: happyOutputs({ remote: "https://github.com/old/repo.git\n", config: "" }),
+      outputs: happyOutputs({ remote: "https://github.com/old/repo.git\n" }),
     });
     performGitSync({ git, ...baseInput() });
     expect(calls.find((c) => c.args[1] === "set-url").args).toEqual([
       "remote", "set-url", "origin", "--", "https://github.com/owner/repo.git",
     ]);
-    expect(calls.filter((c) => c.args[0] === "config" && c.args[1] !== "--get")).toHaveLength(2);
+    expect(subcommands(calls)).not.toContain("config");
 
     const unchanged = createRunner({ outputs: happyOutputs() });
     performGitSync({ git: unchanged.git, ...baseInput() });
     expect(unchanged.calls.some((c) => c.args[1] === "set-url")).toBe(false);
-    expect(unchanged.calls.filter((c) => c.args[0] === "config" && c.args[1] !== "--get")).toHaveLength(0);
+    expect(subcommands(unchanged.calls)).not.toContain("config");
   });
 
   it("untracked candidates are registered with add -N before the single commit", () => {
@@ -269,6 +275,7 @@ describe("lib/cli/git-sync performGitSync", () => {
     expect(calls.find((c) => c.args[0] === "merge-tree").args).toEqual([
       "merge-tree", "--write-tree", "--name-only", "--no-messages", "local-sha", "remote-sha",
     ]);
+    expect(calls.find((c) => c.args[0] === "commit-tree").config).toEqual(["user.name=AlphaClaw Agent", "user.email=agent@alphaclaw.md"]);
     expect(calls.find((c) => c.args[0] === "commit-tree").args).toEqual([
       "commit-tree", "tree-sha", "-p", "local-sha", "-p", "remote-sha", "-m", "sync: merge origin/main (AlphaClaw)",
     ]);
