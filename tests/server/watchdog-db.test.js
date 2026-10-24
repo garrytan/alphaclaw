@@ -222,8 +222,8 @@ describe("server/watchdog-db", () => {
       details: { skipped: false },
     });
 
-    const filtered = getRecentEvents({ limit: 2, includeRoutine: false });
-    const unfiltered = getRecentEvents({ limit: 2, includeRoutine: true });
+    const filtered = getRecentEvents({ limit: 2, includeRoutine: false }).events;
+    const unfiltered = getRecentEvents({ limit: 2, includeRoutine: true }).events;
 
     expect(filtered).toHaveLength(2);
     expect(filtered.every((event) => !(event.eventType === "health_check" && event.status === "ok")))
@@ -283,7 +283,7 @@ describe("server/watchdog-db", () => {
     currentDatabase.exec("COMMIT");
 
     const startedAt = performance.now();
-    const events = getRecentEvents({ limit: 20 });
+    const { events } = getRecentEvents({ limit: 20 });
     const elapsedMs = performance.now() - startedAt;
 
     expect(events).toHaveLength(5);
@@ -307,7 +307,7 @@ describe("server/watchdog-db", () => {
       status: "failed",
       details: { code: 1 },
     });
-    expect(first.getRecentEvents({ limit: 5 })).toHaveLength(1);
+    expect(first.getRecentEvents({ limit: 5 }).events).toHaveLength(1);
 
     currentWatchdogDb.closeWatchdogDb();
 
@@ -327,7 +327,7 @@ describe("server/watchdog-db", () => {
         status: "ok",
         details: null,
       });
-      const events = currentWatchdogDb.getRecentEvents({ limit: 5 });
+      const { events } = currentWatchdogDb.getRecentEvents({ limit: 5 });
       expect(events).toHaveLength(1);
       expect(events[0].eventType).toBe("repair");
     } finally {

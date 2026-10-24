@@ -310,7 +310,7 @@ describe("schema migration", () => {
     db = loadWatchdogDb();
     db.initWatchdogDb({ rootDir, pruneDays: 30 });
     // Legacy rows survive, unstamped; new surfaces work.
-    const events = db.getRecentEvents({ limit: 5 });
+    const { events } = db.getRecentEvents({ limit: 5 });
     expect(events).toHaveLength(1);
     expect(db.listIncidents()).toEqual([]);
     const tracker = createTracker();
@@ -451,7 +451,7 @@ describe("incident lifecycle through the wrapped sink", () => {
     const insert = tracker.wrapInsertEvent(db.insertWatchdogEvent);
     const eventId = insert(crashEvent());
     expect(eventId).toBeGreaterThan(0);
-    const events = db.getRecentEvents({ limit: 5 });
+    const { events } = db.getRecentEvents({ limit: 5 });
     expect(events).toHaveLength(1);
     expect(db.listIncidents()).toEqual([]);
     expect(tracker.getActiveIncidentId()).toBe(null);
@@ -583,7 +583,7 @@ describe("resilience fixes (adversarial-review regressions)", () => {
     });
     // Fail-open: the event still landed (unstamped), exactly once.
     expect(eventId).toBeGreaterThan(0);
-    const all = db.getRecentEvents({ limit: 10, includeRoutine: true });
+    const { events: all } = db.getRecentEvents({ limit: 10, includeRoutine: true });
     expect(all.filter((event) => event.eventType === "restart")).toHaveLength(1);
     const { events } = db.getIncidentEvents(incidentId);
     expect(events.filter((event) => event.eventType === "restart")).toHaveLength(0);
@@ -600,7 +600,7 @@ describe("resilience fixes (adversarial-review regressions)", () => {
     const tracker = createTracker();
     const insert = wrapped(tracker);
     insert(crashEvent());
-    const [row] = db.getRecentEvents({ limit: 1 });
+    const [row] = db.getRecentEvents({ limit: 1 }).events;
     expect(Object.keys(row).sort()).toEqual([
       "correlationId",
       "createdAt",

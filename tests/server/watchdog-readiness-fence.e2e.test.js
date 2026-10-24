@@ -116,7 +116,7 @@ const incidents = () => db.listIncidents();
 // getIncidentEvents returns { events, total, ... } — the rows are what we want.
 const incidentEvents = (incidentId) => db.getIncidentEvents(incidentId).events;
 const eventsOfType = (eventType) =>
-  db.getRecentEvents({ limit: 500, includeRoutine: true }).filter((event) => event.eventType === eventType);
+  db.getRecentEvents({ limit: 500, includeRoutine: true }).events.filter((event) => event.eventType === eventType);
 const noticesIncluding = (notifier, text) =>
   notifier.notify.mock.calls.map((call) => String(call?.[0] || "")).filter((m) => m.includes(text));
 
