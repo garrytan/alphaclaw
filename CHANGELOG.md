@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.80] - 2026-10-24
+
+A new guard keeps `node_modules` out of the tree (ALPH-14 follow-up to #200).
+
+### Added
+- **Guard: `tests/server/guards/committed-node-modules.guard.test.js`.** CI fails when a tracked path has a `node_modules` segment, or when a tracked symlink points into one. It reads the index (`git ls-files -s`), so a staged entry also fails locally before the commit. It follows the `kKnownOffenders` pattern and starts with an empty allowlist; a removed offender that is still listed fails too.
+
+### Fixed
+- **`.gitignore` now ignores a `node_modules` symlink.** The pattern was `node_modules/`, which matches only a directory. A worktree that links `node_modules` to a shared install showed the link as an untracked file, and #200 committed one through `git add -A`. The pattern is now `node_modules`.
+
 ## [0.10.79] - 2026-10-24
 
 The crash-guard SIGTERM test no longer races the child's own startup output (ALPH-14 follow-up).
