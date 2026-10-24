@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.91] - 2026-10-24
+
+### Added
+- **The watchdog stops repeating a memory restart that didn't help.** For an hour after a memory-mitigation restart, it compares the new gateway worker with the one it replaced. It compares private memory with private memory when both were measured, otherwise RSS with RSS, and V8 heap used too for a restart the heap triggered. Two fresh samples in a row at 90% or more of the trigger level record `mitigation_ineffective`, because the restart only bought minutes. Memory restarts then pause for 24 hours and for the episode they first hold back: `mitigation_skipped` with reason `restart_ineffective`, once per episode. The pause is persisted in `memory-mitigation-state.json`, so it survives an AlphaClaw restart. The owner gets one notice ("The memory restart did not help") with the trigger level, the regrowth, how fast it came back and when the pause lifts, and no manual-restart advice. While the pause holds, the 🔴 critical notice says restarts are paused and why. A restart whose worker stays lower for the hour logs `mitigation_outcome` `held`. The restart ladder, the rate brake and the restart authorities are unchanged.
+- **With auto-restart off, the watchdog records what it would have done.** When a verified-worker critical reaches a restart authority (`heap_near_limit`, `worker_container_oom` or `operator_budget`) on fresh evidence but auto-restart is off, it logs one `restart_would_have_run` memory event per episode. The event has the authority, the worker's memory and measure, its group RSS, slope, cap and source, heap, container pressure, the critical gates and the evidence. There's no notification for it. Operators can judge the policy from these events before arming it.
+
+### Tests
+- `watchdog-memory.test.js` covers four cases. A replacement worker back at 370 MB within 18 minutes records one `mitigation_ineffective` and sends one notice; the next critical, 40 minutes later and past the spacing, doesn't restart and logs one skip; a day later in a new episode it restarts. A worker that stays low for the hour logs `held`, and the next critical restarts. Alternating high and low samples are not regrowth. A persisted pause holds after the watchdog is recreated, and claims the episode it held back. With auto-restart off, a heap-authority critical logs one `restart_would_have_run` and sends no notice for it; a critical without an authority logs none.
+
 ## [0.10.90] - 2026-10-24
 
 ### Fixed
