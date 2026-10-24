@@ -19,7 +19,7 @@ Before OpenClaw's data upgrade for a new pin starts, AlphaClaw checks that it fi
   - The state is larger than the Doctor limit is sized for (about 155 GB under the 6-hour cap).
 
   The Retry upgrade confirm repeats the warnings and, when no earlier run is on record, gives an expected duration of about 50 s per GiB.
-- **The refusal shows no OpenClaw output.** OpenClaw never ran, so the data upgrade card hides "What OpenClaw said" for an `insufficient_disk` outcome.
+- **The refusal card reads the disk as it is now.** It says "OpenClaw's data upgrade didn't start" and gives the current free space, not the space at the refusal. Once enough is free it says so ("There is room for it to start now. Use Retry upgrade."), with any warning that still applies. While a Doctor runs, its backups fill the disk, so the card keeps the recorded sentence and the disk warning stays hidden. OpenClaw never ran, so the card hides "What OpenClaw said".
 
 ### Fixed
 - **Free space before the first snapshot.** The snapshot preflight measured free space at `<state>.update-captures`, which does not exist until the first capture. Free space then read as unknown, the 2x-state check never ran, and the card offered no size advice. It now measures the nearest existing parent, which is on the same volume.
