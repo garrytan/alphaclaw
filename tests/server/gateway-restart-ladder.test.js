@@ -397,6 +397,10 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     // Autotune stamped exactly once, after ready (the boot launch stamped once at spawn before).
     expect(stamp).toHaveBeenCalledTimes(2);
     expect(launchHandler).toHaveBeenCalledWith(expect.objectContaining({ pid: next.launcherPid, servingPid: next.workerPid, supervision: "managed" }));
+    // Both notices for the new child (listening, then ready) carry its spawn time.
+    const nextNotices = launchHandler.mock.calls.map(([payload]) => payload).filter((payload) => payload.pid === next.launcherPid);
+    expect(nextNotices.length).toBe(2);
+    expect(nextNotices.map((payload) => payload.launchedAt)).toEqual([expect.any(Number), nextNotices[0].launchedAt]);
     expect(gateway.getManagedGatewayWorkerPid()).toBe(next.workerPid);
   });
 
