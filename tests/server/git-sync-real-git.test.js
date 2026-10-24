@@ -3,7 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { performGitSync } = require("../../lib/cli/git-sync");
+const { performGitSync, kGitMaxBufferBytes } = require("../../lib/cli/git-sync");
 const {
   acquireWriterLock,
   resolveWriterLockPath,
@@ -36,6 +36,7 @@ const createRunner = (repoDir) => (args, { input, literalPathspecs = false, byte
     cwd,
     encoding: bytes ? "latin1" : "utf8",
     stdio: "pipe",
+    maxBuffer: kGitMaxBufferBytes,
     ...(input !== undefined ? { input } : {}),
     ...(Number.isFinite(timeoutMs) ? { timeout: Math.floor(timeoutMs) } : {}),
     env: {
@@ -519,6 +520,62 @@ describe("git-sync against real git (issue #140)", () => {
     });
     expect(result.code).toBe("index_locked");
     expect(result.paths[0]).toMatch(/index\.lock$/);
+  });
+
+  describe("more changed paths than Node's default output buffer holds", () => {
+    const kBulkFiles = 15_000;
+    const writeBulk = () => {
+      const dir = path.join(live, "workspace", "imported-notes-from-a-long-running-agent-session");
+      fs.mkdirSync(dir, { recursive: true });
+      for (let index = 0; index < kBulkFiles; index += 1) {
+        fs.writeFileSync(path.join(dir, `note-${String(index).padStart(5, "0")}-captured-by-the-agent.md`), `${index}\n`);
+      }
+    };
+    // The CLI's runner before it set maxBuffer: Node's 1 MiB default.
+    const defaultBufferGit = (args, { input, literalPathspecs = false, bytes = false, cwd = live } = {}) =>
+      execFileSync("git", args, {
+        cwd,
+        encoding: bytes ? "latin1" : "utf8",
+        stdio: "pipe",
+        ...(input !== undefined ? { input } : {}),
+        env: { ...process.env, ...kGitEnv, ...(literalPathspecs ? { GIT_LITERAL_PATHSPECS: "1" } : {}) },
+      });
+
+    it("commits and pushes 15,000 new files whose status listing is over 1 MiB", () => {
+      writeBulk();
+      const listing = sh(live, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { maxBuffer: kGitMaxBufferBytes });
+      expect(listing.length).toBeGreaterThan(1024 * 1024);
+      expect(kGitMaxBufferBytes).toBeGreaterThan(100 * listing.length);
+
+      expect(sync()).toMatchObject({ code: "ok", committed: true, pushed: true });
+
+      const pushed = sh(remote, ["ls-tree", "-r", "--name-only", "main"], { maxBuffer: kGitMaxBufferBytes });
+      expect(pushed.trim().split("\n")).toHaveLength(kBulkFiles + 2);
+    }, 120_000);
+
+    it("stores a short sentence, never git's stdout, when git's output overflows or git fails without stderr", () => {
+      writeBulk();
+
+      const overflow = sync({ git: defaultBufferGit });
+
+      expect(overflow).toMatchObject({ code: "failed", committed: false, pushed: false });
+      expect(overflow.detail).toBe("git status printed more output than the sync can read (over 1.0 MB)");
+
+      const git = createRunner(live);
+      const silentFailure = sync({
+        git: (args, opts) => {
+          if (args[0] !== "push") return git(args, opts);
+          throw Object.assign(new Error("Command failed: git push"), {
+            status: 1,
+            stderr: "",
+            stdout: git(["status", "--porcelain=v1", "--untracked-files=all"]),
+          });
+        },
+      });
+
+      expect(silentFailure).toMatchObject({ code: "push_failed", committed: true, pushed: false });
+      expect(silentFailure.detail).toBe("git exited with status 1 and no error message");
+    }, 120_000);
   });
 });
 
