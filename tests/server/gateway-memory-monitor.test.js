@@ -593,6 +593,28 @@ describe("getTrend caching", () => {
   });
 });
 
+describe("previewCap", () => {
+  it("answers the cap the next evaluation would use, from the newest sample's limits, kept across a process change", () => {
+    const monitor = createGatewayMemoryMonitor();
+    expect(monitor.previewCap(null)).toEqual({ effectiveCapMb: null, capSource: "none", capPhysicalMb: null, capFraction: null });
+    expect(monitor.previewCap(mb(4500))).toMatchObject({ effectiveCapMb: 4500, capSource: "budget" });
+    monitor.addSample({ rssBasis: "worker", atMs: kStartMs, pid: 1, rssBytes: mb(100),
+      containerLimitBytes: mb(5120), hostTotalBytes: mb(16_384) });
+    expect(monitor.previewCap(null)).toEqual({ effectiveCapMb: 3840, capSource: "container_share", capPhysicalMb: 5120, capFraction: 0.75 });
+    // Above the derived share: still the cap, never clamped to it.
+    expect(monitor.previewCap(mb(4500))).toEqual({ effectiveCapMb: 4500, capSource: "budget", capPhysicalMb: null, capFraction: null });
+    monitor.addSample({ rssBasis: "worker", atMs: kStartMs + kTickMs, pid: 2, rssBytes: mb(100),
+      containerLimitBytes: mb(5120), hostTotalBytes: mb(16_384) });
+    expect(monitor.previewCap(null)).toMatchObject({ effectiveCapMb: 3840, capSource: "container_share" });
+    // The container limit goes away: the preview follows the sample evaluate() uses.
+    monitor.addSample({ rssBasis: "worker", atMs: kStartMs + 2 * kTickMs, pid: 2, rssBytes: mb(100),
+      containerLimitBytes: null, hostTotalBytes: mb(16_384) });
+    const { snapshot } = monitor.evaluate(kStartMs + 2 * kTickMs);
+    expect(monitor.previewCap(null)).toMatchObject({ effectiveCapMb: 12_288, capSource: "host_share" });
+    expect(snapshot).toMatchObject({ effectiveCapMb: 12_288, capSource: "host_share" });
+  });
+});
+
 describe("scoped policy, freshness and retained explanations", () => {
   it("container pressure cannot make a flat process group restart eligible", () => {
     const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });

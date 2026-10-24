@@ -208,6 +208,34 @@ describe("real-server lifecycle e2e", () => {
     }
   });
 
+  it(
+    "stores a watchdog memory budget PUT through the real server wiring and reports the cap",
+    async () => {
+      const rootDir = makeRootDir(tmpDirs);
+      const server = spawnRealServer({ port: kBasePort + 2, rootDir });
+      extraServers.push(server);
+      await waitForHealth(server.port);
+      const cookie = await login(server.port);
+      const body = JSON.stringify({ budgetMb: 4096, maxRestartsPerDay: 5 });
+      const put = await httpRequest({
+        port: server.port,
+        path: "/api/watchdog/memory",
+        method: "PUT",
+        headers: { cookie, "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+        body,
+      });
+      expect(put.status).toBe(200);
+      const putBody = JSON.parse(put.body);
+      expect(putBody.settings).toMatchObject({ budgetMb: 4096, maxRestartsPerDay: 5 });
+      expect(putBody.effectiveCap).toMatchObject({ effectiveCapMb: 4096, capSource: "budget", appliesFrom: "next_evaluation" });
+      const get = await httpRequest({ port: server.port, path: "/api/watchdog/memory", headers: { cookie } });
+      expect(JSON.parse(get.body).settings).toMatchObject({ budgetMb: 4096, maxRestartsPerDay: 5 });
+      const stored = JSON.parse(fs.readFileSync(path.join(rootDir, ".openclaw", "alphaclaw.json"), "utf8"));
+      expect(stored.watchdog.memory).toMatchObject({ budgetMb: 4096, maxRestartsPerDay: 5 });
+    },
+    25000,
+  );
+
   it("serves /health 200 with the pre-onboarding status body", async () => {
     const health = await httpRequest({ port: serverA.port, path: "/health" });
     expect(health.status).toBe(200);
