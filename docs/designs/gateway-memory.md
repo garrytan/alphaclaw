@@ -122,6 +122,16 @@ with an 8 GB heap, which the overseer still accepts in historical records). The
 previous co-resident formula `cgroupUsed - groupRSS` is removed. The old `projectedExhaustionAt` field
 aliases projected group-budget crossing; new code uses `projectedBudgetCrossingAt`.
 
+The budget is never clamped: an operator budget above the derived share is the
+cap. `GET` and `PUT /api/watchdog/memory` return the stored settings beside
+`effectiveCap`, the cap the next evaluation uses with the stored budget
+(`effectiveCapMb`, `capSource`, `capPhysicalMb`, `capFraction`), the cap the last
+evaluation used (`lastEvaluated`), and a `reason` when the stored budget is not
+enforced (`detection_disabled`, `config_unreadable`, `memory_limit_unknown`). A
+PUT whose stored value differs from the request answers `500 setting_not_stored`
+with the field: before v0.10.84 the server dropped `budgetMb` and
+`maxRestartsPerDay` on the way to `alphaclaw.json` and answered `ok: true`.
+
 **Critical (ALPH-22)** needs all three gates on the verified worker, held for
 three consecutive fresh evaluations (the fast path also needs RSS rising on each):
 
