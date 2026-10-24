@@ -1,6 +1,6 @@
 {
   "name": "alphaclaw",
-  "version": "0.10.85",
+  "version": "0.10.89",
   "publishConfig": {
     "access": "public"
   },
