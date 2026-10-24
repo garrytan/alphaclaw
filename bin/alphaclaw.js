@@ -71,6 +71,12 @@ const {
   shouldRefreshHourlyGitSyncScript,
 } = require("../lib/cli/git-runtime");
 const {
+  kSystemBinDir,
+  resolveHostBinDir,
+  prependPathDir,
+  removeStaleSystemGitShim,
+} = require("../lib/cli/host-bin");
+const {
   buildSystemCronFile,
   isSafeCronSchedule,
   resolveSyncScheduleOptions,
@@ -287,6 +293,9 @@ const resolveGithubRepoPath = (value) =>
 const rootDir = resolveRootDirFromArgv(args);
 
 process.env.ALPHACLAW_ROOT_DIR = rootDir;
+
+// /usr/local/bin for a root install, <rootDir>/bin otherwise (lib/cli/host-bin.js).
+const hostBinDir = resolveHostBinDir({ rootDir });
 
 const portFlag = flagValue(args, "--port");
 if (portFlag) {
@@ -694,7 +703,7 @@ const runGitSync = () => {
   }
 
   const realGitPath = resolveRealGitPath({
-    shimPath: resolveGitShimPath(),
+    shimPath: resolveGitShimPath({ binDir: hostBinDir }),
   });
   if (!realGitPath) {
     return refuseNotConfigured(
@@ -908,6 +917,24 @@ process.env.OPENCLAW_STATE_DIR = openclawDir;
 process.env.GOG_KEYRING_PASSWORD =
   process.env.GOG_KEYRING_PASSWORD || "alphaclaw";
 
+// Non-root: the binaries AlphaClaw provides live in <rootDir>/bin, first on
+// PATH for this process and everything it spawns (gateway, Doctor, CLIs).
+if (hostBinDir !== kSystemBinDir) {
+  try {
+    fs.mkdirSync(hostBinDir, { recursive: true });
+  } catch (e) {
+    console.log(`[alphaclaw] ${hostBinDir} not created: ${e.message}`);
+  }
+  process.env.PATH = prependPathDir(hostBinDir, process.env.PATH);
+  console.log(`[alphaclaw] Not running as root: AlphaClaw's git shim, systemctl shim and gog live in ${hostBinDir}`);
+  if (
+    resolveGitShimPath({ binDir: hostBinDir }) !== path.join(kSystemBinDir, "git") &&
+    removeStaleSystemGitShim({ openclawDir })
+  ) {
+    console.log(`[alphaclaw] Removed this install's old git shim from ${kSystemBinDir}/git`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 8. Install gog (Google Workspace CLI) if not present
 // ---------------------------------------------------------------------------
@@ -1112,8 +1139,9 @@ if (!gogInstalled) {
     const extractedPath = path.join(gogTmpDir, plan.memberName);
     const verified = verifyExtractedBinary(extractedPath);
     if (!verified.ok) throw new Error(`extracted gog binary rejected (${verified.reason})`);
-    fs.copyFileSync(extractedPath, "/usr/local/bin/gog");
-    fs.chmodSync("/usr/local/bin/gog", 0o755);
+    const gogDest = path.join(hostBinDir, "gog");
+    fs.copyFileSync(extractedPath, gogDest);
+    fs.chmodSync(gogDest, 0o755);
     console.log(`[alphaclaw] gog CLI ${resolvedGog.version} installed (${checksumNote})`);
   } catch (e) {
     console.log(`[alphaclaw] gog install skipped: ${e.message}`);
@@ -1276,6 +1304,10 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     } catch {}
   };
   const wrapperPath = kWrapperPathOverride || "/usr/local/bin/openclaw";
+  // A non-root install's binaries are not on the machine's PATH: operator
+  // shells get the same <rootDir>/bin prefix as the server.
+  const hostBinPathLines =
+    hostBinDir === kSystemBinDir ? [] : [`export PATH=${shQuote(hostBinDir)}:"$PATH"`];
   // The pinned install's real bin, resolved at generation time.
   // (openclaw's package.json is not in its `exports`, so require.resolve
   // cannot reach it — read the install directly.)
@@ -1319,6 +1351,7 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
       ? `export OPENCLAW_SERVICE_REPAIR_POLICY=${shQuote(serviceRepairPolicy)}`
       : "unset OPENCLAW_SERVICE_REPAIR_POLICY",
     "export OPENCLAW_NO_AUTO_UPDATE=1",
+    ...hostBinPathLines,
     // The alphaclaw install's own (pinned) openclaw bin, then a portable PATH
     // walk that skips this wrapper itself. NOTE: `command -v -a` is NOT the
     // fallback here — POSIX sh (dash, bash-as-sh) rejects the -a flag, which
@@ -1366,6 +1399,7 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     `export OPENCLAW_HOME=${shQuote(rootDir)}`,
     `export OPENCLAW_STATE_DIR=${shQuote(openclawDir)}`,
     `export OPENCLAW_CONFIG_PATH=${shQuote(resolveOpenclawChildConfigPath(openclawDir))}`,
+    ...hostBinPathLines,
     "",
   ].join("\n");
   try {
@@ -1482,7 +1516,7 @@ try {
   execSync("command -v systemctl", { stdio: "ignore" });
 } catch {
   const shimSrc = path.join(__dirname, "..", "lib", "scripts", "systemctl");
-  const shimDest = "/usr/local/bin/systemctl";
+  const shimDest = path.join(hostBinDir, "systemctl");
   try {
     fs.copyFileSync(shimSrc, shimDest);
     fs.chmodSync(shimDest, 0o755);
@@ -1517,7 +1551,7 @@ try {
     ({ scriptPath: gitAskPassDest } = writeGitAskpassScript());
   }
   const gitShimTemplatePath = path.join(__dirname, "..", "lib", "scripts", "git");
-  const gitShimDest = resolveGitShimPath();
+  const gitShimDest = resolveGitShimPath({ binDir: hostBinDir });
   process.env.PATH = prependGitShimDirToPath({
     shimPath: gitShimDest,
   });
