@@ -3708,6 +3708,28 @@ describe("server/routes/system", () => {
     expect(deps.watchdog.onExpectedRestartSettled).toHaveBeenCalledTimes(1);
   });
 
+  it("a note the watchdog already settled (filed while it was stopping) keeps that ending on the record, the stream and the notification (Bug C)", async () => {
+    const deps = failureDeps({
+      operationId: "op-late",
+      error: new GatewayStopError("stop_failed", "1 gateway process did not exit after SIGKILL", { pids: [777], signalled: true }),
+    });
+    deps.watchdog.noteRestartFailure = vi.fn(() => ({
+      admission: { ok: true },
+      recheck: { scheduled: false, delaysMs: [] },
+      settled: { status: "stopped", reason: null },
+    }));
+    await request(createApp(deps)).post("/api/gateway/restart");
+    expect(deps.restartRequiredState.patchRestartOperation).toHaveBeenCalledWith({
+      operationId: "op-late", recovery: { status: "stopped", reason: null },
+    });
+    expect(deps.operationEvents.publish).toHaveBeenCalledWith("op-late", {
+      event: "recovery",
+      data: expect.objectContaining({ status: "stopped", text: "AlphaClaw stopped before automatic recovery finished." }),
+    });
+    expect(deps.notify.mock.calls[0][0]).toContain("AlphaClaw stopped before automatic recovery finished.");
+    expect(deps.notify.mock.calls[0][0]).not.toContain("checking now");
+  });
+
   it("stop evidence on /api/restart-status is admin-only: members get the record without pids or commands (bug #137)", async () => {
     const record = {
       operationId: "op-ev",

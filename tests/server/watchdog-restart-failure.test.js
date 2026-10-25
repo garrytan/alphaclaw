@@ -44,6 +44,7 @@ const createHarness = ({
   supervisorModeActive = () => false,
   consumeRestartHandoffImpl = null,
   onRestartFailureRecovered = null,
+  onRestartFailureSettled = null,
   // Cause linkage (PR 2): route the sink through a real incident tracker on
   // a scratch watchdog db (server.js wiring) and answer /readyz too.
   trackIncidents = false,
@@ -116,6 +117,7 @@ const createHarness = ({
     ...(readPersistedPause ? { readPersistedPause, writePersistedPause: vi.fn() } : {}),
     ...(getOpenclawInfo ? { getOpenclawInfo } : {}),
     ...(onRestartFailureRecovered ? { onRestartFailureRecovered } : {}),
+    ...(onRestartFailureSettled ? { onRestartFailureSettled } : {}),
   });
   const rows = () => insertWatchdogEvent.mock.calls.map(([row]) => row);
   const rowsOf = (eventType, status = null, source = null) =>
@@ -719,6 +721,140 @@ describe("watchdog failed-restart handoff (bug #137)", () => {
       expect(
         h.watchdog.noteRestartFailure({ operationId: "op-2", code: "something_else", gatewayDown: false }).note.code,
       ).toBe("restart_failed");
+    });
+  });
+
+  // Bug C — the record's `recovery` said will_check long after the watchdog
+  // gave up: every way the note ends now settles it once, first ending wins.
+  describe("settled recovery (Bug C)", () => {
+    const settledWith = (hook) => hook.mock.calls.map(([call]) => ({ operationId: call.operationId, status: call.status, reason: call.reason }));
+    const doctorFails = async (command) =>
+      command === "doctor --fix --yes"
+        ? { ok: false, stdout: "", stderr: "ENOSPC: no space left on device" }
+        : { ok: true, stdout: JSON.stringify({ ok: true }) };
+
+    it("the ladder ends with no decision and the port still down: still_down, once", async () => {
+      vi.useFakeTimers();
+      const hook = vi.fn();
+      const h = createHarness({ onRestartFailureSettled: hook });
+      h.control.healthy = false;
+      // Inside a planned restart's window every miss is skipped, never a decision.
+      h.watchdog.onExpectedRestart({ expiresAt: Date.now() + 20 * 60_000 });
+      h.watchdog.noteRestartFailure({ operationId: "op-1", code: "stop_failed", gatewayDown: true });
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(hook).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(settledWith(hook)).toEqual([{ operationId: "op-1", status: "still_down", reason: null }]);
+      expect(hook.mock.calls[0][0]).toMatchObject({ code: "stop_failed", at: expect.any(Number) });
+      // The first ending wins: the later expiry and stop() add nothing.
+      await vi.advanceTimersByTimeAsync(kRestartFailureNoteTtlMs);
+      expect(h.watchdog.getRestartFailureNote()).toBe(null);
+      h.watchdog.stop();
+      expect(hook).toHaveBeenCalledTimes(1);
+    });
+
+    it("the rung's repair ran and failed (Doctor ENOSPC): repair_failed", async () => {
+      vi.useFakeTimers();
+      const hook = vi.fn();
+      const h = createHarness({ clawCmdImpl: doctorFails, onRestartFailureSettled: hook });
+      await h.failUserRestart();
+      h.watchdog.noteRestartFailure({ operationId: "op-1", code: "launch_failed", gatewayDown: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.doctorFixCalls()).toBe(1);
+      expect(settledWith(hook)).toEqual([{ operationId: "op-1", status: "repair_failed", reason: null }]);
+      h.watchdog.stop();
+      expect(hook).toHaveBeenCalledTimes(1);
+    });
+
+    it("the rung's repair was refused: settles as the refusal (repair_attempts_exhausted)", async () => {
+      vi.useFakeTimers();
+      const hook = vi.fn();
+      const h = createHarness({ clawCmdImpl: doctorFails, onRestartFailureSettled: hook });
+      await h.failUserRestart();
+      const filed = h.watchdog.noteRestartFailure({ operationId: "op-1", code: "launch_failed", gatewayDown: true });
+      expect(filed.recheck.scheduled).toBe(true);
+      // Both attempts are spent before the first rung fires.
+      const limit = h.watchdog.getStatus().repairAttemptLimit;
+      for (let i = 0; i < limit; i += 1) await h.watchdog.triggerRepair();
+      expect(h.watchdog.getStatus().repairAttempts).toBe(limit);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.doctorFixCalls()).toBe(limit);
+      expect(settledWith(hook)).toEqual([
+        { operationId: "op-1", status: "repair_attempts_exhausted", reason: "repair_attempts_exhausted" },
+      ]);
+      h.watchdog.stop();
+    });
+
+    it("an admitted repair that brings the port back reports recovered through the recovery hook, never a settle", async () => {
+      vi.useFakeTimers();
+      const settled = vi.fn();
+      const recovered = vi.fn();
+      const h = createHarness({ onRestartFailureSettled: settled, onRestartFailureRecovered: recovered });
+      await h.failUserRestart();
+      h.watchdog.noteRestartFailure({ operationId: "op-1", code: "stop_failed", gatewayDown: true });
+      h.control.healthy = true;
+      await vi.advanceTimersByTimeAsync(0);
+      h.watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 4242, rootPid: 4242, generation: 1 });
+      await h.watchdog.runHealthCheck({ source: "health_timer" });
+      await flushMicrotasks();
+      expect(h.watchdog.getRestartFailureNote()).toBe(null);
+      expect(recovered).toHaveBeenCalledTimes(1);
+      h.watchdog.stop();
+      expect(settled).not.toHaveBeenCalled();
+    });
+
+    it("a newer user restart, a newer note, expiry and stop() each settle the note they end", async () => {
+      vi.useFakeTimers();
+      const hook = vi.fn();
+      const h = createHarness({ onRestartFailureSettled: hook });
+      // The port never answers, so no green probe ends a note first.
+      h.control.healthy = false;
+      h.watchdog.noteRestartFailure({ operationId: "op-user", code: "ready_timeout", gatewayDown: false });
+      h.watchdog.onExpectedRestart({ expiresAt: Date.now() + 60_000, supersedes: "user" });
+      h.watchdog.noteRestartFailure({ operationId: "op-old", code: "ready_timeout", gatewayDown: false });
+      h.watchdog.noteRestartFailure({ operationId: "op-new", code: "ready_timeout", gatewayDown: false });
+      // The idempotent re-report of the standing note settles nothing.
+      h.watchdog.noteRestartFailure({ operationId: "op-new", code: "ready_timeout", gatewayDown: false });
+      await vi.advanceTimersByTimeAsync(kRestartFailureNoteTtlMs);
+      expect(h.watchdog.getRestartFailureNote()).toBe(null);
+      h.watchdog.noteRestartFailure({ operationId: "op-stop", code: "stop_failed", gatewayDown: false });
+      h.watchdog.stop();
+      expect(settledWith(hook)).toEqual([
+        { operationId: "op-user", status: "superseded", reason: null },
+        { operationId: "op-old", status: "superseded", reason: null },
+        { operationId: "op-new", status: "expired", reason: null },
+        { operationId: "op-stop", status: "stopped", reason: null },
+      ]);
+    });
+
+    it("a note whose repair is refused at filing settles as that refusal at once, and its later expiry does not rewrite it", async () => {
+      vi.useFakeTimers();
+      const hook = vi.fn();
+      const h = createHarness({ autoRepair: false, onRestartFailureSettled: hook });
+      h.control.healthy = false;
+      const result = h.watchdog.noteRestartFailure({ operationId: "op-1", code: "launch_failed", gatewayDown: true });
+      expect(result.recheck.scheduled).toBe(false);
+      expect(result.settled).toEqual({ status: "auto_repair_disabled", reason: "auto_repair_disabled" });
+      await vi.advanceTimersByTimeAsync(kRestartFailureNoteTtlMs);
+      expect(h.watchdog.getRestartFailureNote()).toBe(null);
+      h.watchdog.stop();
+      expect(settledWith(hook)).toEqual([{ operationId: "op-1", status: "auto_repair_disabled", reason: "auto_repair_disabled" }]);
+    });
+
+    it("a note filed while the watchdog is stopping settles stopped at once and says so; a throwing hook is contained", async () => {
+      const hook = vi.fn(() => {
+        throw new Error("boom");
+      });
+      const h = createHarness({ onRestartFailureSettled: hook });
+      h.watchdog.stop();
+      const result = h.watchdog.noteRestartFailure({ operationId: "op-1", code: "aborted", signalled: true, gatewayDown: true });
+      expect(result.recheck.scheduled).toBe(false);
+      expect(result.settled).toEqual({ status: "stopped", reason: null });
+      expect(settledWith(hook)).toEqual([{ operationId: "op-1", status: "stopped", reason: null }]);
+      expect(h.watchdog.noteRestartFailure({ operationId: "op-1", code: "aborted", gatewayDown: true }).settled).toEqual({
+        status: "stopped",
+        reason: null,
+      });
     });
   });
 

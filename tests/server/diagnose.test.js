@@ -856,6 +856,54 @@ describe("diagnose: render helpers", () => {
     expect(iso({})).toBe("n/a");
   });
 
+  // Bug D: an incident bundle printed "repairAttempts: 0 / repairAttemptLimit:
+  // 2" under "Watchdog (live)" long after both attempts were used.
+  it("a frozen copy labels live sections with their time and leaves the watchdog's moving counters out", () => {
+    const bundle = {
+      schema: kDiagnoseSchema,
+      generatedAtMs: kNow,
+      mode: "server",
+      sections: {
+        watchdog: {
+          source: "live",
+          reason: null,
+          warnings: [],
+          data: {
+            lifecycle: "crash_loop",
+            health: "unhealthy",
+            repairAttempts: 0,
+            repairAttemptLimit: 2,
+            crashCountInWindow: 1,
+            lastRepairVerdict: null,
+            operationInProgress: false,
+            autoRepair: true,
+            degradedSince: kNow - 60_000,
+            lastExit: { code: 1, signal: null },
+          },
+        },
+      },
+    };
+    const frozen = renderDiagnoseMarkdown(bundle, { frozen: true });
+    expect(frozen).toContain("> Frozen copy: every \"live\" section below describes 2023-11-14T22:13:20.000Z, not now. Run `alphaclaw diagnose` for current values.");
+    expect(frozen).toContain("## Watchdog (live as of 2023-11-14T22:13:20.000Z)");
+    expect(frozen).toContain("- autoRepair: true");
+    expect(frozen).toContain("- degradedSince: 2023-11-14T22:12:20.000Z");
+    expect(frozen).toContain('- lastExit: {"code":1,"signal":null}');
+    for (const field of ["lifecycle", "health", "repairAttempts", "repairAttemptLimit", "crashCountInWindow", "lastRepairVerdict", "operationInProgress"]) {
+      expect(frozen).not.toContain(`- ${field}:`);
+    }
+    expect(frozen).toContain(
+      "- live-only, not in this copy: lifecycle, health, repairAttempts, repairAttemptLimit, crashCountInWindow, lastRepairVerdict, operationInProgress — they change after this copy was written; run `alphaclaw diagnose` (or read GET /api/watchdog/status) for the current values",
+    );
+    // `alphaclaw diagnose` itself is live: unchanged.
+    const live = renderDiagnoseMarkdown(bundle);
+    expect(live).toContain("## Watchdog (live)");
+    expect(live).toContain("- repairAttempts: 0");
+    expect(live).toContain("- repairAttemptLimit: 2");
+    expect(live).not.toContain("Frozen copy");
+    expect(live).not.toContain("live-only");
+  });
+
   it("renders an unknown section and a renderer failure without throwing", () => {
     const md = renderDiagnoseMarkdown({
       schema: kDiagnoseSchema,

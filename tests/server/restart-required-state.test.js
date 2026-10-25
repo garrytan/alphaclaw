@@ -458,6 +458,21 @@ describe("server/restart-required-state (failed-restart recovery truth, bug #137
     expect(storeB.markRecovered({ operationId: runningId, by: "watchdog_repair" })).toBeNull();
   });
 
+  it("the recovery clause settles on the closed record (Bug C) and a later recovery outranks it", () => {
+    let nowMs = 100_000;
+    const store = makeStore({ now: () => nowMs });
+    const operationId = failedRestart(store);
+    // The route's preview, then the watchdog's settle (server.js wiring).
+    store.patchRestartOperation({ operationId, recovery: { status: "will_check", reason: null } });
+    nowMs = 160_000;
+    store.patchRestartOperation({ operationId, recovery: { status: "repair_failed", reason: null } });
+    expect(store.getLastRestartOperation().recovery).toEqual({ status: "repair_failed", reason: null, at: 160_000 });
+    // A settle for another operation never lands here.
+    expect(store.patchRestartOperation({ operationId: "someone-else", recovery: { status: "expired" } })).toBeNull();
+    store.markRecovered({ operationId, by: "unknown", at: 200_000 });
+    expect(store.getLastRestartOperation().recovery).toEqual({ status: "recovered", reason: null, at: 200_000 });
+  });
+
   it("records the step timeline in order, bounded to 32 entries with an omitted count, and reloads it", () => {
     const dir = makeStateDir();
     let nowMs = 50_000;

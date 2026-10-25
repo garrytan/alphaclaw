@@ -1574,8 +1574,10 @@ describe("incident evidence (#76 B4)", () => {
     const bootSection = bundle.slice(bundle.indexOf("## Boot 2"));
     expect(bootSection).toContain("### Boot reports");
     expect(bootSection).not.toContain("### Operator prompt");
-    // The diagnose collector is NOT re-run for an append (one call from the spawn).
-    expect(incidentEvidence.collectDiagnoseMarkdown).toHaveBeenCalledTimes(1);
+    // The append carries a fresh diagnose (Bug D): the first copy is frozen at
+    // the spawn, so the newest section holds the newest snapshot.
+    expect(incidentEvidence.collectDiagnoseMarkdown).toHaveBeenCalledTimes(2);
+    expect(bootSection).toContain("### Diagnose");
     expect(service.getNotificationLine()).toContain(" · Evidence: `INCIDENT-9.md` (updated)");
   });
 

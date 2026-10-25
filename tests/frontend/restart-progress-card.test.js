@@ -353,6 +353,37 @@ describe("frontend/restart-progress-card", () => {
       "The old gateway stopped, but OpenClaw didn't start: spawn ENOENT. Automatic recovery is off — press Repair to run it.",
       true,
     ],
+    // The record's settled endings (Bug C) replace the stream's "checking now".
+    [
+      { code: "launch_failed", message: "ENOSPC.", recovery: { status: "repair_failed", reason: null } },
+      "The old gateway stopped, but OpenClaw didn't start: ENOSPC. Automatic repair ran but did not bring the gateway back — open View logs, then press Repair.",
+      true,
+    ],
+    [
+      { code: "launch_failed", message: "ENOSPC.", recovery: { status: "repair_attempts_exhausted", reason: "repair_attempts_exhausted" } },
+      "The old gateway stopped, but OpenClaw didn't start: ENOSPC. Automatic recovery has used all its attempts — press Repair to run it.",
+      true,
+    ],
+    [
+      { code: "stop_failed", message: "x", recovery: { status: "still_down", reason: null } },
+      "Couldn't confirm the old gateway stopped, so your changes are not live yet. Automatic recovery stopped checking and the gateway is still down — press Repair to run it.",
+      true,
+    ],
+    [
+      { code: "stop_failed", message: "x", recovery: { status: "expired", reason: null } },
+      "Couldn't confirm the old gateway stopped, so your changes are not live yet. Automatic recovery stopped tracking this restart — the Watchdog tab shows the gateway's current state.",
+      true,
+    ],
+    [
+      { code: "stop_failed", message: "x", recovery: { status: "superseded", reason: null } },
+      "Couldn't confirm the old gateway stopped, so your changes are not live yet. A newer restart took over.",
+      true,
+    ],
+    [
+      { code: "stop_failed", message: "x", recovery: { status: "stopped", reason: null } },
+      "Couldn't confirm the old gateway stopped, so your changes are not live yet. AlphaClaw stopped before automatic recovery finished.",
+      true,
+    ],
     [{ code: "launch_failed", message: "spawn ENOENT." }, "The old gateway stopped, but OpenClaw didn't start: spawn ENOENT.", true],
     [{ code: "ready_timeout", budgetMs: 300000 }, "OpenClaw started but wasn't ready within 5 min.", true],
     [{ code: "ready_timeout", budgetMs: 90000 }, "OpenClaw started but wasn't ready within 90 s.", true],

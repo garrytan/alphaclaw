@@ -906,6 +906,31 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toMatchObject({ operationId: "op-s", phase: "recovered", recovered: { by: "unknown", changesLive: false } });
   });
 
+  it("a live failure's recovery clause follows the record once it settles after the stream closed (Bug C)", async () => {
+    const failed = { operationId: "op-c", status: "failed", code: "launch_failed", errorSummary: "ENOSPC", startedAt: 1000, phaseAt: {} };
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: true,
+      restartInProgress: false,
+      reasons: [{ code: "env_vars_changed", label: "Env", addedAt: 1 }],
+      lastOperation: { ...failed, recovery: { status: "will_check", reason: null, at: 1100 } },
+    });
+    let state = await settle();
+    expect(state.state.restartOperation).toMatchObject({ operationId: "op-c", phase: "failed", error: { recovery: { status: "will_check" } } });
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: true,
+      restartInProgress: false,
+      reasons: [{ code: "env_vars_changed", label: "Env", addedAt: 1 }],
+      lastOperation: { ...failed, recovery: { status: "repair_attempts_exhausted", reason: "repair_attempts_exhausted", at: 5000 } },
+    });
+    await state.actions.dismissRestartBanner();
+    state = await settle();
+    expect(state.state.restartOperation).toMatchObject({
+      operationId: "op-c",
+      phase: "failed",
+      error: { message: "ENOSPC", recovery: { status: "repair_attempts_exhausted", reason: "repair_attempts_exhausted" } },
+    });
+  });
+
   it("Retry status after a managed update only reads the saved attempt and never posts or reconnects", async () => {
     const attempt = { id: "deploy-2", state: "unknown", target: { alphaclawVersion: "0.9.35" } };
     api.fetchAlphaclawVersion.mockResolvedValue({ currentVersion: "0.9.35", hasUpdate: false, managedUpdateAttempt: attempt });
