@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.117] - 2026-10-25
+
+The agent's bootstrap prompt stays under OpenClaw's per-file injection cap: rules and operator data are two files, the data is sized to fit, and a file that still overflows is reported by section.
+
+### Fixed
+- **A large topic registry no longer pushes AlphaClaw's prompt past OpenClaw's 20,000-char per-file cap.** Everything was one merged `hooks/bootstrap/AGENTS.md`; with many Telegram topics and Google accounts it reached about 25k chars, and OpenClaw 2026.10.7 keeps only the first 45% and last 15% of the cap for an `AGENTS.md` (plus a digest of policy-looking lines), so the topic table and most of the Google section never reached the agent. AlphaClaw only logged "approaching". The sync now writes two bootstrap extras, both configured in `hooks.internal.entries["bootstrap-extra-files"].paths` (a hot reload in OpenClaw, no gateway restart):
+  - `hooks/bootstrap/AGENTS.md`: the rules (safety, persistence and git first), then the harness and tools map, machine resources and the agent-admin stanza. About 8k chars and fixed.
+  - `hooks/bootstrap/reference/AGENTS.md`: Google accounts, then the topic registry, rendered to stay under 85% of the workspace's effective `bootstrapMaxChars` (OpenClaw's per-agent ladder). Topic rows past that budget are dropped, discovered rows first, and counted in the existing "N more topics not shown — run `alphaclaw telegram topics list`" line.
+  Each file has its own per-file cap; extras inject after the root files, so the data starves before the rules.
+- **A file that still exceeds its cap is reported loudly.** The sync logs an error and raises one `bootstrap_budget` watchdog event per condition (`status: warning`, details `chars`, `capChars`, `sections`), naming the sections OpenClaw will cut. The Doctor's `det:hardening:starved` card names the same sections, read from the file on disk, and its evidence line gives the size against the cap. The cut is computed with OpenClaw's own head and tail split (`findTruncatedSections` in `lib/server/doctor/context-profiles.js`).
+
+### Changed
+- `resolveAgentBootstrapBudget` (`lib/server/doctor/bootstrap-context.js`) resolves the budget ladder for any agent id; `resolveMainBootstrapBudget` delegates to it. The Doctor's hardening file rows now carry `rawChars` and `capChars`.
+- The Telegram setup summary, the import scanner's managed files, the topic sync rule ("Never edit files under `hooks/bootstrap/`"), README and `docs/designs/openclaw-context-contract.md` (re-verified on 2026.10.7) name the new file.
+
+### Tests
+- `bootstrap-budget.test.js`: with 6 groups of 60 named and 15 discovered topics (the untrimmed section alone is over 20k) and 6 Google accounts, both files stay under 17,000 chars, nothing is cut, the git rules come before the harness, and every account plus the sync rules survive. With `bootstrapMaxChars: 6000` the reference file fits 5,100 and the rules file is reported once with the sections OpenClaw would cut. `findTruncatedSections` unit cases for both splits and code fences.
+- `onboarding-workspace.test.js`, `onboarding-openclaw.test.js`: two files per workspace, reconciled paths include the reference file, and the over-cap report fires once across repeated syncs. `doctor-deterministic-checks.test.js`: the hardening card names the cut section.
+
 ## [0.10.116] - 2026-10-25
 
 With `ALPHACLAW_GIT_WRITER_COMMAND` set, the agent's git rules are one consistent rule set.

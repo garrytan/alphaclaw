@@ -285,6 +285,49 @@ describe("server/doctor/deterministic-checks", () => {
     expect(hardening.fixPrompt).toContain("bootstrapMaxChars");
   });
 
+  it("names the sections OpenClaw cuts from an over-cap hardening file", () => {
+    write(workspaceRoot, "AGENTS.md", "root rules");
+    write(workspaceRoot, "hooks/bootstrap/AGENTS.md", "# Rules\n\nsafety first\n");
+    write(
+      workspaceRoot,
+      "hooks/bootstrap/reference/AGENTS.md",
+      [
+        "# AlphaClaw Workspace Reference",
+        "",
+        "## Available Google Accounts",
+        "",
+        "G".repeat(300),
+        "",
+        "## Topic Registry",
+        "",
+        "T".repeat(2000),
+        "",
+        "### Sync Rules",
+        "",
+        "S".repeat(100),
+      ].join("\n"),
+    );
+    const cards = build({
+      bootstrapArgs: {
+        extraFilePaths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/reference/AGENTS.md"],
+        hooksEnabled: true,
+        bootstrapMaxChars: 1000,
+      },
+    });
+    const hardening = findCard(cards, "det:hardening:starved");
+    expect(hardening).toMatchObject({ priority: "P0" });
+    expect(hardening.summary).toContain(
+      "OpenClaw cuts these sections from the agent's context: Topic Registry.",
+    );
+    expect(hardening.evidence).toEqual([
+      expect.objectContaining({
+        text: expect.stringMatching(
+          /^hooks\/bootstrap\/reference\/AGENTS\.md: 2,\d{3} chars against a 1,000-char cap; OpenClaw cuts Topic Registry$/,
+        ),
+      }),
+    ]);
+  });
+
   it("emits no hardening card when the state is unknown (unreadable config)", () => {
     // Merged hardening file on disk but openclaw.json is unreadable: the
     // analyzer reports "unknown", which must never produce the P0 card.

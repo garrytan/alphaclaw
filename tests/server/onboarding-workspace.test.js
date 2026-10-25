@@ -403,7 +403,8 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       onFailure,
     });
 
-    // ONE merged file per workspace: hardening rules first, tools map after.
+    // Two files per workspace: the rules (hardening first, tools map after),
+    // then the operator data in the reference file.
     const mainMergedWrite = mockFs.writeFileSync.mock.calls.find(
       ([target]) =>
         target === path.join(WORKSPACE_DIR, "hooks", "bootstrap", "AGENTS.md"),
@@ -411,14 +412,22 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(mainMergedWrite).toBeTruthy();
     expect(mainMergedWrite[1].startsWith("AGENTS TEMPLATE")).toBe(true);
     expect(mainMergedWrite[1]).toContain("Setup: https://setup.example.com");
-    expect(mainMergedWrite[1]).toContain("## Topic Registry");
-    expect(mainMergedWrite[1]).toContain("| Ops (-100123) | Deploys | 42 |");
-    expect(mainMergedWrite[1]).toContain("### Sync Rules");
-    expect(mainMergedWrite[1]).toContain("## Available Google Accounts");
-    expect(mainMergedWrite[1]).toContain(
+    expect(mainMergedWrite[1]).not.toContain("## Topic Registry");
+    expect(mainMergedWrite[1]).not.toContain("## Available Google Accounts");
+    const mainReferenceWrite = mockFs.writeFileSync.mock.calls.find(
+      ([target]) =>
+        target === path.join(WORKSPACE_DIR, "hooks", "bootstrap", "reference", "AGENTS.md"),
+    );
+    expect(mainReferenceWrite).toBeTruthy();
+    expect(mainReferenceWrite[1].startsWith("# AlphaClaw Workspace Reference")).toBe(true);
+    expect(mainReferenceWrite[1]).toContain("## Topic Registry");
+    expect(mainReferenceWrite[1]).toContain("| Ops (-100123) | Deploys | 42 |");
+    expect(mainReferenceWrite[1]).toContain("### Sync Rules");
+    expect(mainReferenceWrite[1]).toContain("## Available Google Accounts");
+    expect(mainReferenceWrite[1]).toContain(
       "- garry@example.com (type: personal; client: default; status: authenticated; services: gmail:read)",
     );
-    expect(mainMergedWrite[1]).toContain(
+    expect(mainReferenceWrite[1]).toContain(
       "- (unknown email) (type: company; client: default; status: awaiting sign-in",
     );
 
@@ -576,7 +585,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     });
     const toolsContent = (mockFs) =>
       mockFs.writeFileSync.mock.calls.find(([target]) =>
-        String(target).endsWith(path.join("hooks", "bootstrap", "AGENTS.md")),
+        String(target).endsWith(path.join("hooks", "bootstrap", "reference", "AGENTS.md")),
       )[1];
 
     stubRegistryRead({
@@ -937,28 +946,47 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(onFailure).not.toHaveBeenCalled();
   });
 
-  it("warns when the merged hardening file approaches the 20k injection cap", () => {
+  it("reports a bootstrap file over the cap once per condition, naming the sections OpenClaw cuts", () => {
     stubRegistryRead(null);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const mockFs = {
       readFileSync: vi.fn((target) => {
-        if (target === kToolsTemplatePath) return "T".repeat(12000);
-        if (target === kAgentsSourcePath) return "A".repeat(6000);
+        if (target === kToolsTemplatePath) {
+          return `## Harness\n\n${"T".repeat(12000)}\n\n## Webhooks\n\n${"W".repeat(4000)}`;
+        }
+        if (target === kAgentsSourcePath) return `# Rules\n\n${"A".repeat(6000)}`;
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }),
       existsSync: vi.fn(() => false),
       writeFileSync: vi.fn(),
       mkdirSync: vi.fn(),
     };
+    const onOverCap = vi.fn();
+    const sync = () =>
+      syncBootstrapPromptFiles({
+        fs: mockFs,
+        workspaceDir: "/tmp/alphaclaw-size-workspace",
+        baseUrl: "https://setup.example.com",
+        onOverCap,
+      });
 
-    syncBootstrapPromptFiles({
-      fs: mockFs,
-      workspaceDir: "/tmp/alphaclaw-size-workspace",
-      baseUrl: "https://setup.example.com",
-    });
+    sync();
+    sync();
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("approaching OpenClaw's 20,000-char per-file injection cap"),
+    // 45% head / 15% tail of 20,000: "Rules" ends inside the head, the
+    // middle of "Harness" and the start of "Webhooks" fall in the cut.
+    expect(onOverCap).toHaveBeenCalledTimes(1);
+    expect(onOverCap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "hooks/bootstrap/AGENTS.md",
+        capChars: 20000,
+        sections: ["Harness", "Webhooks"],
+      }),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "over OpenClaw's 20000-char per-file injection cap; OpenClaw will cut: Harness, Webhooks",
+      ),
     );
   });
 
@@ -1008,7 +1036,11 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     // dropped, the user-added path preserved verbatim.
     expect(written.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
       enabled: true,
-      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/USER.md"],
+      paths: [
+        "hooks/bootstrap/AGENTS.md",
+        "hooks/bootstrap/reference/AGENTS.md",
+        "hooks/bootstrap/USER.md",
+      ],
     });
   });
 
@@ -1021,7 +1053,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
           entries: {
             "bootstrap-extra-files": {
               enabled: true,
-              paths: ["hooks/bootstrap/AGENTS.md"],
+              paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/reference/AGENTS.md"],
             },
           },
         },
@@ -1100,6 +1132,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       patterns: ["hooks/bootstrap/PATTERNS.md", "notes/*.md"],
       paths: [
         "hooks/bootstrap/AGENTS.md",
+        "hooks/bootstrap/reference/AGENTS.md",
         "hooks/bootstrap/PATTERNS.md",
         "notes/*.md",
       ],
@@ -1136,7 +1169,11 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     expect(written.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
       enabled: true,
       files: ["hooks/bootstrap/EXTRA.md"],
-      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/EXTRA.md"],
+      paths: [
+        "hooks/bootstrap/AGENTS.md",
+        "hooks/bootstrap/reference/AGENTS.md",
+        "hooks/bootstrap/EXTRA.md",
+      ],
     });
   });
 
@@ -1173,12 +1210,13 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     const configWrite = findConfigWrite(mockFs);
     expect(configWrite).toBeTruthy();
     const written = JSON.parse(configWrite[1]);
-    // AlphaClaw's path first, user paths in their original order (legacy
+    // AlphaClaw's paths first, user paths in their original order (legacy
     // TOOLS.md dropped), then patterns, then files, exact duplicates deduped.
     expect(
       written.hooks.internal.entries["bootstrap-extra-files"].paths,
     ).toEqual([
       "hooks/bootstrap/AGENTS.md",
+      "hooks/bootstrap/reference/AGENTS.md",
       "hooks/bootstrap/ZULU.md",
       "hooks/bootstrap/ALPHA.md",
       "notes/*.md",

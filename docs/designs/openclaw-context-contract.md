@@ -146,6 +146,38 @@ Cited: stable `dist/workspace-DkQ7irPD.js` `VALID_BOOTSTRAP_NAMES`; beta
 `AGENTS.md` is a valid extras basename on both — this is what makes AlphaClaw's unconditional
 hardening merge (PR 6 of the 8.1 wave) safe on every version.
 
+### AlphaClaw's two hardening extras (re-verified on `openclaw@2026.10.7`)
+
+Re-verified in the pinned `openclaw@2026.10.7` dist: `DEFAULT_BOOTSTRAP_MAX_CHARS = 2e4` and
+`DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 6e4` (`dist/bootstrap-*.mjs`); `trimBootstrapContent` still
+special-cases the `AGENTS.md` basename (45% head, 35% policy digest, 15% tail; every other
+basename 75/25); `VALID_BOOTSTRAP_NAMES` is still the six names; the bundled
+`bootstrap-extra-files` handler appends every declared extra after the core files, each read
+with basename = its own name, so each extra gets its own per-file cap and all of them share the
+total budget (`dist/workspace-*.mjs` `loadExtraBootstrapFilesWithDiagnostics`, no dedupe by
+basename); a subagent session keeps every file named `AGENTS.md`, extras included
+(`filterBootstrapFilesForSession`); and a change under `hooks.internal` is a hot reload
+(`reloadInternalHooks`), not a gateway restart (`dist/config-reload-plan-*.mjs`).
+
+So an oversized extra is not cut at 20,000 chars: OpenClaw keeps its first 9,000 and last 3,000
+chars and replaces the middle with policy-looking lines picked from the whole file. When the
+single merged `hooks/bootstrap/AGENTS.md` grew past the cap on a box with a large topic registry,
+the topic table and most of the Google section fell in that middle.
+
+AlphaClaw therefore writes two extras, in this order:
+
+| Path | Content | Size |
+|------|---------|------|
+| `hooks/bootstrap/AGENTS.md` | core-prompts `AGENTS.md` (safety, persistence, git rules), then core-prompts `TOOLS.md` (harness, tabs, webhooks), machine resources, the agent-admin stanza | fixed, about 8k chars |
+| `hooks/bootstrap/reference/AGENTS.md` | Google accounts, then the topic registry | rendered to stay under 85% of the effective `bootstrapMaxChars`; topic rows past the budget are dropped (discovered rows first) and counted in the "N more topics not shown — run `alphaclaw telegram topics list`" line |
+
+The effective cap per workspace follows OpenClaw's per-agent ladder (`resolveAgentBootstrapBudget`
+in `lib/server/doctor/bootstrap-context.js`). A file that still exceeds it (for example the rules
+file under an operator-lowered `bootstrapMaxChars`) is reported loudly: one `bootstrap_budget`
+watchdog event per condition and an error log line, both naming the sections OpenClaw will cut
+(`findTruncatedSections` in `lib/server/doctor/context-profiles.js`, the same head/tail split),
+and the Doctor's `det:hardening:starved` card names them too, read from the file on disk.
+
 ### `bootstrap-extra-files` hook
 
 - Config entry shape: `hooks.internal.entries["bootstrap-extra-files"] = { enabled, paths }`

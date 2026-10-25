@@ -517,7 +517,7 @@ describe("server/routes/onboarding", () => {
     expect(writtenConfig.hooks.internal.enabled).toBe(true);
     expect(writtenConfig.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
       enabled: true,
-      paths: ["hooks/bootstrap/AGENTS.md"],
+      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/reference/AGENTS.md"],
     });
   });
 

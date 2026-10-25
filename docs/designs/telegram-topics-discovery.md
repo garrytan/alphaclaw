@@ -24,7 +24,8 @@ Six components, each detailed in the implementation plan:
    even with zero topics (today an empty registry renders nothing). *(Since the
    v0.9.48 hardening merge this section renders into the single merged
    `hooks/bootstrap/AGENTS.md`, not a standalone TOOLS.md — see
-   `lib/server/topic-registry.js`.)*
+   `lib/server/topic-registry.js`. Since v0.10.118 it renders into
+   `hooks/bootstrap/reference/AGENTS.md`, sized to stay under OpenClaw's per-file cap.)*
 3. **CLI fix + topic create** — `alphaclaw telegram topic add` is broken in Telegram
    multi-account mode (reads only legacy `channels.telegram.groups`, writes the wrong
    config branch, wrong baseUrl on prompt re-sync); fix it, and add

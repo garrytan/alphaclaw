@@ -310,7 +310,11 @@ describe("server/onboarding/openclaw", () => {
     expect(next.hooks.internal.entries["bootstrap-extra-files"]).toEqual({
       enabled: true,
       files: ["hooks/bootstrap/EXTRA.md"],
-      paths: ["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/EXTRA.md"],
+      paths: [
+        "hooks/bootstrap/AGENTS.md",
+        "hooks/bootstrap/reference/AGENTS.md",
+        "hooks/bootstrap/EXTRA.md",
+      ],
     });
   });
 
@@ -603,7 +607,7 @@ describe("server/onboarding/openclaw channel configuration", () => {
 });
 
 describe("server/onboarding/openclaw reconcileBootstrapExtraEntryPaths", () => {
-  it("composes AlphaClaw's path, then paths, patterns, files — trimmed and deduped", () => {
+  it("composes AlphaClaw's paths, then paths, patterns, files — trimmed and deduped", () => {
     expect(
       reconcileBootstrapExtraEntryPaths({
         paths: [" hooks/bootstrap/USER.md ", "hooks/bootstrap/TOOLS.md"],
@@ -612,6 +616,7 @@ describe("server/onboarding/openclaw reconcileBootstrapExtraEntryPaths", () => {
       }),
     ).toEqual([
       "hooks/bootstrap/AGENTS.md",
+      "hooks/bootstrap/reference/AGENTS.md",
       "hooks/bootstrap/USER.md",
       "notes/*.md",
       "extra/FILES.md",
@@ -621,9 +626,10 @@ describe("server/onboarding/openclaw reconcileBootstrapExtraEntryPaths", () => {
   it("handles a missing entry and non-array alias values", () => {
     expect(reconcileBootstrapExtraEntryPaths(undefined)).toEqual([
       "hooks/bootstrap/AGENTS.md",
+      "hooks/bootstrap/reference/AGENTS.md",
     ]);
     expect(
       reconcileBootstrapExtraEntryPaths({ patterns: "not-an-array" }),
-    ).toEqual(["hooks/bootstrap/AGENTS.md"]);
+    ).toEqual(["hooks/bootstrap/AGENTS.md", "hooks/bootstrap/reference/AGENTS.md"]);
   });
 });
