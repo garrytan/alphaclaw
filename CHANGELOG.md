@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.118] - 2026-10-25
+
+Operator sidecars: AlphaClaw starts, supervises and stops the commands other operators run next to it on the same box, plus a post-boot hook.
+
+### Added
+- **`ALPHACLAW_SIDECARS` (deployment env only).** A JSON array of commands (argv, no shell) with `user`, `cwd`, `envFile`, `env`, `envUnset` (`ANTHROPIC_*` prefixes), `inheritEnv`, `restart` (`always`, `on-failure`, `never`) and `startAfter` (`gateway` or `boot`). Three types cover the shapes seen in production: `simple` (a guard script, a node or bun daemon), `forking` (a tmux-hosted server on its own socket: a `check` command decides whether it runs, a `stop` command stops it, and a running copy is adopted) and `oneshot`. Gateway-bound sidecars start once the gateway first answers `/readyz` ready, or 10 min after boot if it never does. Every sidecar runs in its own session and process group with its output in `logs/sidecars/<name>.log`; shutdown SIGTERMs each group beside the gateway stop and SIGKILLs after `stopTimeoutSeconds`. Restarts back off from 1 s to 5 min; five exits in 10 min send one crash-loop notice (with a hint when a simple sidecar backgrounds itself), and a 10-minute run sends a recovered notice. Sidecars a previous AlphaClaw process left running are stopped at boot, matched by pid and kernel start time. An invalid entry is logged and skipped without blocking the others.
+- **`GET /api/sidecars`** (agent-readable, admin op `sidecars.status`; env values are never returned, only names) and **`POST /api/sidecars/:name/start|stop|restart`** (humans only). The registry can't be edited through the API: `alphaclaw.json` and `.env` are agent-writable, so the list lives in the deployment environment, like `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK`.
+- **`ALPHACLAW_POST_BOOT_HOOK`.** An executable run once per boot after the gateway is first ready, under the prelaunch hook's checks (root-owned, out-of-tree, inode-pinned, minimal env plus `ALPHACLAW_BOOT_ID` and `ALPHACLAW_GATEWAY_READY_AT`, 120 s). A failure is recorded and notified and never touches the gateway. `runGatewayPrelaunchHook` takes a `hookLabel` so its messages name the hook that ran.
+
+### Tests
+- `sidecars-service.test.js` runs real processes: a bash guard and the child it spawned die with its process group; a SIGTERM-ignoring sidecar is SIGKILLed after its grace; crash-loop backoff alerts once; the daemonize hint; restart policies; env projection (`envFile`, `env`, `envUnset`, no AlphaClaw secrets by default); a node daemon's log; leftover stop that spares a reused pid; the post-boot hook; and, when tmux is installed, a tmux server started on its own socket with the env applied, adopted by a second service and stopped.
+- `sidecars-registry.test.js`, `sidecars-env.test.js`, `routes-sidecars.test.js`: validation, env and user resolution, routes and the agent's tiers.
+
 ## [0.10.117] - 2026-10-25
 
 The agent's bootstrap prompt stays under OpenClaw's per-file injection cap: rules and operator data are two files, the data is sized to fit, and a file that still overflows is reported by section.

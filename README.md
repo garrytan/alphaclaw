@@ -345,6 +345,50 @@ Requirements (all enforced, any miss aborts the launch):
 
 Failure semantics: a refused check (wrong owner/mode/location, symlink, missing) or a failed run (non-zero exit, timeout, cannot execute) is a named error (`GatewayPrelaunchHookError`, with a machine code such as `not_root_owned`, `in_tree`, `symlink`, `nonzero_exit`, `timeout`). The launch is **aborted, fail-closed**: a manual restart fails with that error before anything is stopped (the running gateway keeps serving), a boot or watchdog relaunch starts no gateway, and the outcome (`ran` / `refused` / `failed`) is reported to the watchdog. Unset the variable to turn the hook off; there is no in-tree fallback path.
 
+### Operator sidecars and the post-boot hook
+
+Opt-in, deployment environment only (never honored from `.env`). For boxes where AlphaClaw runs next to other operators' processes in one container: a container swap kills them, and nothing brings them back.
+
+`ALPHACLAW_SIDECARS` is a JSON array of commands AlphaClaw starts after boot, restarts with backoff, and stops on shutdown. The registry lives in the deployment environment because the deployed agent can write `alphaclaw.json` and `.env`; a registry there would let it run any command with AlphaClaw's privileges. Agents can read the registry and status (`GET /api/sidecars`, admin op `sidecars.status`, env values never returned, only names) but can't start, stop or restart a sidecar (`POST /api/sidecars/:name/start|stop|restart` is humans only).
+
+```json
+[
+  { "name": "memory-guard", "command": ["bash", "/srv/ops/guard.sh"], "startAfter": "boot" },
+  {
+    "name": "cli-server",
+    "type": "forking",
+    "command": ["tmux", "-L", "cli", "-f", "/dev/null", "new-session", "-d", "-s", "cli", "my-cli serve --capacity 5"],
+    "check": ["tmux", "-L", "cli", "has-session", "-t", "cli"],
+    "stop": ["tmux", "-L", "cli", "kill-server"],
+    "cwd": "/srv/work",
+    "inheritEnv": true,
+    "envUnset": ["ANTHROPIC_*"],
+    "env": { "HOME": "/srv" }
+  },
+  { "name": "kb-daemon", "command": ["bun", "run", "serve"], "cwd": "/srv/kb", "envFile": "/srv/kb/.env", "user": "kb" }
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Lowercase slug, unique. Output goes to `<root>/logs/sidecars/<name>.log` (rotated to `.1` at 10 MB). |
+| `command` | argv array, run without a shell. |
+| `type` | `simple` (default): the process stays in the foreground. `forking`: `command` starts something that backgrounds itself and exits 0 (a tmux server); `check` (required) says whether it still runs, every `checkIntervalSeconds` (default 30); `stop` stops it. A check that passes before the start adopts the running copy. `oneshot`: runs once, for a post-boot task. |
+| `user` | User name or uid to run as. Needs AlphaClaw to run as root. HOME, USER and LOGNAME follow the user. |
+| `cwd`, `envFile` | Absolute paths. `envFile` is a `KEY=VALUE` file merged over the base environment. |
+| `inheritEnv` | `true` starts from AlphaClaw's whole environment, secrets included. Default: only PATH, locale, TERM, TZ and TMPDIR. |
+| `env`, `envUnset` | `env` is merged last. `envUnset` removes names afterwards; `ANTHROPIC_*` removes a prefix. Together they replace `env -u … HOME=…`. |
+| `restart` | `always` (default), `on-failure` or `never` (the oneshot default). |
+| `startAfter` | `gateway` (default): once the gateway first answers `/readyz` ready, or 10 min after boot if it never does. `boot`: as soon as AlphaClaw listens. |
+| `stopTimeoutSeconds` | SIGTERM grace before SIGKILL, 1–8 (default 5), inside AlphaClaw's 10 s shutdown deadline. |
+| `enabled` | `false` keeps the entry listed but never starts it. |
+
+Every sidecar runs in its own session and process group, so don't wrap it in `setsid -f` or `nohup … &`: stop and restart reach the whole group. A simple sidecar that exits 0 within 3 s is restarted like a crash, and the crash-loop notice says it probably backgrounds itself. Restarts back off from 1 s to 5 min, and the backoff resets after a 60 s run. Five exits within 10 min send one crash-loop notice to the owner channel; a later 10-minute run sends a recovered notice. Events are recorded as `sidecar` in the Watchdog event log. An entry that fails validation is logged and skipped; the others still run. After an in-place AlphaClaw restart, sidecars the previous process left running are stopped (matched by pid and kernel start time, so a reused pid is never signalled) before fresh copies start.
+
+The commands themselves are the operator's: if a script lives in the agent-writable tree, the agent can change what runs.
+
+`ALPHACLAW_POST_BOOT_HOOK=/absolute/path/to/executable` runs once per AlphaClaw boot, after the gateway is first ready and the sidecars started. It follows the [prelaunch hook](#gateway-prelaunch-hook) rules exactly (root-owned, out-of-tree, inode-pinned, minimal env, 120 s budget) and also receives `ALPHACLAW_BOOT_ID` and `ALPHACLAW_GATEWAY_READY_AT`. A failure is recorded and notified; it never affects the gateway. For a post-boot script inside the tree, use a `oneshot` sidecar instead.
+
 ## Environment Variables
 
 **Deployment-only settings:** `ALPHACLAW_ALLOW_LEGACY_LOGIN` and every public-origin alias (`ALPHACLAW_SETUP_URL`, `ALPHACLAW_BASE_URL`, `RENDER_EXTERNAL_URL`, `URL`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_STATIC_URL`) must come from the hosting platform or service's environment, not AlphaClaw's editable `.env`. Envars rejects edits and onboarding imports skip these keys. Boot and reload ignore existing file values without replacing genuine deployment values. If a setting exists only in `.env`, AlphaClaw logs a migration notice once per key per process, without its value. Review and configure the intended value in the deployment environment, then restart AlphaClaw; old file values are never promoted automatically.
@@ -399,6 +443,8 @@ Failure semantics: a refused check (wrong owner/mode/location, symlink, missing)
 | `ALPHACLAW_GATEWAY_ENV_PASSTHROUGH` | Optional | Extra env keys (or `PREFIX*` globs, comma/space separated) to pass to the OpenClaw gateway/CLI children beyond the built-in allowlist. Internal secrets (`SETUP_PASSWORD`, etc.) can never be passed this way — the deny list always wins. Read from the deployment environment only. |
 | `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED` | Optional | Break-glass: set `1` to restore the legacy full-`process.env` spread to the gateway child (minus the absolute deny list). Deprecated; deployment env only. Use only if a needed var is being withheld and the passthrough list is impractical, then report it. |
 | `ALPHACLAW_GATEWAY_PRELAUNCH_HOOK` | Optional | Absolute path of a root-owned, out-of-tree executable run (and awaited, 120 s budget) before every gateway launch with a minimal env — see [Gateway prelaunch hook](#gateway-prelaunch-hook). Any check or run failure aborts the launch. Deployment env only — never honored from `.env`. |
+| `ALPHACLAW_SIDECARS` | Optional | JSON array of operator commands AlphaClaw starts after boot, restarts with backoff and stops on shutdown — see [Operator sidecars](#operator-sidecars-and-the-post-boot-hook). Deployment env only — never honored from `.env`. |
+| `ALPHACLAW_POST_BOOT_HOOK` | Optional | Absolute path of a root-owned, out-of-tree executable run once per boot after the gateway is first ready (prelaunch hook rules, 120 s budget). Deployment env only. |
 | `ALPHACLAW_LSOF_SHIM`             | Optional | Default on: when no `lsof` binary resolves (`/usr/bin/lsof`, `/usr/sbin/lsof`, `PATH`), the one `openclaw gateway restart --wait` ask in the restart ladder runs with AlphaClaw's `/proc`-backed `lsof` shim appended to its `PATH`, so the pinned CLI can find the listener and ask the gateway to drain instead of refusing ("No verified gateway process is listening"). Set `0` to disable the shim (the ask then refuses on a box without `lsof` and the ladder moves on to SIGTERM). The shim never reaches the gateway's own environment or any other CLI call. Deployment env only |
 | `ALPHACLAW_GATEWAY_STOP_ASK`      | Optional | Set `0` to skip the graceful ask step of the restart ladder (`openclaw gateway restart --wait 30000ms`) and go straight to SIGTERM of the gateway's process group; the restart then interrupts an agent turn instead of letting it drain (≤ 30 s). Default on. Deployment env only |
 | `GATEWAY_RESTART_READY_TIMEOUT`   | Optional | Seconds a gateway restart waits for the port to answer before failing (default `300`, clamped `30`–`480`). Raise on slow boxes with many plugins — the wait returns the instant the gateway is up, so a generous value costs nothing on healthy restarts. Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |
