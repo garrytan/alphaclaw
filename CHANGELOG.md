@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.127] - 2026-10-25
+
+AlphaClaw no longer kills its own `doctor --lint` in the middle of a multi-GB snapshot copy, which is what left an orphaned copy of the agent database about every 12 minutes (ALPH-36).
+
+### Fixed
+- **The readiness advisory ran a full lint every 12 minutes and killed it.** While `/readyz` kept reporting not ready (on the box, during OpenClaw's restart loop), each watchdog probe opened a readiness episode. The advisory spawned `openclaw doctor --lint --json` once per 10-minute key floor, at the next 120 s probe: about 2 minutes after a gateway launch, then every 12 minutes. On OpenClaw 2026.10.7 a full lint copies the whole agent database (4 copies; about 70 s or more for 4.6 GB), and the shared spawn was killed at a fixed 60 s. A lint stopped during its copy leaves the partial copy behind, whatever the signal: SIGTERM, SIGINT and SIGHUP, to the process or to its group, all left 1.1-1.7 GB on a 2.5 GB test database. The advisory reads only four checks, so it now runs `doctor --lint --json --only core/doctor/gateway-health --only core/doctor/gateway-auth --only core/doctor/gateway-config --only core/doctor/security`. That takes seconds and copies no agent database. It has its own single-flight collector, so it never joins or starts a full lint.
+- **A full lint's ceiling follows the state it copies.** It used to be a fixed 60 s for every caller (Doctor scans and reuse runs, the medic, the overseer). It now uses the Doctor budget (50 s per GiB with 3x headroom, 150 s per GiB, floored at 60 s, capped at 6 h), so the ceiling is about 11.5 minutes for 4.6 GB of state.
+- **One full lint at a time, with a cooldown.** `lib/server/doctor/lint-runner.js` is now the single owner of the invocation. Concurrent callers join the running full lint, and a settled one is reused for 15 minutes (60 minutes after a timeout), so callers never stack copies. An `--only` run joins a running run for the same checks and is never reused.
+- **A lint that still times out is stopped, then swept.** The run stream sends SIGTERM to the process group, then SIGKILL after its grace. Only once the lint has exited are the copies it left removed (v0.10.112's tracker). The timeout now logs `[alphaclaw] doctor --lint timed out after Ns and was stopped; removing the snapshot copies it left once it has exited` (it used to log nothing), and every completed full lint logs `doctor --lint finished in Ns (ceiling Ms)`.
+
+### Tests
+- `doctor-lint-runner.test.js`: the DB-sized ceiling for a full lint and the floor for `--only`; the advisory's four `--only` flags; one full lint for concurrent callers, reused through the cooldown and the longer post-timeout cooldown; `--only` runs joined but never reused; the timeout line, with the sweep only after the run settled; a spawn failure is recorded and not held.
+
 ## [0.10.126] - 2026-10-25
 
 After an outage or a long restart, the agent's next turn learns how long the gateway was down, that queued messages may be stale, and what AlphaClaw ran meanwhile (ALPH-39).
