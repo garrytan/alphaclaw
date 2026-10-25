@@ -298,6 +298,29 @@ describe("server/routes/system", () => {
     ]);
   });
 
+  it("rewrites the bootstrap prompt files when an env save changes values", async () => {
+    const deps = createSystemDeps();
+    deps.doSyncPromptFiles = vi.fn();
+    const app = createApp(deps);
+
+    const saved = await request(app)
+      .put("/api/env")
+      .send({ vars: [{ key: "ALPHACLAW_GIT_WRITER_COMMAND", value: "brain sync" }] });
+    expect(saved.status).toBe(200);
+    expect(deps.doSyncPromptFiles).toHaveBeenCalledTimes(1);
+    const addCallOrder = deps.syncChannelConfig.mock.invocationCallOrder[
+      deps.syncChannelConfig.mock.calls.findIndex(([, mode]) => mode === "add")
+    ];
+    expect(deps.doSyncPromptFiles.mock.invocationCallOrder[0]).toBeGreaterThan(addCallOrder);
+
+    deps.reloadEnv.mockReturnValue(false);
+    const unchanged = await request(app)
+      .put("/api/env")
+      .send({ vars: [{ key: "ALPHACLAW_GIT_WRITER_COMMAND", value: "brain sync" }] });
+    expect(unchanged.status).toBe(200);
+    expect(deps.doSyncPromptFiles).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects malformed env var names on PUT /api/env (tier-bypass boundary)", async () => {
     const deps = createSystemDeps();
     const app = createApp(deps);
