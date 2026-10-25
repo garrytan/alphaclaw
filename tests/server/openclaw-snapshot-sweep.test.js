@@ -9,10 +9,12 @@ process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 fs.mkdirSync(path.join(kTempRoot, ".openclaw", ".alphaclaw"), { recursive: true });
 
 const {
+  kKilledRunQuietMs,
   kLegacySnapshotMinAgeMs,
   kSnapshotMinAgeMs,
   resolveSnapshotRoots,
   sweepAbandonedSnapshotCopies,
+  trackSnapshotCopiesOfRun,
 } = require("../../lib/server/openclaw-snapshot-sweep");
 
 const kHour = 60 * 60 * 1000;
@@ -169,6 +171,54 @@ describe("server/openclaw-snapshot-sweep", () => {
     const result = sweepAbandonedSnapshotCopies({ env: { HOME: base, XDG_CACHE_HOME: xdg }, procRoot: makeProc(base), logger });
     expect(result.removed).toBe(1);
     expect(fs.existsSync(fallback.directory)).toBe(false);
+  });
+});
+
+describe("trackSnapshotCopiesOfRun: copies a killed CLI left behind", () => {
+  let base;
+  let cacheRoot;
+  let env;
+  let logger;
+  beforeEach(() => {
+    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-run-")));
+    cacheRoot = path.join(base, ".cache", "openclaw");
+    fs.mkdirSync(cacheRoot, { recursive: true });
+    env = { HOME: base };
+    logger = { log: vi.fn() };
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it("removes only directories that appeared during the run, once quiet, however young", () => {
+    const older = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-OlDer1", { ageMs: 5 * 60_000 });
+    const run = trackSnapshotCopiesOfRun({ env, logger, trigger: "doctor-lint-timeout" });
+    const left = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-LeFt01", { ageMs: kKilledRunQuietMs + 1_000 });
+    run.sweepAfterKill();
+    expect(fs.existsSync(left.directory)).toBe(true);
+    vi.advanceTimersByTime(kKilledRunQuietMs);
+    expect(fs.existsSync(left.directory)).toBe(false);
+    expect(fs.existsSync(older.directory)).toBe(true);
+    expect(logger.log.mock.calls[0][0]).toMatch(/^\[alphaclaw\] snapshot sweep \(doctor-lint-timeout\): 1 candidate, removed 1 /);
+  });
+
+  it("keeps a new directory whose copy is still being written", () => {
+    const run = trackSnapshotCopiesOfRun({ env, logger });
+    const live = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-LiVe01", { ageMs: 1_000 });
+    run.sweepAfterKill();
+    vi.advanceTimersByTime(kKilledRunQuietMs);
+    expect(fs.existsSync(live.directory)).toBe(true);
+    expect(logger.log.mock.calls[0][0]).toContain("1 under the age floor");
+  });
+
+  it("logs nothing when the run left nothing", () => {
+    makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-OlDer2");
+    const run = trackSnapshotCopiesOfRun({ env, logger });
+    run.sweepAfterKill();
+    vi.advanceTimersByTime(kKilledRunQuietMs);
+    expect(logger.log).not.toHaveBeenCalled();
   });
 });
 
