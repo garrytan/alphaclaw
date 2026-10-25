@@ -26,7 +26,7 @@ if [[ -f "$REPO/.env" ]]; then
     if [[ "$key" == "$line" ]]; then continue; fi
     if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then continue; fi
     case "$key" in
-      ALPHACLAW_GIT_LOCK_FD|ALPHACLAW_GIT_LOCK_HELD) continue ;;
+      ALPHACLAW_GIT_LOCK_FD|ALPHACLAW_GIT_LOCK_HELD|ALPHACLAW_BOX_LOCK_*) continue ;;
       GITHUB_TOKEN|GITHUB_WORKSPACE_REPO|ALPHACLAW_*|OPENCLAW_*) ;;
       *) continue ;;
     esac

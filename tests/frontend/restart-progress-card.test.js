@@ -162,6 +162,8 @@ describe("frontend/restart-progress-card", () => {
     [[step("waiting_ready", "running")], "checking readiness"],
     [[step("waiting_ready", "running", { detail: { phase: "lock_wait" } })], "waiting for OpenClaw's state lock (another OpenClaw process is finishing)"],
     [[step("waiting_for_lock", "running")], "waiting for the current operation to finish"],
+    [[step("box_lock", "running", { detail: { owner: "OPS-7", holderStep: "db-migrate", since: "2026-10-25T20:29:51Z", waitSeconds: 120 } })], "waiting for the box lock held by OPS-7 (db-migrate), up to 2 min"],
+    [[step("box_lock", "running", { detail: { owner: "", holderStep: "", waitSeconds: 45 } })], "waiting for the box lock held by another operator, up to 45s"],
     [[step("ready", "done")], "OpenClaw is ready"],
     [[{ name: "custom_step", label: "Doing a thing", status: "running" }], "doing a thing"],
   ])("describeRestartPhase(%j) → %j", (steps, expected) => {

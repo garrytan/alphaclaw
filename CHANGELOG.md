@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.122] - 2026-10-25
+
+AlphaClaw honors an operator box lock: with `ALPHACLAW_BOX_LOCK_PATH` set, its own disruptive operations take the same `flock` lock the box's other operators use, wait for another holder (bounded) or refuse, and never break or steal it.
+
+### Added
+- **Operator box lock (`lib/server/box-lock.js`, deployment env only, off unless `ALPHACLAW_BOX_LOCK_PATH` is set).** AlphaClaw opens the lock file for append and has a `flock` child lock that open file, so the lock lives on AlphaClaw's own close-on-exec descriptor: nothing it spawns inherits it, and the kernel drops it if AlphaClaw dies. It writes the operators' records beside the lock (`X.owner`, one JSON line renamed into place, and `X.log` acquire/release lines with `pid`, `rc` and `by` = the operation's attributed source) and reads theirs as labels only; held or free is always tested with `flock`. `ALPHACLAW_BOX_LOCK_WAIT_SECONDS` (default `120`, `0`–`900`), `ALPHACLAW_BOX_LOCK_OWNER` (default `alphaclaw`) and the owner/log path overrides are deployment-only. Without a `flock` binary every locked operation is refused with that reason.
+- **Where it is taken.** A gateway restart (`gateway-restart`) holds it from the prelaunch hook to verified ready or the failure: a restart a person, a channel or a team change asked for waits for another holder (at most half the time left before its deadline) while the restart card shows "waiting for the box lock held by <owner> (<step>)", then is refused as a 409 `box_locked` with nothing stopped. Watchdog restarts never wait: the memory mitigation asks first and defers to the next tick with one `mitigation_skipped` event per holder, and a repair (`doctor-fix`, Doctor through the replace) is skipped without spending an attempt; the Repair button waits, then answers 409. Envars saves (`envars-write`), Browse Sync and the scheduled git sync (`git-sync`; the scheduled run waits within its deadline, then records `box_locked`), and the abandoned snapshot-copy sweep (`sweep-delete`, skipped while held) take it too. Crash relaunches never wait for it. `?boxLockWait=0` makes a route answer 409 at once; every 409 carries `boxLock.holder`.
+- **`GET /api/watchdog/box-lock`** (admin manifest `watchdog.box-lock`, safe tier): held or free, the holder's label, AlphaClaw's own holds and waits, and the log's last lines. Waits and refusals are `box_lock` watchdog events.
+- The scheduled git sync gets the keys from `/etc/cron.d/openclaw-hourly-sync` (written from AlphaClaw's environment); the hourly script never exports them from `.env`.
+
+### Tests
+- `box-lock.test.js` (real `flock`, an operator-style holder from `tests/fixtures/box-lock.sh`): AlphaClaw waits, names the holder and proceeds after the release; refuses with 409 after the bounded wait without touching the holder, its record or the lock file; the operator's script gets rc 75 while AlphaClaw holds it; a SIGKILLed AlphaClaw leaves no lock; reentrant inside one operation, serialized across operations; no `flock` binary refuses.
+- `box-lock-wiring.test.js`: restart classes (routine waits, watchdog and unattributed never), the repair skip and the Repair button refusal with Doctor run under the lock once free, a crash relaunch unaffected, Browse Sync and the Repair route 409s, the status route, the sweep skip, the cron.d keys and a scheduled CLI run exiting 75 `box_locked`. `routes-system.test.js`: `PUT /api/env` and the restart route. `watchdog-memory.test.js`: the mitigation defers without a restart or notice.
+
 ## [0.10.121] - 2026-10-25
 
 Deploy announcements: AlphaClaw tells the owner channel and the sidecars before it restarts for a deploy, and reports the measured downtime once it is back.

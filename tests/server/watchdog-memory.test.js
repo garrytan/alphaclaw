@@ -957,6 +957,84 @@ describe("server/watchdog memory monitor", () => {
       expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
     });
 
+    it("another operator's box lock defers the restart: skipped, not failed — budget stamp refunded, no failure cooldown or notice, the next tick retries", async () => {
+      const { BoxLockError } = require("../../lib/server/box-lock");
+      let locked = true;
+      const restart = vi.fn(async () => {
+        if (locked) {
+          throw Object.assign(
+            new BoxLockError("box_locked", "The box lock is held by OPS-7 (db-migrate), so AlphaClaw did not start the gateway restart.", {
+              holder: { owner: "OPS-7", step: "db-migrate", started_at: "2026-10-25T20:29:51Z" },
+              step: "gateway-restart",
+            }),
+            { blocked: true },
+          );
+        }
+        return { ok: true };
+      });
+      const statePath = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), "memory-mitigation-")),
+        "memory-mitigation-state.json",
+      );
+      const harness = createHarness({
+        settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+        restartGatewayForMitigation: restart,
+        mitigationStatePath: statePath,
+      });
+      launchGateway(harness);
+      await criticalScenario(harness);
+      // Every critical tick tries again while the lock is held; none fails.
+      const deferred = restart.mock.calls.length;
+      expect(deferred).toBeGreaterThan(0);
+      const kinds = memoryEvents(harness.insertWatchdogEvent).map((e) => e.details.kind);
+      expect(kinds).toContain("mitigation_skipped");
+      expect(kinds).not.toContain("mitigation_restart_failed");
+      const skipped = memoryEvents(harness.insertWatchdogEvent).find((e) => e.details.kind === "mitigation_skipped");
+      expect(skipped.details).toMatchObject({ reason: "box_locked", holder: { owner: "OPS-7" } });
+      const restartRows = harness.insertWatchdogEvent.mock.calls
+        .map(([row]) => row)
+        .filter((row) => row.eventType === "operation" && row.source === "gateway_restart");
+      expect(new Set(restartRows.map((row) => row.status))).toEqual(new Set(["started", "skipped"]));
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(0);
+      expect(notifications(harness.notifier).some((m) => m.includes("Pre-OOM gateway restart failed"))).toBe(false);
+      expect(harness.watchdog.getStatus().expectedRestartUntil).toBeNull();
+      locked = false;
+      await criticalScenario(harness, 2);
+      expect(restart).toHaveBeenCalledTimes(deferred + 1);
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")).restarts).toHaveLength(1);
+    });
+
+    it.runIf(require("child_process").spawnSync("flock", ["--version"]).status === 0)("asks the box lock first: while another holder has it, no restart, notice or restart row — one skipped event — and the restart runs once it is free", async () => {
+      const { createBoxLock, resolveBoxLockConfig, setBoxLockForTests } = require("../../lib/server/box-lock");
+      const lockPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "memory-box-lock-")), "box.lock");
+      const quiet = { log() {}, warn() {}, error() {} };
+      const configFor = (owner) => resolveBoxLockConfig({ ALPHACLAW_BOX_LOCK_PATH: lockPath, ALPHACLAW_BOX_LOCK_OWNER: owner });
+      setBoxLockForTests(createBoxLock({ config: configFor("alphaclaw"), recordEvent: () => {}, logger: quiet }));
+      const operator = createBoxLock({ config: configFor("OPS-7"), recordEvent: () => {}, logger: quiet });
+      const hold = operator.acquireSync({ step: "db-migrate", by: "ops-session" });
+      try {
+        const restart = vi.fn(async () => ({ ok: true }));
+        const harness = createHarness({
+          settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true },
+          restartGatewayForMitigation: restart,
+        });
+        launchGateway(harness);
+        await criticalScenario(harness);
+        expect(restart).not.toHaveBeenCalled();
+        const skipped = memoryEvents(harness.insertWatchdogEvent).filter((e) => e.details.kind === "mitigation_skipped");
+        expect(skipped).toHaveLength(1);
+        expect(skipped[0].details).toMatchObject({ reason: "box_locked", holder: { owner: "OPS-7", step: "db-migrate" } });
+        expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_restart")).toBe(false);
+        expect(notifications(harness.notifier).some((m) => m.includes("Restarting gateway before it runs out of memory"))).toBe(false);
+        hold.release(0);
+        await criticalScenario(harness, 2);
+        expect(restart).toHaveBeenCalledTimes(1);
+      } finally {
+        hold.release(0);
+        setBoxLockForTests(null);
+      }
+    });
+
     it("is suppressed while an expected restart is already in progress", async () => {
       const restart = vi.fn(async () => ({ ok: true }));
       const harness = createHarness({

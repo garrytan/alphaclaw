@@ -4415,3 +4415,86 @@ describe("server/routes/system boot progress per actor", () => {
   });
 });
 
+
+// Operator box lock (box-lock.js): Envars saves and the restart route.
+describe("server/routes/system operator box lock", () => {
+  const { spawn, spawnSync } = require("child_process");
+  const { BoxLockError, createBoxLock, resolveBoxLockConfig, setBoxLockForTests } = require("../../lib/server/box-lock");
+  const hasFlock = spawnSync("flock", ["--version"]).status === 0;
+  const kScript = nodePath.join(__dirname, "..", "fixtures", "box-lock.sh");
+  const children = [];
+  afterEach(() => {
+    setBoxLockForTests(null);
+    while (children.length) children.pop().kill("SIGKILL");
+  });
+
+  it.runIf(hasFlock)("PUT /api/env waits for another holder, then answers 409 box_locked naming it and writes nothing; ?boxLockWait=0 refuses at once; free, the save holds the lock", async () => {
+    const lockPath = nodePath.join(nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), "alphaclaw-env-box-")), "box.lock");
+    setBoxLockForTests(createBoxLock({
+      config: resolveBoxLockConfig({ ALPHACLAW_BOX_LOCK_PATH: lockPath, ALPHACLAW_BOX_LOCK_WAIT_SECONDS: "1" }),
+      recordEvent: () => {},
+      logger: { log() {}, warn() {}, error() {} },
+    }));
+    const holder = spawn("bash", [kScript, "run", "OPS-7", "db-migrate", "--", "sleep", "30"], { env: { ...process.env, BOX_LOCK: lockPath }, stdio: "ignore" });
+    children.push(holder);
+    const ownerPath = lockPath.replace(/\.lock$/, ".owner");
+    for (let i = 0; i < 250 && !nodeFs.existsSync(ownerPath); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const deps = createSystemDeps();
+    deps.reloadEnv.mockReturnValue(true);
+    const app = createApp(deps);
+
+    const refused = await request(app).put("/api/env").send({ vars: [{ key: "CUSTOM_FLAG", value: "yes" }] });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({
+      ok: false,
+      code: "box_locked",
+      error: expect.stringMatching(/^The box lock is held by OPS-7 \(db-migrate\) since \S+Z, so AlphaClaw did not start saving Envars after waiting 1s\.$/),
+      boxLock: { step: "envars-write", holder: { owner: "OPS-7", step: "db-migrate" } },
+    });
+    const startedAt = Date.now();
+    expect((await request(app).put("/api/env?boxLockWait=0").send({ vars: [{ key: "CUSTOM_FLAG", value: "yes" }] })).status).toBe(409);
+    expect(Date.now() - startedAt).toBeLessThan(900);
+    expect(deps.writeEnvFile).not.toHaveBeenCalled();
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+    expect(holder.exitCode).toBeNull();
+
+    holder.kill("SIGKILL");
+    await new Promise((resolve) => holder.once("exit", resolve));
+    const saved = await request(app).put("/api/env").send({ vars: [{ key: "CUSTOM_FLAG", value: "yes" }] });
+    expect(saved.status).toBe(200);
+    expect(deps.writeEnvFile).toHaveBeenCalledTimes(1);
+    expect(nodeFs.readFileSync(lockPath.replace(/\.lock$/, ".log"), "utf8").trim().split("\n").slice(-2)).toEqual([
+      expect.stringMatching(/ acquire alphaclaw envars-write pid=\d+ by=api:env$/),
+      expect.stringMatching(/ release alphaclaw envars-write rc=0 by=api:env$/),
+    ]);
+  });
+
+  it("a restart refused by the box lock is a 409 refusal naming the holder, booked skipped, never a failed restart", async () => {
+    const deps = createSystemDeps();
+    deps.restartRequiredState.beginRestart = vi.fn(() => ({ operationId: "op-box", reasonsSnapshot: [] }));
+    deps.restartRequiredState.completeRestart = vi.fn();
+    deps.watchdog = { recordOperationEvent: vi.fn(), getStatus: vi.fn(() => ({})), onExpectedRestart: vi.fn(), onExpectedRestartSettled: vi.fn(), noteRestartFailure: vi.fn() };
+    const holder = { owner: "OPS-7", step: "db-migrate", started_at: "2026-10-25T20:29:51Z" };
+    deps.restartGateway = vi.fn(async () => {
+      throw Object.assign(
+        new BoxLockError("box_locked", "The box lock is held by OPS-7 (db-migrate) since 2026-10-25T20:29:51Z, so AlphaClaw did not start the gateway restart after waiting 120s.", {
+          holder, step: "gateway-restart", waitedMs: 120_000, hint: "Try again once the other operator's work is finished.",
+        }),
+        { blocked: true },
+      );
+    });
+    const app = createApp(deps);
+    const res = await request(app).post("/api/gateway/restart");
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      ok: false,
+      code: "box_locked",
+      hint: "Try again once the other operator's work is finished.",
+      boxLock: { step: "gateway-restart", waitedSeconds: 120, holder, since: "2026-10-25T20:29:51Z" },
+    });
+    expect(deps.restartRequiredState.completeRestart).toHaveBeenCalledWith(expect.objectContaining({ ok: false, code: "box_locked" }));
+    expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(expect.objectContaining({ status: "skipped", details: expect.objectContaining({ reason: "box_locked" }) }));
+    expect(deps.watchdog.noteRestartFailure).not.toHaveBeenCalled();
+  });
+});
+

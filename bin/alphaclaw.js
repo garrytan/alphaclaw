@@ -758,6 +758,36 @@ const runGitSync = () => {
         },
       },
     );
+  // Operator box lock (lib/server/box-lock.js): the scheduled run takes it
+  // here, outside the writer lock; the dashboard's Sync holds it in the
+  // server around its manual run. Busy: skipped and recorded, the next run
+  // retries. Deployment env only: cron.d carries the keys (system-cron.js).
+  let boxHold = null;
+  let boxRc = 1;
+  if (trigger === "scheduled") {
+    const { createBoxLock, resolveBoxLockConfig, isBoxLockError } = require("../lib/server/box-lock");
+    const boxLock = createBoxLock({ config: resolveBoxLockConfig(process.env), recordEvent: () => {} });
+    if (boxLock.enabled) {
+      try {
+        boxHold = boxLock.acquireSync({
+          step: "git-sync",
+          by: "git-sync:scheduled",
+          waitMs: Math.min(boxLock.config.waitMs, Math.max(0, deadlineAtMs - Date.now() - 60_000)),
+          background: true,
+        });
+      } catch (error) {
+        if (!isBoxLockError(error)) throw error;
+        const codeInfo = getGitSyncCode("box_locked");
+        console.error(`[alphaclaw] git-sync ${codeInfo.outcome} (${error.code}): ${error.message}`);
+        recordGitSyncRun({ openclawDir, trigger, lock: "none", result: { code: "box_locked", detail: error.message } });
+        reportGitSync({ code: "box_locked", detail: error.message });
+        try {
+          fs.rmSync(path.dirname(askPassPath), { recursive: true, force: true });
+        } catch {}
+        return codeInfo.exitCode;
+      }
+    }
+  }
   let lock = null;
   try {
     let lockState = "unavailable";
@@ -809,9 +839,11 @@ const runGitSync = () => {
     });
     recordGitSyncRun({ openclawDir, trigger, lock: lockState, result });
     reportGitSync(result);
+    boxRc = result.exitCode === 0 ? 0 : 1;
     return result.exitCode;
   } finally {
     lock?.release?.();
+    boxHold?.release(boxRc);
     try {
       // Remove the private mkdtemp dir, not just the script (H14).
       fs.rmSync(path.dirname(askPassPath), { recursive: true, force: true });
