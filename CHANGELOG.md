@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.131] - 2026-10-25
+
+Disk use of the box by folder: the volumes, the state directory's top-level folders, the temporary copies each feature leaves behind, and who still holds files open under a path (ALPH-40, 4 of 7).
+
+### Added
+- **`GET /api/box/disk`** (`box.read` view `disk`):
+  - `volumes`: free and total bytes of the state volume and any diagnostic-dir volume, as the disk-space monitor reads them.
+  - `stateDir`: the gateway state directory's top-level folders by allocated size, largest first (100 shown), and the bytes in its top-level files.
+  - `temp`: each feature's copies with count, bytes, newest and oldest modification and the 50 newest items: OpenClaw's SQLite read-only snapshot copies, OpenClaw's Doctor and update captures (`<state>.update-captures`), OpenClaw package and shim backups beside the state dir, `openclaw.json` backups (Doctor, medic, rotation, quarantine), and Back up now archives. A hand-named copy such as `openclaw.json.backup-by-hand` is not counted as a feature's copy.
+  - `openUnder=<absolute path>` adds `openFiles`: the processes holding files open under that path from `/proc/<pid>/fd`, with deleted files and the bytes they still hold listed first, since that space only comes back when the holder closes them.
+- **Bounded.** The size census reuses the disk-space monitor's walker (lstat only, never following a symlink or leaving the device) over the state dir and the copy folders, stops at 200,000 entries or 3 s (`census.status: "partial"`) and stays fresh for 5 minutes, single-flight. The open-files scan reads at most 4,096 pids and 100,000 descriptors within 750 ms, returns 100 processes with 20 paths each and stays fresh for 5 s. Nothing in the view deletes anything.
+
+### Tests
+- `box-disk.test.js`: top-level sizes and every copy group against a temporary state dir, a symlink out of the state dir never followed, the census cache and a partial or failed census, open and deleted files from a fake `/proc` ordered by held bytes, `openUnder` validation and the route's 400.
+
 ## [0.10.130] - 2026-10-25
 
 Every scheduled thing on the box in one list, with when it last ran, how that ended and when it runs next (ALPH-40, 3 of 7).

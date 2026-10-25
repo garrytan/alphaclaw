@@ -200,7 +200,7 @@ describe("GET /api/box/processes", () => {
   it("answers an unknown view with 404 and the list of views", async () => {
     const res = await request(createApp({ read: vi.fn() })).get("/api/box/nope");
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ ok: false, error: "unknown_view", views: ["processes", "restart", "schedules"] });
+    expect(res.body).toEqual({ ok: false, error: "unknown_view", views: ["processes", "restart", "schedules", "disk"] });
   });
 
   it("does not treat inherited object keys as views", async () => {
