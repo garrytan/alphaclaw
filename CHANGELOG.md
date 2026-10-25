@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.105] - 2026-10-25
+
+Abandoned OpenClaw SQLite snapshot copies no longer accumulate on the state volume (ALPH-34).
+
+### Fixed
+- **Interrupted OpenClaw SQLite snapshot copies were never removed.** OpenClaw 2026.10.7 reads SQLite databases through a private snapshot: it copies the database into `openclaw-sqlite-readonly-v2-<id>/` (older builds: `openclaw-sqlite-readonly-<pid>-<id>/`) under `<XDG_CACHE_HOME or $HOME/.cache>/openclaw` (fallback `openclaw-<uid>`). A copy cut short by a restart or a kill leaves fs-safe's staged `.fs-safe-<uuid>.tmp`, a full-size copy of the database. OpenClaw's own reclamation skips such a directory for good (it refuses any file it does not recognize, "Unrecognized snapshot artifact"), runs only on an idle gateway and frees at most 512 MB per pass, so a box restarting often kept several GB per orphan. Before each gateway launch, once `requestGatewayLaunch` has confirmed no managed child and no gateway on the port, AlphaClaw now removes snapshot directories whose newest entry is older than 1 hour (24 hours for the legacy layout; OpenClaw's own grace is 15 minutes and 24 hours), that belong to this user, and in which no process holds a file open (OpenClaw's snapshot tokens are held file locks, so a live reader always shows in `/proc/*/fd`). Without a readable `/proc` nothing is removed. Nothing else in the cache root is touched: other names, plain files and symlinks stay. One log line names the count and the bytes freed. The sweep never fails a launch.
+
+### Tests
+- `openclaw-snapshot-sweep.test.js`: root resolution (XDG_CACHE_HOME, HOME/.cache, per-uid fallback), v2/UUID/legacy names removed with bytes logged, a held file (fake `/proc` of real fd symlinks) keeps its directory, recent copies judged by the newest entry, other names/files/symlinks untouched, no `/proc` removes nothing, another user's directory is skipped, and `requestGatewayLaunch` removes the orphan before spawning but not while a gateway serves the port.
+
 ## [0.10.104] - 2026-10-25
 
 A Node heap-snapshot hook on SIGUSR2 can no longer turn OpenClaw's restart requests into a full disk (ALPH-34).
