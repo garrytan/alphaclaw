@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.104] - 2026-10-25
+
+A Node heap-snapshot hook on SIGUSR2 can no longer turn OpenClaw's restart requests into a full disk (ALPH-34).
+
+### Fixed
+- **`--heapsnapshot-signal=SIGUSR2` in NODE_OPTIONS wrote a heap snapshot on every gateway restart request.** Node installs `--heapsnapshot-signal` and `--report-on-signal` (signal from `--report-signal`, default SIGUSR2) as ordinary `process.on(<signal>)` listeners. OpenClaw 2026.10.7 handles SIGUSR2 as its restart signal in `gateway run` and delivers every scheduled restart with `process.emit("SIGUSR2")`, which runs every listener, so each restart request also wrote a snapshot of the whole gateway heap (hundreds of MB, the gateway frozen while it writes). Restart requests once a minute filled a volume in hours. `openclaw gateway restart` can also signal the gateway pid with SIGUSR1. `gatewayEnv()` now removes those flags when they name SIGUSR1 or SIGUSR2 from the gateway's and the `openclaw` CLI children's NODE_OPTIONS (both `--flag=value` and `--flag value`, `_` or `-` in the name). Other flags, `--diagnostic-dir` included, pass through, and AlphaClaw's own process and the operator's .env are untouched. The first removal of each set logs one line naming the flag and signal only.
+
+### Added
+- **Doctor card `det:node-options-signal-collision:<flag>-<signal>`** (P1, config) while the deployment's NODE_OPTIONS still sets such a flag: what the flag would do on OpenClaw's restart signals, that the gateway is already protected, and how to remove it at the source. It names flags and signals only, never the rest of NODE_OPTIONS.
+
+### Tests
+- `node-options-signal-flags.test.js`: both spellings and underscore names for SIGUSR1/SIGUSR2, a signal OpenClaw doesn't use left alone, `--report-on-signal` with the default and an explicit report signal, a real Node child with the stripped NODE_OPTIONS has no SIGUSR2 listener (one with the original has one), `gatewayEnv()` strips it alongside the memory flags without touching `process.env` and logs once without the diagnostic dir, and the Doctor card's shape and absence.
+- Live: `tests/live/restart-heapsnapshot-signal.e2e.test.js` boots the pinned gateway with the external-supervisor env and an inflated heap. With the env AlphaClaw builds from `--heapsnapshot-signal=SIGUSR2`, one `openclaw gateway restart --safe` completes and no snapshot is written. The control, unstripped, writes a dump longer than OpenClaw's 5 s restart authorization and the gateway does not restart, so the file catches drift in the pin.
+
 ## [0.10.103] - 2026-10-25
 
 A data upgrade that stopped because the workspace folder moved is no longer a dead end (ALPH-32).
