@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.106] - 2026-10-25
+
+AlphaClaw now tells the owner when a restart OpenClaw scheduled itself keeps failing to complete (ALPH-34).
+
+### Added
+- **Restart-loop watch.** OpenClaw 2026.10.7 restarts in-process: its scheduler delivers a restart with `process.emit("SIGUSR2")`, and a request that cannot complete is coalesced into the one already scheduled and re-emitted after its cooldown. On a production box an agent-requested restart stayed "already scheduled" for hours, re-emitted about once a minute, each attempt closing admission. `lib/server/openclaw-restart-loop-watch.js` reads the gateway output (the same observer the wedge sweep uses) for OpenClaw's lines `received SIGUSR<n> N times in 5 min`, `admission closed: restart-signal fence`, `restart request coalesced (already scheduled)` and `gateway restart already scheduled; skipping duplicate signal`. When at least 5 of them keep coming for 10 minutes with no quiet gap over 5 minutes, it writes one watchdog event (`gateway_restart_loop`, status `stuck`, first/last time and line counts) and sends the owner one notice (`restart_loop`, deduped per episode) saying a restart OpenClaw scheduled has not completed and offering Restart on the Watchdog tab. It never signals or restarts anything. AlphaClaw's own restarts pause it until the next launch (at most 30 minutes), and every launch starts a fresh watch.
+
+### Tests
+- `openclaw-restart-loop-watch.test.js`: the 2026.10.7 line shapes (including a line split across chunks), one event and one notice after 10 minutes and no more, nothing for a short burst or a loop broken by a quiet gap, pause during AlphaClaw's restart and reset on launch, resume after a restart that never launches, and failing sinks never throw.
+
 ## [0.10.105] - 2026-10-25
 
 Abandoned OpenClaw SQLite snapshot copies no longer accumulate on the state volume (ALPH-34).
