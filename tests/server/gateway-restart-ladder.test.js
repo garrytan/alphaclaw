@@ -885,6 +885,46 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     }
   });
 
+  it("every cold restart reports to the last-restart recorder: who asked, why, the outcome and the downtime; a refused stop reports its class (ALPH-40)", async () => {
+    await bootManaged(gateway, world);
+    world.restartCli = "graceful";
+    const recorder = { requested: vi.fn(), finished: vi.fn() };
+    gateway.setGatewayRestartRecorder(recorder);
+    try {
+      const { value, error } = await runRestart({ source: "api:restart", reason: "operator", opId: "abcd1234-op" }, 5000);
+      expect(error).toBeNull();
+      expect(recorder.requested).toHaveBeenCalledWith({ opId: "abcd1234-op", source: "api:restart", reason: "operator", restartClass: "routine" });
+      expect(recorder.finished).toHaveBeenCalledWith({
+        opId: "abcd1234-op", outcome: "ready", durationMs: value.durationMs, downtimeMs: value.downtimeMs, how: "graceful",
+      });
+      expect(value.downtimeMs).toBeGreaterThan(0);
+
+      const stranger = nextPid++;
+      for (const proc of world.procs.values()) proc.listens = false;
+      world.add(stranger, { ppid: 1, listens: true, openclaw: false });
+      recorder.finished.mockClear();
+      const refused = await runRestart({ source: "watchdog:repair_replace", reason: "stuck" }, 500);
+      expect(refused.error.code).toBe("stop_refused");
+      const [[requested]] = recorder.requested.mock.calls.slice(-1);
+      expect(requested).toMatchObject({ source: "watchdog:repair_replace", reason: "stuck", restartClass: "repair" });
+      expect(recorder.finished).toHaveBeenCalledWith({ opId: requested.opId, outcome: "stop_refused" });
+    } finally {
+      gateway.setGatewayRestartRecorder(null);
+    }
+  });
+
+  it("a recorder that throws never fails a restart (ALPH-40)", async () => {
+    await bootManaged(gateway, world);
+    world.restartCli = "graceful";
+    gateway.setGatewayRestartRecorder({ requested: () => { throw new Error("disk full"); }, finished: () => { throw new Error("disk full"); } });
+    try {
+      const { error } = await runRestart({ source: "api:restart" }, 5000);
+      expect(error).toBeNull();
+    } finally {
+      gateway.setGatewayRestartRecorder(null);
+    }
+  });
+
   it("stopGatewayForShutdown never asks (no supervisor will relaunch): SIGTERM the group, SIGKILL inside its budget; killManagedGatewayChildNow SIGKILLs the group synchronously", async () => {
     world.nextRunOptions = { ignoreSigterm: true };
     const { launcherPid, workerPid } = await bootManaged(gateway, world);

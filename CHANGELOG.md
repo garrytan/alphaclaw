@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.129] - 2026-10-25
+
+The box status says when and why the gateway last restarted and how long it was down (ALPH-40, 2 of 7).
+
+### Added
+- **`GET /api/box/restart`** returns three things. `gateway`: the last cold restart, recorded by the restart itself: its op id, `source` and `reason` (the attribution every caller passes since v0.10.53, reason redacted), `restartClass`, `requestedAt`, `finishedAt`, `outcome` (`ready`, `running`, or the failure class `stop_refused`, `stop_failed`, `launch_failed`, `ready_timeout`, `aborted`), `durationMs` (the whole operation), `downtimeMs` (stop started to ready, what the operator felt) and how the old gateway stopped. `lastBoot` and `previousBoot`: AlphaClaw's last two boots from the boot history (a container or AlphaClaw restart: kind, outcome, reason, start, end, time to ready, versions). `lastGatewayExit`: the watchdog's last unexpected gateway exit (time, code, signal, cause).
+- The record is one small file, `<state>/.alphaclaw/last-gateway-restart.json`, so it survives an AlphaClaw restart. A restart still `running` when AlphaClaw went away reads as `interrupted`. Shutdown stops are not gateway restarts and are not recorded there; the boot history covers them.
+
+### Changed
+- `runGatewayColdStart` reports the start and the end of every cold restart to a recorder (`setGatewayRestartRecorder`). The recorder runs synchronously but can never delay or fail a restart: a throw is swallowed.
+
+### Tests
+- `box-last-restart.test.js`: the record across a store restart, a finish for another op ignored, `interrupted`, the reason redacted on disk and in the answer, an unreadable file; the route's combined answer and its nulls when every reader throws.
+- `gateway-restart-ladder.test.js`: a graceful restart reports `ready` with the same durations it returns; a refused stop reports `stop_refused` with its source, reason and class; a throwing recorder never fails a restart.
+
 ## [0.10.128] - 2026-10-25
 
 The injected prompt's Google accounts section lists the accounts gog itself knows, including ones added with `gog auth add` outside the Setup UI.
