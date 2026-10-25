@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.100] - 2026-10-25
+
+### Fixed
+- **`npm test` no longer writes AlphaClaw's git auth shim to the machine's `/usr/local/bin/git`.** `tests/bin/alphaclaw.test.js` booted `alphaclaw start` in several cases without `ALPHACLAW_GIT_SHIM_PATH`, so the shim landed at its default path whenever `/usr/local/bin` was writable (Homebrew setups, Capy machines). It pointed at a deleted temp askpass and a deleted test repository and shadowed git for every later process on the machine. Every case in that file now gets a temp `ALPHACLAW_GIT_SHIM_PATH` inside its own scratch directory.
+
+### Tests
+- New Vitest globalSetup `tests/setup-host-paths-guard.js` fingerprints `/usr/local/bin/git`, `/usr/local/bin/openclaw`, `/etc/profile.d/alphaclaw-openclaw.sh` and `/etc/cron.d/openclaw-hourly-sync` (the host paths `start` writes by default and tests can redirect) before the run and fails `npm test` at teardown if any was created, rewritten, re-moded, replaced or removed, naming the path and the override to set. `tests/server/guards/host-paths-guard.test.js` covers the fingerprint and the teardown verdict.
+
 ## [0.10.99] - 2026-10-24
 
 ### Fixed
