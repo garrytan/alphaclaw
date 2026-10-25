@@ -9,7 +9,7 @@ const { writeGoogleState } = require("../../lib/server/google-state");
 
 // F098: the live `gog auth list --check` probe decides `authenticated`; the
 // sticky state flag stands in only when gog did not answer for that client.
-const buildApp = ({ accounts, gogAuthList }) => {
+const buildApp = ({ accounts, gogAuthList, refreshGogAccounts = null }) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gaccts-"));
   const statePath = path.join(tmpDir, "google-state.json");
   writeGoogleState({ fs, statePath, state: { version: 2, accounts } });
@@ -43,6 +43,7 @@ const buildApp = ({ accounts, gogAuthList }) => {
       kMaxGoogleAccounts: 5,
       gogClientCredentialsPath: () => path.join(tmpDir, "creds.json"),
     },
+    refreshGogAccounts,
   });
   return { app, tmpDir };
 };
@@ -100,6 +101,37 @@ describe("server/routes/google accounts: the live probe wins over the sticky fla
       ["acc1", true],
       ["acc2", false],
     ]);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("server/routes/google accounts: prompt sync after a state change", () => {
+  it("re-lists gog's own accounts before it rewrites the prompt", async () => {
+    let releaseRefresh;
+    const refreshGogAccounts = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          releaseRefresh = resolve;
+        }),
+    );
+    const { app, tmpDir } = buildApp({
+      accounts: [],
+      gogAuthList: async () => ({ ok: true, stdout: JSON.stringify({ accounts: [] }), stderr: "" }),
+      refreshGogAccounts,
+    });
+    const promptPath = path.join(tmpDir, "workspace", "hooks", "bootstrap", "AGENTS.md");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await request(app)
+      .post("/api/google/accounts")
+      .send({ email: "new@example.com", client: "default" });
+
+    expect(res.body.ok).toBe(true);
+    expect(refreshGogAccounts).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(promptPath)).toBe(false);
+    releaseRefresh(true);
+    await vi.waitFor(() => expect(fs.existsSync(promptPath)).toBe(true));
+    vi.restoreAllMocks();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });

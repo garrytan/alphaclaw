@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.128] - 2026-10-25
+
+The injected prompt's Google accounts section lists the accounts gog itself knows, including ones added with `gog auth add` outside the Setup UI.
+
+### Fixed
+- **"No Google accounts are currently configured" while gog had accounts.** The "## Available Google Accounts" section of the injected prompt read only AlphaClaw's own `gogcli/state.json`, so an account the agent or an operator added with `gog auth add` was invisible to the agent. AlphaClaw now asks gog (`gog auth list --json --no-input`, the listing gog keeps in its keyring, with the same `XDG_CONFIG_HOME` and `GOG_KEYRING_PASSWORD` every other gog call gets and a 10 s timeout). Accounts in AlphaClaw's state keep their lines unchanged; an account only gog knows gets its own line, for example `- you@example.com (configured in gog outside the Setup UI; client: default)`, under "Also stored in gog". The section says no accounts are configured only when neither has one.
+- The prompt render stays synchronous: the listing lives in an in-memory cache (`lib/server/gog-accounts.js`), refreshed after boot and before the prompt is rewritten after a Google route changes state, so a disconnected account never shows as set up outside. Entries that are not a plain email and a valid client name are dropped, the list is capped at 20, and nothing gog prints is logged. If gog is missing, times out, exits non-zero or prints something else, the cache is empty and the section shows AlphaClaw's state alone, as before.
+
+### Tests
+- `gog-accounts.test.js`: a fake gog binary under `os.tmpdir()` run through the real `execFileCmd` gets `auth list --json --no-input` with AlphaClaw's gog env; a non-zero exit, a missing binary, a hang and non-JSON output all leave the cache empty and log no gog output; an older refresh that finishes last never overwrites a newer one; malformed, duplicate and excess entries are dropped.
+- `onboarding-workspace-google-accounts.test.js`: the rendered section for AlphaClaw-only accounts (byte-identical to before, even when gog lists the same account), gog-only accounts, both (the same email under another client counts as separate), none, and gog failing.
+- `routes-google-accounts.test.js`: saving an account re-lists gog's accounts before the prompt is rewritten.
+
 ## [0.10.127] - 2026-10-25
 
 AlphaClaw no longer kills its own `doctor --lint` in the middle of a multi-GB snapshot copy, which is what left an orphaned copy of the agent database about every 12 minutes (ALPH-36).
