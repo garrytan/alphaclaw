@@ -173,18 +173,61 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     }
   });
 
-  it("tells the agent to use the sanctioned writer when ALPHACLAW_GIT_WRITER_COMMAND is set", () => {
+  const gitSection = (merged) => {
+    const start = merged.indexOf("Other processes write to this repository too, so:\n\n");
+    const end = merged.indexOf("\n\nWhenever you do this");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return merged.slice(start, end);
+  };
+
+  it("renders today's plain git rules, byte for byte, when no writer is set", () => {
+    expect(gitSection(renderShippedPrompt(undefined))).toBe(
+      [
+        "Other processes write to this repository too, so:",
+        "",
+        "- Before you start, update only with `git pull --ff-only`. Never run a plain `git pull`, `git pull --rebase`, `git merge` or `git rebase` on this repository, and never force push.",
+        "- Commit only the paths you changed (`git commit -- <paths>`), then push.",
+        "- If the fast-forward or your push is refused because the histories diverged, stop. Do not merge or rebase to reconcile them: tell the user the repository has diverged and leave it to them.",
+        "- If you find a merge or rebase already in progress, leave it alone and tell the user.",
+      ].join("\n"),
+    );
+  });
+
+  it("renders one consistent writer rule set when ALPHACLAW_GIT_WRITER_COMMAND is set", () => {
     const merged = renderShippedPrompt('  alphaclaw git-sync -m "<message>"  ');
-    expect(merged).toContain(
-      '- This repository has a sanctioned writer: commit and push with `alphaclaw git-sync -m "<message>"` instead of raw `git commit` and `git push`.',
+    expect(gitSection(merged)).toBe(
+      [
+        "Other processes write to this repository too, so:",
+        "",
+        "- Before you start, update only with `git pull --ff-only`. Never run a plain `git pull`, `git pull --rebase`, `git merge` or `git rebase` on this repository, and never force push.",
+        '- This repository has a sanctioned writer: commit and push only with `alphaclaw git-sync -m "<message>"`. Never run raw `git commit` or `git push` on this repository.',
+        '- If `git pull --ff-only` fails, run `alphaclaw git-sync -m "<message>"` instead of stopping.',
+        "- If the writer refuses, stop and tell the user. Never fall back to raw git, a merge, a rebase or a force push.",
+        "- If you find a merge or rebase already in progress, leave it alone and tell the user.",
+      ].join("\n"),
     );
-    expect(merged).toContain(
-      'When `git pull --ff-only` fails, run `alphaclaw git-sync -m "<message>"` instead of stopping.',
-    );
-    expect(merged).toContain("never fall back to raw git, a merge or a rebase.");
-    expect(merged).toContain("Before you start, update only with `git pull --ff-only`.");
     expect(merged).not.toContain("{{");
   });
+
+  it("never renders the raw-commit rule and the writer rule together", () => {
+    for (const writer of [undefined, "", "brain sync", 'alphaclaw git-sync -m "<message>"', "sync`x`"]) {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let merged;
+      try {
+        merged = renderShippedPrompt(writer);
+      } finally {
+        warn.mockRestore();
+      }
+      const section = gitSection(merged);
+      const hasRawCommit = section.includes("git commit --");
+      const hasWriterRule = section.includes("sanctioned writer");
+      expect(hasRawCommit && hasWriterRule).toBe(false);
+      expect(hasRawCommit || hasWriterRule).toBe(true);
+      if (hasWriterRule) expect(section).not.toContain("histories diverged, stop");
+    }
+  });
+
 
   it("never renders an unsafe or oversized ALPHACLAW_GIT_WRITER_COMMAND", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -225,6 +268,15 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
           /pull first|or a merge|finish or abort/i.test(line) ||
           (/`git (pull(?! --ff-only)|merge|rebase)\b/.test(line) && !/\bnever\b/i.test(line));
         if (allowsMerge) offenders.push(`${path.relative(kSetupDir, file)}:${index + 1}: ${line.trim()}`);
+      });
+    }
+    // The git rules live in workspace.js, so the rendered prompt is checked too.
+    for (const writer of [undefined, "brain sync"]) {
+      renderShippedPrompt(writer).split("\n").forEach((line, index) => {
+        const allowsMerge =
+          /pull first|or a merge|finish or abort/i.test(line) ||
+          (/`git (pull(?! --ff-only)|merge|rebase)\b/.test(line) && !/\bnever\b/i.test(line));
+        if (allowsMerge) offenders.push(`render(${writer || "plain"}):${index + 1}: ${line.trim()}`);
       });
     }
     expect(offenders).toEqual([]);

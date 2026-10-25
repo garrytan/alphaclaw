@@ -39,10 +39,7 @@ For plugins and other durable artifacts:
 
 Anytime you add, edit, or remove workspace files, openclaw.json, cron/jobs.json, skills, or external resources (third-party pages, databases, integrations), **commit and push your changes to git**. Other processes write to this repository too, so:
 
-- Before you start, update only with `git pull --ff-only`. Never run a plain `git pull`, `git pull --rebase`, `git merge` or `git rebase` on this repository, and never force push.
-- Commit only the paths you changed (`git commit -- <paths>`), then push.
-- If the fast-forward or your push is refused because the histories diverged, stop. Do not merge or rebase to reconcile them: tell the user the repository has diverged and leave it to them.
-- If you find a merge or rebase already in progress, leave it alone and tell the user.{{GIT_WRITER_RULE}}
+{{GIT_RULES}}
 
 Whenever you do this, end your message with a **Changes committed** summary. Use workspace-relative paths for local files.
 

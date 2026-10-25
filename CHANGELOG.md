@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.116] - 2026-10-25
+
+With `ALPHACLAW_GIT_WRITER_COMMAND` set, the agent's git rules are one consistent rule set.
+
+### Fixed
+- **The writer rule no longer contradicts the plain git rules.** The bootstrap prompt kept "Commit only the paths you changed (`git commit -- <paths>`), then push" and "stop when the histories diverged", and then appended the writer rule saying to commit and push with the writer instead of raw git and to run it when `git pull --ff-only` fails. An agent could follow either. The git bullets are now one `{{GIT_RULES}}` token rendered by `lib/server/onboarding/workspace.js`. With a writer set it renders: pull only with `git pull --ff-only`; commit and push only with the writer, never raw `git commit` or `git push`; run the writer when the fast-forward fails; if the writer refuses, stop and tell the user, never falling back to raw git, a merge, a rebase or a force push; leave a merge or rebase in progress alone. Without a writer, or with a value the validation rejects, the rendered prompt is byte for byte what it was.
+- README's git sync section describes the writer rule set.
+
+### Tests
+- `onboarding-workspace.test.js`: exact renders of the git section with and without a writer, a guard that fails when one render holds both `git commit --` and the writer rule (and that a writer render never keeps the diverged-history stop), and the no-merge guard now also scans both renders, since the git rules moved out of `lib/setup`.
+
 ## [0.10.115] - 2026-10-25
 
 An env save asks for a gateway restart only when it changes the environment the gateway is launched with.
