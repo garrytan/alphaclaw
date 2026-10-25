@@ -58,6 +58,30 @@ export const createHostPathsGuard = (paths) => {
   };
 };
 
+// A leftover from an earlier run (before this guard, or from a branch without
+// it) would pass the before/after comparison unnoticed. AlphaClaw's generated
+// files name the managed root they were made for, so a guarded path that
+// points into a test run's private TMPDIR is a test leftover.
+const kTestRunMarker = "alphaclaw-vitest-run-";
+
+export const findTestLeftovers = (paths) =>
+  paths.filter((filePath) => {
+    try {
+      const stat = fs.lstatSync(filePath);
+      return stat.isFile() && fs.readFileSync(filePath, "utf8").includes(kTestRunMarker);
+    } catch {
+      return false;
+    }
+  });
+
 export default function guardHostPaths() {
+  const leftovers = findTestLeftovers(kGuardedHostPaths);
+  if (leftovers.length) {
+    throw new Error(
+      "[host-paths-guard] an earlier test run left AlphaClaw files on this machine, pointing at a deleted test directory. " +
+        "They shadow the real tools for every process; remove them before running the suite:\n" +
+        leftovers.map((filePath) => `rm ${filePath}`).join("\n"),
+    );
+  }
   return createHostPathsGuard(kGuardedHostPaths);
 }

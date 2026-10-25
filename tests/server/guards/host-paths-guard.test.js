@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   createHostPathsGuard,
+  findTestLeftovers,
   fingerprintHostPath,
   kGuardedHostPaths,
 } from "../../setup-host-paths-guard.js";
@@ -34,6 +35,14 @@ describe("tests/setup-host-paths-guard", () => {
     const teardown = createHostPathsGuard([shim]);
     fs.writeFileSync(shim, "#!/bin/bash\n", { mode: 0o755 });
     expect(() => teardown()).toThrow(`${shim}: absent -> file:`);
+  });
+
+  it("finds a guarded file left by an earlier test run, and nothing else", () => {
+    const leftover = path.join(dir, "git");
+    const real = path.join(dir, "openclaw");
+    fs.writeFileSync(leftover, 'OPENCLAW_REPO_ROOT="/tmp/alphaclaw-vitest-run-AbC123/alphaclaw-test-x/.openclaw"\n');
+    fs.writeFileSync(real, 'OPENCLAW_REPO_ROOT="/data/.openclaw"\n');
+    expect(findTestLeftovers([leftover, real, path.join(dir, "absent")])).toEqual([leftover]);
   });
 
   it("fails on rewritten content, a mode change, a replacement symlink and a removal", () => {

@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.101] - 2026-10-25
+
+### Changed
+- **A normal-user install keeps its binaries under its own root.** `alphaclaw start` installed the git auth shim at `/usr/local/bin/git`, a `systemctl` shim at `/usr/local/bin/systemctl` when the machine had none (every Mac), and a downloaded `gog` at `/usr/local/bin/gog` when gog was missing, whatever user it ran as. Wherever `/usr/local/bin` was writable (Homebrew setups, some dev boxes), that shadowed git for every process on the machine. When AlphaClaw is not running as root, all three now go to `<ALPHACLAW_ROOT_DIR>/bin`, which is put first on `PATH` for the server and everything it starts (gateway, Doctor, CLI calls), and the operator-shell wrapper and profile snippet carry the same `PATH` prefix when they are written. Root installs, the Docker images included, keep `/usr/local/bin` and an unchanged `PATH`. `ALPHACLAW_GIT_SHIM_PATH` still overrides the git shim. A git shim that an earlier version left at `/usr/local/bin/git` for this same install (managed header plus this install's repo root) is removed at boot; anything else there is left alone. The `/etc/cron.d` sync entry still needs root, as before, and does not use these binaries. Documented in the README under "Running as a normal user".
+
+### Tests
+- `tests/bin/alphaclaw-host-bin.test.js` boots `start` as a normal user, as root (uid stubbed) and with the override. A preload records every write under `/usr/local/bin` and `/etc` without performing it, fakes a missing systemctl and gog, and serves a local gog archive. It checks where each binary lands, the `PATH` order, and the operator-shell `PATH` line. `tests/server/host-bin.test.js` covers the root check, the directory, the `PATH` prefix, the shim-path default and the stale-shim removal rules.
+- The host-path guard (`tests/setup-host-paths-guard.js`) also refuses to start the run when a guarded path is a leftover from an earlier test run: a file that names a test run's private TMPDIR (`alphaclaw-vitest-run-*`). It prints the `rm` to run. Before this, a leftover from a run on a branch without the guard passed the before-and-after comparison unnoticed.
+
 ## [0.10.100] - 2026-10-25
 
 ### Fixed
