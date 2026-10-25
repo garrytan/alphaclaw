@@ -57,6 +57,10 @@ describe("git sync last-run line", () => {
     });
     expect(describeGitSyncLastRun({ at: "x", outcome: "refused", code: "lock_timeout", consecutiveFailures: 1, headline: "h" }, { nowMs }).tone)
       .toBe("warning");
+    expect(describeGitSyncLastRun({ at: "2026-10-12T11:48:00.000Z", outcome: "warning", code: "nested_repo", nestedRepoCount: 1 }, { nowMs })).toEqual({
+      tone: "warning",
+      text: "Pushed 12 minutes ago, but 1 nested git repository is not backed up",
+    });
     expect(describeGitSyncLastRun({ at: "2026-10-12T11:48:00.000Z", outcome: "warning", code: "held_back", heldBackCount: 2 }, { nowMs })).toEqual({
       tone: "warning",
       text: "Pushed 12 minutes ago, but 2 large new paths are held back and not backed up",

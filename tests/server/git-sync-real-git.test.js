@@ -4,6 +4,8 @@ const os = require("os");
 const path = require("path");
 
 const { performGitSync, kGitMaxBufferBytes } = require("../../lib/cli/git-sync");
+const { recordGitSyncRun } = require("../../lib/cli/git-sync-status");
+const { createGitSyncHealth } = require("../../lib/server/git-sync-health");
 const {
   acquireWriterLock,
   resolveWriterLockPath,
@@ -405,7 +407,7 @@ describe("git-sync against real git (issue #140)", () => {
       expect(remoteNames()).not.toContain("workspace/notes.md");
     });
 
-    it("leaves out a nested repository with no commits and still pushes everything else", () => {
+    it("leaves out a nested repository with no commits, warns, and still pushes everything else", () => {
       const nested = path.join(live, "workspace/clone");
       fs.mkdirSync(nested, { recursive: true });
       sh(nested, ["init", "-q", "-b", "main"]);
@@ -413,10 +415,10 @@ describe("git-sync against real git (issue #140)", () => {
       write(live, "workspace/notes.md", "b\n");
       const log = vi.fn();
 
-      expect(sync({ log })).toMatchObject({ code: "ok", committed: true, pushed: true });
+      expect(sync({ log })).toMatchObject({ code: "nested_repo", outcome: "warning", committed: true, pushed: true });
       expect(remoteNames()).not.toContain("workspace/clone");
       expect(sh(remote, ["show", "main:workspace/notes.md"])).toBe("b\n");
-      expect(log).toHaveBeenCalledWith(expect.stringContaining("left out 1 path(s) git cannot commit"));
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("does not back up 1 nested git repository path(s): workspace/clone/ (a separate repository)"));
     });
 
     it("reads the tree again when an untracked file vanishes before git add", () => {
@@ -618,6 +620,111 @@ describe("git-sync against real git (issue #140)", () => {
       ]);
       const lockPath = resolveWriterLockPath({ git: createRunner(stateDir), openclawDir: stateDir });
       expect(fs.realpathSync(path.dirname(lockPath))).toBe(fs.realpathSync(path.join(outer, ".git")));
+    });
+  });
+
+
+  // OpenClaw `git init`s every brand-new agent workspace, so a nested
+  // repository is the normal state of a managed directory. It is never
+  // staged and never a silent ok.
+  describe("nested git repositories", () => {
+    const remoteTree = () =>
+      sh(remote, ["ls-tree", "-r", "main"]).trim().split("\n").map((line) => {
+        const [meta, name] = line.split("\t");
+        return { mode: meta.split(" ")[0], name };
+      });
+    const initRepo = (dir, { commit = false } = {}) => {
+      fs.mkdirSync(dir, { recursive: true });
+      sh(dir, ["init", "-q", "-b", "main"]);
+      if (!commit) return;
+      write(dir, "README.md", "nested\n");
+      sh(dir, ["add", "-A"]);
+      sh(dir, ["commit", "-qm", "nested"]);
+    };
+    const createHealth = () => {
+      const notify = vi.fn(async () => ({ ok: true }));
+      return { notify, health: createGitSyncHealth({ openclawDir: live, notify, recordEvent: vi.fn() }) };
+    };
+
+    it("warns and notifies about a new agent workspace OpenClaw git-inited, then clears once its .git is gone", async () => {
+      initRepo(path.join(live, "workspace-research"));
+      write(live, "workspace-research/AGENTS.md", "agent\n");
+      write(live, "workspace/notes.md", "b\n");
+
+      const result = sync();
+
+      expect(result).toMatchObject({ code: "nested_repo", outcome: "warning", exitCode: 0, committed: true, pushed: true });
+      expect(result.nestedRepos).toEqual([{ path: "workspace-research/", kind: "repository" }]);
+      expect(result.detail).toBe("not backed up: workspace-research/ (a separate repository)");
+      expect(remoteTree().map((entry) => entry.name)).toEqual(["openclaw.json", "workspace/notes.md"]);
+      recordGitSyncRun({ openclawDir: live, result, trigger: "scheduled", lock: "acquired" });
+      const { health, notify } = createHealth();
+      expect(await health.check()).toEqual({ action: "notified_nested_repo" });
+      expect(notify.mock.calls[0][0]).toContain(
+        "has not backed up 1 nested git repository since",
+      );
+      expect(notify.mock.calls[0][0]).toContain("workspace-research/ (a separate repository: its content and history are not backed up)");
+
+      fs.rmSync(path.join(live, "workspace-research", ".git"), { recursive: true });
+      const cleared = sync();
+      expect(cleared).toMatchObject({ code: "ok", nestedRepos: [], pushed: true });
+      expect(sh(remote, ["show", "main:workspace-research/AGENTS.md"])).toBe("agent\n");
+      recordGitSyncRun({ openclawDir: live, result: cleared, trigger: "scheduled", lock: "acquired" });
+      expect(await health.check()).toEqual({ action: "notified_nested_repo_cleared" });
+    });
+
+    it("never pushes an untracked nested repository with commits as a gitlink, and warns", () => {
+      initRepo(path.join(live, "workspace/tools/clone"), { commit: true });
+      write(live, "workspace/notes.md", "b\n");
+
+      const result = sync();
+
+      expect(result).toMatchObject({ code: "nested_repo", committed: true, pushed: true });
+      expect(result.nestedRepos).toEqual([{ path: "workspace/tools/clone/", kind: "repository" }]);
+      expect(remoteTree().filter((entry) => entry.mode === "160000")).toEqual([]);
+      expect(remoteTree().map((entry) => entry.name)).not.toContain("workspace/tools/clone");
+    });
+
+    it("is unchanged when there is no nested repository", () => {
+      write(live, "workspace/notes.md", "b\n");
+      expect(sync()).toMatchObject({ code: "ok", outcome: "ok", nestedRepos: [], pushed: true });
+    });
+
+    it("keeps backing up files the outer repository tracks under a folder that later got its own .git, without a warning", () => {
+      initRepo(path.join(live, "workspace"), { commit: true });
+      write(live, "workspace/notes.md", "tracked change\n");
+      write(live, "workspace/new.md", "new under the nested repo\n");
+
+      const result = sync();
+
+      expect(result).toMatchObject({ code: "ok", nestedRepos: [], committed: true, pushed: true });
+      expect(sh(remote, ["show", "main:workspace/notes.md"])).toBe("tracked change\n");
+      expect(sh(remote, ["show", "main:workspace/new.md"])).toBe("new under the nested repo\n");
+      expect(remoteTree().filter((entry) => entry.mode === "160000")).toEqual([]);
+    });
+
+    it("never stages a changed gitlink pointer inside a tracked workspace, warns about it, and pushes the rest", () => {
+      const pointed = path.join(live, "workspace/scripts/xmcp");
+      initRepo(pointed, { commit: true });
+      sh(live, ["add", "workspace/scripts/xmcp"]);
+      sh(live, ["commit", "-qm", "gitlink"]);
+      sh(live, ["push", "-q", "origin", "main"]);
+      const pointerBefore = remoteTree().find((entry) => entry.name === "workspace/scripts/xmcp");
+      expect(pointerBefore.mode).toBe("160000");
+      write(pointed, "README.md", "moved\n");
+      sh(pointed, ["commit", "-qam", "moved"]);
+      write(live, "workspace/notes.md", "b\n");
+
+      const result = sync();
+
+      expect(result).toMatchObject({ code: "nested_repo", committed: true, pushed: true });
+      expect(result.nestedRepos).toEqual([{ path: "workspace/scripts/xmcp", kind: "pointer" }]);
+      expect(sh(live, ["show", "--name-only", "--format=", "HEAD"]).trim()).toBe("workspace/notes.md");
+      expect(remoteTree()).toContainEqual(pointerBefore);
+      expect(sh(remote, ["ls-tree", "main", "workspace/scripts/xmcp"])).toBe(sh(live, ["ls-tree", "HEAD~1", "workspace/scripts/xmcp"]));
+
+      const unchanged = sync();
+      expect(unchanged).toMatchObject({ code: "nested_repo", nestedRepos: [{ path: "workspace/scripts/xmcp", kind: "pointer" }] });
     });
   });
 

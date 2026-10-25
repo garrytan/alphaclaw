@@ -659,6 +659,28 @@ describe("server/doctor/deterministic-checks", () => {
     expect(build({}).some((c) => c.sourceKey.startsWith("det:git-sync-held-back:"))).toBe(false);
   });
 
+  it("flags nested git repositories the sync does not back up, per episode", () => {
+    write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({
+      outcome: "warning",
+      code: "nested_repo",
+      consecutiveFailures: 0,
+      nestedRepos: {
+        since: "2026-10-12T10:00:00.000Z",
+        runs: 1,
+        paths: [{ path: "workspace-research/", kind: "repository" }, { path: "workspace/scripts/xmcp", kind: "pointer" }],
+      },
+    }));
+    const card = findCard(build({}), "det:git-sync-nested-repo:2026-10-12T10:00:00.000Z");
+    expect(card).toMatchObject({ priority: "P2", category: "workspace state", targetPaths: [] });
+    expect(card.evidence).toEqual([
+      { type: "text", text: "separate repository: workspace-research/" },
+      { type: "text", text: "pointer only: workspace/scripts/xmcp" },
+    ]);
+
+    write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({ outcome: "ok", code: "ok", nestedRepos: null }));
+    expect(build({}).some((c) => c.sourceKey.startsWith("det:git-sync-nested-repo:"))).toBe(false);
+  });
+
   it("flags a live tree that stays behind GitHub after three runs", () => {
     write(managedRoot, ".alphaclaw/git-sync-status.json", JSON.stringify({
       outcome: "warning",

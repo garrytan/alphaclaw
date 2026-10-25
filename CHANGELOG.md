@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.98] - 2026-10-24
+
+### Fixed
+- **A new agent workspace was silently never backed up.** OpenClaw 2026.10 `git init`s every brand-new agent workspace, so the workspace folder usually has its own `.git` with no commits. The sync left such a nested repository out of every commit with one log line and reported a plain ok, so nothing told the owner that the agent's whole workspace was missing from GitHub. A nested repository that had commits was pushed as a gitlink (a pointer, mode 160000) and its content was silently missing too. Now a nested repository is never staged and is always reported. An untracked one (`?? dir/`) is "a separate repository: its content and history are not backed up". A gitlink in the scan, changed or not, is "a pointer only", and a changed pointer is not staged. The run's code is the new `nested_repo` warning (exit 0, everything else pushed), with a `nestedRepos` episode in `git-sync-status.json` and in `lib/server/git-sync-health.js` that follows the held_back lifecycle (one notification and a `git_sync_refused` warning event, a daily reminder, and a line plus `git_sync_recovered` when it is gone). There is also a P2 Doctor card naming each path and its kind, and a line on the General tab. The sync never deletes or changes a nested `.git`. Files the outer repository already tracks under a folder that later got its own `.git` are ordinary paths to git and keep syncing without a warning. The nested-repository probe (`git -C <dir> rev-parse`) is gone, because no nested repository is staged any more. The gitlink listing (`git ls-files --stage`) is best-effort: if it fails, a changed gitlink is still found among the changed paths, because its path is a folder.
+
+### Tests
+- `git-sync-real-git.test.js`, "nested git repositories":
+  - A freshly `git init`ed agent workspace warns, notifies through the health check, and clears (sync, status and notice) once its `.git` is gone, after which its files push.
+  - An untracked nested repository with commits is never pushed as a gitlink.
+  - No nested repository keeps a plain ok.
+  - Files tracked under a folder that later got its own `.git` (with commits) keep pushing with no warning.
+  - A changed gitlink inside a tracked workspace is not staged and is reported as a pointer, while the workspace's own changes push. An unchanged gitlink still warns.
+  - The existing "nested repository with no commits" case now expects the warning.
+- `git-sync-health.test.js` covers the episode lifecycle and the status-file rules. `doctor-deterministic-checks.test.js` covers the card, `general-sync-status.test.js` the General tab line, and `routes-system.test.js` `nestedRepoCount`.
+
 ## [0.10.97] - 2026-10-24
 
 ### Fixed
