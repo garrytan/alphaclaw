@@ -585,6 +585,19 @@ describe("server/doctor/deterministic-checks", () => {
     expect(findCard(build({}), "det:git-sync-disabled")).toBeUndefined();
   });
 
+  it("does not flag the paused schedule when ALPHACLAW_GIT_SYNC=off turned sync off on purpose", () => {
+    write(managedRoot, "cron/system-sync.json", JSON.stringify({ enabled: false }));
+    const previous = process.env.ALPHACLAW_GIT_SYNC;
+    process.env.ALPHACLAW_GIT_SYNC = "off";
+    try {
+      expect(findCard(build({}), "det:git-sync-disabled")).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.ALPHACLAW_GIT_SYNC;
+      else process.env.ALPHACLAW_GIT_SYNC = previous;
+    }
+    expect(findCard(build({}), "det:git-sync-disabled")).toBeDefined();
+  });
+
   it("tolerates unreadable git sync state", () => {
     write(managedRoot, "cron/system-sync.json", "{not json");
     expect(() => build({})).not.toThrow();

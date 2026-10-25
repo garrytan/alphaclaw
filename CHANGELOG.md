@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.111] - 2026-10-25
+
+`ALPHACLAW_GIT_SYNC=off` turns AlphaClaw's git sync off for a repository another writer owns (ALPH-36).
+
+### Added
+- **A supported off switch for git sync.** A box whose workspace repository is committed and pushed by the agent's own sync script had no way to stop AlphaClaw's sync short of pausing the schedule, and the Browse Sync button and the models, Telegram and webhook saves kept running `alphaclaw git-sync` anyway (and a paused schedule raised a P1 Doctor card). With `ALPHACLAW_GIT_SYNC=off` in `.env` (`false`, `0`, `no` and `disabled` also count), `alphaclaw git-sync` returns before the writer lock and before any git command, for every trigger, and exits 0. It still records the run in `git-sync-status.json` as code and outcome `disabled`, which ends every open episode (failure, held-back, nested-repository, live-tree-behind) and keeps `lastSuccessAt`. The Sync button answers 200 with "Git sync is off (ALPHACLAW_GIT_SYNC=off)", the General tab shows the same line instead of a stale failure, saves get no sync warning, and the Doctor's paused-schedule card stays quiet.
+- **An open failure alert closes with one line.** When an announced git-sync episode is open and the next run is disabled, the owner gets one "⏸️ Git sync was turned off (ALPHACLAW_GIT_SYNC=off) …" notice and a `git_sync_disabled` watchdog event, never a "recovered" line, and no further reminder. Turned off with nothing open, it says nothing.
+- README: the env table row and a "Turning it off" line in "Git sync with other writers".
+
+### Tests
+- `git-sync-off.test.js`: the accepted values; the real CLI with the key only in `.env` exits 0 for the scheduled, manual and caller triggers, prints the off sentence, leaves the repository untouched (no commit, the file still untracked), and turns a refused status into `disabled` with the episode closed; removing the key runs the sync again; a save gets no warning.
+- `git-sync-health.test.js`: a disabled run ends every episode and keeps the last success; an announced conflict episode closes with one turned-off line and event, no recovery line, and no reminder a day later or after a restart; nothing is sent when no episode is open.
+- `routes-browse.test.js`, `general-sync-status.test.js`, `doctor-deterministic-checks.test.js`: the Sync button's 200, the General tab line, and no paused-schedule card while the key is set.
+
 ## [0.10.110] - 2026-10-25
 
 On a full disk, owner notices still leave the box and the login page says why sign-in fails (ALPH-35 follow-up).

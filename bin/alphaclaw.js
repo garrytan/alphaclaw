@@ -90,7 +90,7 @@ const {
   kGitAskpassScript,
 } = require("../lib/git-askpass-script");
 const { kGithubRepoSlugPattern } = require("../lib/server/helpers");
-const { performGitSync, parseGitSyncPaths, kGitMaxBufferBytes } = require("../lib/cli/git-sync");
+const { performGitSync, parseGitSyncPaths, isGitSyncOff, kGitMaxBufferBytes } = require("../lib/cli/git-sync");
 const { getGitSyncCode } = require("../lib/cli/git-sync-codes");
 const { recordGitSyncRun } = require("../lib/cli/git-sync-status");
 const {
@@ -628,6 +628,16 @@ const runGitSync = () => {
     console.error("[alphaclaw] --trigger must be scheduled, manual or caller");
     reportGitSync({ code: "usage", outcome: "failed", detail: "--trigger must be scheduled, manual or caller" });
     return 2;
+  }
+  // Off for this repository: no lock, no git, no config checks. The status
+  // file still records the run, so the server closes any open episode and
+  // the General tab says why nothing is being backed up.
+  if (isGitSyncOff(process.env)) {
+    console.log("[alphaclaw] Git sync is off (ALPHACLAW_GIT_SYNC=off); nothing was committed or pushed");
+    const result = { code: "disabled", outcome: "disabled" };
+    recordGitSyncRun({ openclawDir, trigger, lock: "none", result });
+    reportGitSync(result);
+    return 0;
   }
   const defaults = kGitSyncDefaults[trigger];
   const deadlineSeconds = parseBoundedSeconds(flagValue(commandArgs, "--deadline-seconds"), {
