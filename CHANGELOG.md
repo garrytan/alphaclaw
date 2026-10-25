@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.123] - 2026-10-25
+
+A read-only process table for the whole box, so an operator or the agent can see what runs in the container without a shell (ALPH-40, 1 of 7).
+
+### Added
+- **`GET /api/box/processes`** lists every process in the container from `/proc`: pid, parent, uid and user, the command line with secrets redacted (the deployment's `.env` values, secret-named env values, secret flags and token shapes), state, start time and uptime, RSS, PSS for the 32 largest, and who owns it: `gateway` (the launcher and the serving worker), `tool` (anything the gateway worker started), `alphaclaw` (the server and its own children, such as Doctor or git) or `other` (co-resident services; `role: "ancestor"` for the processes above AlphaClaw). AlphaClaw's server carries its version, the gateway its OpenClaw version, and a process running AlphaClaw's own Node binary its Node version. `totals` sums count and RSS per owner over every process read.
+- **Which processes still run on an old env value.** `envKeys=A,B` (up to 8 names) adds, per returned process, an HMAC of the value it holds for each key and `envFile: match | mismatch | unset | not_in_env_file | unknown` against the deployment's `.env`. The HMAC key is random and lives only in the AlphaClaw process, so the hashes compare between processes and with the file within one AlphaClaw lifetime and can't be used to guess a value. Values never leave the server.
+- **Bounded.** At most 4,096 pids and 750 ms per scan (`status: "partial"` with `reason` otherwise), 100 rows by default and 500 at most, largest RSS first, command lines read up to 8 KB and shown up to 400 characters, environments read up to 256 KB, PSS within 500 ms. A read stays fresh for 5 s, so a polling panel doesn't rescan.
+- **One route and one agent-admin op for every box view.** `GET /api/box/:view` (op `box.read`, tier safe, listed under the watchdog domain) serves the views this and the next PRs add; an unknown view answers 404 `unknown_view` with the list. A single op keeps the generated `alphaclaw-admin` skill inside its 62k budget, and the manifest documents each view's parameters (`alphaclaw admin manifest --op box.read`). `/api/box` is a local-only namespace, never proxied to the gateway.
+
+### Tests
+- `box-processes.test.js`: against a fake `/proc`, every owner and role, ordering, versions, uptime, PSS and totals; secrets and tokens absent from the whole response; env hashes match across processes and against the `.env` file, a changed value reads `mismatch`, and no value appears in the response; the limit, the cache window, a scan that runs out of budget, a missing `/proc`; the route's 400s for bad `envKeys` and `limit`, and 404 for an unknown view, `constructor` included.
+
 ## [0.10.122] - 2026-10-25
 
 AlphaClaw honors an operator box lock: with `ALPHACLAW_BOX_LOCK_PATH` set, its own disruptive operations take the same `flock` lock the box's other operators use, wait for another holder (bounded) or refuse, and never break or steal it.
