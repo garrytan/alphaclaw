@@ -9,10 +9,12 @@ process.env.ALPHACLAW_ROOT_DIR = kTempRoot;
 fs.mkdirSync(path.join(kTempRoot, ".openclaw", ".alphaclaw"), { recursive: true });
 
 const {
+  kKilledRunQuietMs,
   kLegacySnapshotMinAgeMs,
   kSnapshotMinAgeMs,
   resolveSnapshotRoots,
   sweepAbandonedSnapshotCopies,
+  trackSnapshotCopiesOfRun,
 } = require("../../lib/server/openclaw-snapshot-sweep");
 
 const kHour = 60 * 60 * 1000;
@@ -70,18 +72,22 @@ describe("server/openclaw-snapshot-sweep", () => {
     const uuid = makeSnapshot(cacheRoot, `openclaw-sqlite-readonly-v2-${kUuid}`);
     const legacy = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-917-xYz789", { ageMs: kLegacySnapshotMinAgeMs + kHour });
     const result = sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base), logger });
-    expect(result).toMatchObject({ removed: 3, held: 0, recent: 0, failed: 0 });
+    expect(result).toMatchObject({ candidates: 3, removed: 3, held: 0, recent: 0, failed: 0, unverified: 0, keptBytes: 0 });
     expect(result.freedBytes).toBeGreaterThanOrEqual(1 << 20);
     for (const { directory } of [v2, uuid, legacy]) expect(fs.existsSync(directory)).toBe(false);
     expect(logger.log).toHaveBeenCalledTimes(1);
-    expect(logger.log.mock.calls[0][0]).toMatch(/^\[alphaclaw\] snapshot sweep: removed 3 abandoned OpenClaw SQLite snapshot copies, freed \d+ MB/);
+    expect(logger.log.mock.calls[0][0]).toMatch(
+      /^\[alphaclaw\] snapshot sweep \(launch\): 3 candidates, removed 3 \(\d+ MB\), skipped 0 \(0 in use, 0 under the age floor, 0 not ours or unreadable, 0 unchecked without \/proc; 0 MB kept\)$/,
+    );
   });
 
   it("keeps a directory any process holds a file open in", () => {
     const held = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-HeLd01");
     const result = sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base, [held.staged]), logger });
     expect(result).toMatchObject({ removed: 0, held: 1 });
+    expect(result.keptBytes).toBeGreaterThan(0);
     expect(fs.existsSync(held.staged)).toBe(true);
+    expect(logger.log.mock.calls[0][0]).toContain("skipped 1 (1 in use, 0 under the age floor,");
   });
 
   it("keeps recent copies: under an hour for v2, under a day for the legacy layout, judged by the newest entry", () => {
@@ -93,7 +99,41 @@ describe("server/openclaw-snapshot-sweep", () => {
     const result = sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base), logger });
     expect(result).toMatchObject({ removed: 0, recent: 3 });
     for (const { directory } of [fresh, legacy, mixed]) expect(fs.existsSync(directory)).toBe(true);
-    expect(logger.log).not.toHaveBeenCalled();
+    expect(logger.log.mock.calls[0][0]).toContain("3 candidates, removed 0 (0 MB), skipped 3 (0 in use, 3 under the age floor,");
+  });
+
+  it("judges age by the copy's own files: a directory or token file touched later does not keep an old copy", () => {
+    const touched = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-ToUch1", { bytes: 1 << 20 });
+    fs.mkdirSync(path.join(touched.directory, "openclaw-state", "state"), { recursive: true });
+    const nested = path.join(touched.directory, "openclaw-state", "state", "openclaw.sqlite");
+    fs.writeFileSync(nested, "x");
+    setAge(nested, 3 * kHour);
+    fs.writeFileSync(path.join(touched.directory, "owner.sqlite"), "token");
+    expect(Date.now() - fs.statSync(touched.directory).mtimeMs).toBeLessThan(60_000);
+    const result = sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base), logger });
+    expect(result).toMatchObject({ candidates: 1, removed: 1, recent: 0 });
+    expect(fs.existsSync(touched.directory)).toBe(false);
+  });
+
+  it("falls back to the token files, then the directory, only when the copy has no other file", () => {
+    const tokenOnly = path.join(cacheRoot, "openclaw-sqlite-readonly-v2-ToKen1");
+    fs.mkdirSync(tokenOnly);
+    fs.writeFileSync(path.join(tokenOnly, "owner.sqlite"), "token");
+    setAge(tokenOnly, 3 * kHour);
+    const empty = path.join(cacheRoot, "openclaw-sqlite-readonly-v2-EmPty1");
+    fs.mkdirSync(empty);
+    const result = sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base), logger });
+    expect(result).toMatchObject({ candidates: 2, removed: 0, recent: 2 });
+    setAge(path.join(tokenOnly, "owner.sqlite"), 3 * kHour);
+    setAge(empty, 3 * kHour);
+    expect(sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base), logger })).toMatchObject({ removed: 2 });
+  });
+
+  it("logs one line even when there is nothing to sweep", () => {
+    const result = sweepAbandonedSnapshotCopies({ env, procRoot: makeProc(base), trigger: "periodic", logger });
+    expect(result).toMatchObject({ candidates: 0, removed: 0 });
+    expect(logger.log).toHaveBeenCalledTimes(1);
+    expect(logger.log.mock.calls[0][0]).toMatch(/^\[alphaclaw\] snapshot sweep \(periodic\): 0 candidates, removed 0 \(0 MB\), skipped 0 /);
   });
 
   it("touches nothing else in the cache root: other names, plain files, symlinks", () => {
@@ -112,7 +152,8 @@ describe("server/openclaw-snapshot-sweep", () => {
   it("removes nothing when /proc cannot be read", () => {
     const orphan = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-NoPrOc");
     const result = sweepAbandonedSnapshotCopies({ env, procRoot: path.join(base, "missing-proc"), logger });
-    expect(result.removed).toBe(0);
+    expect(result).toMatchObject({ removed: 0, unverified: 1 });
+    expect(logger.log.mock.calls[0][0]).toContain("1 unchecked without /proc");
     expect(fs.existsSync(orphan.directory)).toBe(true);
   });
 
@@ -130,6 +171,54 @@ describe("server/openclaw-snapshot-sweep", () => {
     const result = sweepAbandonedSnapshotCopies({ env: { HOME: base, XDG_CACHE_HOME: xdg }, procRoot: makeProc(base), logger });
     expect(result.removed).toBe(1);
     expect(fs.existsSync(fallback.directory)).toBe(false);
+  });
+});
+
+describe("trackSnapshotCopiesOfRun: copies a killed CLI left behind", () => {
+  let base;
+  let cacheRoot;
+  let env;
+  let logger;
+  beforeEach(() => {
+    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-run-")));
+    cacheRoot = path.join(base, ".cache", "openclaw");
+    fs.mkdirSync(cacheRoot, { recursive: true });
+    env = { HOME: base };
+    logger = { log: vi.fn() };
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it("removes only directories that appeared during the run, once quiet, however young", () => {
+    const older = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-OlDer1", { ageMs: 5 * 60_000 });
+    const run = trackSnapshotCopiesOfRun({ env, logger, trigger: "doctor-lint-timeout" });
+    const left = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-LeFt01", { ageMs: kKilledRunQuietMs + 1_000 });
+    run.sweepAfterKill();
+    expect(fs.existsSync(left.directory)).toBe(true);
+    vi.advanceTimersByTime(kKilledRunQuietMs);
+    expect(fs.existsSync(left.directory)).toBe(false);
+    expect(fs.existsSync(older.directory)).toBe(true);
+    expect(logger.log.mock.calls[0][0]).toMatch(/^\[alphaclaw\] snapshot sweep \(doctor-lint-timeout\): 1 candidate, removed 1 /);
+  });
+
+  it("keeps a new directory whose copy is still being written", () => {
+    const run = trackSnapshotCopiesOfRun({ env, logger });
+    const live = makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-LiVe01", { ageMs: 1_000 });
+    run.sweepAfterKill();
+    vi.advanceTimersByTime(kKilledRunQuietMs);
+    expect(fs.existsSync(live.directory)).toBe(true);
+    expect(logger.log.mock.calls[0][0]).toContain("1 under the age floor");
+  });
+
+  it("logs nothing when the run left nothing", () => {
+    makeSnapshot(cacheRoot, "openclaw-sqlite-readonly-v2-OlDer2");
+    const run = trackSnapshotCopiesOfRun({ env, logger });
+    run.sweepAfterKill();
+    vi.advanceTimersByTime(kKilledRunQuietMs);
+    expect(logger.log).not.toHaveBeenCalled();
   });
 });
 
