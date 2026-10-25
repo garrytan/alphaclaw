@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.114] - 2026-10-25
+
+Git sync uses the configured root when the state directory is a symlink, so every run shares one status file and one writer lock.
+
+### Fixed
+- **The Browse sidebar's Sync button ran against the wrong root.** The route gave the runner the state directory's realpath, and the runner set the child's `ALPHACLAW_ROOT_DIR` to its parent. With `<root>/.openclaw` a symlink into a subdirectory of a larger repository, the run loaded `<repository>/.env` instead of the deployment's `.env` and kept its status file under `<repository>/.openclaw/.alphaclaw`, inside that repository's working tree. The server never saw that status file. With sync enabled, the status and the writer lock could split between two roots, so two writers could run at once. The runner now always passes the server's configured root (`constants.kRootDir`), the same lexical path the cron line, the CLI and the server's status readers use, and callers no longer pass a directory. Git itself still resolves the repository through the symlink, so the writer lock is the one in the state repository's own git directory.
+- **A stray status directory from the old behavior is reported, not removed.** At startup, if the state directory is a symlink and `<parent of its target>/.openclaw/.alphaclaw` exists, AlphaClaw logs one warning naming it and the current status location. It deletes nothing.
+
+### Tests
+- `git-sync-symlinked-state-dir.test.js`: with the state directory behind a symlink into a nested repository, the Browse Sync route, the save-triggered caller sync, the scheduled cron script and the CLI all run the real CLI and land on the one status file the server reads, and none creates `<repository>/.openclaw` (the Browse case fails on v0.10.113). The writer lock resolves to the state repository's git directory. The stray-directory warning fires once and leaves the files in place, and stays quiet for a plain directory.
+- `git-sync-runner.test.js`, `routes-browse.test.js`: the runner takes the root, and the Browse route passes no directory.
+
 ## [0.10.113] - 2026-10-25
 
 Git sync holds against a second writer's conflicting pushes instead of leaving a diverged branch behind (ALPH-36).

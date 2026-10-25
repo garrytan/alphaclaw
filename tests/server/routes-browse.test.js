@@ -1190,7 +1190,6 @@ describe("server/routes/browse git-sync", () => {
     expect(runGitSync).toHaveBeenCalledWith({
       message: "remote sync",
       trigger: "manual",
-      openclawDir: fs.realpathSync(rootDir),
     });
   });
 

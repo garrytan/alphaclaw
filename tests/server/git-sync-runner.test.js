@@ -26,10 +26,10 @@ describe("git-sync runner", () => {
     expect(parseGitSyncResult("not json")).toBeNull();
   });
 
-  it("passes argv (no shell), the manual trigger and the root derived from the managed dir", async () => {
+  it("passes argv (no shell), the manual trigger and the configured root", async () => {
     const execFileImpl = vi.fn((file, args, opts, callback) =>
       callback(null, '{"gitSync":{"outcome":"ok","code":"ok","message":"No changes to sync"}}\n', ""));
-    const result = await runGitSyncCli({ message: "sync", openclawDir: "/data/.openclaw", execFileImpl });
+    const result = await runGitSyncCli({ message: "sync", rootDir: "/data", execFileImpl });
     expect(result).toEqual({ outcome: "ok", code: "ok", message: "No changes to sync" });
     const [file, args, opts] = execFileImpl.mock.calls[0];
     expect(file).toBe(process.execPath);
@@ -39,7 +39,7 @@ describe("git-sync runner", () => {
 
   it("lets a caller scope the commit to one file", async () => {
     const execFileImpl = vi.fn((file, args, opts, callback) => callback(null, '{"gitSync":{"outcome":"ok","code":"ok"}}', ""));
-    await runGitSyncCli({ message: "models: update config", file: "openclaw.json", trigger: "caller", openclawDir: "/data/.openclaw", execFileImpl });
+    await runGitSyncCli({ message: "models: update config", file: "openclaw.json", trigger: "caller", rootDir: "/data", execFileImpl });
     expect(execFileImpl.mock.calls[0][1].slice(1)).toEqual([
       "git-sync", "--json", "--trigger", "caller", "-m", "models: update config", "-f", "openclaw.json",
     ]);
@@ -51,21 +51,21 @@ describe("git-sync runner", () => {
     expect(describeCallerSyncWarning({ outcome: "failed", code: "deadline_exceeded" })).toMatch(/^Backup push deferred/);
     expect(describeCallerSyncWarning({ outcome: "refused", code: "conflict", message: "Git sync refused: conflict" })).toBe("Git sync refused: conflict");
     const runGitSync = vi.fn(async () => ({ outcome: "failed", code: "push_failed", message: "Git sync could not push to GitHub" }));
-    const gitSync = createCallerGitSync({ openclawDir: "/data/.openclaw", runGitSync });
+    const gitSync = createCallerGitSync({ runGitSync });
     await expect(gitSync({ message: "webhooks: create a" })).resolves.toBe("Git sync could not push to GitHub");
-    expect(runGitSync).toHaveBeenCalledWith({ message: "webhooks: create a", file: "", trigger: "caller", openclawDir: "/data/.openclaw" });
+    expect(runGitSync).toHaveBeenCalledWith({ message: "webhooks: create a", file: "", trigger: "caller" });
   });
 
   it("turns a killed or unparseable run into a failure the route can show", async () => {
     const killed = await runGitSyncCli({
       message: "sync",
-      openclawDir: "/data/.openclaw",
+      rootDir: "/data",
       execFileImpl: (file, args, opts, callback) => callback(Object.assign(new Error("killed"), { killed: true }), "", ""),
     });
     expect(killed).toMatchObject({ outcome: "failed", code: "deadline_exceeded", pushed: false });
     const crashed = await runGitSyncCli({
       message: "sync",
-      openclawDir: "/data/.openclaw",
+      rootDir: "/data",
       execFileImpl: (file, args, opts, callback) => callback(new Error("exit 1"), "", "[alphaclaw] boom\n"),
     });
     expect(crashed).toMatchObject({ outcome: "failed", code: "failed", message: "Git sync failed: boom" });
@@ -81,7 +81,7 @@ describe("git-sync runner", () => {
       const env = { ...process.env, HOME: homeDir };
       delete env.GITHUB_TOKEN;
       delete env.GITHUB_WORKSPACE_REPO;
-      const result = await runGitSyncCli({ message: "sync", openclawDir, env });
+      const result = await runGitSyncCli({ message: "sync", rootDir, env });
       expect(result).toMatchObject({ outcome: "failed", code: "not_configured" });
       expect(result.message).toContain("Missing GITHUB_TOKEN");
     } finally {
