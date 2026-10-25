@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.119] - 2026-10-25
+
+A failed channel create undoes only its own config change, so an `mcp.servers` entry (or any other edit) made while the create ran is no longer reverted.
+
+### Fixed
+- **A failed channel create no longer writes the whole pre-create config back.** When `channels add`, `agents bind` or (for WhatsApp) the gateway restart failed, the rollback wrote the config snapshot taken when the request began over `openclaw.json`. Everything written in between was lost: an operator's `mcp.servers` entry, OpenClaw's own writes during the CLI calls, and, for WhatsApp, anything written during a restart that can take minutes. The rollback (`rollbackChannelCreate` in `lib/server/agents/shared.js`) now runs under the config lock against the current file and puts back only what the create wrote: the provider's `channels.<provider>` block, its `plugins.entries` entry and `plugins.allow` slot, and the binding it added. Channels, plugins and bindings that existed before are untouched.
+- **Saving an agent's thinking default no longer writes a config read before an await.** `updateAgent` read `openclaw.json`, awaited the thinking-level normalization, then wrote the earlier read back. It now normalizes first and reads right before the write.
+
+### Not AlphaClaw
+- `openclaw doctor` restores `openclaw.json` from `openclaw.json.last-good` when the file fails validation, which a malformed `mcp.servers` entry can cause. It logs `Config auto-restored from last-known-good` and keeps the rejected file as `openclaw.json.clobbered.<timestamp>`. AlphaClaw's own Doctor runs move `last-good` aside first (`doctor-guard.js`), but a doctor run started outside AlphaClaw does not. An added server that disappears with a `.clobbered.*` file beside the config was rejected by OpenClaw's schema.
+
+### Tests
+- `openclaw-config-operator-keys.test.js`: an `mcp.servers` entry added while a Telegram create's CLI ran, or while a WhatsApp create's restart ran, survives the failed create's rollback, and pre-existing channels, plugins and bindings stay (these three fail on v0.10.117). The same entry survives boot normalization, roster canonicalization, the boot plugin reconcile, the exec defaults and the workspace sync's hook-entry reconcile.
+
 ## [0.10.118] - 2026-10-25
 
 Operator sidecars: AlphaClaw starts, supervises and stops the commands other operators run next to it on the same box, plus a post-boot hook.
