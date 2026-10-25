@@ -331,6 +331,16 @@ describe("GET /api/watchdog/resources gatewayMemoryTrend", () => {
     const res = await request(createApp(deps)).get("/api/watchdog/resources");
     expect(res.status).toBe(200);
     expect(res.body.resources.gatewayMemoryTrend).toBeNull();
+    expect(res.body.resources.diskSpace).toBeNull();
+  });
+
+  it("carries the disk-space snapshot", async () => {
+    const diskSpace = { volumes: [{ id: "state", state: "low", episodeId: "disk-state-1" }], census: { lastAt: null } };
+    const deps = createDeps();
+    deps.watchdog.getDiskSpace = vi.fn(() => diskSpace);
+    const res = await request(createApp(deps)).get("/api/watchdog/resources");
+    expect(res.status).toBe(200);
+    expect(res.body.resources.diskSpace).toEqual(diskSpace);
   });
 });
 

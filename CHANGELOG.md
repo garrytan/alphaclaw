@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.107] - 2026-10-25
+
+The watchdog now warns before a volume fills up, and says what is filling it.
+
+### Added
+- **Disk-space early warning.** A production volume filled in a few hours with no warning (heap snapshots and leftover OpenClaw database copies). Every 60 seconds the watchdog reads free space (`statfs`, space a non-root writer can still use) on the volume that holds the OpenClaw state dir, and on the volume of Node's diagnostic directory when `NODE_OPTIONS` sets `--diagnostic-dir` or `--report-directory` to a different device. A path it cannot read is reported as unknown and never alerts.
+  - **Thresholds.** Low below min(10% of the volume, 20 GB) free, critical below min(5%, 5 GB). The percentage rules small volumes; the cap stops a multi-TB disk from alerting with hundreds of GB free. A growth trigger also opens low when the projected time to full is under 6 hours and critical under 1 hour, but only on a sustained trend (at least 30 minutes of samples and 1 GB consumed in the 60-minute window), because on a large disk the level thresholds alone fire too late: filling at 40 GB/h, a 20 GB threshold leaves 30 minutes. An episode clears when free space is back above 1.25x the low threshold with no growth trigger, for 2 consecutive samples.
+  - **What is growing.** A bounded size census (async, 200k entries or 5 seconds, same device, symlinks never followed) of the AlphaClaw root, the diagnostic dir and the temp dir runs every 15 minutes and keeps 2 hours. When an episode opens or escalates, a fresh census lists the 5 fastest-growing directories against the oldest one, or the 5 largest when there is no earlier census, and says so. A census cut short by its budget is labelled as estimates.
+  - **Notices.** One when an episode opens, one when it reaches critical, and one cleared follow-up only if the episode notified. Each names the volume, free/size/percent, the growth rate and time to full when known, and the top growers. Event type `disk`; watchdog events `disk_low`, `disk_critical`, `disk_recovered` (source `disk-monitor`).
+  - **Doctor card.** While an episode is open, `det:disk-space-low:<episode>` (P1) or `det:disk-space-critical:<episode>` (P0, replaces the P1), with the growers as evidence and a fix prompt that diagnoses before deleting and never touches OpenClaw's state databases. The card goes away when the episode clears, and a new episode re-triggers a scheduled scan.
+  - `GET /api/watchdog/resources` carries the snapshot as `resources.diskSpace`; `watchdog.getDiskSpace()` returns it.
+
+### Notes
+- The code lives in `lib/server/disk-space/` (sampler, pure monitor, census, notice text, tracker); `watchdog.js` only creates, starts and stops it. Harnesses that do not pass `diskSpace` never touch the real disk. Nothing is deleted automatically.
+
+### Tests
+- `disk-space-monitor.test.js` (thresholds, hysteresis and clear, the growth trigger's 30-minute and 1 GB gate, no de-escalation, unknown volumes), `disk-space-sampler.test.js` (`NODE_OPTIONS` parsing, second volume only on a different device, unknown paths), `disk-space-growers.test.js` (depth 1 and 2, symlinks, entry and time budgets, growth ranking and the largest fallback), `disk-space-tracker.test.js` (one notice per tier per episode, cleared follow-up only after a notice, one census in flight, timers), `doctor-disk-space-card.test.js` (P1/P0 exclusivity, no card after clear), `watchdog-disk-space.test.js` (start/stop, `getDiskSpace`, event and notice wiring), and the resources route and Doctor service cases.
+
 ## [0.10.106] - 2026-10-25
 
 AlphaClaw now tells the owner when a restart OpenClaw scheduled itself keeps failing to complete (ALPH-34).

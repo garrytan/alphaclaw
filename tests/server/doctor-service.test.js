@@ -2689,6 +2689,7 @@ describe("server/doctor-service", () => {
       getGatewayMemoryTrend = null,
       getDoctorAvailability = null,
       getOpenclawInfo = null,
+      getDiskSpace = null,
     } = {}) => {
       const { createDoctorService } = loadDoctorService();
       const created = [];
@@ -2739,6 +2740,7 @@ describe("server/doctor-service", () => {
         ...(getGatewayMemoryTrend ? { getGatewayMemoryTrend } : {}),
         ...(getDoctorAvailability ? { getDoctorAvailability } : {}),
         ...(getOpenclawInfo ? { getOpenclawInfo } : {}),
+        ...(getDiskSpace ? { getDiskSpace } : {}),
       });
       return { service, created, runsByIdCards, meta };
     };
@@ -2919,6 +2921,35 @@ describe("server/doctor-service", () => {
       const critical = await signatureForTrend("critical");
       expect(critical).not.toBe(healthy);
       expect(critical).not.toBe(suspected);
+    });
+
+    it("adds the disk-space card from watchdog.getDiskSpace(), none when the getter throws, and flips the env signature", async () => {
+      const disk = (state) => ({ volumes: [{
+        id: "state", path: "/data/.openclaw", mountPath: "/data", freeBytes: 4 * 1024 ** 3, sizeBytes: 100 * 1024 ** 3,
+        state, episodeId: state === "ok" ? null : "disk-state-1792911600000", growers: null,
+      }] });
+      const runFor = async (getDiskSpace) => {
+        const meta = new Map();
+        const { service, runsByIdCards } = makeService({ meta, getDiskSpace });
+        try {
+          const result = await service.runDoctor();
+          await settle();
+          return {
+            keys: (runsByIdCards.get(result.runId) || []).map((card) => card.sourceKey).filter((key) => key.startsWith("det:disk-space-")),
+            signature: meta.get("last_env_signature"),
+          };
+        } finally {
+          service.dispose();
+        }
+      };
+      const critical = await runFor(() => disk("critical"));
+      expect(critical.keys).toEqual(["det:disk-space-critical:disk-state-1792911600000"]);
+      const low = await runFor(() => disk("low"));
+      expect(low.keys).toEqual(["det:disk-space-low:disk-state-1792911600000"]);
+      const ok = await runFor(() => disk("ok"));
+      expect(ok.keys).toEqual([]);
+      expect((await runFor(() => { throw new Error("boom"); })).keys).toEqual([]);
+      expect(new Set([critical.signature, low.signature, ok.signature]).size).toBe(3);
     });
 
     it("adds the pin-boundary card from openclawRuntime.getInfo() on every run, and none when the getter throws", async () => {
