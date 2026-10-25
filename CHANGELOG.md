@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.130] - 2026-10-25
+
+Every scheduled thing on the box in one list, with when it last ran, how that ended and when it runs next (ALPH-40, 3 of 7).
+
+### Added
+- **`GET /api/box/schedules`** (`box.read` view `schedules`) answers three groups:
+  - `openclaw`: OpenClaw's cron jobs through the gateway's `cron.list` (disabled jobs included, one page of 200, 20 s CLI budget), each with its agent, schedule, last run, last outcome, redacted last error and next run. OpenClaw's database is never read; when the gateway does not answer, `status: "unavailable"` says why (`gateway_unreachable`, `unreadable_answer`, `no_cli`).
+  - `alphaclaw`: AlphaClaw's own timers (gateway health check, memory sample, snapshot sweep, readiness advisory) with their run count, last run, outcome, detail and next run, plus the workspace git sync from `cron/system-sync.json` and `git-sync-status.json`.
+  - `system`: the user's `crontab -l`, `/etc/crontab` and `/etc/cron.d` lines with their user, redacted command and next run (`@reboot` and unsupported syntax are listed without one), and whether a cron daemon is running at all, since a cron line without a daemon never fires.
+- **Bounded.** At most 64 cron.d files of 64 KB, 300 system entries, commands cut to 300 characters; the list stays fresh for 15 s and the OpenClaw part for 60 s, so a polling panel never respawns the CLI.
+- The watchdog's timers report each run to an in-process schedule registry (`lib/server/box-status/schedule-registry.js`). Recording never changes the work: a run returns or throws exactly what it did before.
+
+### Tests
+- `box-schedules.test.js`: the cron reader (lists, ranges, steps, names, macros, either-day matching, unsupported syntax), the registry for sync, async and failing work, the reader against fake `cron.list`, crontab files and `/proc` with secrets absent from the whole answer, the OpenClaw cache and its unavailable reasons, a missing `crontab` binary and cron daemon, and the route. `watchdog-snapshot-sweep.test.js`: the sweep and memory timers register, record runs and go inactive on `stop()`.
+
 ## [0.10.129] - 2026-10-25
 
 The box status says when and why the gateway last restarted and how long it was down (ALPH-40, 2 of 7).

@@ -71,4 +71,24 @@ describe("watchdog: periodic snapshot sweep", () => {
       error.mockRestore();
     }
   });
+  it("reports its runs and its interval to the box schedule list (ALPH-40)", async () => {
+    const { createScheduleRegistry } = require("../../lib/server/box-status/schedule-registry");
+    const scheduleRegistry = createScheduleRegistry();
+    const sweepSnapshotCopies = vi.fn(() => ({ candidates: 3, removed: 2 }));
+    const { watchdog } = createHarness({ sweepSnapshotCopies, snapshotSweepIntervalMs: 20, scheduleRegistry });
+    try {
+      watchdog.start();
+      await vi.waitFor(() => expect(sweepSnapshotCopies).toHaveBeenCalled());
+      const byId = Object.fromEntries(scheduleRegistry.list().map((entry) => [entry.id, entry]));
+      expect(byId["watchdog.snapshot_sweep"]).toMatchObject({ active: true, lastOutcome: "ok", lastDetail: "removed 2 of 3" });
+      expect(byId["watchdog.snapshot_sweep"].nextRunAt).not.toBeNull();
+      expect(byId["watchdog.memory"]).toMatchObject({ active: true });
+      expect(byId["watchdog.memory"].runs).toBeGreaterThan(0);
+    } finally {
+      await watchdog.stop();
+    }
+    const byId = Object.fromEntries(scheduleRegistry.list().map((entry) => [entry.id, entry]));
+    expect(byId["watchdog.snapshot_sweep"]).toMatchObject({ active: false, nextRunAt: null });
+    expect(byId["watchdog.memory"]).toMatchObject({ active: false });
+  });
 });
