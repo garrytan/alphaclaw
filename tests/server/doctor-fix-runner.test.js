@@ -481,6 +481,31 @@ describe("server/doctor-fix-runner heartbeat", () => {
     };
     const readRecord = (managedDir) => JSON.parse(fs.readFileSync(path.join(managedDir, "openclaw-boot-migration.json"), "utf8"));
 
+    it("records OpenClaw's workspace-alias stop with both paths expanded from the gateway's OPENCLAW_HOME, and --force only when asked", async () => {
+      const managedDir = mkOpenclawDir();
+      const line =
+        "Failing check workspace-state (step-threw): Workspace path $OPENCLAW_HOME/.openclaw/workspace now resolves to $OPENCLAW_HOME/repo/sub/workspace, but its saved setup records belong to $OPENCLAW_HOME/.openclaw/workspace. Incoming messages cann\n";
+      const run = makeRunner({ managedDir, exit: 1, chunks: [[line, "stderr"]] });
+      await run({ source: "boot" });
+      expect(readRecord(managedDir).lastOutcome).toMatchObject({
+        status: "failed",
+        class: "deterministic",
+        reason: "workspace_moved",
+        workspaceMove: {
+          aliasPath: "/data/.openclaw/.openclaw/workspace",
+          from: "/data/.openclaw/.openclaw/workspace",
+          to: "/data/.openclaw/repo/sub/workspace",
+        },
+      });
+      const { run: plain, runStream } = createRunner(mkOpenclawDir());
+      await plain();
+      await plain({ force: true });
+      expect(runStream.runStreamed.mock.calls.map(([options]) => options.args)).toEqual([
+        ["doctor", "--fix", "--yes"],
+        ["doctor", "--fix", "--force", "--yes"],
+      ]);
+    });
+
     it("latches capture and failure lines split across chunks on stderr, even after more than 64 KiB of later output", async () => {
       const managedDir = mkOpenclawDir();
       const later = `${"│  migrated row\n".repeat(6000)}`;
