@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.111] - 2026-10-25
+
+OpenClaw's abandoned SQLite snapshot copies are now removed while the gateway runs, not only before a launch (ALPH-36).
+
+### Fixed
+- **The launch-only sweep (v0.10.105) removed nothing on a busy box.** The orphaned `openclaw-sqlite-readonly-v2-*` copies (4.6 GB each) were 13 and 25 minutes old at the upgrade's launch, under the one-hour age floor, and a running gateway leaves a new one every 30-60 minutes. They piled up until the next restart. The watchdog now sweeps every 30 minutes between `start()` and `stop()` (`sweepSnapshotCopies`, wired in `lib/server.js` with the gateway's env; skipped while a repair or restart runs, since that launch sweeps). The safety rules are the launch sweep's: the directory belongs to this user, its copy is older than the floor (1 h, 24 h for the legacy layout), and no process holds any file in it open. The open-file check now reads `/proc` right before each delete instead of once per sweep.
+- **Age is the copy's own files, never a directory.** The sweep took the newest mtime over the whole tree, the snapshot directory and any nested directory included, and also counted the `owner.sqlite*` token files. A directory's mtime moves whenever an entry in it is created or removed, and the token files carry OpenClaw's lock traffic, so later activity could keep an old copy "recent". The age is now the newest mtime of the regular files other than the token files (OpenClaw's own reclamation skips the token files the same way); the token files count only when there is no other file, and the directory's mtime only when it holds no file at all.
+- **Every sweep logs one line**, also when it removes nothing: `[alphaclaw] snapshot sweep (launch|periodic): N candidates, removed R (bytes), skipped S (H in use, A under the age floor, F not ours or unreadable, U unchecked without /proc; bytes kept)`. It used to log only when it removed something.
+
+### Tests
+- `openclaw-snapshot-sweep.test.js`: a copy whose directory and token file were touched after the copy was written is still removed (fails on v0.10.110); token-file and empty-directory fallbacks; the per-class log line, also with zero candidates and without `/proc`.
+- `watchdog-snapshot-sweep.test.js`: the 30-minute default, sweeps on the interval and never at start, stops with the watchdog, and keeps ticking after a sweep throws.
+
 ## [0.10.110] - 2026-10-25
 
 On a full disk, owner notices still leave the box and the login page says why sign-in fails (ALPH-35 follow-up).
