@@ -44,6 +44,21 @@ describe("git sync last-run line", () => {
     });
   });
 
+  it("shows a second writer's conflict as a hold, not a failure", () => {
+    expect(describeGitSyncLastRun({
+      at: "2026-10-12T11:37:00.000Z",
+      outcome: "held",
+      code: "merge_conflict",
+      headline: "Git sync is holding: another writer pushed conflicting changes",
+      firstFailureAt: "2026-10-12T11:00:00.000Z",
+      consecutiveFailures: 2,
+      reason: "Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them.",
+    }, { nowMs })).toEqual({
+      tone: "warning",
+      text: "Git sync is holding: another writer pushed conflicting changes since 1 hour ago. This box's changes are not being pushed. Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them.",
+    });
+  });
+
   it("reports success, behind-GitHub warnings and blocked episodes", () => {
     expect(describeGitSyncLastRun({ at: "2026-10-12T11:48:00.000Z", outcome: "ok", shortHash: "abc1234" }, { nowMs })).toEqual({
       tone: "ok",

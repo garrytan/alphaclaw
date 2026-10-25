@@ -66,7 +66,7 @@ describe("ALPHACLAW_GIT_SYNC=off", () => {
     it.each(["scheduled", "manual", "caller"])("%s: exits 0 from .env alone, touches no git, records a disabled run", (trigger) => {
       recordGitSyncRun({ openclawDir, trigger: "scheduled", result: { code: "merge_conflict", detail: "conflict in a.md" } });
       const before = readGitSyncStatus({ statusPath: resolveGitSyncStatusPath(openclawDir) });
-      expect(before).toMatchObject({ outcome: "refused", consecutiveFailures: 1 });
+      expect(before).toMatchObject({ outcome: "held", consecutiveFailures: 1 });
 
       const result = runCli(trigger);
 

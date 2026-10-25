@@ -158,6 +158,56 @@ describe("git-sync against real git (issue #140)", () => {
     expect(sh(live, ["diff", "--name-only", "--diff-filter=U"])).toBe("");
   });
 
+  it("holds against a second writer: takes its own commit back so the branch never diverges from origin", () => {
+    const headBefore = sh(live, ["rev-parse", "HEAD"]).trim();
+    pushFromOther("openclaw.json", '{"theirs":true}\n');
+    write(live, "openclaw.json", '{"mine":true}\n');
+    write(live, "workspace/new.md", "new local file\n");
+    const remoteBefore = sh(remote, ["rev-parse", "main"]);
+
+    for (let run = 1; run <= 2; run += 1) {
+      const result = sync();
+
+      expect(result).toMatchObject({ code: "merge_conflict", outcome: "held", exitCode: 1, committed: false, pushed: false });
+      expect(result.detail).toMatch(/^Another writer pushed conflicting changes to .* \(main\) since the last sync, and AlphaClaw won't merge over them\. Conflicting files: openclaw\.json\. Nothing was pushed\. The local changes stay uncommitted/);
+      expect(sh(remote, ["rev-parse", "main"])).toBe(remoteBefore);
+      expect(sh(live, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+      expect(sh(live, ["rev-list", "--count", "origin/main..HEAD"]).trim()).toBe("0");
+      expect(sh(live, ["status", "--porcelain"]).split("\n").filter(Boolean).sort()).toEqual([" M openclaw.json", "?? workspace/new.md"]);
+      expect(fs.readFileSync(path.join(live, "openclaw.json"), "utf8")).toBe('{"mine":true}\n');
+      for (const marker of ["MERGE_HEAD", "rebase-merge", "rebase-apply"]) {
+        expect(fs.existsSync(path.join(live, ".git", marker))).toBe(false);
+      }
+    }
+
+    sh(live, ["checkout", "--", "openclaw.json"]);
+    sh(live, ["merge", "--ff-only", "origin/main"]);
+    const next = sync();
+    expect(next).toMatchObject({ code: "ok", pushed: true });
+    expect(sh(remote, ["show", "main:openclaw.json"])).toBe('{"theirs":true}\n');
+    expect(sh(remote, ["show", "main:workspace/new.md"])).toBe("new local file\n");
+  });
+
+  it("leaves its commit in place, and says so, when another commit landed on top of it", () => {
+    pushFromOther("openclaw.json", '{"theirs":true}\n');
+    write(live, "openclaw.json", '{"mine":true}\n');
+    const runner = createRunner(live);
+    const racingRunner = (args, opts) => {
+      if (args[0] === "merge-tree") {
+        write(live, "workspace/agent.md", "agent work\n");
+        sh(live, ["add", "workspace/agent.md"]);
+        sh(live, ["commit", "-qm", "agent commit"]);
+      }
+      return runner(args, opts);
+    };
+
+    const result = sync({ git: racingRunner });
+
+    expect(result).toMatchObject({ code: "merge_conflict", outcome: "held", committed: true, pushed: false });
+    expect(result.detail).toMatch(/This run's commit [0-9a-f]{7} stays on main: it could not be taken back/);
+    expect(sh(live, ["log", "-1", "--format=%s"]).trim()).toBe("agent commit");
+  });
+
   it("pushes but warns when a dirty file blocks the fast-forward, then converges", () => {
     pushFromOther("workspace/notes.md", "upstream notes\n");
     write(live, "openclaw.json", '{"x":2}\n');

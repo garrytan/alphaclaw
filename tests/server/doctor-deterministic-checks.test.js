@@ -629,6 +629,19 @@ describe("server/doctor/deterministic-checks", () => {
     status({ code: "lock_timeout", staleState: null, consecutiveFailures: 3 });
     expect(findCard(build({ nowMs }), "det:git-sync-blocked:lock_timeout:2026-10-12T10:00:00.000Z")).toBeDefined();
 
+    status({
+      outcome: "held",
+      code: "merge_conflict",
+      staleState: null,
+      detail: "Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them. Conflicting files: a.md. Nothing was pushed.",
+    });
+    const held = findCard(build({ nowMs }), "det:git-sync-blocked:merge_conflict:2026-10-12T10:00:00.000Z");
+    expect(held).toMatchObject({ priority: "P2", title: "Git sync is holding: another writer pushed conflicting changes — workspace changes are not being backed up" });
+    expect(held.summary).toContain("Another writer pushed conflicting changes to owner/repo (main)");
+    expect(held.recommendation).toContain("ALPHACLAW_GIT_WRITER_COMMAND");
+    expect(held.fixPrompt).toContain("Do not merge, rebase, reset, stash or force push");
+    expect(held.fixPrompt).not.toMatch(/merge origin into/i);
+
     status({ outcome: "ok", code: "ok", firstFailureAt: null, consecutiveFailures: 0, lock: "unavailable" });
     const cards = build({ nowMs });
     expect(cards.some((c) => c.sourceKey.startsWith("det:git-sync-blocked:"))).toBe(false);

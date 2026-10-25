@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.113] - 2026-10-25
+
+Git sync holds against a second writer's conflicting pushes instead of leaving a diverged branch behind (ALPH-36).
+
+### Changed
+- **A conflict with another writer is a hold, not a failure.** When another writer (for example the agent's own sync script) pushed changes to the files this box changed, `merge_conflict` now has outcome `held`: the headline is "Git sync is holding: another writer pushed conflicting changes", and the detail says "Another writer pushed conflicting changes to <repo> (<branch>) since the last sync, and AlphaClaw won't merge over them. Conflicting files: … Nothing was pushed." The action names the ways to pick one writer: `ALPHACLAW_GIT_WRITER_COMMAND`, `ALPHACLAW_GIT_SYNC=off` or `ALPHACLAW_GIT_SYNC_PATHS`. The exit code stays 1, and the episode, the notification schedule and the Sync button's 409 are unchanged.
+- **The notice, the General tab and the Doctor card read as a hold.** The owner gets one "⏸️ Git sync is holding …" notice per episode with the conflict sentence and the action, and the `git_sync_refused` event carries status `warning`. The General tab shows a warning line instead of an error. The Doctor card is P2, and its fix prompt tells the agent not to merge, rebase, reset, stash or force push, but to report the other writer and the conflicting files. The old prompt told it to merge origin into the local branch, which is the merge the sync refuses to make.
+
+### Fixed
+- **A held run no longer leaves its own commit behind.** The sync commits before it fetches, so a refused merge used to leave that commit on the local branch: the branch diverged from `origin`, every other writer's `git pull --ff-only` failed, and each later run piled another unpushable commit on top. The run now takes back the commit it made (`update-ref` guarded by the commit's own SHA, then `git reset` of only its paths in the index). The branch is where the run found it, and the changes stay uncommitted in the working tree. If another commit landed on top of the run's commit in the meantime, it stays, and the detail says so.
+
+### Tests
+- `git-sync-real-git.test.js`: against real git, two held runs in a row leave HEAD where it was, nothing ahead of `origin`, the changes (an edit and a new file) uncommitted, and no `MERGE_HEAD` or rebase directory; once the conflict is gone, the next run pushes both. A commit that lands on top of the run's commit is kept, and the detail says so.
+- `git-sync-health.test.js`, `general-sync-status.test.js`, `doctor-deterministic-checks.test.js`: the hold notice's exact text, sent once per episode with a `warning` event; the conflict sentence as the reason; the General tab's warning line; the P2 card and its fix prompt.
+
 ## [0.10.111] - 2026-10-25
 
 `ALPHACLAW_GIT_SYNC=off` turns AlphaClaw's git sync off for a repository another writer owns (ALPH-36).

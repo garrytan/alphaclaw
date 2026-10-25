@@ -74,7 +74,7 @@ describe("git-sync status file", () => {
 
   it("every emitted code has an outcome, exit code and copy", () => {
     for (const [code, info] of Object.entries(kGitSyncCodes)) {
-      expect(["ok", "warning", "disabled", "refused", "failed"]).toContain(info.outcome);
+      expect(["ok", "warning", "disabled", "held", "refused", "failed"]).toContain(info.outcome);
       expect([0, 1, 2, 75]).toContain(info.exitCode);
       expect(info.headline, code).toBeTruthy();
       if (code !== "ok") expect(info.action, code).toBeTruthy();
@@ -101,6 +101,12 @@ describe("git-sync failure reason", () => {
   it("leaves codes whose headline already names the cause, and whose detail can name processes, without one", () => {
     expect(describeGitSyncFailure({ code: "in_progress_operation", detail: "pid 812 (git rebase) is still running" })).toBe("");
     expect(describeGitSyncFailure({ code: "merge_conflict", detail: "conflict in a.md" })).toBe("");
+    expect(
+      describeGitSyncFailure({
+        code: "merge_conflict",
+        detail: "Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them. Conflicting files: a.md. Nothing was pushed.",
+      }),
+    ).toBe("Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them.");
     expect(describeGitSyncFailure({ code: "failed", detail: "" })).toBe("");
   });
 });
@@ -190,6 +196,27 @@ describe("git-sync health notifications", () => {
     const { health, notify } = createHealth();
     expect(await health.check()).toEqual({ action: "none" });
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("reports a second writer's conflict as a hold, once per episode, naming the ways to pick one writer", async () => {
+    const detail =
+      "Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them. Conflicting files: openclaw.json. Nothing was pushed. The local changes stay uncommitted in the working tree, and the branch is where the sync found it.";
+    record({ code: "merge_conflict", detail, paths: ["openclaw.json"] });
+    const { health, notify, recordEvent } = createHealth();
+    expect(await health.check()).toEqual({ action: "notified_blocked" });
+    expect(notify.mock.calls[0][0]).toBe(
+      "⏸️ Git sync is holding: another writer pushed conflicting changes (since " +
+        notify.mock.calls[0][0].match(/\(since (.*?), 1 run/)[1] +
+        ", 1 run(s)). AlphaClaw is not pushing this box's changes, and it left nothing behind in the repository.\n" +
+        "Another writer pushed conflicting changes to owner/repo (main) since the last sync, and AlphaClaw won't merge over them.\n" +
+        "Pick one writer for this repository: set ALPHACLAW_GIT_WRITER_COMMAND to the other writer's sync command so the agent commits through it, turn AlphaClaw's sync off with ALPHACLAW_GIT_SYNC=off, or limit it with ALPHACLAW_GIT_SYNC_PATHS to paths the other writer never touches.",
+    );
+    expect(recordEvent).toHaveBeenCalledWith(expect.objectContaining({ eventType: "git_sync_refused", status: "warning" }));
+
+    now += 60 * 60_000;
+    record({ code: "merge_conflict", detail, paths: ["openclaw.json"] });
+    expect(await health.check()).toEqual({ action: "none" });
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 
   it("waits for repeated transient failures and for a second refusal while the rebase owner is alive", async () => {
