@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.121] - 2026-10-25
+
+Deploy announcements: AlphaClaw tells the owner channel and the sidecars before it restarts for a deploy, and reports the measured downtime once it is back.
+
+### Added
+- **`POST /api/deploy/announce`** (`inSeconds`, optional `etaSeconds` and one-line `reason`; admin op `deploy.announce`, tier write, one per 30 s) sends "🔄 AlphaClaw will restart for a deploy in about N. Expected back about M after it stops." and runs every running sidecar's new `announce` command with `ALPHACLAW_DEPLOY_PHASE`, `ALPHACLAW_DEPLOY_IN_SECONDS`, `ALPHACLAW_DEPLOY_ETA_SECONDS` and `ALPHACLAW_DEPLOY_REASON`. Without `etaSeconds` the estimate is the median of the last five measured downtimes. **`GET /api/deploy/status`** returns the pending announcement, the last shutdown and the history.
+- **The SIGTERM notice.** A graceful exit on SIGTERM that nothing announced sends its own notice with the measured estimate, flushed beside the drain and awaited for at most 1.5 s after it, and runs the sidecars' announce commands with phase `shutting_down`. The notice carries an expiry, so the outbox never delivers it after the next boot. Every exit records its shutdown time in `<root>/deploy-history.json`.
+- **Measured downtime.** When the first gateway of a boot answers ready, the downtime since the previous process's shutdown is recorded (last 20) and sent as "✅ AlphaClaw is back: down 1 min 50 s (stopped …, gateway ready …)", quoting the announced estimate when there was one. The post-boot hook receives it as `ALPHACLAW_LAST_DOWNTIME_SECONDS`. A boot without a clean shutdown record measures nothing and stays quiet.
+
+### Tests
+- `deploy-announce.test.js`: announcement text, expiry, sidecar env and rate limit; no repeat at SIGTERM after an announcement; the unannounced SIGTERM notice and its flush; no notice for other exits; downtime measured across two processes and reused as the next ETA; no measurement without a shutdown record; routes and tiers; the lifecycle starts the notice beside the drain, waits for it, caps a slow one and survives one that throws.
+- `sidecars-service.test.js`: announce commands run for running sidecars with the deploy env, and a failing one is reported.
+
 ## [0.10.120] - 2026-10-25
 
 AlphaClaw no longer rewrites a generated file whose content did not change, and with git sync off it says which file changed and who should commit it.

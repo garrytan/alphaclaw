@@ -66,8 +66,9 @@ describe("agent-admin skill builder", () => {
   // overseer situation-report op (v0.9.69), the updates.backups inventory
   // row (issue #54), and the fix-wave PR 3 additions (error-code rows for the
   // confirm/admin codes, the browse config-path deny hints, updates.capabilities).
-  // 62k leaves headroom without cutting the op tables, which are the
-  // load-bearing content.
+  // The sidecars and deploy domains (v0.10.119-0.10.120) took it to ~62.1k,
+  // so the budget moved to 63k: the op tables are the load-bearing content
+  // and are not cut to fit.
   it("stays within the on-demand size budget on a maximal fixture", () => {
     const adminTargets = Array.from({ length: 10 }, (_, i) => ({
       channel: "telegram",
@@ -99,7 +100,7 @@ describe("agent-admin skill builder", () => {
     expect(content).toContain(
       "- Resource autotune: on (agent concurrency cap 32) — details: `alphaclaw admin GET /api/autotune`",
     );
-    expect(content.length).toBeLessThan(62000);
+    expect(content.length).toBeLessThan(63000);
   });
 
   it("renders no-GPU/autotune-off machine state and omits the lines when machine is absent", () => {

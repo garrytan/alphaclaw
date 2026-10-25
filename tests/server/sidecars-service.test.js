@@ -281,6 +281,32 @@ describe("sidecar service (real processes)", () => {
     expect(snapshot.sidecars[0].envKeys).toEqual(["API_TOKEN"]);
   });
 
+  it("runs each running sidecar's announce command with the deploy env", async () => {
+    const rootDir = makeRoot();
+    const out = path.join(rootDir, "announced.txt");
+    const { service } = makeService({
+      rootDir,
+      sidecars: [
+        {
+          name: "guard",
+          command: ["sleep", "30"],
+          announce: [process.execPath, "-e", `require("fs").writeFileSync(${JSON.stringify(out)}, process.env.ALPHACLAW_DEPLOY_PHASE + " " + process.env.ALPHACLAW_DEPLOY_IN_SECONDS)`],
+          startAfter: "boot",
+        },
+        { name: "quiet", command: ["sleep", "30"], startAfter: "boot" },
+        { name: "failing", command: ["sleep", "30"], announce: ["bash", "-c", "exit 2"], startAfter: "boot" },
+      ],
+    });
+    await service.start();
+    await waitFor(() => service.getStatus().sidecars.every((sidecar) => sidecar.status === "running"), 4000, "running");
+    const results = await service.announceAll({ ALPHACLAW_DEPLOY_PHASE: "announced", ALPHACLAW_DEPLOY_IN_SECONDS: "60" }, 3000);
+    expect(results).toEqual([
+      { name: "guard", ok: true, code: 0, error: null },
+      { name: "failing", ok: false, code: 2, error: null },
+    ]);
+    expect(fs.readFileSync(out, "utf8")).toBe("announced 60");
+  });
+
   (hasTmux ? it : it.skip)("a tmux-hosted server (forking) is started, checked, adopted on restart and stopped", async () => {
     const socket = `alphaclaw-test-${process.pid}-${seq}`;
     const out = path.join(makeRoot(), "tmux-env.txt");

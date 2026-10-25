@@ -32,6 +32,15 @@ describe("sidecar registry", () => {
     expect(entries[2]).toMatchObject({ user: "kb", cwd: "/srv/kb", envFile: "/srv/kb/.env", stopTimeoutSeconds: 5 });
   });
 
+  it("accepts an announce command on any type and rejects a non-argv one", () => {
+    const { entries, errors } = parse([
+      { name: "a", command: ["x"], announce: ["/srv/ops/notify.sh"] },
+      { name: "b", command: ["x"], announce: "notify" },
+    ]);
+    expect(entries[0].announce).toEqual(["/srv/ops/notify.sh"]);
+    expect(errors[0].errors[0]).toMatch(/^announce must be/);
+  });
+
   it("defaults a oneshot to restart never", () => {
     const { entries } = parse([{ name: "post-boot", type: "oneshot", command: ["/srv/ops/after-boot.sh"] }]);
     expect(entries[0].restart).toBe("never");
