@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.115] - 2026-10-25
+
+An env save asks for a gateway restart only when it changes the environment the gateway is launched with.
+
+### Fixed
+- **A key the gateway never receives no longer raises the restart banner.** Saving `ALPHACLAW_GIT_SYNC` (or any key the gateway env filter strips) set the `env_vars_changed` restart reason, but AlphaClaw never passes that key to the gateway, so the restart changed nothing. `PUT /api/env` now compares the gateway's launch env (`gatewayLaunchEnv`: the filtered child env plus the daemon's heap cap) before and after the save, and raises `env_vars_changed` only when it differs. `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE` is stripped from the child env but sets the daemon's heap cap, so it still asks for a restart. If the launch env cannot be read, every change counts, as before.
+- **The save says when no restart is needed.** A save that changed variables but not the gateway's env returns `gatewayEnvChanged: false` and `note: "Saved. The gateway does not receive the changed variables, so the change takes effect without a restart."`, and the Envars tab shows that note as its toast. A save that changes nothing returns the same body as before.
+- The `alphaclaw-admin` env skill page says the same.
+
+### Tests
+- `routes-system.test.js`: through the real `gatewayLaunchEnv`, saving `ALPHACLAW_GIT_SYNC` or a custom key the filter strips leaves no restart reason and returns the note; `OPENAI_API_KEY` and `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE` still require a restart; a launch env that throws counts as a change.
+
 ## [0.10.114] - 2026-10-25
 
 Git sync uses the configured root when the state directory is a symlink, so every run shares one status file and one writer lock.

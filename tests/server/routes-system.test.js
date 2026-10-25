@@ -535,6 +535,75 @@ describe("server/routes/system", () => {
     expect((await request(app).get("/api/restart-status")).body.restartRequired).toBe(false);
   });
 
+  describe("env save restart need follows the gateway's launch env", () => {
+    const { gatewayLaunchEnv } = require("../../lib/server/gateway");
+    const kTouchedKeys = ["ALPHACLAW_GIT_SYNC", "MY_APP_SETTING", "OPENAI_API_KEY", "ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE"];
+    let savedEnv;
+    beforeEach(() => {
+      savedEnv = Object.fromEntries(kTouchedKeys.map((key) => [key, process.env[key]]));
+      for (const key of kTouchedKeys) delete process.env[key];
+    });
+    afterEach(() => {
+      for (const key of kTouchedKeys) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    });
+
+    // reloadEnv applies the saved vars to process.env, which the real
+    // gatewayLaunchEnv reads through the gateway env filter.
+    const saveWithRealGatewayEnv = async (vars) => {
+      const deps = createSystemDeps();
+      const store = withRealRestartStore(deps);
+      deps.gatewayLaunchEnv = gatewayLaunchEnv;
+      deps.reloadEnv = vi.fn(() => {
+        for (const { key, value } of vars) process.env[key] = value;
+        return true;
+      });
+      const res = await request(createApp(deps)).put("/api/env").send({ vars });
+      return { res, store };
+    };
+
+    it.each([
+      ["ALPHACLAW_GIT_SYNC", "off"],
+      ["MY_APP_SETTING", "on"],
+    ])("%s reaches only AlphaClaw: no restart reason, and the response says so", async (key, value) => {
+      const { res, store } = await saveWithRealGatewayEnv([{ key, value }]);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        ok: true,
+        changed: true,
+        gatewayEnvChanged: false,
+        restartRequired: false,
+        note: "Saved. The gateway does not receive the changed variables, so the change takes effect without a restart.",
+      });
+      expect(store.hasReason("env_vars_changed")).toBe(false);
+    });
+
+    it.each([
+      ["OPENAI_API_KEY", "sk-test-123"],
+      // Stripped from the child env, but it sets the daemon's heap cap.
+      ["ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE", "2048"],
+    ])("%s changes what the gateway is launched with: restart required", async (key, value) => {
+      const { res, store } = await saveWithRealGatewayEnv([{ key, value }]);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ok: true, changed: true, gatewayEnvChanged: true, restartRequired: true });
+      expect(res.body.note).toBeUndefined();
+      expect(store.hasReason("env_vars_changed")).toBe(true);
+    });
+
+    it("counts every change as a gateway change when the launch env cannot be read", async () => {
+      const deps = createSystemDeps();
+      const store = withRealRestartStore(deps);
+      deps.gatewayLaunchEnv = vi.fn(() => {
+        throw new Error("boom");
+      });
+      const res = await request(createApp(deps)).put("/api/env").send({ vars: [{ key: "MY_APP_SETTING", value: "on" }] });
+      expect(res.body).toMatchObject({ changed: true, gatewayEnvChanged: true, restartRequired: true });
+      expect(store.hasReason("env_vars_changed")).toBe(true);
+    });
+  });
+
   it("a ready launch started after the env save clears it on /api/env and /api/restart-status alike (crash relaunch)", async () => {
     const deps = createSystemDeps();
     const store = withRealRestartStore(deps);
