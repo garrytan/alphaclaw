@@ -32,6 +32,7 @@ const {
   kGatewayRestartReadyTimeoutMs,
   kOnboardingMarkerPath,
 } = require("../../lib/server/constants");
+const { classifyGatewayCrash } = require("../../lib/server/gateway-crash-cause");
 // The REAL watchdog for the repair drills below (wired like lib/server.js
 // against the drill's fresh gateway instance and its real lifecycle lock).
 const { createWatchdog } = require("../../lib/server/watchdog");
@@ -240,7 +241,14 @@ const createFakeGateway = ({
     // `gateway run`: the new gateway binds the port unless the drill is
     // simulating one that never becomes ready.
     fake.servingPid = kFakeSupervisorPid;
-    if (!fake.neverReady) {
+    if (fake.failLaunch) {
+      const { stderr = [], code = 1 } = fake.failLaunch;
+      fake.portOpen = false;
+      queueMicrotask(() => {
+        if (stderr.length) child.stderr.emit("data", `${stderr.join("\n")}\n`);
+        queueMicrotask(() => exit(code));
+      });
+    } else if (!fake.neverReady) {
       queueMicrotask(() => {
         fake.portOpen = true;
         child.stdout.emit("data", "http server listening on 127.0.0.1\n");
@@ -481,7 +489,14 @@ const createGatewayHealthFetch =
 // relaunch primitive, the serving-identity scan, the launch-generation
 // counter, and the cold restart (`(options) => restartGateway(options)`,
 // observed here for the lock kind it runs under). Auto-repair on.
-const createDrillWatchdog = ({ fake, harness, isHealthy }) => {
+const createDrillWatchdog = ({
+  fake,
+  harness,
+  isHealthy,
+  sleepImpl = () => Promise.resolve(),
+  classifyGatewayCrash = null,
+  measureDiskFree = () => null,
+}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "true";
   global.fetch = vi.fn(createGatewayHealthFetch({ isHealthy, fake }));
   const insertWatchdogEvent = vi.fn();
@@ -505,7 +520,7 @@ const createDrillWatchdog = ({ fake, harness, isHealthy }) => {
     resolveSetupUrl: () => "https://setup.example.com",
     resolveGatewayHealthUrl: () => `${fake.gateway.getGatewayUrl()}/health`,
     resolveGatewayReadyzUrl: () => `${fake.gateway.getGatewayUrl()}/readyz`,
-    sleepImpl: () => Promise.resolve(),
+    sleepImpl,
     supervisorModeActive: () => false,
     restartGatewayColdStart: (options) => {
       coldRestartHolds.push(
@@ -526,6 +541,8 @@ const createDrillWatchdog = ({ fake, harness, isHealthy }) => {
     // sustained ladder → repair → replace path these drills exercise.
     pidAlive: (pid) => fake.livePids.some((proc) => proc.pid === pid),
     readProcStartTicks: () => null,
+    classifyGatewayCrash,
+    measureDiskFree,
   });
   fake.gateway.setGatewayExitHandler((payload) => watchdog.onGatewayExit(payload));
   fake.gateway.setGatewayLaunchHandler((payload) => watchdog.onGatewayLaunch(payload));
@@ -1460,6 +1477,107 @@ describe("server/gateway restart drills (e2e)", () => {
         expect(noticesIncluding(notifier, "Auto-repair failed")).toHaveLength(1);
         expect(noticesIncluding(notifier, "Auto-repair complete")).toHaveLength(0);
         expect(harness.gatewayLifecycleLock.getActiveOperation()).toBeNull();
+      } finally {
+        watchdog.stop();
+        vi.useRealTimers();
+      }
+    });
+
+
+    it("a restart whose relaunch keeps dying of a full disk holds Doctor and crash relaunches, names the disk, and brings the gateway back on its own once space is freed (DISK-FULL DRILL)", async () => {
+      const fake = createFakeGateway({
+        portOpen: true,
+        livePids: [{ pid: kIncumbentPid, cmdline: kIncumbentCmdline }],
+        livePidsAfterLaunch: [],
+      });
+      const harness = createDrillHarness({ fake });
+      const disk = { freeBytes: 20 * 1024 * 1024 };
+      vi.useFakeTimers();
+      const { watchdog, insertWatchdogEvent, clawCmd, notifier } = createDrillWatchdog({
+        fake,
+        harness,
+        isHealthy: () => fake.portOpen,
+        sleepImpl: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        classifyGatewayCrash,
+        measureDiskFree: () => ({ dir: "/data/.openclaw", freeBytes: disk.freeBytes }),
+      });
+      harness.deps.watchdog = watchdog;
+      const routeNotify = vi.fn(async () => ({ ok: true }));
+      harness.deps.notify = routeNotify;
+      const app = createApp(harness.deps);
+      try {
+        await bootAroundIncumbent(fake);
+        watchdog.start();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(watchdog.getStatus()).toMatchObject({ lifecycle: "running", readiness: "ready" });
+
+        fake.failLaunch = {
+          stderr: [
+            "[gateway] writing state snapshot",
+            "Error: ENOSPC: no space left on device, write",
+          ],
+          code: 1,
+        };
+        const res = await request(app).post("/api/gateway/restart?async=1");
+        expect(res.status).toBe(202);
+        const { operationId } = res.body;
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        // The restart settles failed and hands the watchdog its note; the
+        // record and the notice name the disk instead of a generic recovery.
+        const sentence = "The disk holding /data/.openclaw is full (20 MB free); the gateway can't start until space is freed.";
+        expect(harness.operationEvents.getOperation(operationId)?.status).toBe("failed");
+        const status = await request(app).get("/api/restart-status");
+        expect(status.body.lastOperation).toMatchObject({ status: "failed", code: "launch_failed" });
+        expect(status.body.lastOperation.recovery).toMatchObject({ status: "disk_full", reason: "disk_full" });
+        expect(noticesIncluding(notifier, sentence)).toHaveLength(1);
+        const restartNotice = routeNotify.mock.calls.map((call) => String(call[0])).find((text) => text.includes("Gateway restart failed"));
+        expect(restartNotice).toContain(sentence);
+        expect(restartNotice).toContain("AlphaClaw starts it again on its own once space is freed.");
+        expect(watchdog.getStatus().diskFull).toMatchObject({
+          dir: "/data/.openclaw",
+          freeBytes: 20 * 1024 * 1024,
+          resumeAtFreeBytes: (20 + 256) * 1024 * 1024,
+        });
+        expect(ledgerRows(insertWatchdogEvent)).toContainEqual(
+          expect.objectContaining({
+            eventType: "disk_full",
+            status: "failed",
+            details: expect.objectContaining({ cause: "disk_full", corroborated: true, message: sentence }),
+          }),
+        );
+        expect(ledgerRows(insertWatchdogEvent)).toContainEqual(
+          expect.objectContaining({ eventType: "crash", details: expect.objectContaining({ cause: "disk_full" }) }),
+        );
+
+        // Ten minutes of a still-full disk: no Doctor, no spent budget, no
+        // crash loop; relaunches only on the hold's backoff (60 s, 120 s, 300 s).
+        const runSpawnsBefore = fake.spawnCalls.filter((call) => call.args[1] === "run").length;
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        const runSpawnsHeld = fake.spawnCalls.filter((call) => call.args[1] === "run").length - runSpawnsBefore;
+        expect(runSpawnsHeld).toBe(3);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
+        expect(watchdog.getStatus()).toMatchObject({ repairAttempts: 0, lifecycle: "crashed" });
+        expect(watchdog.getStatus().lifecycle).not.toBe("crash_loop");
+        expect(watchdog.getStatus().diskFull).toMatchObject({ retries: 3 });
+        expect(repairSkipReasons(insertWatchdogEvent).map((details) => details.reason)).not.toContain("repair_attempts_exhausted");
+
+        // Space is freed: the next poll ends the hold and the gateway comes
+        // back without anyone pressing anything.
+        disk.freeBytes = 2 * 1024 * 1024 * 1024;
+        fake.failLaunch = null;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(watchdog.getStatus()).toMatchObject({
+          lifecycle: "running",
+          health: "healthy",
+          diskFull: null,
+          repairAttempts: 0,
+        });
+        expect(ledgerRows(insertWatchdogEvent)).toContainEqual(
+          expect.objectContaining({ eventType: "disk_full", source: "disk_space_recovered", status: "ok" }),
+        );
+        expect(noticesIncluding(notifier, "Space was freed on the disk holding /data/.openclaw")).toHaveLength(1);
+        expect(doctorFixCalls(clawCmd)).toBe(0);
       } finally {
         watchdog.stop();
         vi.useRealTimers();

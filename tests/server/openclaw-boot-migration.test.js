@@ -74,7 +74,7 @@ describe("server/openclaw-boot-migration", () => {
     ["an unexplained exit", { ok: false, code: 1 }, "exit_1"],
     ["a timeout", { ok: false, timedOut: true }, "timed_out"],
     ["a cancellation", { ok: false, cancelled: true }, "cancelled"],
-    ["no space", { ok: false, code: 1, stdout: "Error: ENOSPC: no space left on device, write\n" }, "no_space"],
+    ["no space", { ok: false, code: 1, stdout: "Error: ENOSPC: no space left on device, write\n" }, "disk_full"],
     ["no result", null, "failed"],
   ])("%s: transient — notifies once, remembers nothing and still returns (the gateway starts anyway)", async (_label, result, reason) => {
     const box = newBox();

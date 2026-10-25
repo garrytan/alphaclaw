@@ -1094,6 +1094,17 @@ describe("Stage 3 (#76 B1.3 / F015): the `down` reason names a latched auto-repa
     expect(kAutoRepairPauseCopy.hint).toContain("alphaclaw diagnose");
   });
 
+  it("a disk-full hold reads `down` with the disk sentence between its relaunches, and `starting` while one runs", () => {
+    const diskFull = { dir: "/data/.openclaw", freeBytes: 0, resumeAtFreeBytes: 268435456, since: "2026-10-25T07:47:01.795Z", retries: 3, nextRetryAt: null };
+    const held = reduce(downInputs({ lifecycle: "crashed", health: "degraded", diskFull }));
+    expect(held.state).toBe("down");
+    expect(held.reason).toBe(
+      "The disk holding /data/.openclaw is full (0 MB free); the gateway can't start until space is freed. AlphaClaw starts it again on its own once space is freed.",
+    );
+    expect(reduce(downInputs({ lifecycle: "crashed", diskFull, operationInProgress: true })).state).toBe("starting");
+    expect(reduce(downInputs({ lifecycle: "crashed" })).state).toBe("starting");
+  });
+
   it("an exhausted Doctor budget reads `down` with the F015 copy; the pause outranks it; below the cap the legacy copy stands", () => {
     const exhausted = reduce(downInputs({ lifecycle: "crash_loop", repairAttempts: 2, repairAttemptLimit: 2 }));
     expect(exhausted.state).toBe("down");

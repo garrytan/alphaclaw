@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.108] - 2026-10-25
+
+A gateway that cannot start because its disk is full no longer exhausts the watchdog for good (ALPH-35).
+
+### Fixed
+- **A full disk spent the whole repair budget, then the watchdog stopped.** A production gateway went down at the end of an operator's Restart: the relaunch failed at startup with ENOSPC while OpenClaw wrote its state snapshot. Each automatic step failed the same way. Doctor ran twice and failed on ENOSPC, three crashes in five minutes made a crash loop, and from then on every check logged `repair_attempts_exhausted`, so the gateway stayed down after space was freed until someone pressed Repair. The cause was logged as `unknown` although the output said ENOSPC.
+- **ENOSPC and EDQUOT are now a `disk_full` cause** in gateway exit and launch output (`classifyGatewayCrash`, ranked after the version family and before ownership, port, OOM and EX_CONFIG) and in Doctor output (`summarizeDoctorResult` reason `disk_full`, which replaces `no_space`).
+
+### Added
+- **The disk-full hold** (`lib/server/watchdog-disk-full.js`, `lib/server/disk-full.js`). Output is untrusted, so the watchdog acts on measured free space: when a disk-full exit or Doctor run happens with less than 1 GiB free on the disk holding the OpenClaw state (or the temp dir, whichever is fuller), automatic Doctor (`repair/<source>/skipped {reason: disk_full}`) and crash relaunches wait instead of spending the repair and crash-loop budgets. One relaunch is still tried after 1, 2, 5, 10 and then every 15 minutes. Free space is measured every 15 s, and once `WATCHDOG_DISK_RESUME_FREE_MB` (default 256, deployment env only) more is free than when the hold started, the hold ends and the gateway is relaunched with a fresh repair budget and an empty crash window. A healthy gateway also ends the hold, and an exit with another recognised cause hands back to the ordinary crash ladder, so crash-loop protection is unchanged for every other cause. The hold works with auto-repair on or off (crash relaunches never consult it), so its refusal ranks above `auto_repair_disabled`; only a latched pause and a configuration error outrank it. An ENOSPC line with plenty of measured space is an ordinary crash.
+- **One sentence everywhere:** "The disk holding <dir> is full (N MB free); the gateway can't start until space is freed." It is in the `disk_full` watchdog event (`cause: disk_full`, corroborated by the free-space measurement, so the incident's cause is `disk_full`), the owner notice, the failed-restart notice and card recovery clause ("AlphaClaw starts it again on its own once space is freed."), the dashboard's down reason and `getStatus().diskFull` (`{ dir, freeBytes, resumeAtFreeBytes, since, retries, nextRetryAt }`). A second notice says when space was freed and the gateway is starting again. The exhausted-attempts notice is not sent while the hold stands. The rescue session's operator prompt has a `disk_full` hint.
+
+### Tests
+- `gateway-restart.e2e.test.js` DISK-FULL DRILL drives the real restart route, gateway module and watchdog: Restart, a relaunch that keeps exiting with ENOSPC, ten minutes of a full disk (three backoff relaunches, no Doctor, no spent attempt, no crash loop), then space freed and the gateway Running again on its own. On main the same drill ended in `crash_loop` with a Doctor attempt spent and no further relaunch. `watchdog-disk-full.test.js` covers the classifier (ENOSPC, EDQUOT, precedence), Doctor's `disk_full` reason, the measurement, the hold's floor, backoff and resume, the box's sequence (Doctor fails on ENOSPC, later repairs wait, freed space resets the budget and relaunches), the hand-back to the crash ladder and the plenty-of-space case.
+
 ## [0.10.107] - 2026-10-25
 
 The watchdog now warns before a volume fills up, and says what is filling it.

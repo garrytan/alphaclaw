@@ -53,7 +53,7 @@ const noise = (count, prefix = "log") =>
   Array.from({ length: count }, (_, i) => `[gateway] ${prefix} line ${i} still running fine`);
 
 describe("kGatewayCrashCauses", () => {
-  it("is the frozen 11-value enum in precedence order", () => {
+  it("is the frozen 12-value enum in precedence order", () => {
     expect(Object.isFrozen(kGatewayCrashCauses)).toBe(true);
     expect(kGatewayCrashCauses).toEqual([
       "state_schema_too_new",
@@ -62,6 +62,7 @@ describe("kGatewayCrashCauses", () => {
       "legacy_exec_approvals",
       "plugin_api_too_old",
       "cli_startup_crash",
+      "disk_full",
       "port_in_use",
       "state_dir_owned",
       "oom",
@@ -329,6 +330,7 @@ describe("classifyGatewayCrash — ownership, port, oom, config, unknown, null",
       { code: 1, stderrTail: [kLegacyExecApprovalsLine] },
       { code: 1, stderrTail: [kIncidentPluginLine] },
       { code: 1, stderrTail: kIncidentCrash },
+      { code: 1, stderrTail: ["Error: ENOSPC: no space left on device, write"] },
       { code: 1, stderrTail: [kEaddrinuseLine] },
       { code: 1, stderrTail: [kStateWriterLine] },
       { code: 137 },
