@@ -1,4 +1,8 @@
-const { isEarlyExitCliCommand } = require("../../lib/boot-cli-verbs");
+const {
+  isEarlyExitCliCommand,
+  isJsonCliInvocation,
+  kJsonCliVerbs,
+} = require("../../lib/boot-cli-verbs");
 
 // The predicate decides whether bin/alphaclaw.js binds the boot placeholder
 // web server: a false negative binds a placeholder that fights the live
@@ -46,5 +50,42 @@ describe("boot-cli-verbs isEarlyExitCliCommand", () => {
 
   it("tolerates being called with no argument at all", () => {
     expect(isEarlyExitCliCommand()).toBe(false);
+  });
+});
+
+// Under --json the bin sends every console.log line to stderr, so a false
+// positive hides a verb's human output and a false negative puts boot lines
+// in front of the JSON document (ALPH-39).
+describe("boot-cli-verbs isJsonCliInvocation", () => {
+  it.each([
+    [["git-sync", "--json", "-m", "x"]],
+    [["git-sync", "-m", "x", "--json"]],
+    [["diagnose", "--json"]],
+    [["telegram", "topics", "list", "--group", "-100", "--json"]],
+    [["admin", "GET", "/api/status", "--json"]],
+    [["admin", "manifest", "--json"]],
+  ])("is a JSON invocation: %j", (commandArgs) => {
+    expect(isJsonCliInvocation(commandArgs)).toBe(true);
+  });
+
+  it.each([
+    [["git-sync", "-m", "--json"]],
+    [["git-sync", "--message", "--json", "--file", "--json"]],
+    [["git-sync", "-m", "x"]],
+    [["diagnose"]],
+    [["telegram", "topics", "list"]],
+    [["telegram", "topic", "add", "--json"]],
+    [["admin", "GET", "/api/status"]],
+    [["start", "--json"]],
+    [[]],
+  ])("is not a JSON invocation: %j", (commandArgs) => {
+    expect(isJsonCliInvocation(commandArgs)).toBe(false);
+  });
+
+  it("lists only early-exit verbs", () => {
+    for (const { verb } of kJsonCliVerbs) {
+      const [command, commandScope, commandAction] = verb;
+      expect(isEarlyExitCliCommand({ command, commandScope, commandAction })).toBe(true);
+    }
   });
 });

@@ -103,7 +103,7 @@ const {
   migrateManagedInternalFiles,
 } = require("../lib/server/internal-files-migration");
 const { assertSupportedNodeVersion } = require("../lib/node-runtime");
-const { isEarlyExitCliCommand } = require("../lib/boot-cli-verbs");
+const { isEarlyExitCliCommand, isJsonCliInvocation } = require("../lib/boot-cli-verbs");
 
 // ---------------------------------------------------------------------------
 // Parse CLI flags
@@ -147,26 +147,16 @@ const command = commandArgs[0];
 const commandScope = commandArgs[1];
 const commandAction = commandArgs[2];
 
-// `git-sync --json` (issue #140): stdout carries exactly one JSON document
-// for the dashboard and route callers, so every log line moves to stderr.
-// Values of the verb's value flags are skipped, so a commit message spelled
-// "--json" stays a message.
-const kGitSyncValueFlags = new Set([
-  "--message", "-m", "--file", "-f", "--trigger", "--deadline-seconds", "--lock-wait",
-]);
-const gitSyncJson =
-  command === "git-sync" &&
-  (() => {
-    for (let index = 1; index < commandArgs.length; index += 1) {
-      if (kGitSyncValueFlags.has(commandArgs[index])) {
-        index += 1;
-      } else if (commandArgs[index] === "--json") {
-        return true;
-      }
-    }
-    return false;
-  })();
-if (gitSyncJson) console.log = (...logArgs) => console.error(...logArgs);
+// `<verb> --json` (issue #140, ALPH-39): stdout carries exactly one JSON
+// document, so every log line moves to stderr from here on, the boot lines
+// below ("Root directory", "Loaded .env", the pending-update install) included.
+// The verb writes its document with process.stdout.write. The verb list and
+// its flag parsing live in lib/boot-cli-verbs.js.
+const kJsonOutput = isJsonCliInvocation(commandArgs);
+if (kJsonOutput) {
+  console.log = (...logArgs) => console.error(...logArgs);
+  console.info = console.log;
+}
 
 const pkg = JSON.parse(
   fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
@@ -244,6 +234,11 @@ diagnose options:
   --json              One JSON line instead of markdown (the bundle is redacted either way)
   --root-dir <path>    Deployment data root; overrides ALPHACLAW_ROOT_DIR, then ~/.alphaclaw
                       Exit 0 means evidence was collected, not that the gateway is healthy.
+
+admin options:
+  --json              One JSON line instead of indented JSON or the --summary digest
+
+With --json, stdout carries exactly one JSON document and every log line goes to stderr.
 
 Examples:
   alphaclaw git-sync --message "sync workspace"
@@ -451,7 +446,7 @@ if (fs.existsSync(pendingUpdateMarker)) {
         ["install", `${selfUpdatePackageName}@latest`, "--omit=dev", "--prefer-online"],
         {
           cwd: selfDep.installDir,
-          stdio: "inherit",
+          stdio: kJsonOutput ? ["inherit", 2, "inherit"] : "inherit",
           timeout: 180000,
         },
       );
@@ -853,7 +848,7 @@ const runGitSync = () => {
 
 if (command === "git-sync") {
   const exitCode = runGitSync();
-  if (gitSyncJson) {
+  if (kJsonOutput) {
     process.stdout.write(
       `${JSON.stringify({ gitSync: gitSyncJsonResult || { outcome: "failed", code: "failed", message: "git-sync failed" } })}\n`,
     );

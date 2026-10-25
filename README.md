@@ -259,6 +259,8 @@ Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`
 | `alphaclaw version`                                        | Print version                                 |
 | `alphaclaw help`                                           | Show help                                     |
 
+With `--json` (`git-sync`, `diagnose`, `telegram topics list`, `admin`), stdout carries exactly one JSON document. Every log line goes to stderr, including the boot lines such as `Loaded .env` and a pending self-update's npm output.
+
 ### Git sync with other writers
 
 The scheduled sync (`/etc/cron.d/openclaw-hourly-sync` → `alphaclaw git-sync --trigger scheduled`) shares the `.openclaw` checkout with the agent, cron scripts and hooks, so it never rewrites the live working tree:

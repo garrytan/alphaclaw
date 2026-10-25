@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.124] - 2026-10-25
+
+Every `alphaclaw <verb> --json` call prints exactly one JSON document on stdout.
+
+### Fixed
+- **Boot lines no longer land in front of the JSON document.** `alphaclaw telegram topics list --json` and `alphaclaw admin … --json` printed `[alphaclaw] Root directory: …` and `[alphaclaw] Loaded .env` on stdout before their JSON, so a caller that parsed stdout failed. Under `--json`, every `console.log` line now goes to stderr from the first line of the bin, the boot lines and a pending self-update's `npm install` output included, and the verb writes its document with `process.stdout.write`. This generalises the existing `git-sync --json` rule (issue #140) to every verb with a `--json` mode; one list in `lib/boot-cli-verbs.js` (`kJsonCliVerbs`, `isJsonCliInvocation`) names those verbs. Without `--json` nothing moves: `alphaclaw start` and the human output of every verb stay on stdout.
+- `alphaclaw --help` lists `admin`'s `--json` flag and says where the logs go.
+
+### Tests
+- `tests/server/guards/cli-json-stdout.guard.test.js`: spawns the real bin for each `--json` verb in a scratch root with a `.env` present and asserts stdout is one line that parses as JSON and that `Loaded .env` went to stderr; a pending self-update (with a stand-in `npm` on `PATH`) keeps its output off stdout; without `--json` the boot lines stay on stdout. The verb list is read from `--help`, so a new `<verb> options:` section with `--json` fails until the verb has a case. Fails on v0.10.115 for `telegram topics list`, `admin` and the pending update.
+- `boot-cli-verbs.test.js`: `isJsonCliInvocation` matches `--json` per verb, skips git-sync's flag values, and lists only early-exit verbs.
+
 ## [0.10.123] - 2026-10-25
 
 A read-only process table for the whole box, so an operator or the agent can see what runs in the container without a shell (ALPH-40, 1 of 7).
