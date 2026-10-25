@@ -168,6 +168,7 @@
       fetch("/api/auth/status")
         .then((res) => res.json())
         .then((data) => {
+          if (data?.notice?.message) showError(data.notice.message);
           teamEnabled = data?.team?.enabled === true;
           legacyLoginDisabled = data?.team?.legacyLoginDisabled === true;
           if (mode === "password" && (legacyLoginDisabled || teamEnabled)) {

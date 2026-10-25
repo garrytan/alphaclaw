@@ -217,6 +217,20 @@ describe("server/routes/auth", () => {
     expect(res.headers.location).toBe("/login.html");
   });
 
+  it("the auth status carries the disk-full notice for the login page, without a session", async () => {
+    process.env.SETUP_PASSWORD = "secret";
+    const { registerAuthRoutes } = loadAuthRoutes();
+    const app = express();
+    app.use(express.json());
+    const notice = { code: "disk_full", message: "The server's disk is full." };
+    registerAuthRoutes({ app, loginThrottle: createLoginThrottleMock(), readDiskFullNotice: () => notice });
+    const status = await request(app).get("/api/auth/status");
+    expect(status.status).toBe(200);
+    expect(status.body.notice).toEqual(notice);
+    const { app: plain } = createTestApp({ setupPassword: "secret" });
+    expect((await request(plain).get("/api/auth/status")).body.notice).toBeNull();
+  });
+
   it("reports auth status and clears the session cookie on logout", async () => {
     const { app } = createTestApp({ setupPassword: "secret" });
 

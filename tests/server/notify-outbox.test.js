@@ -1285,6 +1285,46 @@ describe("server/upgrade-notifier flush scheduling", () => {
     expect(flushSpy).toHaveBeenCalledTimes(2);
   });
 
+  it("a full disk sends each notice directly once: per id for good, per text within an hour, and a failed send is not remembered", async () => {
+    const enospc = () => {
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    };
+    const fullDisk = { ...fs, writeFileSync: enospc, openSync: enospc, writeSync: enospc };
+    const { outbox, nowRef } = makeOutbox({ fsModule: fullDisk });
+    const fanout = vi.fn(async () => ({ ok: true, sent: 1, failed: 0, failures: [] }));
+    const notifier = createUpgradeNotifier({
+      notifier: { notify: fanout, sendToTarget: vi.fn(async () => ({ ok: true })) },
+      outbox,
+      operatorsStore: {
+        read: () => ({ notifications: { preferredChannel: null, adminTargets: [] } }),
+      },
+      logger: kSilentLogger,
+      nowFn: () => nowRef.now,
+    });
+
+    expect(await notifier.notify("The disk is full", { id: "disk-full-1" })).toMatchObject({ ok: true });
+    expect(await notifier.notify("The disk is full", { id: "disk-full-1" })).toMatchObject({ ok: true, deduplicated: true });
+    nowRef.now += 2 * 60 * 60 * 1000;
+    expect(await notifier.notify("The disk is full", { id: "disk-full-1" })).toMatchObject({ deduplicated: true });
+    expect(fanout).toHaveBeenCalledTimes(1);
+
+    await notifier.notify("Gateway crashed", { eventType: "crash" });
+    await Promise.all([
+      notifier.notify("Gateway crashed", { eventType: "crash" }),
+      notifier.notify("Gateway crashed", { eventType: "crash" }),
+    ]);
+    expect(fanout).toHaveBeenCalledTimes(2);
+    nowRef.now += 60 * 60 * 1000;
+    await notifier.notify("Gateway crashed", { eventType: "crash" });
+    expect(fanout).toHaveBeenCalledTimes(3);
+
+    fanout.mockResolvedValueOnce({ ok: false, reason: "no_channels_delivered", sent: 0, failed: 0, failures: [] });
+    expect(await notifier.notify("Space was freed", { id: "freed-1" })).toMatchObject({ ok: false });
+    expect(await notifier.notify("Space was freed", { id: "freed-1" })).toMatchObject({ ok: true });
+    expect(fanout).toHaveBeenCalledTimes(5);
+    expect(outbox.listEvents()).toEqual([]);
+  });
+
   it("with the outbox unavailable the direct send is immediate", async () => {
     const outboxStub = {
       enqueue: vi.fn(() => null),

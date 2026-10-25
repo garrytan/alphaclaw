@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.110] - 2026-10-25
+
+On a full disk, owner notices still leave the box and the login page says why sign-in fails (ALPH-35 follow-up).
+
+### Fixed
+- **A notice the outbox cannot persist is sent once.** `upgrade-notifier` already delivered directly when `notify-outbox` could not write (ENOSPC), but nothing remembered the send. A notice that repeats while the disk is full went out again every time. Direct sends are now deduplicated in memory: by id for the life of the process, and by identical text without an id for an hour. A failed send is not remembered, so it is retried.
+- **Sign-in on a full disk said "Internal server error".** A request whose write fails for space (ENOSPC, EDQUOT or SQLite's "database or disk is full") now answers `503 {code: "disk_full"}` with one sentence: "The server's disk is full, so signing in and saving changes fail until space is freed on it." A page navigation that fails this way redirects to the login page. The terminal error middleware moved to `lib/server/terminal-error-handler.js` so it can be tested.
+- **The login page shows that sentence on load** while a request was refused for space in the last 10 minutes, or while the state disk measures under 16 MB free. `GET /api/auth/status` carries it as `notice`, without a session, and it never names a path or a size.
+
+### Tests
+- `notify-outbox.test.js`: with ENOSPC on every outbox write, an id-keyed notice goes out once and stays deduplicated; text-keyed notices dedupe for an hour, including concurrent ones; a failed send is retried; nothing is persisted.
+- `terminal-error-handler.test.js`: 503 `disk_full` with the public sentence only, the login-page redirect, the notice's window and floor, and `isDiskFullError`.
+- `routes-auth.test.js`: `notice` in the auth status.
+
 ## [0.10.109] - 2026-10-25
 
 A failed restart's recovery line no longer stalls at "checking now", and an incident bundle no longer presents old watchdog counters as current.
