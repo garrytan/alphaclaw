@@ -222,15 +222,20 @@ describe("git-sync health notifications", () => {
     record(failing);
     expect(await health.check()).toEqual({ action: "none" });
     now += 60 * 60_000;
-    expect(await createHealth().health.check()).toEqual({ action: "reminded_blocked" });
+    const restarted = createHealth();
+    expect(await restarted.health.check()).toEqual({ action: "none" });
+    now += 60_000;
+    record(failing);
+    expect(await restarted.health.check()).toEqual({ action: "reminded_blocked" });
     expect(await health.check()).toEqual({ action: "none" });
 
     now += 24 * 60 * 60_000;
-    record(failing);
     const third = createHealth();
+    now += 60_000;
+    record(failing);
     expect(await third.health.check()).toEqual({ action: "reminded_blocked" });
     const [message, opts] = third.notify.mock.calls[0];
-    expect(message).toMatch(/^⚠️ Still failing: Git sync failed \(since 2026-10-12T10:00:00Z, 5 run\(s\)\)/);
+    expect(message).toMatch(/^⚠️ Still failing: Git sync failed \(since 2026-10-12T10:00:00Z, 6 run\(s\)\)/);
     expect(message).toContain('Git could not match "workspace/a.md", a path the sync asked it to commit.');
     expect(opts.id).toBe("git-sync-blocked-2026-10-12T10:00:00.000Z-reminder-2");
     expect(third.recordEvent.mock.calls[0][0]).toMatchObject({ eventType: "git_sync_refused", details: { reminder: 2 } });
@@ -238,16 +243,42 @@ describe("git-sync health notifications", () => {
     expect(recordEvent).toHaveBeenCalledTimes(1);
   });
 
-  it("reminds at once for an episode announced by an older version that never reminded", async () => {
+  it("holds an older version's episode until the first run after this process started, then reminds once", async () => {
     for (let run = 0; run < 3; run += 1) record({ code: "failed", detail: "fatal: x" });
     const statePath = path.join(openclawDir, ".alphaclaw", "git-sync-health.json");
     fs.writeFileSync(statePath, JSON.stringify({ episode: "2026-10-12T10:00:00.000Z", episodeCode: "failed" }));
-    const { health } = createHealth();
+    now += 60_000;
+    const { health, notify } = createHealth();
+    now += 7_000;
+    expect(await health.check()).toEqual({ action: "none" });
+    expect(notify).not.toHaveBeenCalled();
+
+    now += 60 * 60_000;
+    record({ code: "failed", detail: "fatal: x" });
     expect(await health.check()).toEqual({ action: "reminded_blocked" });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toMatch(/^⚠️ Still failing: /);
     expect(JSON.parse(fs.readFileSync(statePath, "utf8"))).toEqual({
       episodeCode: "failed",
       failure: { since: "2026-10-12T10:00:00.000Z", lastNotifiedAt: now, reminders: 1 },
     });
+    expect(await health.check()).toEqual({ action: "none" });
+  });
+
+  it("sends an older version's episode one recovery line once a run after this process started succeeds", async () => {
+    for (let run = 0; run < 3; run += 1) record({ code: "failed", detail: "fatal: x" });
+    const statePath = path.join(openclawDir, ".alphaclaw", "git-sync-health.json");
+    fs.writeFileSync(statePath, JSON.stringify({ failure: { since: "2026-10-12T10:00:00.000Z", lastNotifiedAt: now, reminders: 0 } }));
+    now += 2 * 24 * 60 * 60_000;
+    const { health, notify } = createHealth();
+    expect(await health.check()).toEqual({ action: "none" });
+
+    now += 30 * 60_000;
+    record({ code: "ok", pushed: true, shortHash: "abc1234" });
+    expect(await health.check()).toEqual({ action: "notified_recovered" });
+    expect(await health.check()).toEqual({ action: "none" });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toBe("✅ Git sync recovered after 2 days; pushed abc1234.");
   });
 
   it("does not mark an episode announced when the notification could not be handed over", async () => {
