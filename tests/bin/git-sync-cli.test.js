@@ -104,6 +104,34 @@ describe("bin/alphaclaw git-sync (issue #140)", () => {
     expect(spawnSync("git", ["-C", rootDir, "rev-parse", "--verify", "-q", "HEAD"]).status).not.toBe(0);
   });
 
+  it("syncs 15,000 new files through the CLI's own git runner, whose status listing is over 1 MiB", () => {
+    const remote = path.join(rootDir, "remote.git");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    execFileSync("git", ["-C", openclawDir, "remote", "add", "origin", "https://github.com/owner/repo.git"]);
+    const dir = path.join(openclawDir, "workspace", "imported-notes-from-a-long-running-agent-session");
+    fs.mkdirSync(dir, { recursive: true });
+    for (let index = 0; index < 15_000; index += 1) {
+      fs.writeFileSync(path.join(dir, `note-${String(index).padStart(5, "0")}-captured-by-the-agent.md`), `${index}\n`);
+    }
+
+    const result = runCli(["-m", "bulk import", "--json"], {
+      GITHUB_TOKEN: "ghp_test",
+      GITHUB_WORKSPACE_REPO: "owner/repo",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.file://${remote}.insteadOf`,
+      GIT_CONFIG_VALUE_0: "https://github.com/owner/repo.git",
+    });
+
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      gitSync: expect.objectContaining({ outcome: "ok", code: "ok", committed: true, pushed: true }),
+    });
+    const pushed = execFileSync("git", ["-C", remote, "ls-tree", "-r", "--name-only", "main"], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    expect(pushed.trim().split("\n")).toHaveLength(15_001);
+  }, 120_000);
+
   it("rejects an unknown trigger and non-numeric budgets as usage errors (exit 2)", () => {
     expect(runCli(["-m", "sync", "--trigger", "cron"]).status).toBe(2);
     expect(runCli(["-m", "sync", "--lock-wait", "soon"]).status).toBe(2);

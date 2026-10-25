@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.97] - 2026-10-24
+
+### Fixed
+- **git-sync failed on a managed directory with about 13,000 or more changed paths, and stored the porcelain listing as the failure detail.** The CLI's git runner used Node's 1 MiB output default, so `git status --porcelain=v1 -z --untracked-files=all` over a large import died with `ENOBUFS`, nothing was pushed, and the detail (written to `git-sync-status.json`, notices and events) was git's raw stdout, a list of every changed path. The runner now allows 256 MiB of output (`kGitMaxBufferBytes`, exported by `lib/cli/git-sync.js`), and an overflow is its own sentence: "git status printed more output than the sync can read (over N MB)".
+- **A git failure detail never carries git's stdout.** It is the first `fatal:`/`error:` line of stderr (else its first line), capped at 400 characters. Without stderr it is a short sentence: "git exited with status N and no error message", the signal that stopped git, or the spawn error code. Pattern checks (lock contention, a push rejected by a race, "nothing to commit", unrelated histories) still read both streams, and the live-tree fast-forward reads the blocking paths from stderr only. The three-path summaries of a merge conflict or a blocked fast-forward are unchanged.
+
+### Tests
+- `git-sync-real-git.test.js`: 15,000 new files, whose status listing is over 1 MiB, are committed and pushed. With Node's default buffer the run fails with the overflow sentence, not the listing. A push that fails with only stdout stores "git exited with status 1 and no error message". `tests/bin/git-sync-cli.test.js` syncs 15,000 new files through the CLI's own runner to a local remote (`url.<remote>.insteadOf` through `GIT_CONFIG_*`). Both bulk tests and the overflow-detail test fail on v0.10.88.
+
 ## [0.10.96] - 2026-10-24
 
 ### Changed
