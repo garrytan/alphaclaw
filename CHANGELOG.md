@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.120] - 2026-10-25
+
+AlphaClaw no longer rewrites a generated file whose content did not change, and with git sync off it says which file changed and who should commit it.
+
+### Fixed
+- **Identical generated files are left alone.** Every boot and several routes rewrote the two bootstrap files in each agent workspace (`hooks/bootstrap/AGENTS.md` and `hooks/bootstrap/reference/AGENTS.md`) and `skills/gog-cli/SKILL.md`, even when the bytes were the same, giving each file a new inode and mtime. New `writeFileAtomicIfChanged` (`lib/server/utils/safe-file.js`) compares the bytes first and writes nothing (no temp file, no rename) when they match; it returns whether it wrote. Both generators use it, so the gog skill's "installed" line now appears only when the skill changed.
+- **With git sync off, a changed generated file is named once.** In a repository AlphaClaw does not sync (`ALPHACLAW_GIT_SYNC=off`), new content in one of those files stays uncommitted until the repository's own writer commits it. AlphaClaw now logs one line per change with the repository-relative path, for example `workspace/hooks/bootstrap/AGENTS.md was regenerated with new content and git sync is off (ALPHACLAW_GIT_SYNC=off); commit it with this repository's writer (ALPHACLAW_GIT_WRITER_COMMAND)`. It never prints the writer command or an absolute path, and it does not run the writer: `ALPHACLAW_GIT_WRITER_COMMAND` is free text for the agent's prompt, with placeholders but no machine contract, and running it would need a shell string.
+- The bootstrap files render the same bytes from the same inputs (checked: topic registry rows, Google accounts and the agent roster keep their stored order, and nothing in it is time-based), so an unchanged box produces no change at all.
+
+### Tests
+- `generated-file-stability.test.js`: identical content keeps the inode and mtime and leaves no temp file; changed content lands on a fresh inode; two renders from the same inputs are byte-identical; a second boot sync leaves both bootstrap files untouched; with git sync off the first sync logs one line for each of the two files, an unchanged sync logs nothing, a writer change logs only the rules file and names `ALPHACLAW_GIT_WRITER_COMMAND` without its value; nothing is logged with sync on; an unchanged gog skill is not rewritten.
+
 ## [0.10.119] - 2026-10-25
 
 A failed channel create undoes only its own config change, so an `mcp.servers` entry (or any other edit) made while the create ran is no longer reverted.
