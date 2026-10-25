@@ -47,6 +47,7 @@ import {
   kReconnectingBannerText,
   kRestartRequiredBannerText,
   kUnreachableBannerText,
+  nextLocalOccurrence,
 } from "../../lib/public/js/components/global-restart-banner.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
@@ -317,5 +318,95 @@ describe("frontend/global-restart-banner (demoted)", () => {
     // Restart-required outranks it; the admin-only snapshot notice never shows.
     expect(buildGlobalBannerModel({ shell: { upgradeAlert: alert, restartRequired: true } }).kind).toBe("required");
     expect(buildGlobalBannerModel({ shell: { upgradeAlert: { kind: "snapshotless", headline: "x" } } })).toBeNull();
+  });
+
+  describe("pending since and Restart at <time> (ALPH-39)", () => {
+    const kHourMs = 60 * 60 * 1000;
+    const findTimes = (tree) => findAllByType(tree, "time");
+    const findActionButton = (tree, label) =>
+      findAllByType(tree, ActionButton).find((vnode) => vnode.props.idleLabel === label);
+
+    it("shows each reason with a relative pending-since and the absolute time on hover", () => {
+      const since = Date.now() - 2 * kHourMs;
+      gatewayShellStore.publish({
+        restartRequired: true,
+        restartReasons: [{ code: "env_vars_changed", label: "Environment variables changed", addedAt: since + 1000, since }],
+      });
+      const tree = renderBanner({ visible: true });
+      expect(treeText(tree)).toContain("Environment variables changed · pending since 2h ago");
+      const [time] = findTimes(tree);
+      expect(time.props.datetime).toBe(new Date(since).toISOString());
+      expect(time.props.title).toMatch(/\d{4}/);
+    });
+
+    it("an admin picks a local time and schedules the next occurrence of it; nothing restarts now", async () => {
+      const scheduleRestart = vi.fn(async () => true);
+      gatewayShellStore.publish({
+        restartRequired: true,
+        identityRole: "admin",
+        restartReasons: [{ code: "env_vars_changed", label: "Environment variables changed", addedAt: Date.now(), since: Date.now() }],
+        actions: { scheduleRestart },
+      });
+      let tree = renderBanner({ visible: true });
+      expect(findAllByType(tree, "input")).toEqual([]);
+      findActionButton(tree, "Schedule…").props.onClick();
+
+      tree = renderBanner({ visible: true });
+      const [input] = findAllByType(tree, "input");
+      expect(input.props.type).toBe("time");
+      input.props.onInput({ currentTarget: { value: "04:30" } });
+      tree = renderBanner({ visible: true });
+      const before = Date.now();
+      await findActionButton(tree, "Schedule").props.onClick();
+      expect(scheduleRestart).toHaveBeenCalledTimes(1);
+      const at = Date.parse(scheduleRestart.mock.calls[0][0]);
+      expect(at).toBe(nextLocalOccurrence("04:30", before));
+      expect(new Date(at).getHours()).toBe(4);
+      expect(new Date(at).getMinutes()).toBe(30);
+      expect(at).toBeGreaterThan(before);
+      expect(at - before).toBeLessThanOrEqual(24 * kHourMs);
+      // Saved: the picker closes.
+      tree = renderBanner({ visible: true });
+      expect(findAllByType(tree, "input")).toEqual([]);
+    });
+
+    it("shows the scheduled time with a cancel control, and members see it read-only", () => {
+      const cancelScheduledRestart = vi.fn();
+      const at = Date.now() + 3 * kHourMs;
+      const reasons = [{ code: "config_file_edited", label: "Configuration file edited", addedAt: Date.now(), since: Date.now() }];
+      gatewayShellStore.publish({
+        restartRequired: true,
+        identityRole: "admin",
+        restartReasons: reasons,
+        restartSchedule: { at, createdAt: Date.now() },
+        actions: { cancelScheduledRestart },
+      });
+      let tree = renderBanner({ visible: true });
+      expect(treeText(tree)).toMatch(/Restart scheduled for .+ \(\s*in (2|3)h\s*\)/);
+      expect(findActionButton(tree, "Schedule…")).toBeUndefined();
+      findActionButton(tree, "Cancel schedule").props.onClick();
+      expect(cancelScheduledRestart).toHaveBeenCalledTimes(1);
+
+      harness.reset();
+      gatewayShellStore.reset();
+      gatewayShellStore.publish({ restartRequired: true, identityRole: "member", restartReasons: reasons, restartSchedule: { at, createdAt: Date.now() } });
+      tree = renderBanner({ visible: true });
+      expect(treeText(tree)).toContain("Restart scheduled for");
+      expect(findActionButton(tree, "Cancel schedule")).toBeUndefined();
+      expect(findActionButton(tree, "Schedule…")).toBeUndefined();
+    });
+
+    it("only server-side reasons can be scheduled (a browse-only restart flag has none)", () => {
+      expect(buildGlobalBannerModel({ shell: {}, visible: true }).canSchedule).toBe(false);
+    });
+
+    it("nextLocalOccurrence picks today when the time is still ahead, else tomorrow, and rejects junk", () => {
+      const now = new Date(2026, 9, 25, 14, 0, 0).getTime();
+      expect(nextLocalOccurrence("15:00", now)).toBe(new Date(2026, 9, 25, 15, 0, 0).getTime());
+      expect(nextLocalOccurrence("14:00", now)).toBe(new Date(2026, 9, 26, 14, 0, 0).getTime());
+      expect(nextLocalOccurrence("03:00", now)).toBe(new Date(2026, 9, 26, 3, 0, 0).getTime());
+      expect(nextLocalOccurrence("25:00", now)).toBeNull();
+      expect(nextLocalOccurrence("", now)).toBeNull();
+    });
   });
 });

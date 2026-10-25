@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.125] - 2026-10-25
+
+The restart banner says how long each change has been waiting for a restart, and an admin can schedule the restart for a later time (ALPH-39).
+
+### Added
+- **Pending since.** Each restart reason now records when it was first set (`since`; a repeat of the same change keeps the first time, `addedAt` still moves to the latest). `GET /api/restart-status` returns it per reason, and the banner lists every reason as "<label> · pending since 2h ago", with the absolute time on hover. A reasons file written by an older version has no `since` and reads its `addedAt` instead.
+- **Restart at <time>.** The restart-required banner has a **Schedule…** control for admins: pick a local time and the restart runs at its next occurrence. The banner then shows "Restart scheduled for <time> (in 3h)" with **Cancel schedule**. Members see the scheduled time without the controls.
+- `POST /api/gateway/restart/schedule` (`{ at }`, ISO time or epoch ms) stores one pending schedule (a new one replaces it) and `DELETE /api/gateway/restart/schedule` cancels it. A time in the past is `400 time_in_past`, more than 7 days ahead is `400 time_too_far`, an unparseable one is `400 invalid_time`, and a schedule with no restart pending is `409 no_restart_required`. Both routes are human-only: tier `denied` for the agent in the admin manifest. `GET /api/restart-status` shows the schedule read-only as `schedule: { at, createdAt }` (or `null`).
+- The schedule is persisted next to the restart reasons (`alphaclaw-restart-schedule.json`, written atomically) and re-armed when AlphaClaw starts. When it is due, the timer runs the same restart path as `POST /api/gateway/restart`, attributed as `source=api:scheduled_restart` (routine class, so OpenClaw gets the routine drain) with `reason=actor=scheduler scheduled_for=<time>`; the ledger row says `trigger: scheduled`. The outcome is reported through the usual restart record, card and failure notification.
+- The schedule is cleared when the restart starts, when the pending reasons clear first (another restart, a launch that applied them, Dismiss), or when it is cancelled. If the start is refused (another gateway operation or relaunch running, AlphaClaw still booting), it retries every minute. A schedule more than 15 minutes overdue, for example because AlphaClaw was down at that time, is skipped instead of restarting at a busy hour, with one `gateway_restart` `skipped` ledger row and a log line.
+- The `alphaclaw-admin` system skill page names the read-only `schedule` field.
+
+### Tests
+- `restart-schedule.test.js`: time validation; `since` kept across repeats and a reload, and an old reasons file without it; no schedule without a pending restart; persistence and re-arming after a reload, then the start when due; an early timer re-arms; a refused start retries and then succeeds; a schedule missed by more than the window is skipped; the schedule clears when a restart applies the reasons, when a leftover file has no reasons, on Dismiss and on cancel.
+- `routes-system.test.js`: the schedule route's 400/409 codes, the schedule and `since` on `/api/restart-status`, the timer running the real restart route path with `source: "api:scheduled_restart"`, an op id, the scheduled reason and a `trigger: scheduled` ledger row; a refused start retries instead of restarting; `DELETE` cancels.
+- `global-restart-banner.test.js`: pending-since lines with the absolute time on hover; an admin schedules the next occurrence of a picked time; the scheduled line with Cancel schedule, read-only for members; `nextLocalOccurrence`.
+- `restart-required-state.test.js`, `routes-system.test.js`, `api-barrel-exports.test.js`: expectations updated for the new `since` field, the `schedule` key and the two new API helpers.
+
 ## [0.10.124] - 2026-10-25
 
 Every `alphaclaw <verb> --json` call prints exactly one JSON document on stdout.

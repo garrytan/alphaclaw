@@ -143,11 +143,12 @@ const createApp = (deps) => {
 // Captures raw route handlers so long-lived handlers (SSE) can be driven with
 // hand-rolled req/res doubles under fake timers.
 const captureRoutes = (deps) => {
-  const routes = { get: new Map(), put: new Map(), post: new Map() };
+  const routes = { get: new Map(), put: new Map(), post: new Map(), delete: new Map() };
   const app = {
     get: (routePath, handler) => routes.get.set(routePath, handler),
     put: (routePath, handler) => routes.put.set(routePath, handler),
     post: (routePath, handler) => routes.post.set(routePath, handler),
+    delete: (routePath, handler) => routes.delete.set(routePath, handler),
   };
   registerSystemRoutes({ app, ...deps });
   return routes;
@@ -3066,6 +3067,122 @@ describe("server/routes/system", () => {
     resolveRestart();
   });
 
+  describe("Restart at <time>: the scheduled restart (ALPH-39)", () => {
+    const kHourMs = 60 * 60 * 1000;
+    const makeScheduleTimers = (clock) => {
+      const timers = [];
+      return {
+        injected: {
+          now: () => clock.nowMs,
+          setTimer: (fn, ms) => {
+            const timer = { fn, ms, cleared: false, fired: false };
+            timers.push(timer);
+            return timer;
+          },
+          clearTimer: (timer) => {
+            if (timer) timer.cleared = true;
+          },
+        },
+        live: () => timers.filter((t) => !t.cleared && !t.fired),
+        fireNext: () => {
+          const [timer] = timers.filter((t) => !t.cleared && !t.fired);
+          timer.fired = true;
+          timer.fn();
+        },
+      };
+    };
+
+    it("validates and stores one schedule, shows it on /api/restart-status, and runs the restart path with source api:scheduled_restart when due", async () => {
+      const clock = { nowMs: Date.now() };
+      const scheduleTimers = makeScheduleTimers(clock);
+      const deps = createSystemDeps();
+      const store = withRealRestartStore(deps);
+      deps.restartScheduleTimers = scheduleTimers.injected;
+      deps.watchdog = { getStatus: vi.fn(() => ({})), recordOperationEvent: vi.fn() };
+      let options = null;
+      deps.restartGateway = vi.fn(async (opts) => {
+        options = opts;
+        return { durationMs: 5 };
+      });
+      const app = createApp(deps);
+      const at = clock.nowMs + 3 * kHourMs;
+      const iso = new Date(at).toISOString();
+
+      const nothingPending = await request(app).post("/api/gateway/restart/schedule").send({ at: iso });
+      expect(nothingPending.status).toBe(409);
+      expect(nothingPending.body.code).toBe("no_restart_required");
+
+      store.markRequired("env_vars_changed");
+      for (const [value, code] of [
+        ["not a time", "invalid_time"],
+        [new Date(clock.nowMs - 60_000).toISOString(), "time_in_past"],
+        [new Date(clock.nowMs + 8 * 24 * kHourMs).toISOString(), "time_too_far"],
+      ]) {
+        const refused = await request(app).post("/api/gateway/restart/schedule").send({ at: value });
+        expect(refused.status).toBe(400);
+        expect(refused.body).toEqual(expect.objectContaining({ ok: false, code }));
+      }
+
+      const scheduled = await request(app).post("/api/gateway/restart/schedule").send({ at: iso });
+      expect(scheduled.status).toBe(200);
+      expect(scheduled.body).toEqual({ ok: true, schedule: { at, createdAt: expect.any(Number) } });
+      const status = await request(app).get("/api/restart-status");
+      expect(status.body.schedule).toEqual({ at, createdAt: expect.any(Number) });
+      expect(status.body.reasons).toEqual([
+        expect.objectContaining({ code: "env_vars_changed", since: expect.any(Number) }),
+      ]);
+      expect(scheduleTimers.live().map((t) => t.ms)).toEqual([3 * kHourMs]);
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+
+      clock.nowMs = at;
+      scheduleTimers.fireNext();
+      await vi.waitFor(() => expect(deps.restartGateway).toHaveBeenCalledTimes(1));
+      expect(options.source).toBe("api:scheduled_restart");
+      expect(options.opId).toEqual(expect.any(String));
+      expect(options.reason).toBe(`actor=scheduler scheduled_for=${iso}`);
+      await vi.waitFor(() =>
+        expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            kind: "gateway_restart",
+            status: "ok",
+            details: expect.objectContaining({ operationId: options.opId, restartSource: "api:scheduled_restart", trigger: "scheduled" }),
+          }),
+        ),
+      );
+      const after = await request(app).get("/api/restart-status");
+      expect(after.body.schedule).toBeNull();
+      expect(after.body.restartRequired).toBe(false);
+      expect(after.body.lastOperation).toEqual(expect.objectContaining({ operationId: options.opId, status: "succeeded" }));
+    });
+
+    it("a refused scheduled start retries instead of restarting over another operation, and DELETE cancels the schedule", async () => {
+      const clock = { nowMs: Date.now() };
+      const scheduleTimers = makeScheduleTimers(clock);
+      const deps = createSystemDeps();
+      const store = withRealRestartStore(deps);
+      deps.restartScheduleTimers = scheduleTimers.injected;
+      deps.watchdog = { getStatus: vi.fn(() => ({ replacementPending: { pid: 1 } })), recordOperationEvent: vi.fn() };
+      const app = createApp(deps);
+      store.markRequired("config_file_edited");
+      const at = clock.nowMs + kHourMs;
+      expect((await request(app).post("/api/gateway/restart/schedule").send({ at: new Date(at).toISOString() })).status).toBe(200);
+
+      clock.nowMs = at;
+      scheduleTimers.fireNext();
+      expect(deps.restartGateway).not.toHaveBeenCalled();
+      expect(store.getRestartSchedule()).toEqual(expect.objectContaining({ at }));
+      expect(scheduleTimers.live().map((t) => t.ms)).toEqual([60_000]);
+
+      const cancelled = await request(app).delete("/api/gateway/restart/schedule");
+      expect(cancelled.status).toBe(200);
+      expect(cancelled.body).toEqual({ ok: true, cancelled: true, schedule: null });
+      expect(scheduleTimers.live()).toEqual([]);
+      const status = await request(app).get("/api/restart-status");
+      expect(status.body.schedule).toBeNull();
+      expect(status.body.restartRequired).toBe(true);
+    });
+  });
+
   const createQueuedRestartHarness = () => {
     const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
     const deps = createSystemDeps();
@@ -3344,6 +3461,7 @@ describe("server/routes/system", () => {
       restartInProgress: false,
       gatewayRunning: true,
       reasons: [],
+      schedule: null,
       activeOperation: null,
       lastOperation: null,
     });

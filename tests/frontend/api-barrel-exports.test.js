@@ -11,6 +11,7 @@ const kExpectedApiExports = [
   "approvePairing",
   "authFetch",
   "cancelClaudeCodeLocalLogin",
+  "cancelScheduledGatewayRestart",
   "checkGoogleApis",
   "closeWatchdogTerminalSession",
   "confirmWorkspaceMoveAsync",
@@ -150,6 +151,7 @@ const kExpectedApiExports = [
   "saveGoogleCredentials",
   "saveModelsConfig",
   "scanImportRepo",
+  "scheduleGatewayRestart",
   "sendAgentMessage",
   "sendDoctorCardFix",
   "setCronJobEnabled",
@@ -195,7 +197,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(184);
+    expect(kExpectedApiExports).toHaveLength(186);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

@@ -57,6 +57,7 @@ describe("server/restart-required-state (reasons)", () => {
         code: "channel_token_updated",
         label: "Channel token updated",
         addedAt: 2000,
+        since: 1000,
       },
     ]);
     expect(snapshot.reason).toBe("channel_token_updated");
@@ -125,6 +126,7 @@ describe("server/restart-required-state (reasons)", () => {
         code: "telegram_actions_enabled",
         label: "Telegram actions enabled",
         addedAt: 4242,
+        since: 4242,
       },
     ]);
     // Re-reading the same flag does not duplicate the entry.
