@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.111] - 2026-10-25
+## [0.10.112] - 2026-10-25
 
 OpenClaw's abandoned SQLite snapshot copies are now removed while the gateway runs, not only before a launch, and a `doctor --lint` that AlphaClaw kills no longer leaves one behind (ALPH-36).
 
