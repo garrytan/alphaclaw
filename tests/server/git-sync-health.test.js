@@ -23,6 +23,16 @@ describe("git-sync status file", () => {
     expect(ok.attemptId).toBe(4);
   });
 
+  it("ends every episode on a disabled run and keeps the last success", () => {
+    const ok = buildNextStatus({ previous: null, result: { code: "ok", pushed: true, pushedSha: "abc" }, trigger: "scheduled", lock: "acquired", nowIso: at(0) });
+    const held = buildNextStatus({ previous: ok, result: { code: "held_back", heldBack: [{ path: "big.bin", bytes: 1 }], pushed: true }, trigger: "scheduled", lock: "acquired", nowIso: at(10) });
+    const failed = buildNextStatus({ previous: held, result: { code: "merge_conflict", liveTreeBehind: { paths: ["a.md"] } }, trigger: "scheduled", lock: "acquired", nowIso: at(20) });
+    expect(failed).toMatchObject({ consecutiveFailures: 1, firstFailureAt: at(20), heldBack: { since: at(10) }, liveTreeBehind: { since: at(20) } });
+    const off = buildNextStatus({ previous: failed, result: { code: "disabled" }, trigger: "scheduled", lock: "none", nowIso: at(30) });
+    expect(off).toMatchObject({ outcome: "disabled", code: "disabled", consecutiveFailures: 0, sameCodeRuns: 0, firstFailureAt: null, lastSuccessAt: at(10), heldBack: null, nestedRepos: null, liveTreeBehind: null });
+    expect(kGitSyncCodes.disabled).toMatchObject({ outcome: "disabled", exitCode: 0, headline: "Git sync is off (ALPHACLAW_GIT_SYNC=off)" });
+  });
+
   it("tracks a live-tree-behind warning as a success with its own `since`", () => {
     const behind = buildNextStatus({ previous: null, result: { code: "live_tree_behind", liveTreeBehind: { paths: ["a.md"] }, pushed: true }, trigger: "scheduled", lock: "acquired", nowIso: at(0) });
     expect(behind).toMatchObject({ outcome: "warning", consecutiveFailures: 0, lastSuccessAt: at(0), liveTreeBehind: { since: at(0), runs: 1, paths: ["a.md"] } });
@@ -64,7 +74,7 @@ describe("git-sync status file", () => {
 
   it("every emitted code has an outcome, exit code and copy", () => {
     for (const [code, info] of Object.entries(kGitSyncCodes)) {
-      expect(["ok", "warning", "refused", "failed"]).toContain(info.outcome);
+      expect(["ok", "warning", "disabled", "refused", "failed"]).toContain(info.outcome);
       expect([0, 1, 2, 75]).toContain(info.exitCode);
       expect(info.headline, code).toBeTruthy();
       if (code !== "ok") expect(info.action, code).toBeTruthy();
@@ -148,6 +158,38 @@ describe("git-sync health notifications", () => {
     expect(await restarted.health.check()).toEqual({ action: "notified_recovered" });
     expect(restarted.notify.mock.calls[0][0]).toBe("✅ Git sync recovered after 90 min; pushed abc1234.");
     expect(await restarted.health.check()).toEqual({ action: "none" });
+  });
+
+  it("closes an announced failure episode with one turned-off line when sync is switched off, never a recovery line", async () => {
+    record({ code: "merge_conflict", detail: "conflict in a.md" });
+    record({ code: "merge_conflict", detail: "conflict in a.md" });
+    const { health, notify, recordEvent } = createHealth();
+    expect(await health.check()).toEqual({ action: "notified_blocked" });
+
+    now += 60 * 60_000;
+    record({ code: "disabled" });
+    expect(await health.check()).toEqual({ action: "notified_disabled" });
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify.mock.calls[1][0]).toBe(
+      "⏸️ Git sync was turned off (ALPHACLAW_GIT_SYNC=off), so AlphaClaw no longer backs up this repository and its open sync alert is closed.",
+    );
+    expect(notify.mock.calls[1][1]).toEqual({ eventType: "health", id: "git-sync-disabled-2026-10-12T10:00:00.000Z" });
+    expect(recordEvent).toHaveBeenLastCalledWith(expect.objectContaining({ eventType: "git_sync_disabled", source: "git-sync", status: "ok" }));
+    expect(notify.mock.calls.some(([message]) => /recovered/.test(message))).toBe(false);
+
+    now += 25 * 60 * 60_000;
+    record({ code: "disabled" });
+    expect(await health.check()).toEqual({ action: "none" });
+    await expect(createHealth().health.check()).resolves.toEqual({ action: "none" });
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it("says nothing when sync is switched off with no open episode", async () => {
+    record({ code: "ok", pushed: true, shortHash: "abc1234" });
+    record({ code: "disabled" });
+    const { health, notify } = createHealth();
+    expect(await health.check()).toEqual({ action: "none" });
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("waits for repeated transient failures and for a second refusal while the rebase owner is alive", async () => {

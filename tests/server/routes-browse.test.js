@@ -1209,6 +1209,21 @@ describe("server/routes/browse git-sync", () => {
     expect(res.body).toMatchObject({ ok: true, outcome: "warning", code: "live_tree_behind", paths: ["notes.md"] });
   });
 
+  it("answers 200 with the off sentence when ALPHACLAW_GIT_SYNC=off", async () => {
+    const { app } = createSyncApp(repoRoot(), {
+      outcome: "disabled",
+      code: "disabled",
+      message: "Git sync is off (ALPHACLAW_GIT_SYNC=off)",
+      committed: false,
+      pushed: false,
+      shortHash: "",
+      paths: [],
+    });
+    const res = await request(app).post("/api/browse/git-sync").send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, outcome: "disabled", code: "disabled", message: "Git sync is off (ALPHACLAW_GIT_SYNC=off)" });
+  });
+
   it("maps refusals to 409 with the code and the action as hint", async () => {
     const { app } = createSyncApp(repoRoot(), {
       outcome: "refused",

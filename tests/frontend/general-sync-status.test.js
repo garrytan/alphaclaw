@@ -37,6 +37,13 @@ describe("git sync last-run line", () => {
     expect(describeGitSyncLastRun(null)).toBeNull();
   });
 
+  it("says sync is off instead of a stale failure", () => {
+    expect(describeGitSyncLastRun({ at: "2026-10-12T11:48:00.000Z", outcome: "disabled", code: "disabled", headline: "Git sync is off (ALPHACLAW_GIT_SYNC=off)" }, { nowMs })).toEqual({
+      tone: "ok",
+      text: "Git sync is off (ALPHACLAW_GIT_SYNC=off)",
+    });
+  });
+
   it("reports success, behind-GitHub warnings and blocked episodes", () => {
     expect(describeGitSyncLastRun({ at: "2026-10-12T11:48:00.000Z", outcome: "ok", shortHash: "abc1234" }, { nowMs })).toEqual({
       tone: "ok",
