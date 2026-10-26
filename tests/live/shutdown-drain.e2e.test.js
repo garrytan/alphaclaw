@@ -378,7 +378,7 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
 
     expect(exit, tail).toMatchObject({ code: 0, signal: null });
     expect(exit.ms, tail).toBeLessThan(25_000);
-    expect(text, tail).toMatch(/restart op=\S+ asking status=running graceMs=\d+ graceReason=shutdown_budget overheadMs=12000/);
+    expect(text, tail).toMatch(/restart op=\S+ asking status=running graceMs=\d+ graceReason=shutdown_budget overheadMs=14000/);
     expect(text, tail).toMatch(/restart op=\S+ stopped how=graceful /);
     expect(text).not.toMatch(/restart op=\S+ forcing signal=SIGKILL/);
     expect(text).not.toContain("Shutdown deadline exceeded");

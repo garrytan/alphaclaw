@@ -946,15 +946,15 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       expect(signalsTo(launcherPid)).toEqual([]);
     });
 
-    it("a gateway running owned child trees (stdio MCP servers) gets their close reserved: a drain 4 s shorter, and an ask that waits as much longer for the close (ALPH-48)", async () => {
+    it("a gateway running owned child trees (stdio MCP servers) gets their close reserved: a drain 6 s shorter, and an ask that waits as much longer for the close (ALPH-48)", async () => {
       const { launcherPid, workerPid } = await bootManaged(gateway, world);
       world.add(nextPid++, { ppid: workerPid, pgid: launcherPid, openclaw: false, cmd: "node service-child-group-anchor.js" });
       world.restartCli = "graceful";
       const overheadMs = gateway.kGatewayShutdownAskOverheadMs + gateway.kGatewayShutdownOwnedChildCloseMs;
       const waitMs = 22_000 - gateway.kGatewayShutdownKillGraceMs - overheadMs - gateway.kGatewayShutdownAskSlackMs;
-      // The drain plus 11 s to close its children and exit: past the plain
+      // The drain plus 13 s to close its children and exit: past the plain
       // overhead, inside the reserved one.
-      world.gracefulDelayMs = waitMs + 11_000;
+      world.gracefulDelayMs = waitMs + 13_000;
       const { error } = await drive(gateway.stopGatewayForShutdown({ deadlineAt: Date.now() + 22_000 }), 23_000);
       expect(error).toBeNull();
       expect(world.restartArgs).toEqual([["gateway", "restart", "--wait", `${waitMs}ms`]]);

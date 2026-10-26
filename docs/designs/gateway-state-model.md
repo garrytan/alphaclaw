@@ -375,7 +375,7 @@ automated triggers (`replace`, memory mitigation) already target an unhealthy
 or about-to-OOM gateway. Shutdown (`stopGatewayForShutdown`) runs the ladder
 by the shutdown budget's deadline (`ALPHACLAW_SHUTDOWN_GRACE_SECONDS`, default
 25 s, minus a 3 s tail reserve): an ask sized to the time left, then SIGKILL
-at the deadline; the ask's overhead grows by 4 s when the gateway's tree holds
+at the deadline; the ask's overhead grows by 6 s when the gateway's tree holds
 an owned child (`service-child-group-anchor.js`, a stdio MCP server), which
 OpenClaw closes only after the drain; a SIGTERM-only ladder when no drain fits;
 `killManagedGatewayChildNow` SIGKILLs the managed group synchronously for the
