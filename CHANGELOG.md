@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.136] - 2026-10-25
+
+The `alphaclaw-admin` skill is an index plus one reference file per domain, so a new admin op no longer has to trim another domain's text to fit one 63k file, and the skill is readable again on models with less than about 160k tokens of context (ALPH-42).
+
+### Changed
+- **`SKILL.md` is a short index.** It keeps the intro, how to call, the Ground Rules, the Admins table, Current State and the Quick Recipes, then one row per domain: title, `references/<domain>.md` link, op count and a one-line summary. Each domain's prose and generated op table move to `skills/alphaclaw-admin/references/<domain>.md`, which the agent reads with its read tool when a question touches that domain (paths relative to `SKILL.md`, the convention OpenClaw's bundled skills use; `alphaclaw admin manifest --domain <name>` stays the fallback). The error-code table and long-running-operation guidance move to `references/errors.md`. Every op, recipe and fragment still renders; nothing about op behavior changes. On the maximal fixture the index is about 11k characters (was 62.6k for the whole skill) and the largest domain file (watchdog) about 6.7k.
+- **OpenClaw could not serve the old file.** OpenClaw 2026.10.7 serves a skill file through the read tool only whole, up to max(32 KiB, 10% of the model's context at 4 chars per token), and otherwise answers "Skill instructions cannot be partially served". The single 62.7 KB `SKILL.md` was refused that way for a 128k-context model; every file now stays under 32 KiB.
+- **Each admin-manifest domain module carries a `summary`** (one line, at most 160 characters, no `|`), which the index renders. The manifest refuses a domain without one. `getDomains()` returns `{ domain, title, summary }` per domain. Domain titles now render in the skill (the old builder fell back to the domain id).
+- The installer writes the reference files before `SKILL.md`, deletes reference files the manifest no longer produces, and removes the `references/` directory with the skill when the feature is turned off.
+
+### Tests
+- `agent-admin-skill.test.js`: the index stays under 16k characters and every reference file under 12k on the maximal fixture (replacing the single 63k cap), and every file under 32 KiB; each op's command is in its own domain's file; the index links exactly the files produced; every fragment renders; every domain row shows its title and summary; the installer writes the files, drops a stale one, and removes them when disabled.
+- `admin-manifest.test.js`: one summary per domain, shared by the box views under watchdog.
+- `tests/live/admin-skill-references.e2e.test.js` (live tier): on the real pinned gateway with a scripted model, `alphaclaw-admin` is in the agent's skill catalog, the read tool serves the index whole, the agent opens `references/webhooks.md` relative to it and answers from that file.
+
 ## [0.10.135] - 2026-10-25
 
 Env changes the operator and the agent can reason about: a one-key PATCH, a PUT confirm that says what it would delete, reserved keys skipped instead of failing the write, and a list of the processes still running with the old value (ALPH-39).

@@ -144,6 +144,20 @@ describe("admin-manifest engine", () => {
     }
   });
 
+  it("gives every domain one title and a one-line summary for the skill index", () => {
+    const domains = manifest.getDomains();
+    const opDomains = new Set(manifest.getManifest().ops.map((op) => op.domain));
+    expect(new Set(domains.map((entry) => entry.domain))).toEqual(opDomains);
+    expect(domains).toHaveLength(opDomains.size);
+    for (const { domain, title, summary } of domains) {
+      expect(title, domain).toBeTruthy();
+      expect(summary.length, domain).toBeLessThanOrEqual(160);
+      expect(summary, domain).not.toMatch(/[\r\n|]/);
+    }
+    // The box views share the watchdog domain and its summary.
+    expect(domains.find((entry) => entry.domain === "watchdog").summary).toMatch(/box views/);
+  });
+
   it("serializes ops without functions or regexes (JSON-safe)", () => {
     const { ops } = manifest.getManifest();
     const json = JSON.stringify(ops);

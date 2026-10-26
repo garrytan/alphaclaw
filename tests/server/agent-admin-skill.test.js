@@ -1,9 +1,9 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { getManifest } = require("../../lib/server/admin-manifest");
+const { getDomains, getManifest } = require("../../lib/server/admin-manifest");
 const {
-  buildAdminSkillContent,
+  buildAdminSkillFiles,
   gatherLiveState,
   installAlphaclawAdminSkill,
   renderToolsStanza,
@@ -14,6 +14,38 @@ const {
   updateAgentAdminFeature,
 } = require("../../lib/server/alphaclaw-config");
 
+const kFragmentsDir = path.join(__dirname, "..", "..", "lib", "setup", "skills", "alphaclaw-admin");
+
+// The index alone, the way most assertions read it.
+const buildAdminSkillContent = (args) => buildAdminSkillFiles(args)["SKILL.md"];
+
+const referenceEntries = (files) =>
+  Object.entries(files).filter(([name]) => name !== "SKILL.md");
+
+const buildMaximalFiles = () =>
+  buildAdminSkillFiles({
+    fs,
+    manifest: getManifest(),
+    liveState: {
+      adminTargets: Array.from({ length: 10 }, (_, i) => ({
+        channel: "telegram",
+        label: `ops-${i}`,
+        target: `55500000${i}`,
+      })),
+      activeChannels: ["telegram", "discord", "slack", "whatsapp"],
+      releaseChannel: "beta",
+      restartRequired: true,
+      machine: {
+        tier: "medium",
+        memoryGb: 4.0,
+        cores: 2,
+        gpuLabel: "NVIDIA A10G",
+        autotuneEnabled: true,
+        agentConcurrencyCap: 32,
+      },
+    },
+  });
+
 const makeOpenclawDir = () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-admin-skill-"));
   const openclawDir = path.join(root, ".openclaw");
@@ -22,18 +54,26 @@ const makeOpenclawDir = () => {
 };
 
 describe("agent-admin skill builder", () => {
-  it("builds a SKILL.md with frontmatter, ground rules, and op tables", () => {
-    const content = buildAdminSkillContent({
+  it("builds a SKILL.md index with frontmatter and ground rules, and one reference file per domain", () => {
+    const files = buildAdminSkillFiles({
       fs,
       manifest: getManifest(),
       liveState: { adminTargets: [], activeChannels: [], releaseChannel: "stable" },
     });
+    const content = files["SKILL.md"];
     expect(content.startsWith("---\nname: alphaclaw-admin")).toBe(true);
     expect(content).toContain("# AlphaClaw Administration");
     expect(content).toContain("manifestVersion:");
-    expect(content).toContain("alphaclaw admin GET /api/status");
+    expect(content).toContain("## Ground Rules");
+    // Op tables live in the domain files, not the index.
+    expect(content).not.toContain("| Operation | Command | Tier | Notes |");
+    const system = files["references/system.md"];
+    expect(system.startsWith("# System & Gateway\n")).toBe(true);
+    expect(system).toContain("manifestVersion:");
+    expect(system).toContain("`alphaclaw admin GET /api/status` |");
     // A denied op still renders (unavailable > omitted, A40) with its hint.
-    expect(content).toContain("not available to you");
+    expect(files["references/watchdog.md"]).toContain("not available to you");
+    expect(files["references/errors.md"]).toContain("`confirm_required` (HTTP 428)");
   });
 
   it("masks admin targets to the last 4 chars (A5)", () => {
@@ -60,39 +100,27 @@ describe("agent-admin skill builder", () => {
   });
 
   // On-demand skills are NOT under the 20k/150k always-injected bootstrap
-  // budget; this guard just keeps context cost bounded as domains grow. A
-  // typical deployment renders ~27-35k; the maximal fixture (all 22 domains,
-  // 10 admins, every channel) is ~60.2k with the doctor.settings ops, the
-  // overseer situation-report op (v0.9.69), the updates.backups inventory
-  // row (issue #54), and the fix-wave PR 3 additions (error-code rows for the
-  // confirm/admin codes, the browse config-path deny hints, updates.capabilities).
-  // The sidecars and deploy domains (v0.10.119-0.10.120) took it to ~62.1k,
-  // so the budget moved to 63k: the op tables are the load-bearing content
-  // and are not cut to fit.
-  it("stays within the on-demand size budget on a maximal fixture", () => {
-    const adminTargets = Array.from({ length: 10 }, (_, i) => ({
-      channel: "telegram",
-      label: `ops-${i}`,
-      target: `55500000${i}`,
-    }));
-    const content = buildAdminSkillContent({
-      fs,
-      manifest: getManifest(),
-      liveState: {
-        adminTargets,
-        activeChannels: ["telegram", "discord", "slack", "whatsapp"],
-        releaseChannel: "beta",
-        restartRequired: true,
-        machine: {
-          tier: "medium",
-          memoryGb: 4.0,
-          cores: 2,
-          gpuLabel: "NVIDIA A10G",
-          autotuneEnabled: true,
-          agentConcurrencyCap: 32,
-        },
-      },
-    });
+  // budget; these caps keep context cost bounded as domains grow. The skill
+  // used to be one SKILL.md capped at 63k, so every new op had to trim another
+  // domain's text. Now SKILL.md is a short index (rules, admins, live state,
+  // recipes, one line per domain) and each domain is its own reference file
+  // the agent reads only when it needs it: a new op spends only its own
+  // domain's budget, and a new domain adds one index row. On the maximal
+  // fixture (10 admins, every channel) the index is about 11k and the largest
+  // domain file (watchdog) about 6.7k.
+  //
+  // OpenClaw (2026.10.7) serves a skill file through the read tool only whole:
+  // past max(32 KiB, 10% of the model's context at 4 chars per token) it
+  // answers "Skill instructions cannot be partially served" instead. The old
+  // 62.7 KB single file was refused that way for a 128k-context model, so every
+  // file here also stays under the 32 KiB floor, which holds for any model.
+  const kIndexMaxChars = 16000;
+  const kReferenceFileMaxChars = 12000;
+  const kOpenclawReadFloorBytes = 32 * 1024;
+
+  it("keeps the index and every reference file within their own budgets on a maximal fixture", () => {
+    const files = buildMaximalFiles();
+    const content = files["SKILL.md"];
     // The machine + autotune lines render in Current State.
     expect(content).toContain(
       "- Machine: medium tier — 4.0 GB RAM, 2 vCPU, GPU: NVIDIA A10G",
@@ -100,7 +128,65 @@ describe("agent-admin skill builder", () => {
     expect(content).toContain(
       "- Resource autotune: on (agent concurrency cap 32) — details: `alphaclaw admin GET /api/autotune`",
     );
-    expect(content.length).toBeLessThan(63000);
+    expect(content.length).toBeLessThan(kIndexMaxChars);
+    const oversized = referenceEntries(files)
+      .filter(([, text]) => text.length >= kReferenceFileMaxChars)
+      .map(([name, text]) => `${name}: ${text.length}`);
+    expect(oversized).toEqual([]);
+    for (const [name, text] of Object.entries(files)) {
+      expect(Buffer.byteLength(text, "utf8"), name).toBeLessThan(kOpenclawReadFloorBytes);
+    }
+  });
+
+  it("keeps every op reachable: each command is in its own domain's file, and each file is linked from the index", () => {
+    const files = buildMaximalFiles();
+    const index = files["SKILL.md"];
+    const { ops } = getManifest();
+    const missing = [];
+    for (const op of ops) {
+      const command = `\`alphaclaw admin ${op.method} ${op.path}\``;
+      const owner = files[`references/${op.domain}.md`] || "";
+      if (!owner.includes(command)) missing.push(op.id);
+    }
+    expect(missing).toEqual([]);
+
+    const linked = Array.from(index.matchAll(/\]\((references\/[a-z0-9-]+\.md)\)/g), (m) => m[1]);
+    const produced = referenceEntries(files).map(([name]) => name);
+    expect(new Set(linked)).toEqual(new Set(produced));
+    for (const domain of new Set(ops.map((op) => op.domain))) {
+      expect(produced).toContain(`references/${domain}.md`);
+    }
+    // The cross-domain recipes stay in the index.
+    expect(index).toContain("## Quick Recipes");
+    expect(index).toContain("alphaclaw admin PATCH /api/env --data-stdin");
+  });
+
+  it("renders every fragment file somewhere in the skill", () => {
+    const files = buildMaximalFiles();
+    const domains = new Set(getManifest().ops.map((op) => op.domain));
+    const sections = new Set(["_intro", "_calling", "_rules", "_recipes", "_errors"]);
+    const orphans = fs
+      .readdirSync(kFragmentsDir)
+      .filter((name) => name.endsWith(".md"))
+      .map((name) => name.slice(0, -3))
+      .filter((name) => !domains.has(name) && !sections.has(name));
+    expect(orphans).toEqual([]);
+    for (const domain of domains) {
+      const fragmentPath = path.join(kFragmentsDir, `${domain}.md`);
+      if (!fs.existsSync(fragmentPath)) continue;
+      const firstLine = fs.readFileSync(fragmentPath, "utf8").split("\n").find((line) => line.trim());
+      expect(files[`references/${domain}.md`]).toContain(firstLine.trim());
+    }
+  });
+
+  it("names every domain in the index with its title and summary", () => {
+    const index = buildMaximalFiles()["SKILL.md"];
+    const domains = new Set(getManifest().ops.map((op) => op.domain));
+    for (const { domain, title, summary } of getDomains()) {
+      if (!domains.has(domain)) continue;
+      expect(index).toContain(`| ${title} | [references/${domain}.md](references/${domain}.md) |`);
+      expect(index).toContain(` | ${summary} |`);
+    }
   });
 
   it("renders no-GPU/autotune-off machine state and omits the lines when machine is absent", () => {
@@ -177,18 +263,30 @@ describe("agent-admin skill builder", () => {
     expect(result.installed).toBe(false);
     expect(fs.existsSync(skillPath)).toBe(false);
 
-    // Flag on, token present → installed.
+    // Flag on, token present → installed, index plus every reference file;
+    // a reference file the manifest no longer produces is deleted.
     updateAgentAdminFeature({ fsModule: fs, openclawDir, enabled: true });
     tokenStore.ensureToken({ fsModule: fs, openclawDir });
+    const referencesDir = path.join(path.dirname(skillPath), "references");
+    fs.mkdirSync(referencesDir, { recursive: true });
+    fs.writeFileSync(path.join(referencesDir, "retired-domain.md"), "# Retired\n");
     result = installAlphaclawAdminSkill({ fs, openclawDir });
     expect(result.installed).toBe(true);
     expect(fs.existsSync(skillPath)).toBe(true);
+    const index = fs.readFileSync(skillPath, "utf8");
+    const linked = Array.from(index.matchAll(/\]\(references\/([a-z0-9-]+\.md)\)/g), (m) => m[1]);
+    expect(linked.length).toBeGreaterThan(20);
+    expect(fs.readdirSync(referencesDir).sort()).toEqual([...new Set(linked)].sort());
+    expect(fs.readFileSync(path.join(referencesDir, "webhooks.md"), "utf8")).toContain(
+      "`alphaclaw admin GET /api/webhooks`",
+    );
 
-    // Flag back off → skill removed.
+    // Flag back off → skill and its reference files removed.
     updateAgentAdminFeature({ fsModule: fs, openclawDir, enabled: false });
     result = installAlphaclawAdminSkill({ fs, openclawDir });
     expect(result.installed).toBe(false);
     expect(fs.existsSync(skillPath)).toBe(false);
+    expect(fs.existsSync(referencesDir)).toBe(false);
   });
 
   it("does not install (or advertise) when the flag is on but the token is missing", () => {
