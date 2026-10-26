@@ -391,6 +391,17 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       kind: "owner_lease_held",
       holderPid: null,
       holderRole: null,
+      retryAfterMs: 79_000,
+    },
+    {
+      // 2026.10.7 (dist/openclaw-state-db-readonly-*.mjs): the CLI bootstrap's
+      // shared-state read raises the same refusal before any lock wait and
+      // exits 1 about one second in (verbatim from a SIGKILLed-container boot).
+      text: `[openclaw] Reason: Cannot read shared state for discovery: /data/.openclaw/state/openclaw.sqlite. Retry after the current state operation completes. GatewayLockNamespaceError: ${kNamespaceRefusal}`,
+      kind: "owner_lease_held",
+      holderPid: null,
+      holderRole: null,
+      retryAfterMs: 79_000,
     },
     {
       // Raised after acquisition (projection lock / owner-lease publish): the
@@ -400,6 +411,7 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       kind: "owner_lease_held",
       holderPid: null,
       holderRole: null,
+      retryAfterMs: 79_000,
     },
     {
       // 2026.10.2 appends the holder to the lease refusal.
@@ -421,6 +433,7 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       kind: "owner_lease_held",
       holderPid: null,
       holderRole: null,
+      retryAfterMs: 91_000,
     },
   ];
 
@@ -435,9 +448,19 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
     ).toEqual({ kind: "state_writer_conflict", holderPid: 5, holderRole: "agent-embedded" });
   });
 
-  it.each(rows)("$text → $kind", ({ text, kind, holderPid, holderRole }) => {
+  it.each(rows)("$text → $kind", ({ text, kind, holderPid, holderRole, retryAfterMs }) => {
     expect(kGatewayOwnershipConflictPattern.test(text)).toBe(true);
-    expect(classifyOwnershipConflict(text)).toEqual({ kind, holderPid, holderRole });
+    expect(classifyOwnershipConflict(text)).toEqual({ kind, holderPid, holderRole, ...(retryAfterMs != null ? { retryAfterMs } : {}) });
+  });
+
+  it("reads upstream's heartbeat countdown only from the namespace refusal line, and only when it is upstream's (N <= 95 s)", () => {
+    // The same-namespace lease refusal names no countdown; a "wait N s" elsewhere in the tail is not one.
+    expect(
+      classifyOwnershipConflict(["Another Gateway owner lease is still active for this state directory", "wait 30 s and retry"].join("\n")),
+    ).toEqual({ kind: "owner_lease_held", holderPid: null, holderRole: null });
+    for (const text of [kNamespaceRefusal.replace("wait 79 s", "wait 400 s"), kNamespaceRefusal.replace(" wait 79 s and retry.", "")]) {
+      expect(classifyOwnershipConflict(text)).toEqual({ kind: "owner_lease_held", holderPid: null, holderRole: null });
+    }
   });
 
   it("2026.10.2: the namespace refusal outranks the generic state-ownership wording on its line, a separate state-writer line still outranks it, and the pre-wait warning line alone is never a conflict", () => {
@@ -455,6 +478,7 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       kind: "owner_lease_held",
       holderPid: null,
       holderRole: null,
+      retryAfterMs: 79_000,
     });
     expect(
       classifyOwnershipConflict(
@@ -471,7 +495,7 @@ describe("classifyOwnershipConflict (exit-1 wording of a losing gateway contende
       `Gateway failed to start: failed to acquire gateway state ownership | ${kNamespaceRefusal}`,
       [`[gateway] starting (pid 100)`, `Gateway failed to start: ${kNamespaceRefusal}`].join("\n"),
     ]) {
-      expect(classifyOwnershipConflict(text)).toEqual({ kind: "owner_lease_held", holderPid: null, holderRole: null });
+      expect(classifyOwnershipConflict(text)).toEqual({ kind: "owner_lease_held", holderPid: null, holderRole: null, retryAfterMs: 79_000 });
     }
     expect(
       classifyOwnershipConflict(

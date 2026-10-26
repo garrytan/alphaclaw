@@ -37,6 +37,16 @@ describe("boot progress card model", () => {
     expect(launched.doctorProgress).toBeNull();
   });
 
+  it("says what the boot waits for while the watchdog waits out OpenClaw's state ownership", () => {
+    const waiting = (lockWait) => buildBootCardModel({ bootProgress: frame({ stage: "gateway", lockWait }), nowMs: t0 + 42_000 }).lockWait;
+    expect(waiting({ kind: "owner_lease_held", untilMs: t0 + 42_000 + 40_400 })).toBe(
+      "The previous gateway's OpenClaw state ownership has not lapsed yet (OpenClaw allows a takeover 90 s after its last heartbeat) — retrying in about 41s",
+    );
+    expect(waiting({ kind: "owner_lease_held", untilMs: t0 + 1_000 })).toMatch(/— retrying now$/);
+    expect(waiting({ kind: "state_writer_conflict", untilMs: null })).toBe("Another OpenClaw process holds the state database — retrying once it releases");
+    expect(buildBootCardModel({ bootProgress: frame(), nowMs: t0 + 42_000 }).lockWait).toBeNull();
+  });
+
   it("shows elapsed only without three comparable samples", () => {
     const model = buildBootCardModel({ bootProgress: frame(), nowMs: t0 + 42_000 });
     expect(model).toMatchObject({ kind: "running", headline: "Upgrading OpenClaw", stageLabel: "Upgrading OpenClaw data" });

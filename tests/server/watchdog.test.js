@@ -5599,6 +5599,78 @@ describe("server/watchdog", () => {
       watchdog.stop();
     });
 
+    it("OpenClaw 2026.10.7 namespace refusal after a SIGKILLed container: waits out upstream's own heartbeat countdown (not the 300 s lease expiry), relaunches at that instant, re-arms on a second refusal with backoff, never reclaims the lease or runs Doctor", async () => {
+      vi.useFakeTimers();
+      require("../../lib/server/boot-phase").setBootPhase("ready");
+      const startedAt = Date.now();
+      const refusal = (renewedAgo, waitSeconds) =>
+        `[openclaw] Reason: Cannot read shared state for discovery: /data/.openclaw/state/openclaw.sqlite. Retry after the current state operation completes. GatewayLockNamespaceError: cannot verify Gateway ownership from this process (different PID namespace); the owner heartbeat is fresh — run this command inside the Gateway container or with a shared PID namespace. If the previous Gateway stopped, wait up to 90 seconds after its last heartbeat. holder 921 at a1b2c6ce9e1d/pid-ns 4026532271, last renewed ${renewedAgo} s ago. wait ${waitSeconds} s and retry.`;
+      // The lease row would hold the relaunch for its full recorded expiry.
+      const lease = {
+        status: "held", heartbeatAt: startedAt - 11_000, expiresAt: startedAt + 289_000,
+        owner: { host: "a1b2c6ce9e1d", pid: 921 },
+      };
+      const readGatewayOwnerLease = vi.fn(() => lease);
+      const reclaimGatewayOwnerLease = vi.fn(() => ({ status: "skipped", reason: "fresh_heartbeat" }));
+      let nextPid = 4243;
+      const requestGatewayLaunch = vi.fn(async () => ({
+        outcome: "launch_requested", pid: nextPid, generation: nextPid - 4241,
+      }));
+      const { watchdog, clawCmd, insertWatchdogEvent, notifier } = createHarness({
+        autoRepair: true,
+        requestGatewayLaunch,
+        getLaunchGeneration: () => 1,
+        readGatewayOwnerLease,
+        reclaimGatewayOwnerLease,
+        fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+      });
+      try {
+        watchdog.start({ child: { pid: 4242, exitCode: null } });
+        await vi.advanceTimersByTimeAsync(1_000);
+        const exitedAt = Date.now();
+        watchdog.onGatewayExit({ pid: 4242, generation: 1, code: 1, launchedAt: startedAt, stderrTail: [refusal(11, 79)] });
+        await vi.advanceTimersByTimeAsync(0);
+        // 79 s of upstream countdown plus the 2 s margin, anchored at the exit.
+        const lapseAt = exitedAt + 81_000;
+        expect(watchdog.getStatus()).toMatchObject({
+          lifecycle: "running",
+          health: "degraded",
+          degradedReason: "owner_lease_held",
+          crashCountInWindow: 0,
+          incumbentConflict: expect.objectContaining({ kind: "owner_lease_held", holderPid: null, heartbeatLapseAtMs: lapseAt }),
+          incumbentGraceUntil: new Date(lapseAt).toISOString(),
+        });
+        expect(noticesIncluding(notifier, "accepts a new gateway only once that heartbeat is 90 s old — relaunching in about 81s")).toHaveLength(1);
+
+        // Degraded ticks inside the countdown wait without touching the lease.
+        await vi.advanceTimersByTimeAsync(79_000);
+        expect(requestGatewayLaunch).not.toHaveBeenCalled();
+        expect(reclaimGatewayOwnerLease).not.toHaveBeenCalled();
+        // The lapse wake relaunches at the countdown, not on the next 30 s tick.
+        await vi.advanceTimersByTimeAsync(Math.max(0, lapseAt - Date.now()) + 50);
+        expect(requestGatewayLaunch).toHaveBeenCalledTimes(1);
+        expect(watchdog.getStatus().replacementPending).toMatchObject({ pid: 4243, source: "owner_lease_held" });
+
+        // The holder renewed meanwhile (a live gateway elsewhere): upstream refuses again
+        // with a fresh countdown; the relaunch waits for it plus the conflict backoff.
+        nextPid = 4244;
+        await vi.advanceTimersByTimeAsync(1_000);
+        const secondExitAt = Date.now();
+        watchdog.onGatewayExit({ pid: 4243, generation: 2, code: 1, launchedAt: secondExitAt - 1_000, stderrTail: [refusal(76, 15)] });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(watchdog.getStatus().incumbentConflict).toMatchObject({ heartbeatLapseAtMs: secondExitAt + 17_000 });
+        await vi.advanceTimersByTimeAsync(16_000);
+        expect(requestGatewayLaunch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(requestGatewayLaunch).toHaveBeenCalledTimes(2);
+        expect(rowsOfType(insertWatchdogEvent, "crash")).toHaveLength(0);
+        expect(reclaimGatewayOwnerLease).not.toHaveBeenCalled();
+        expect(clawCmd).not.toHaveBeenCalledWith("doctor --fix --yes");
+      } finally {
+        watchdog.stop();
+      }
+    });
+
     it("5A. the ownership-conflict probe rides the shared exit resolver: a newer launch mid-probe discards its verdict (no incumbentConflict row, no degraded state)", async () => {
       let resolveFirstFetch;
       let fetchCalls = 0;

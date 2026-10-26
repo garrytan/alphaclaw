@@ -29,7 +29,7 @@ const runBootSteps = (timeline, { doctor = true } = {}) => {
 
 describe("boot timeline: stage mapping", () => {
   it("maps every startup step to exactly one stage, in boot order, so no stage reopens", () => {
-    const order = ["bin_setup", "server_start", "lock_contention", "restart_reconcile", "boot_report", "config_normalize", "doctor", "native_maintenance", "autotune", "config_ensure", "prompt_sync", "channel_sync", "proxy_config", "report_finalize", "gateway_launch", "openclaw_startup", "readiness"];
+    const order = ["bin_setup", "server_start", "lock_contention", "restart_reconcile", "boot_report", "config_normalize", "doctor", "native_maintenance", "autotune", "config_ensure", "prompt_sync", "channel_sync", "proxy_config", "report_finalize", "gateway_launch", "openclaw_startup", "lock_wait", "readiness"];
     expect(Object.keys(kBootSteps).sort()).toEqual([...order].sort());
     let last = -1;
     for (const id of order) {
@@ -162,6 +162,51 @@ describe("boot timeline: terminal table", () => {
     expect(timeline.snapshot().outcome).toBe("ready");
     expect(history).toHaveLength(1);
     expect(history[0]).toMatchObject({ outcome: "ready", complete: true, kind: "restarting", openclawVersion: "2026.10.4" });
+  });
+
+  it("waits through the watchdog's owner-heartbeat lock wait instead of failing, then follows the relaunch to ready", () => {
+    const { timeline, history, advance, now } = makeTimeline();
+    runBootSteps(timeline, { doctor: false });
+    advance(2_000);
+    const lapseAt = now() + 81_000;
+    const waiting = {
+      lifecycle: "running",
+      health: "degraded",
+      degradedReason: "owner_lease_held",
+      crashCountInWindow: 0,
+      incumbentConflict: { kind: "owner_lease_held", holderPid: null, holderRole: null, heartbeatLapseAtMs: lapseAt },
+      incumbentGraceUntil: new Date(lapseAt).toISOString(),
+    };
+    timeline.observe({ bootPhase: { phase: "ready" }, watchdog: waiting });
+    expect(timeline.isTerminal()).toBe(false);
+    expect(timeline.snapshot()).toMatchObject({
+      stage: "gateway",
+      step: expect.objectContaining({ id: "lock_wait", label: "Waiting for OpenClaw's state ownership" }),
+      lockWait: { kind: "owner_lease_held", untilMs: lapseAt },
+    });
+    expect(projectBootProgressHuman(timeline.snapshot(), { now: now() }).lockWait).toEqual({ kind: "owner_lease_held", untilMs: lapseAt });
+    // The public frame never carries step detail.
+    expect(projectBootProgressPublic(timeline.snapshot(), { now: now() })).not.toHaveProperty("lockWait");
+    advance(80_000);
+    timeline.observe({ bootPhase: { phase: "ready" }, watchdog: { ...waiting, incumbentGraceUntil: null } });
+    expect(timeline.isTerminal()).toBe(false);
+    // The watchdog relaunched: the conflict clears with the new launch.
+    advance(2_000);
+    timeline.observe({ bootPhase: { phase: "ready" }, watchdog: { lifecycle: "running", health: "unknown", crashCountInWindow: 0, incumbentConflict: null } });
+    expect(timeline.snapshot()).toMatchObject({ step: expect.objectContaining({ id: "gateway_launch" }), lockWait: null });
+    timeline.observe({ bootPhase: { phase: "ready" }, watchdog: kHealthyReady });
+    expect(timeline.snapshot().outcome).toBe("ready");
+    expect(history[0]).toMatchObject({ outcome: "ready" });
+  });
+
+  it("a lock wait that ends in the watchdog's relaunch cap still fails the boot", () => {
+    const { timeline } = makeTimeline();
+    runBootSteps(timeline, { doctor: false });
+    const conflict = { kind: "owner_lease_held", holderPid: null, holderRole: null };
+    timeline.observe({ bootPhase: { phase: "ready" }, watchdog: { lifecycle: "running", health: "degraded", crashCountInWindow: 0, incumbentConflict: conflict } });
+    expect(timeline.isTerminal()).toBe(false);
+    timeline.observe({ bootPhase: { phase: "ready" }, watchdog: { lifecycle: "crash_loop", health: "unhealthy", crashCountInWindow: 0, incumbentConflict: conflict } });
+    expect(timeline.snapshot()).toMatchObject({ outcome: "failed", reason: "gateway_exited", lockWait: null });
   });
 
   it.each([
