@@ -285,7 +285,8 @@ describe("real-server lifecycle e2e", () => {
     await withTimeout(sse.firstFrame, 10000, "SSE frame before shutdown");
 
     server.child.kill("SIGTERM");
-    // Hard bound: drain grace is 3s and the shutdown deadline is 10s; a clean
+    // Hard bound: drain grace is 3s and nothing else runs on a box that is
+    // not onboarded (no gateway, so no drain uses the shutdown budget); a clean
     // drain must exit 0 (the deadline path would flip the code to 1).
     const outcome = await withTimeout(server.exited, 12000, "server exit after SIGTERM");
     expect(outcome).toEqual({ code: 0, signal: null });

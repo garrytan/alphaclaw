@@ -380,6 +380,75 @@ describe("server/init/server-lifecycle", () => {
     expect(stopGateway).not.toHaveBeenCalled();
   });
 
+  describe("the shutdown budget (ALPHACLAW_SHUTDOWN_GRACE_SECONDS, ALPH-45)", () => {
+    it("defaults the hard deadline to the shutdown budget and hands the gateway stop everything but the tail reserve", async () => {
+      const { kShutdownGraceMs } = require("../../lib/server/constants");
+      expect(kShutdownGraceMs).toBe(25_000);
+      const stopGateway = vi.fn(async () => {});
+      const logger = createSilentLogger();
+      const lifecycle = createServerLifecycle({
+        server: new EventEmitter(),
+        PORT: 3999,
+        stopGateway,
+        flushLogs: vi.fn(),
+        exitImpl: vi.fn(),
+        logger,
+      });
+      const startedAt = Date.now();
+      await lifecycle.gracefulExit(0, "SIGTERM");
+      const [{ deadlineAt }] = stopGateway.mock.calls[0];
+      expect(deadlineAt - startedAt).toBeGreaterThanOrEqual(kShutdownGraceMs - 3000);
+      expect(deadlineAt - startedAt).toBeLessThanOrEqual(kShutdownGraceMs - 3000 + 50);
+      expect(logger.log).toHaveBeenCalledWith("[alphaclaw] Shutting down: SIGTERM (budget 25 s)");
+    });
+
+    it("the self-update drain passes no deadline, so the gateway stop keeps its own slice", async () => {
+      const stopGateway = vi.fn(async () => {});
+      const lifecycle = createServerLifecycle({
+        server: new EventEmitter(),
+        PORT: 3999,
+        stopGateway,
+        flushLogs: vi.fn(),
+        exitImpl: vi.fn(),
+        logger: createSilentLogger(),
+      });
+      await lifecycle.drain();
+      expect(stopGateway).toHaveBeenCalledWith({ deadlineAt: null });
+    });
+
+    it("the shutdown record and the deploy notice start with the signal, before a long gateway drain ends; a second signal still exits at once", async () => {
+      let releaseStop;
+      const stopGateway = vi.fn(() => new Promise((resolve) => { releaseStop = resolve; }));
+      const onShutdownStart = vi.fn(async () => {});
+      const killGatewayNow = vi.fn();
+      const exitCalls = [];
+      const lifecycle = createServerLifecycle({
+        server: new EventEmitter(),
+        PORT: 3999,
+        stopGateway,
+        killGatewayNow,
+        onShutdownStart,
+        flushLogs: vi.fn(),
+        exitImpl: (code) => exitCalls.push(code),
+        logger: createSilentLogger(),
+        shutdownDeadlineMs: 120_000,
+      });
+      const first = lifecycle.gracefulExit(0, "SIGTERM");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(onShutdownStart).toHaveBeenCalledWith({ code: 0, reason: "SIGTERM" });
+      expect(stopGateway.mock.calls[0][0].deadlineAt).toBeGreaterThan(Date.now() + 100_000);
+      expect(exitCalls).toEqual([]);
+
+      await lifecycle.gracefulExit(0, "SIGINT");
+      expect(exitCalls).toEqual([0]);
+      expect(killGatewayNow).toHaveBeenCalledTimes(1);
+
+      releaseStop();
+      await first;
+      expect(stopGateway).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("enforces the hard shutdown deadline when a drain step hangs", async () => {
     const exitCalls = [];
     const lifecycle = createServerLifecycle({

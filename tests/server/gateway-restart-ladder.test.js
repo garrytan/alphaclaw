@@ -925,11 +925,77 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     }
   });
 
-  it("stopGatewayForShutdown never asks (no supervisor will relaunch): SIGTERM the group, SIGKILL inside its budget; killManagedGatewayChildNow SIGKILLs the group synchronously", async () => {
+  describe("a deploy shutdown uses the time it has (ALPH-45)", () => {
+    const logLines = () => console.log.mock.calls.map(([line]) => String(line));
+    const signalsTo = (pgid) => world.signalLog.filter((entry) => entry.pid === -pgid && (entry.sig === "SIGTERM" || entry.sig === "SIGKILL"));
+    afterEach(() => {
+      delete process.env.ALPHACLAW_GATEWAY_STOP_ASK;
+    });
+
+    it("a deadline that fits asks OpenClaw for a restart drain sized to the time left; the gateway exits inside it and nothing is signalled", async () => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "graceful";
+      world.gracefulDelayMs = 9000;
+      const startedAt = Date.now();
+      const { error } = await drive(gateway.stopGatewayForShutdown({ deadlineAt: startedAt + 22_000 }), 23_000);
+      expect(error).toBeNull();
+      const waitMs = 22_000 - gateway.kGatewayShutdownKillGraceMs - gateway.kGatewayShutdownAskOverheadMs - gateway.kGatewayShutdownAskSlackMs;
+      expect(world.restartArgs).toEqual([["gateway", "restart", "--wait", `${waitMs}ms`]]);
+      expect(logLines().find((line) => /asking status=running/.test(line))).toContain(`graceMs=${waitMs} graceReason=shutdown_budget`);
+      expect(logLines().some((line) => /stopped how=graceful /.test(line))).toBe(true);
+      expect(signalsTo(launcherPid)).toEqual([]);
+    });
+
+    it("a drain that outlasts the deadline is SIGKILLed at the deadline minus the kill grace (OpenClaw ignores SIGTERM while it drains), and the stop ends inside the budget", async () => {
+      world.nextRunOptions = { ignoreSigterm: true };
+      const { launcherPid, workerPid } = await bootManaged(gateway, world);
+      world.nextRunOptions = {};
+      world.restartCli = "ignored";
+      const startedAt = Date.now();
+      const deadlineAt = startedAt + 22_000;
+      let settledAt = null;
+      const { error } = await drive(gateway.stopGatewayForShutdown({ deadlineAt }).then(() => { settledAt = Date.now(); }), 23_000);
+      expect(error).toBeNull();
+      expect(world.restartArgs).toHaveLength(1);
+      const sent = signalsTo(launcherPid);
+      expect(sent.map((entry) => entry.sig)).toEqual(["SIGTERM", "SIGKILL"]);
+      // The ask's window ends a slack second before the SIGKILL step; the
+      // SIGTERM in between is ignored by a draining gateway.
+      const killAt = deadlineAt - gateway.kGatewayShutdownKillGraceMs;
+      const [term, kill] = sent;
+      expect(Math.abs(term.at - (killAt - gateway.kGatewayShutdownAskSlackMs))).toBeLessThanOrEqual(500);
+      expect(Math.abs(kill.at - killAt)).toBeLessThanOrEqual(500);
+      expect(world.alive(workerPid)).toBe(false);
+      expect(settledAt).toBeLessThanOrEqual(deadlineAt);
+      expect(logLines().some((line) => /stopped how=sigkill /.test(line))).toBe(true);
+      expect(logLines().some((line) => /stop_failed/.test(line))).toBe(false);
+    });
+
+    it("with the ask turned off (ALPHACLAW_GATEWAY_STOP_ASK=0), SIGTERM gets all the time but the SIGKILL step", async () => {
+      process.env.ALPHACLAW_GATEWAY_STOP_ASK = "0";
+      world.nextRunOptions = { ignoreSigterm: true };
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.nextRunOptions = {};
+      const startedAt = Date.now();
+      const deadlineAt = startedAt + 22_000;
+      const { error } = await drive(gateway.stopGatewayForShutdown({ deadlineAt }), 23_000);
+      expect(error).toBeNull();
+      expect(world.restartArgs).toEqual([]);
+      expect(logLines().some((line) => /asking status=skipped reason=caller_disabled/.test(line))).toBe(true);
+      const [term, kill] = signalsTo(launcherPid);
+      expect(term).toMatchObject({ sig: "SIGTERM" });
+      expect(term.at - startedAt).toBeLessThan(500);
+      expect(kill).toMatchObject({ sig: "SIGKILL" });
+      expect(Math.abs(kill.at - (deadlineAt - gateway.kGatewayShutdownKillGraceMs))).toBeLessThanOrEqual(500);
+    });
+  });
+
+  it("stopGatewayForShutdown with the fixed 2 s slice never asks (no budget for a drain): SIGTERM the group, SIGKILL inside its budget; killManagedGatewayChildNow SIGKILLs the group synchronously", async () => {
     world.nextRunOptions = { ignoreSigterm: true };
     const { launcherPid, workerPid } = await bootManaged(gateway, world);
     await drive(gateway.stopGatewayForShutdown({ budgetMs: 2000 }), 3000);
     expect(childProcess.spawn.mock.calls.some(([, args]) => args[1] === "restart")).toBe(false);
+    expect(console.log.mock.calls.some(([line]) => /asking status=skipped reason=no_budget/.test(String(line)))).toBe(true);
     expect(world.signals).toEqual(expect.arrayContaining([[-launcherPid, "SIGTERM"], [-launcherPid, "SIGKILL"]]));
     expect(world.alive(workerPid)).toBe(false);
 

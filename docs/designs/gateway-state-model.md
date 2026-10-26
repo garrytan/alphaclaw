@@ -373,7 +373,9 @@ no spawn time and clear nothing; a running restart stays with
 Interruption policy is one policy for every trigger: ask → term → kill. The
 automated triggers (`replace`, memory mitigation) already target an unhealthy
 or about-to-OOM gateway. Shutdown (`stopGatewayForShutdown`) runs the ladder
-without the ask inside a 6 s slice of the process deadline;
+by the shutdown budget's deadline (`ALPHACLAW_SHUTDOWN_GRACE_SECONDS`, default
+25 s, minus a 3 s tail reserve): an ask sized to the time left, then SIGKILL
+at the deadline; a SIGTERM-only ladder when no drain fits;
 `killManagedGatewayChildNow` SIGKILLs the managed group synchronously for the
 second-signal path.
 
