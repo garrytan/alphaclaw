@@ -2,10 +2,10 @@
 
 **Rotate a provider key** (secret via stdin, restart after):
 ```
-printf '%s' '{"vars":[{"key":"ANTHROPIC_API_KEY","value":"<new-key>"}, ...keep the rest...]}' \
-  | alphaclaw admin PUT /api/env --data-stdin
+printf '%s' '{"key":"ANTHROPIC_API_KEY","value":"<new-key>"}' \
+  | alphaclaw admin PATCH /api/env --data-stdin
 ```
-Read `GET /api/env` first to see which keys exist (values are masked); include every key you want to keep — omitting one deletes it. Then tell the user a restart is required.
+Then tell the user a restart is required, naming any `staleProcesses`.
 
 **Check upgrade status:** `alphaclaw admin GET /api/openclaw/channel` (current build/channel) and `GET /api/status --summary`.
 

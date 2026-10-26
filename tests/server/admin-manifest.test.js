@@ -262,6 +262,52 @@ describe("admin-manifest env.update body-aware tierResolver (A1)", () => {
     return manifest.resolveTier(op, { body });
   };
 
+  it("the confirm summary says how many keys a PUT would delete, by name", () => {
+    mockEnvFile([
+      { key: "ANTHROPIC_API_KEY", value: "x" },
+      { key: "BRAVE_API_KEY", value: "y" },
+      { key: "CUSTOM_FLAG", value: "on" },
+      { key: "TELEGRAM_BOT_TOKEN", value: "t" },
+      { key: "SETUP_PASSWORD", value: "p" },
+    ]);
+    const op = manifest.findOp("PUT", "/api/env");
+    expect(op.confirmSummary({ body: { vars: [{ key: "CUSTOM_FLAG", value: "on" }, { key: "BRAVE_API_KEY", value: "" }] } }))
+      .toBe("Replace environment variables: would delete 2 keys (ANTHROPIC_API_KEY, BRAVE_API_KEY)");
+    expect(op.confirmSummary({ body: { vars: [
+      { key: "ANTHROPIC_API_KEY", value: "x" },
+      { key: "BRAVE_API_KEY", value: "y" },
+      { key: "CUSTOM_FLAG", value: "on" },
+    ] } })).toBeNull();
+    const many = Array.from({ length: 12 }, (_, index) => ({ key: `K${String(index).padStart(2, "0")}`, value: "v" }));
+    mockEnvFile(many);
+    expect(op.confirmSummary({ body: { vars: [] } })).toBe(
+      "Replace environment variables: would delete 12 keys (K00, K01, K02, K03, K04, K05, K06, K07, K08, K09 and 2 more)",
+    );
+  });
+
+  it("PATCH /api/env escalates only a secret delete or a protected-key change", () => {
+    mockEnvFile([
+      { key: "ANTHROPIC_API_KEY", value: "x" },
+      { key: "CLAUDE_CODE_ROUTINE_URL", value: "https://routine.example" },
+    ]);
+    const op = manifest.findOp("PATCH", "/api/env");
+    expect(op.id).toBe("env.patch");
+    const tier = (body) => manifest.resolveTier(op, { body });
+    expect(tier({ key: "ANTHROPIC_API_KEY", value: "rotated" })).toBe("restart");
+    expect(tier({ key: "ANTHROPIC_API_KEY", delete: true })).toBe("dangerous");
+    expect(tier({ key: "ANTHROPIC_API_KEY", value: "" })).toBe("dangerous");
+    expect(tier({ key: " ANTHROPIC_API_KEY ", delete: true })).toBe("dangerous");
+    expect(tier({ key: "CUSTOM_FLAG", delete: true })).toBe("restart");
+    expect(tier({ key: "CLAUDE_CODE_ROUTINE_URL", value: "https://other.example" })).toBe("dangerous");
+    expect(tier({ key: "CLAUDE_CODE_LOCAL_CWD", value: "/x" })).toBe("dangerous");
+    expect(op.confirmSummary({ body: { key: "ANTHROPIC_API_KEY", delete: true } })).toBe("Delete environment variable ANTHROPIC_API_KEY");
+    expect(op.confirmSummary({ body: { key: "BRAVE_API_KEY", value: "v" } })).toBe("Set environment variable BRAVE_API_KEY");
+  });
+
+  it("the stale-process read is a safe op", () => {
+    expect(manifest.findOp("GET", "/api/env/stale-processes")).toMatchObject({ id: "env.stale-processes", tier: "safe" });
+  });
+
   it("escalates to dangerous when the payload OMITS an existing agent-editable secret", () => {
     mockEnvFile([{ key: "ANTHROPIC_API_KEY", value: "x" }]);
     expect(resolveEnvUpdate({ vars: [] })).toBe("dangerous");

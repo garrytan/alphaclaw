@@ -62,15 +62,21 @@ describe("agent Envars authority boundary", () => {
     else process.env.SETUP_PASSWORD = savedPassword;
   });
 
-  it("rejects every deployment-only key through bearer auth and enforcement, not a confirm flow", async () => {
+  it("never writes a deployment-only key through bearer auth and enforcement, and needs no confirm flow", async () => {
     for (const key of kDeploymentOnlyEnvKeys) {
       const result = await request(app).put("/api/env")
         .set("Authorization", `Bearer ${token}`)
         .send({ vars: [{ key: ` ${key} `, value: "synthetic-file-value" }] });
-      expect(result.status, key).toBe(400);
-      expect(result.body.error).toContain(key);
-      expect(result.body.error).toContain("deployment environment");
-      expect(result.body.error).not.toContain("synthetic-file-value");
+      expect(result.status, key).toBe(200);
+      expect(result.body.changed, key).toBe(false);
+      expect(result.body.skipped[0].key).toBe(key);
+      expect(result.body.skipped[0].warning).toContain("deployment environment");
+      expect(JSON.stringify(result.body)).not.toContain("synthetic-file-value");
+      const patched = await request(app).patch("/api/env")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ key, value: "synthetic-file-value" });
+      expect(patched.status, key).toBe(400);
+      expect(patched.body.error).toContain("deployment environment");
     }
     expect(writes).not.toHaveBeenCalled();
     const saved = await request(app).put("/api/env")

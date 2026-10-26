@@ -143,11 +143,12 @@ const createApp = (deps) => {
 // Captures raw route handlers so long-lived handlers (SSE) can be driven with
 // hand-rolled req/res doubles under fake timers.
 const captureRoutes = (deps) => {
-  const routes = { get: new Map(), put: new Map(), post: new Map(), delete: new Map() };
+  const routes = { get: new Map(), put: new Map(), post: new Map(), patch: new Map(), delete: new Map() };
   const app = {
     get: (routePath, handler) => routes.get.set(routePath, handler),
     put: (routePath, handler) => routes.put.set(routePath, handler),
     post: (routePath, handler) => routes.post.set(routePath, handler),
+    patch: (routePath, handler) => routes.patch.set(routePath, handler),
     delete: (routePath, handler) => routes.delete.set(routePath, handler),
   };
   registerSystemRoutes({ app, ...deps });
@@ -238,7 +239,7 @@ describe("server/routes/system", () => {
     expect(res.body.restartRequired).toBe(false);
   });
 
-  it("rejects reserved vars on PUT /api/env", async () => {
+  it("skips reserved vars on PUT /api/env with a warning per key and saves the rest", async () => {
     const deps = createSystemDeps();
     deps.reloadEnv.mockReturnValue(true);
     deps.readEnvFile.mockReturnValue([
@@ -256,14 +257,36 @@ describe("server/routes/system", () => {
 
     const res = await request(app).put("/api/env").send(payload);
 
-    expect(res.status).toBe(400);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.error).toContain("Reserved environment variables cannot be edited");
-    expect(res.body.error).toContain("PORT");
-    expect(res.body.error).toContain("GITHUB_WORKSPACE_REPO");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.skipped).toEqual([
+      { key: "PORT", warning: "PORT is reserved and was not saved." },
+      { key: "GITHUB_WORKSPACE_REPO", warning: "GITHUB_WORKSPACE_REPO is reserved and was not saved." },
+    ]);
+    expect(deps.writeEnvFile).toHaveBeenCalledWith([
+      { key: "OPENAI_API_KEY", value: "abc" },
+      { key: "GITHUB_WORKSPACE_REPO", value: "owner/repo" },
+    ]);
+    expect(JSON.stringify(res.body)).not.toContain("changed/repo");
+    expect(deps.restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing when every key in a PUT is reserved", async () => {
+    const deps = createSystemDeps();
+    deps.readEnvFile.mockReturnValue([{ key: "OPENAI_API_KEY", value: "kept" }]);
+    const app = createApp(deps);
+
+    const res = await request(app).put("/api/env").send({ vars: [{ key: "PORT", value: "1" }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      ok: true,
+      changed: false,
+      restartRequired: false,
+      skipped: [{ key: "PORT", warning: "PORT is reserved and was not saved." }],
+    });
     expect(deps.writeEnvFile).not.toHaveBeenCalled();
     expect(deps.syncChannelConfig).not.toHaveBeenCalled();
-    expect(deps.restartGateway).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -282,11 +305,18 @@ describe("server/routes/system", () => {
     expect(listed.body.reservedKeys).toContain(key);
     expect(listed.body.vars.some((entry) => entry.key === key)).toBe(false);
     for (const inputKey of [key, ` ${key} `]) {
-      const rejected = await request(app).put("/api/env").send({ vars: [{ key: inputKey, value: "untrusted-value" }] });
-      expect(rejected.status).toBe(400);
-      expect(rejected.body.error).toContain(key);
-      expect(rejected.body.error).toContain("deployment environment");
-      expect(JSON.stringify(rejected.body)).not.toContain("untrusted-value");
+      const skipped = await request(app).put("/api/env").send({ vars: [{ key: inputKey, value: "untrusted-value" }] });
+      expect(skipped.status).toBe(200);
+      expect(skipped.body.changed).toBe(false);
+      expect(skipped.body.skipped).toHaveLength(1);
+      expect(skipped.body.skipped[0].key).toBe(key);
+      expect(skipped.body.skipped[0].warning).toContain("deployment environment");
+      expect(JSON.stringify(skipped.body)).not.toContain("untrusted-value");
+      const patched = await request(app).patch("/api/env").send({ key: inputKey, value: "untrusted-value" });
+      expect(patched.status).toBe(400);
+      expect(patched.body.error).toContain(key);
+      expect(patched.body.error).toContain("deployment environment");
+      expect(JSON.stringify(patched.body)).not.toContain("untrusted-value");
     }
     expect(deps.writeEnvFile).not.toHaveBeenCalled();
     expect(deps.reloadEnv).not.toHaveBeenCalled();
@@ -356,7 +386,7 @@ describe("server/routes/system", () => {
     }
   });
 
-  it("rejects gog keyring password edits on PUT /api/env", async () => {
+  it("never writes gog keyring password edits on PUT /api/env", async () => {
     const deps = createSystemDeps();
     const app = createApp(deps);
 
@@ -364,9 +394,11 @@ describe("server/routes/system", () => {
       vars: [{ key: "GOG_KEYRING_PASSWORD", value: "changed" }],
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.error).toContain("GOG_KEYRING_PASSWORD");
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+    expect(res.body.skipped).toEqual([
+      { key: "GOG_KEYRING_PASSWORD", warning: "GOG_KEYRING_PASSWORD is reserved and was not saved." },
+    ]);
     expect(deps.writeEnvFile).not.toHaveBeenCalled();
     expect(deps.syncChannelConfig).not.toHaveBeenCalled();
   });

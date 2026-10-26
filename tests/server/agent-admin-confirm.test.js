@@ -74,6 +74,18 @@ describe("agent-admin confirm service", () => {
     expect(deliver.mock.calls[0][0].code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
   });
 
+  it("uses the op's description of the exact request as the summary, falling back to the title", () => {
+    const described = { ...kOp, confirmSummary: (req) => `Delete agent ${req.path.split("/").pop()} and 3 sessions` };
+    expect(service.gate({ req: makeReq(), op: described }).body.summary).toBe("Delete agent foo and 3 sessions");
+    expect(deliver.mock.calls[0][0].summary).toBe("Delete agent foo and 3 sessions");
+    expect(service.listPending()[0].summary).toBe("Delete agent foo and 3 sessions");
+
+    const throwing = { ...kOp, confirmSummary: () => { throw new Error("boom"); } };
+    expect(service.gate({ req: makeReq({ path: "/agents/bar" }), op: throwing }).body.summary).toBe("Delete agent foo");
+    const empty = { ...kOp, confirmSummary: () => null };
+    expect(service.gate({ req: makeReq({ path: "/agents/baz" }), op: empty }).body.summary).toBe("Delete agent foo");
+  });
+
   it("proceeds when the correct code is supplied", () => {
     const req = makeReq();
     service.gate({ req, op: kOp });

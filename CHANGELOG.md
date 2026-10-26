@@ -5,6 +5,27 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.135] - 2026-10-25
+
+Env changes the operator and the agent can reason about: a one-key PATCH, a PUT confirm that says what it would delete, reserved keys skipped instead of failing the write, and a list of the processes still running with the old value (ALPH-39).
+
+### Added
+- **`PATCH /api/env` sets or deletes one key.** `{"key":"K","value":"v"}` sets it, `{"key":"K","delete":true}` removes it, and every other key in `.env` stays as it is. It runs the same save path as PUT (channel sync, auth-profile sync, the restart reason only when the gateway's launch env changes, the bootstrap prompt rewrite) and returns the same body. Reserved, managed-channel and AlphaClaw-managed keys are refused with a 400 that names the key. Like PUT, it takes the operator box lock (step `envars-write`, by `api:env`): it waits for another holder up to the configured time, or at once with `?boxLockWait=0`, then answers 409 `box_locked`. In the admin manifest it is `env.patch` (restart tier); deleting or blanking an existing secret-class key, or changing a Claude Code launcher key, escalates to a dangerous-tier confirm, as with PUT. The `alphaclaw-admin` skill's env page and the key-rotation recipe now use it.
+- **Processes still running with the old value.** After a save that changed keys, the response carries `staleProcesses`: for each changed key, the processes under AlphaClaw's user whose `/proc/<pid>/environ` holds a different value (`differs`), still holds a deleted key (`still_set`), or, inside the gateway's process tree, lacks a key the gateway is launched with (`missing`). Gateway processes are judged against the gateway's launch env, every other process against `.env`. Each value is SHA-256 hashed as it is read and compared in constant time; only key names, pids and command names leave the scan, and nothing is logged or stored. AlphaClaw's own process is skipped (its env is updated in place). `GET /api/env/stale-processes?keys=A,B` (default: every key in `.env`) answers the same question at any time; it is a safe-tier op for the agent (`env.stale-processes`).
+- **The Envars tab shows that list** under the save, with a Dismiss button, so an operator sees which sidecars to restart besides the gateway.
+
+### Changed
+- **Reserved keys in a PUT are skipped, not fatal.** A reserved or deployment-only key in the body used to fail the whole write with a 400. It is now left out, and the response lists it in `skipped` with a warning per key (`PORT is reserved and was not saved.`; a deployment-only key says to set it in the deployment environment). The Envars tab shows each warning as a toast. A body whose every key is reserved writes nothing, since a full replacement without them would delete every editable key.
+- **The PUT confirm says what the write would delete.** When an agent's PUT escalates to a confirm, the summary the operator sees (dashboard and admin channel) names how many currently-set keys the body omits or blanks, for example `Replace environment variables: would delete 2 keys (ANTHROPIC_API_KEY, BRAVE_API_KEY)`. Manifest ops can now describe the exact request with `confirmSummary(req)`; a missing, empty or throwing description falls back to the op title.
+- The env routes moved out of `routes/system.js` into `routes/env.js` (same behavior and registration point). PUT keeps v0.10.122's box lock unchanged, now in the write path PUT and PATCH share.
+
+### Tests
+- `env-stale-processes.test.js`: against real `/proc`, a child started with the old value is listed by pid and command and one with the new value is not; a deleted key is `still_set`; a gateway-tree process missing a launched key is `missing`, and not when the launch env strips the key; this process is skipped; neither value appears in the result.
+- `routes-env.test.js`: PATCH refused with 409 `box_locked` while another holder has the box lock (nothing written; `?boxLockWait=0` refuses at once), then holding the lock once it is free; PATCH set, delete, no-op delete and every refusal; the scan gets exactly the changed keys and the post-save values; no scan without a change; a throwing scan never fails the save; the read route's defaults, key list and validation.
+- `admin-manifest.test.js`, `agent-admin-confirm.test.js`: the delete-count summary (and its 10-name cap), the PATCH tier rules, the stale read's tier, and the summary fallback.
+- `routes-system.test.js`, `deployment-env-agent.test.js`: reserved and deployment-only keys are skipped with warnings and never written; PATCH refuses them.
+- `envars-component.test.js`: the skipped-key toasts, the stale list after a save, and Dismiss.
+
 ## [0.10.134] - 2026-10-25
 
 A compact Box card on the Watchdog tab: processes, the last restart and MCP servers at a glance, schedules and disk one click away (ALPH-40, 7 of 7).

@@ -65,6 +65,9 @@ import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { Envars } from "../../lib/public/js/components/envars.js";
+import { EnvarsStaleProcesses } from "../../lib/public/js/components/envars-stale-processes.js";
+import { saveEnvVars } from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 
 const harness = preactHooks.__harness;
 
@@ -182,6 +185,49 @@ describe("frontend/envars component", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("after a save, warns once per skipped key and lists the processes still holding the old values", async () => {
+    const payload = { vars: [{ key: "FOO", value: "1", label: "FOO", group: "custom", hint: "", source: "env_file", editable: true }], reservedKeys: [] };
+    useCachedFetch.mockReturnValue({ data: payload, error: null, loading: false, refresh: vi.fn(async () => payload) });
+    const staleProcesses = {
+      available: true,
+      stale: [{ key: "FOO", processes: [
+        { pid: 101, command: "openclaw", gateway: true, state: "differs" },
+        { pid: 202, command: "worker.js", gateway: false, state: "differs" },
+      ] }],
+    };
+    saveEnvVars.mockResolvedValue({
+      ok: true,
+      changed: true,
+      restartRequired: true,
+      skipped: [{ key: "PORT", warning: "PORT is reserved and was not saved." }],
+      staleProcesses,
+    });
+
+    let tree = renderEnvars();
+    const save = findAllByType(tree, ActionButton).find((vnode) => vnode.props.idleLabel === "Save changes");
+    await save.props.onClick();
+    expect(showToast).toHaveBeenCalledWith("PORT is reserved and was not saved.", "warning");
+
+    tree = renderEnvars();
+    const panels = findAllByType(tree, EnvarsStaleProcesses);
+    expect(panels.length).toBeGreaterThan(0);
+    expect(panels[0].props.report).toEqual(staleProcesses);
+    const text = JSON.stringify(panels[0].rendered);
+    expect(text).toContain("FOO");
+    expect(text).toContain("gateway openclaw (pid 101, old value)");
+    expect(text).toContain("worker.js (pid 202, old value)");
+
+    panels[0].props.onDismiss();
+    tree = renderEnvars();
+    expect(findAllByType(tree, EnvarsStaleProcesses)[0].props.report).toBe(null);
+  });
+
+  it("renders nothing when no process is stale or the scan is unavailable", () => {
+    expect(EnvarsStaleProcesses({ report: null })).toBe(null);
+    expect(EnvarsStaleProcesses({ report: { available: true, stale: [] } })).toBe(null);
+    expect(EnvarsStaleProcesses({ report: { available: false, reason: "no_proc" } })).toBe(null);
   });
 
   it("surfaces a Cancel/reload failure inline near the actions and clears it on the next attempt", async () => {
