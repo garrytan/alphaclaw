@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.144] - 2026-10-26
+
+A deploy's SIGTERM no longer SIGKILLs a gateway that runs a slow-exiting stdio MCP server. OpenClaw 2026.10.7 closes the children it owns as process trees (stdio MCP servers, each under a `service-child-group-anchor.js`) only after the restart drain, all at once: stdin EOF, 2 s, SIGTERM, 2 s, SIGKILL. With a server that takes 3 s to exit after its stdin closes, the gateway's post-drain close took 7.1 s instead of about 3.5 s (3.65 s of it closing the child), the gateway needed about 19 s from the SIGTERM to exit, and v0.10.140's 25 s budget had already ended the ask's window at 18 s: `stopped how=sigkill ms=19368` on the live tier, `how=sigterm ms=19095` in the Render deploy replay (ALPH-46, ALPH-48).
+
+### Fixed
+- **The shutdown ask reserves the owned-child close.** When the gateway's process inventory holds a `service-child-group-anchor.js`, `stopGatewayForShutdown` adds `kGatewayShutdownOwnedChildCloseMs` (4 s, OpenClaw's two 2 s graces) to the ask's overhead: the drain is 4 s shorter (about 6 s instead of 10 s with the default budget) and the ladder waits 4 s longer for the close, so the ask's window still ends a second before the SIGKILL step. A gateway with no owned child is unchanged. The ladder now passes its `askGraceMs` resolver `{ inventory }` and takes an `askOverheadMs` the resolver returns; the asking line logs `overheadMs=`.
+
+### Tests
+- `gateway-restart-ladder.test.js`: a gateway with an anchor in its tree is asked with the 4 s shorter `--wait` and `overheadMs=12000`, and a gateway that needs its drain plus 11 s to exit stops gracefully with no signal.
+- `tests/live/shutdown-drain.e2e.test.js` (live tier): a third case adds a stdio MCP server that ignores SIGTERM and exits 3 s after its stdin closes. With an exec turn running, SIGTERM drains (`graceMs≈5900 overheadMs=12000`), OpenClaw closes the child itself, the gateway stops `how=graceful` at about 15.5 s and AlphaClaw exits 0.
 ## [0.10.142] - 2026-10-26
 
 A model a chat can pick with `/model` but the provider will not serve now explains itself. On OpenClaw 2026.10.7, `/model` accepts any ref the allowlist permits. When the provider then rejects the model, the reply is "⚠️ This model was not found. Choose another model in the Control UI or run `openclaw configure`". That reply names neither the model, the provider, nor what the provider said. A `/model` choice also turns off the configured fallbacks, so that chat stays broken until someone sends `/model default` (ALPH-47).

@@ -87,6 +87,37 @@ const server = http.createServer((req, res) => {
 server.listen(0, "127.0.0.1", () => process.stdout.write("PORT " + server.address().port + "\n"));
 `;
 
+// A stdio MCP server that exits a few seconds after its stdin closes and
+// ignores SIGTERM meanwhile, like a server finishing its work. OpenClaw closes
+// it after the drain: stdin EOF, 2 s, SIGTERM, 2 s, SIGKILL (ALPH-48).
+const kSlowMcpExitMs = 3000;
+const kSlowMcpSource = String.raw`
+const fs = require("fs");
+const exitDelayMs = Number(process.argv[2]) || 0;
+const log = (event) => { try { fs.appendFileSync(process.env.SLOW_MCP_LOG, JSON.stringify({ t: Date.now(), pid: process.pid, event }) + "\n"); } catch {} };
+log("start");
+process.on("SIGTERM", () => log("sigterm_ignored"));
+const keepAlive = setInterval(() => {}, 1000);
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
+let buf = "";
+process.stdin.on("data", (d) => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    let m;
+    try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined) continue;
+    if (m.method === "initialize") send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: (m.params && m.params.protocolVersion) || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "slow-exit", version: "1.0.0" } } });
+    else if (m.method === "tools/list") send({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "slow_wait", description: "Waits.", inputSchema: { type: "object", properties: {} } }] } });
+    else if (m.method === "ping") send({ jsonrpc: "2.0", id: m.id, result: {} });
+    else send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "method not found" } });
+  }
+});
+process.stdin.on("end", () => { log("stdin_end"); setTimeout(() => { clearInterval(keepAlive); log("exit"); process.exit(0); }, exitDelayMs); });
+`;
+
 // The vitest worker's env without the runner's markers (OpenClaw silences
 // stdout and skips its state-owner lock under them).
 const childEnv = () => {
@@ -321,5 +352,41 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
       return finalText.includes(`exec done: resumed-${tag}`);
     }, 240_000, "the interrupted turn resumed and finished after the next boot");
     expect(messages.some((m) => m.role === "user" && kRecoveryNotePattern.test(textOf(m.content)))).toBe(true);
+  }, kCaseTimeoutMs);
+
+  it("the default budget with a stdio MCP server that takes 3 s to exit: the ask reserves the child's close, so the gateway still exits on its own inside the budget (ALPH-48)", async () => {
+    if (alphaclaw && alphaclaw.exitCode === null && alphaclaw.signalCode === null) await sigterm();
+    const mcpPath = path.join(rootDir, "slow-exit-mcp.js");
+    const mcpLog = path.join(rootDir, "slow-exit-mcp.log");
+    fs.writeFileSync(mcpPath, kSlowMcpSource);
+    const configPath = path.join(rootDir, ".openclaw", "openclaw.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    config.mcp = { ...(config.mcp || {}), servers: { slowexit: { command: process.execPath, args: [mcpPath, String(kSlowMcpExitMs)], env: { SLOW_MCP_LOG: mcpLog } } } };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    const log = [];
+    await boot({}, log);
+    await startTurn("mcp");
+    const mcpEvents = () => (fs.existsSync(mcpLog) ? fs.readFileSync(mcpLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : []);
+    const running = mcpEvents().filter((event) => event.event === "start").map((event) => event.pid)
+      .filter((pid) => !mcpEvents().some((event) => event.pid === pid && event.event === "exit"));
+    expect(running.length, JSON.stringify(mcpEvents())).toBeGreaterThan(0);
+    const exit = await sigterm();
+    const text = log.join("");
+    const tail = text.slice(-3_000);
+    console.log(`[live] slow MCP child: exit ${JSON.stringify(exit)}; ${text.match(/restart op=\S+ asking status=running graceMs=\d+ \S+ overheadMs=\d+/)?.[0]}; ${text.match(/restart op=\S+ stopped how=\S+ ms=\d+/)?.[0]}`);
+
+    expect(exit, tail).toMatchObject({ code: 0, signal: null });
+    expect(exit.ms, tail).toBeLessThan(25_000);
+    expect(text, tail).toMatch(/restart op=\S+ asking status=running graceMs=\d+ graceReason=shutdown_budget overheadMs=12000/);
+    expect(text, tail).toMatch(/restart op=\S+ stopped how=graceful /);
+    expect(text).not.toMatch(/restart op=\S+ forcing signal=SIGKILL/);
+    expect(text).not.toContain("Shutdown deadline exceeded");
+    expect(text, tail).toMatch(/marked 1 interrupted main session\(s\) for restart recovery/);
+    // OpenClaw closed the child itself, after its stdin closed.
+    for (const pid of running) {
+      const events = mcpEvents().filter((event) => event.pid === pid).map((event) => event.event);
+      expect(events, JSON.stringify(mcpEvents())).toEqual(expect.arrayContaining(["stdin_end", "exit"]));
+    }
   }, kCaseTimeoutMs);
 });
