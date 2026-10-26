@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.141] - 2026-10-26
+
+AlphaClaw's own cron job now gets the box's temp directory. cron starts every job with a minimal environment, so the hourly git sync and anything it spawns wrote temp files to the container's own /tmp even where the deployment routes temp onto the persistent disk (the Render template exports `TMPDIR=/data/tmp`). A full /tmp is what made Render replace an instance on Oct 25 (ALPH-24); the deploy-replay e2e (ALPH-46) found that AlphaClaw's cron.d file still left TMPDIR out.
+
+### Fixed
+- **`/etc/cron.d/openclaw-hourly-sync` carries `TMPDIR`, `TMP` and `TEMP`** when AlphaClaw's process has them, using the same safe-path rule as the file's other paths. A value cron.d cannot carry is left out with a warning and the file is still written. All three writers (onboarding, the boot reconcile, `PUT /api/sync-cron`) share the builder, so the next boot rewrites an existing file with the new lines.
+
+### Tests
+- `system-cron.test.js`: the temp vars are written in order between the state lines and the box-lock lines, an unrelated variable is not, and an unsafe value is dropped with a warning while the file is still written. The exact-content test now passes an empty environment, because the test runner sets its own TMPDIR.
+
 ## [0.10.140] - 2026-10-26
 
 A platform SIGTERM (a deploy, a container stop) now uses the time the platform gives. Before, the gateway got a fixed 6 s slice of a 10 s process deadline, SIGTERM first and then SIGKILL. OpenClaw drains a plain stop for up to 20 s, so any deploy that landed while the agent was working SIGKILLed the gateway mid-turn (`stopped how=sigkill ms≈4100` on 2026.10.7 with an exec turn running), and the next boot then waited for OpenClaw's ownership heartbeat to lapse (ALPH-45).

@@ -19,7 +19,7 @@ describe("cli/system-cron buildSystemCronFile", () => {
   };
 
   it("emits SHELL, PATH, the state env lines, the schedule line, and a trailing newline", () => {
-    const content = buildSystemCronFile(args);
+    const content = buildSystemCronFile({ ...args, env: {} });
     expect(content).toBe(
       [
         "SHELL=/bin/bash",
@@ -34,6 +34,30 @@ describe("cli/system-cron buildSystemCronFile", () => {
     );
     // /etc/cron.d files without a trailing newline are ignored by cron.
     expect(content.endsWith("\n")).toBe(true);
+  });
+
+  it("carries TMPDIR, TMP and TEMP into the job environment when they are set", () => {
+    const content = buildSystemCronFile({
+      ...args,
+      env: { TMPDIR: "/data/tmp", TMP: "/data/tmp", TEMP: "/data/tmp", HOME: "/root" },
+    });
+    const lines = content.split("\n");
+    expect(lines.slice(6, 9)).toEqual(["TMPDIR=/data/tmp", "TMP=/data/tmp", "TEMP=/data/tmp"]);
+    expect(content).not.toMatch(/^HOME=/m);
+    expect(lines[9]).toMatch(/^0 \* \* \* \* root bash /);
+  });
+
+  it.each([
+    ["a space", "/data/my tmp"],
+    ["a newline", "/data/tmp\nMAILTO=evil"],
+    ["a relative path", "data/tmp"],
+  ])("leaves out a temp dir with %s and still writes the file", (_name, value) => {
+    const logger = quietLogger();
+    const content = buildSystemCronFile({ ...args, env: { TMPDIR: value, TMP: "/data/tmp" }, logger });
+    expect(content).not.toContain("TMPDIR=");
+    expect(content).not.toContain("MAILTO");
+    expect(content).toContain("TMP=/data/tmp\n");
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("leaves out TMPDIR"));
   });
 
   it.each([
