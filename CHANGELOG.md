@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.133] - 2026-10-25
+
+Which MCP servers the gateway has, how many tools each brings and why one did not start, plus one owner notice when a server fails to start (ALPH-40, 6 of 7).
+
+### Added
+- **`GET /api/box/mcp`** (`box.read` view `mcp`): every MCP server from `openclaw.json` `mcp.servers` and every server the gateway reported on, with `configured`, `enabled`, `transport`, a redacted `target` (URL origin and path, or the command's name and argument count), `lastEvent` and `lastError` (kind, time, whether it happened since the gateway's last launch, redacted message) and `failing` when the server's last event this launch was an error. `probe=1` runs OpenClaw's own `openclaw mcp probe --json` (it connects to each server once, starting stdio servers briefly, 45 s budget, at most once per 10 minutes) and fills `toolCount`; the result is reused by later reads until it expires.
+- **MCP start failures reach the owner.** OpenClaw starts an MCP server the first time a session needs it and reports a failure only as a `bundle-mcp:` warning in the gateway output, so the agent quietly ran without the server's tools. AlphaClaw now reads those lines (`lib/server/mcp-watch.js`): failed to start, skipped (unsupported transport or launch), and a failed connection resolver send one notice and one `mcp_server_failed` watchdog event per server per gateway launch; refresh failures, tool-list failures, closes and recycles are recorded for the view without a notice. Messages are redacted. Nothing is restarted or reconfigured.
+
+### Tests
+- `box-mcp.test.js`: a start failure recorded, redacted and notified once per launch (the second launch notice of the same generation does not re-arm it, a new generation does), a skipped server across split output chunks, closes and recycles without a notice, a failing notifier or ledger never throwing; the view joining config, the gateway's reports and a probe without showing a secret, the probe cache, a failed probe and an unreadable config, and the route's `probe` validation.
+
 ## [0.10.132] - 2026-10-25
 
 Back up now archives and OpenClaw's Doctor and update captures no longer pile up forever: the periodic sweep keeps the newest 3 and anything younger than 7 days, and removes only what those features made (ALPH-40, 5 of 7).
