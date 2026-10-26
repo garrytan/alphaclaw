@@ -6,6 +6,7 @@ const {
   readBootHistory,
   estimateBootDuration,
   kBootHistoryMax,
+  kBootHistoryMaxAgeMs,
 } = require("../../lib/server/boot-progress/history");
 const bootProgress = require("../../lib/server/boot-progress");
 
@@ -29,6 +30,38 @@ describe("boot history", () => {
     expect(status).toBe("ok");
     expect(entries).toHaveLength(kBootHistoryMax);
     expect(entries[0].totalMs).toBe(6);
+  });
+
+  it("keeps the last 20 boots or 14 days, whichever bound is hit first", () => {
+    const nowMs = Date.parse("2026-10-26T12:00:00Z");
+    const day = 24 * 60 * 60 * 1000;
+    expect(kBootHistoryMax).toBe(20);
+    expect(kBootHistoryMaxAgeMs).toBe(14 * day);
+    const append = (startedAt, extra = {}) => appendBootHistory({ managedDir: dir, entry: row({ startedAt, ...extra }), now: () => nowMs, logger: quietLogger });
+    append(nowMs - 20 * day);
+    append(nowMs - 15 * day);
+    append(nowMs - 14 * day + 60_000);
+    append(nowMs - day, { kind: "updating_alphaclaw" });
+    append(nowMs - 60_000);
+    expect(readBootHistory({ managedDir: dir }).entries.map((entry) => entry.startedAt)).toEqual([nowMs - 14 * day + 60_000, nowMs - day, nowMs - 60_000]);
+
+    for (let i = 0; i < kBootHistoryMax + 3; i += 1) append(nowMs - 60_000 + i);
+    const { entries } = readBootHistory({ managedDir: dir });
+    expect(entries).toHaveLength(kBootHistoryMax);
+    expect(entries.at(-1).startedAt).toBe(nowMs - 60_000 + kBootHistoryMax + 2);
+
+    const old = row({ startedAt: nowMs - 30 * day });
+    append(nowMs - 30 * day);
+    expect(readBootHistory({ managedDir: dir }).entries.at(-1)).toEqual(old);
+    append(nowMs);
+    expect(readBootHistory({ managedDir: dir }).entries.some((entry) => entry.startedAt === nowMs - 30 * day)).toBe(false);
+  });
+
+  it("drops only boots it can date: a row without startedAt stays inside the count bound", () => {
+    const nowMs = Date.parse("2026-10-26T12:00:00Z");
+    appendBootHistory({ managedDir: dir, entry: row(), now: () => nowMs, logger: quietLogger });
+    appendBootHistory({ managedDir: dir, entry: row({ startedAt: nowMs }), now: () => nowMs, logger: quietLogger });
+    expect(readBootHistory({ managedDir: dir }).entries).toHaveLength(2);
   });
 
   it("survives a corrupt file: reads empty, the next append starts over", () => {
@@ -83,6 +116,14 @@ describe("boot history", () => {
     expect(readBootHistory({ managedDir: dir }).entries).toHaveLength(0);
     timeline.abort("shutdown");
     expect(readBootHistory({ managedDir: dir }).entries).toEqual([expect.objectContaining({ outcome: "aborted" })]);
+    expect(readBootHistory({ managedDir: dir }).entries[0]).not.toHaveProperty("cause");
+  });
+
+  it("records why the process booted on its history row", () => {
+    const cause = { kind: "unclean_exit", label: "Platform or crash", reason: null, shutdownAt: null, gapMs: 240_000 };
+    const timeline = bootProgress.beginBootTimeline({ bootId: "1:3", startedAtMs: Date.now(), cause, managedDir: dir, logger: quietLogger, readSources: () => ({}) });
+    timeline.abort("shutdown");
+    expect(readBootHistory({ managedDir: dir }).entries).toEqual([expect.objectContaining({ outcome: "aborted", cause })]);
   });
 
   it("a not-onboarded listen leaves the history unchanged", () => {

@@ -44,6 +44,7 @@ const createService = ({
   fsImpl = fs,
   drain,
   markExiting,
+  onRestart,
 } = {}) => {
   const { createAlphaclawVersionService } = loadVersionModule({ execMock, execFileMock });
   const service = createAlphaclawVersionService({
@@ -56,6 +57,7 @@ const createService = ({
     }),
     ...(drain ? { drain } : {}),
     ...(markExiting ? { markExiting } : {}),
+    ...(onRestart ? { onRestart } : {}),
   });
   return { service, fetchMock, execMock, execFileMock };
 };
@@ -1009,16 +1011,20 @@ describe("server/alphaclaw-version", () => {
     const calls = [];
     const markExiting = vi.fn((code) => calls.push(["markExiting", code]));
     const drain = vi.fn(async () => calls.push(["drain"]));
+    const onRestart = vi.fn(() => calls.push(["onRestart"]));
 
     // Container path: the latch carries the intentional-restart code so a
     // SIGTERM inside the ≤10s drain window exits 75 instead of double-draining.
+    // The restart record is written before the drain, so the next boot reads
+    // as an AlphaClaw restart.
     const { service } = createService({
       env: { RENDER: "true" },
       drain,
       markExiting,
+      onRestart,
     });
     await expect(service.restartProcess()).rejects.toThrow("exit 75");
-    expect(calls).toEqual([["markExiting", 75], ["drain"]]);
+    expect(calls).toEqual([["markExiting", 75], ["onRestart"], ["drain"]]);
 
     // Respawn (VPS) path: the latch carries the clean-exit code.
     const originalSpawn = childProcess.spawn;

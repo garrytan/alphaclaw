@@ -34,6 +34,11 @@ const box = {
     ok: true,
     gateway: { outcome: "ready", source: "api:restart", reason: "config change", requestedAt: "2026-10-25T11:50:00Z", downtimeMs: 12_000 },
     lastGatewayExit: { at: "2026-10-25T09:00:00Z", code: null, signal: "SIGKILL", cause: "oom" },
+    boots: [
+      { bootId: "b2", kind: "restarting", outcome: "ready", startedAt: "2026-10-25T10:00:00Z", totalMs: 92_000, cause: { kind: "unclean_exit", label: "Platform or crash", gapMs: 47 * 60_000 } },
+      { bootId: "b1", kind: "restarting", outcome: "aborted", startedAt: "2026-10-24T12:00:00Z", totalMs: 9_000, cause: { kind: "shutdown", label: "Clean shutdown (SIGTERM)", gapMs: 20_000 } },
+      { bootId: "b0", kind: "restarting", outcome: "ready", startedAt: "2026-10-20T12:00:00Z", totalMs: 60_000, cause: null },
+    ],
   },
   mcp: { ok: true, servers: [{ name: "docs", enabled: true, failing: false }, { name: "calc", enabled: true, failing: true, lastError: { message: "spawn uvx ENOENT" } }, { name: "off", enabled: false, failing: false }] },
   schedules: {
@@ -59,6 +64,12 @@ describe("Box card", () => {
     const summary = buildBoxSummary(box, { nowMs: kNow });
     expect(summary.processes.owners.map((entry) => entry.label)).toEqual(["Gateway", "AlphaClaw", "Other"]);
     expect(summary.restart).toMatchObject({ outcome: "ready", tone: "success", when: "10m ago", downtime: expect.any(String), lastExit: { when: "3h ago", cause: "oom" } });
+    expect(summary.boots.latest).toEqual({ key: "b2", when: "2h ago", outcome: "ready", ready: "1m 32s", cause: "Platform or crash", causeKind: "unclean_exit", causeTone: "warning", gap: "47m 0s" });
+    expect(summary.boots.history.map((boot) => [boot.cause, boot.gap, boot.ready])).toEqual([
+      ["Platform or crash", "47m 0s", "1m 32s"],
+      ["Clean shutdown (SIGTERM)", "20s", null],
+      [null, null, "1m 0s"],
+    ]);
     expect(summary.mcp).toEqual({ total: 3, failing: [{ name: "calc", message: "spawn uvx ENOENT" }], disabled: 1 });
     expect(summary.schedules).toMatchObject({ openclawJobs: 1, failingJobs: ["digest"], alphaclawTimers: 1, systemEntries: 1, cronDaemon: "not_running", next: { label: "Gateway health and readiness check", in: "in 2m" } });
     expect(summary.disk.copies).toEqual([{ id: "alphaclaw_backups", title: "Back up now archives", count: 5, bytes: 2 * 1024 ** 3, due: 2 }]);
@@ -77,7 +88,15 @@ describe("Box card", () => {
       processes: null,
       disk: null,
     });
-    expect(buildBoxSummary()).toEqual({ processes: null, restart: null, mcp: null, schedules: null, disk: null, alerts: [] });
+    expect(buildBoxSummary()).toEqual({ processes: null, restart: null, boots: null, mcp: null, schedules: null, disk: null, alerts: [] });
+  });
+
+  it("falls back to lastBoot from an older server and says when no boot is recorded", () => {
+    const lastBoot = { kind: "restarting", outcome: "ready", startedAt: "2026-10-25T11:00:00Z", totalMs: 30_000, cause: null };
+    expect(buildBoxSummary({ restart: { ok: true, gateway: null, lastBoot } }, { nowMs: kNow }).boots.history).toHaveLength(1);
+    expect(buildBoxSummary({ restart: { ok: true, gateway: null, lastBoot: null, boots: [] } }, { nowMs: kNow }).boots).toEqual({ latest: null, history: [] });
+    const text = collectText(WatchdogBoxCard({ box: { restart: { ok: true, gateway: null, boots: [] } }, errors: {}, nowMs: kNow })).join(" ");
+    expect(text).toContain("No boot recorded yet");
   });
 
   it("renders the compact rows, and schedules and disk only when expanded", () => {
@@ -86,9 +105,15 @@ describe("Box card", () => {
     expect(collapsed).toContain("Gateway 2");
     expect(collapsed).toContain("spawn uvx ENOENT");
     expect(collapsed).not.toContain("System cron");
+    expect(collapsed).toContain("Platform or crash");
+    expect(collapsed).toContain("2h ago · down 47m 0s · ready in 1m 32s");
+    expect(collapsed).not.toContain("Clean shutdown (SIGTERM)");
     const open = collectText(WatchdogBoxCard({ box, errors: {}, expanded: true, nowMs: kNow })).join(" ").replace(/\s+/g, " ");
     expect(open).toContain("System cron");
     expect(open).toContain("due for cleanup");
     expect(open).toContain("agents");
+    expect(open).toContain("Clean shutdown (SIGTERM)");
+    expect(open).toContain("Cause not recorded");
+    expect(open).toContain("aborted");
   });
 });

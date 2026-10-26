@@ -344,6 +344,31 @@ describe("server/gateway-downtime-note", () => {
     expect(fresh.clawCmd).not.toHaveBeenCalled();
   });
 
+  it("a boot classified unclean_exit names it when the episode has no cause; a recorded cause wins", async () => {
+    expect(buildDowntimeNoteText({ downAtMs: kT0, readyAtMs: kT0 + 47 * 60_000, cause: "unclean_exit" })).toBe(
+      "The gateway was down for 47 min (13:52–14:39 UTC) after an unclean exit (platform replacement or crash); messages queued during that time may be stale, and their timestamps show when they were sent.",
+    );
+    const stampPath = makeStampPath();
+    const first = makeNote({ stampPath });
+    await bootServing(first);
+    await first.note.tick();
+    const lastServing = first.clock.value;
+
+    const second = makeNote({ stampPath, bootCause: "unclean_exit", clock: { value: lastServing + 47 * 60_000 } });
+    expect(await second.note.onGatewayLaunch({ generation: 1 })).toEqual({ sent: true, downMs: 47 * 60_000, cause: "unclean_exit" });
+    expect(decodeShellWords(second.clawCmd.mock.calls[0][0])[3]).toContain(" after an unclean exit (platform replacement or crash); ");
+    expect(logs.at(-1)).toContain("cause=unclean_exit");
+
+    const crashed = makeNote({ stampPath, clock: { value: second.clock.value + 30_000 } });
+    await crashed.note.tick();
+    crashed.note.onGatewayExit({ expectedExit: false, generation: 1 });
+    const third = makeNote({ stampPath, bootCause: "unclean_exit", clock: { value: crashed.clock.value + 10 * 60_000 } });
+    expect((await third.note.onGatewayLaunch({ generation: 1 })).cause).toBe("crash");
+
+    const graceful = makeNote({ stampPath, bootCause: "shutdown", clock: { value: third.clock.value + 5 * 60_000 } });
+    expect(await graceful.note.onGatewayLaunch({ generation: 1 })).toEqual({ sent: true, downMs: 5 * 60_000, cause: null });
+  });
+
   it("an unreadable stamp file reads as no history", async () => {
     const stampPath = makeStampPath();
     fs.writeFileSync(stampPath, "{not json");

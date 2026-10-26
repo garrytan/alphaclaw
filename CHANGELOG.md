@@ -5,6 +5,28 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.138] - 2026-10-26
+
+The Box card keeps a restart history (the last 20 boots or 14 days) and says why each boot happened. A boot that follows no AlphaClaw shutdown record and no AlphaClaw restart is classified as an unclean exit ("platform or crash"), with how long the box was down, and the agent's downtime note now says so instead of giving no cause.
+
+### Added
+- **Shutdown record.** A graceful exit (SIGTERM, SIGINT, or the crash guards' own drain after an uncaught exception or a rejection storm) writes `<managedDir>/last-shutdown.json` (`{ kind: "shutdown", reason, code, atMs }`, atomic) as the drain begins, and a self-update restart (`restartProcess`) writes `{ kind: "restart", reason: "update" }` before its drain. The next process reads and deletes it once at startup (`lib/server/box-status/boot-cause.js`), so it explains one boot only.
+- **Boot cause.** Each boot is classified at startup and recorded on its `boot-history.json` row as `cause: { kind, label, reason, shutdownAt, gapMs }`. `kind` is `shutdown` ("Clean shutdown (SIGTERM)", or "AlphaClaw exited on an error (…)" for a non-zero code), `restart` ("AlphaClaw restart (update)"), `unclean_exit` ("Platform or crash": no record, so the platform replaced or killed the container, or AlphaClaw died past its crash guards; the two cannot be told apart from inside) or `first_boot` (no last-serving stamp and no boot history). `gapMs` is the time from the persisted last-serving stamp (`gateway-last-serving.json`) to this boot's start. A record the gateway outlived by more than a minute is stale and ignored. The server logs one `[alphaclaw] boot cause: <kind> gap_ms=<n>` line.
+- **`GET /api/box/restart` returns `boots`**: the retained history, newest first, each with `bootId` (the public boot id) and `cause`. `lastBoot` and `previousBoot` stay (they are its first two rows) and carry the same two new fields. The `box.read` manifest description names the new field.
+- **Box card.** A "Last boot" row shows the cause badge (warning tone for platform or crash), when, how long the box was down and how long it took to be ready. Expanded, a "Boots" row lists the whole history; boots recorded before this version read "Cause not recorded". The expand button reads "Boots, schedules and disk".
+
+### Changed
+- **Boot history retention.** `boot-history.json` keeps the last 20 boots or 14 days, whichever bound is hit first (it kept 20). The row being written is always kept. Boot duration estimates still use the last three comparable successful boots among the retained rows.
+- **Downtime note cause.** When the episode a process boots into carries no cause and the boot is classified `unclean_exit`, the note says "after an unclean exit (platform replacement or crash)" (new cause `unclean_exit`). A cause the previous process recorded (a crash, a restart, a repair) still wins, and a clean shutdown still carries no cause.
+
+### Tests
+- `box-boot-cause.test.js` (new): a graceful shutdown record reads as `shutdown` with the gap, a crash guard's drain as an AlphaClaw error, a self-update restart as `restart`, no record as `unclean_exit` with `gapMs`, no stamp and no history as `first_boot`; a record is consumed once; stale, unreadable and foreign records are ignored; a failed write never throws.
+- `boot-progress-history.test.js`: the 20-boot and 14-day bounds, the new row always kept, undated rows kept within the count; the timeline records the cause on its row.
+- `box-last-restart.test.js`: the route's `boots` array newest first with causes, `lastBoot`/`previousBoot` compatibility, and `boots: []` when nothing is known.
+- `gateway-downtime-note.test.js`: an `unclean_exit` boot names the cause in the note, a recorded crash cause wins, a clean shutdown stays causeless.
+- `watchdog-box-card.test.js`: the boot section, the older-server `lastBoot` fallback, the collapsed "Last boot" row and the expanded history.
+- `alphaclaw-version.test.js`: `restartProcess` writes the restart record after the exit latch and before the drain.
+
 ## [0.10.137] - 2026-10-25
 
 A gateway killed in another container (a killed deploy, an OOM kill, a SIGKILL from the stop ladder under tini) no longer keeps the next container's gateway down for the gateway-owner lease's full five minutes. The watchdog now relaunches when OpenClaw's own ownership heartbeat lapses, about 90 s after the dead gateway's last beat, and the boot card says what it is waiting for (ALPH-43).

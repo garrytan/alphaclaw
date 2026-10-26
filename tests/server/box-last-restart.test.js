@@ -58,7 +58,7 @@ describe("last gateway restart record", () => {
 });
 
 describe("GET /api/box/restart", () => {
-  it("combines the gateway restart, the last two boots and the last unexpected exit", async () => {
+  it("combines the gateway restart, the boot history with its causes and the last unexpected exit", async () => {
     const app = express();
     const s = { read: () => ({ opId: "op-1", outcome: "ready", downtimeMs: 5000 }) };
     registerBoxRoutes({
@@ -69,25 +69,37 @@ describe("GET /api/box/restart", () => {
         store: s,
         readBootHistory: () => ({ entries: [
           { kind: "fresh", outcome: "ready", startedAt: 1000, endedAt: 2000, totalMs: 1000 },
+          { kind: "restarting", outcome: "aborted", reason: "shutdown", startedAt: Date.parse("2026-10-25T16:00:00Z"), endedAt: Date.parse("2026-10-25T16:00:10Z"),
+            totalMs: 10_000, bootId: "aaaaaaaaaaaa", cause: { kind: "shutdown", label: "Clean shutdown (SIGTERM)", reason: "SIGTERM", shutdownAt: "2026-10-25T15:59:50.000Z", gapMs: 15_000 } },
           { kind: "restarting", outcome: "ready", reason: null, startedAt: Date.parse("2026-10-25T18:00:00Z"),
-            endedAt: Date.parse("2026-10-25T18:01:32Z"), totalMs: 92_000, alphaclawVersion: "0.10.120", openclawVersion: "2026.10.7", stageMs: { x: 1 } },
+            endedAt: Date.parse("2026-10-25T18:01:32Z"), totalMs: 92_000, alphaclawVersion: "0.10.120", openclawVersion: "2026.10.7", stageMs: { x: 1 },
+            bootId: "bbbbbbbbbbbb", cause: { kind: "unclean_exit", label: "Platform or crash", reason: null, shutdownAt: null, gapMs: 6_000_000.4, extra: "x" } },
         ] }),
         getWatchdogStatus: () => ({ lastExit: { at: "2026-10-25T17:59:00.000Z", code: 1, signal: null, cause: "oom", corroborated: true } }),
       }),
     });
     const res = await request(app).get("/api/box/restart");
     expect(res.status).toBe(200);
+    const newest = {
+      bootId: "bbbbbbbbbbbb", kind: "restarting", outcome: "ready", reason: null, startedAt: "2026-10-25T18:00:00.000Z", endedAt: "2026-10-25T18:01:32.000Z",
+      totalMs: 92_000, alphaclawVersion: "0.10.120", openclawVersion: "2026.10.7",
+      cause: { kind: "unclean_exit", label: "Platform or crash", reason: null, shutdownAt: null, gapMs: 6_000_000 },
+    };
+    const middle = {
+      bootId: "aaaaaaaaaaaa", kind: "restarting", outcome: "aborted", reason: "shutdown", startedAt: "2026-10-25T16:00:00.000Z", endedAt: "2026-10-25T16:00:10.000Z",
+      totalMs: 10_000, alphaclawVersion: null, openclawVersion: null,
+      cause: { kind: "shutdown", label: "Clean shutdown (SIGTERM)", reason: "SIGTERM", shutdownAt: "2026-10-25T15:59:50.000Z", gapMs: 15_000 },
+    };
+    const oldest = {
+      bootId: null, kind: "fresh", outcome: "ready", reason: null, startedAt: "1970-01-01T00:00:01.000Z", endedAt: "1970-01-01T00:00:02.000Z",
+      totalMs: 1000, alphaclawVersion: null, openclawVersion: null, cause: null,
+    };
     expect(res.body).toEqual({
       ok: true,
       gateway: { opId: "op-1", outcome: "ready", downtimeMs: 5000 },
-      lastBoot: {
-        kind: "restarting", outcome: "ready", reason: null, startedAt: "2026-10-25T18:00:00.000Z", endedAt: "2026-10-25T18:01:32.000Z",
-        totalMs: 92_000, alphaclawVersion: "0.10.120", openclawVersion: "2026.10.7",
-      },
-      previousBoot: {
-        kind: "fresh", outcome: "ready", reason: null, startedAt: "1970-01-01T00:00:01.000Z", endedAt: "1970-01-01T00:00:02.000Z",
-        totalMs: 1000, alphaclawVersion: null, openclawVersion: null,
-      },
+      lastBoot: newest,
+      previousBoot: middle,
+      boots: [newest, middle, oldest],
       lastGatewayExit: { at: "2026-10-25T17:59:00.000Z", code: 1, signal: null, cause: "oom" },
     });
   });
@@ -97,6 +109,6 @@ describe("GET /api/box/restart", () => {
       store: { read: () => null },
       readBootHistory: () => { throw new Error("x"); },
       getWatchdogStatus: () => { throw new Error("x"); },
-    })).toEqual({ ok: true, gateway: null, lastBoot: null, previousBoot: null, lastGatewayExit: null });
+    })).toEqual({ ok: true, gateway: null, lastBoot: null, previousBoot: null, boots: [], lastGatewayExit: null });
   });
 });
