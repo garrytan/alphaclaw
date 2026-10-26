@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.139] - 2026-10-26
+
+Boot native maintenance (the Codex migration, then the Codex plugin reconciliation) runs once per OpenClaw build and per version of its scripts instead of on every boot. A same-version restart with an already-migrated state skips both helpers, which cost about 3 s per boot on 8 CPUs and about 17 s on half a CPU, before the gateway could launch (ALPH-44).
+
+### Changed
+- **A stamp decides, and any doubt runs the helpers.** After both helpers exit 0, `<managedDir>/codex-maintenance.json` records the executing OpenClaw build (`dist/build-info.json` `buildId`, else the package version), a hash of the maintenance sources, a hash of `openclaw.json` as the run left it, a hash of every agent's auth profile ids, providers and types (never their credentials, so a token refresh does not count), a hash of any legacy JSON auth store's name, size and mtime, and a hash of the installed Codex plugin packages. The next boot skips only when all of them still match, and logs `Codex migration and plugin reconciliation skipped: already done for OpenClaw <build> with this config (<time>)`. Otherwise it logs why it runs (`OpenClaw build changed`, `openclaw.json changed`, `auth profiles changed`, `legacy auth store changed`, `Codex plugin install changed`, `maintenance scripts changed`, `no record of a completed run`, `inputs unreadable`) and runs both helpers as before. The record is removed before a run and written only after a run in which every helper exited 0, so an interrupted, failed or timed-out run is retried on the next boot. A box with something left to migrate (Connect Codex's deprecated `openai:codex-cli` profile id, for example) still runs it, because that write changes the config or the auth profiles.
+- **Diagnostics are summarized, not withheld.** A helper that writes stderr now logs `<label> completed with diagnostics, N lines: <first> | <second> | <third> (+K more)` (or the same summary on its failure line) instead of "emitted diagnostics; child output withheld". Each line is redacted (the child env's and config's secret values, secret-named assignments, token shapes) and clamped to 160 characters.
+- **The plugin reconciliation exits 1 when it could not finish**: an unknown active OpenClaw version, a `plugins list` that failed (it used to read as "not installed") or a failed install. Boot continues as before; the exit only keeps the run from being recorded, so the next boot retries.
+
+### Tests
+- `boot-native-maintenance.test.js`: the first boot runs and records, a same-build boot skips, a token refresh alone skips, and each input change (build, config, auth profile, legacy auth store, Codex plugin install, sources) runs it again. The helpers' own config write does not trigger a rerun, a failed or timed-out run is never recorded, unreadable inputs always run and record nothing, and the diagnostics summary is redacted.
+- `reconcile-codex-plugin.test.js`: a failed plugin list is `plugins-unknown`, and the script exits 1 for it, for an unknown version and for a failed install, and 0 when the plugin is current.
+- `tests/live/boot-native-maintenance-once.e2e.test.js` (live tier): real AlphaClaw boots on the pinned OpenClaw. The first boot without a record runs (about 3.3 s of maintenance), the same-build reboot skips it and is ready about 3 s sooner, a planted `openai:codex-cli` profile runs it and is migrated to the canonical id, and a record from another OpenClaw build runs it.
+
 ## [0.10.138] - 2026-10-26
 
 The Box card keeps a restart history (the last 20 boots or 14 days) and says why each boot happened. A boot that follows no AlphaClaw shutdown record and no AlphaClaw restart is classified as an unclean exit ("platform or crash"), with how long the box was down, and the agent's downtime note now says so instead of giving no cause.

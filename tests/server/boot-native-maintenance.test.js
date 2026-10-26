@@ -11,6 +11,140 @@ const { setBootPhase, getBootPhase } = require("../../lib/server/boot-phase");
 const { normalizeBootConfig } = require("../../lib/server/boot-config-normalization");
 const { kUsageTrackerPluginPath } = require("../../lib/server/usage-tracker-config");
 
+describe("boot native maintenance runs once per OpenClaw build", () => {
+  let root;
+  let stateDir;
+  let managedDir;
+  let packageDir;
+  let env;
+  let deps;
+  let profiles;
+  const writeBuild = (buildId) => fs.writeFileSync(path.join(packageDir, "dist", "build-info.json"), JSON.stringify({ version: "2026.10.7", buildId }));
+  const stampFile = () => path.join(managedDir, "codex-maintenance.json");
+  const boot = () => runBootNativeMaintenance(deps);
+  const ranHelpers = () => deps.execFileCmd.mock.calls.length;
+  const logged = () => deps.logger.log.mock.calls.map(([text]) => text);
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-boot-native-stamp-"));
+    stateDir = path.join(root, ".openclaw");
+    managedDir = path.join(stateDir, ".alphaclaw");
+    packageDir = path.join(root, "node_modules", "openclaw");
+    fs.mkdirSync(path.join(stateDir, "agents", "main", "agent"), { recursive: true });
+    fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
+    writeBuild("2026.10.7-release-aaaa");
+    env = { ...process.env, OPENCLAW_STATE_DIR: stateDir, OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json") };
+    fs.writeFileSync(env.OPENCLAW_CONFIG_PATH, JSON.stringify({ agents: { defaults: { model: { primary: "openai/gpt-6-astra" } } } }));
+    profiles = { "openai:default": { provider: "openai", type: "oauth", access: "synthetic-access-one", refresh: "synthetic-refresh-one" } };
+    deps = {
+      execFileCmd: vi.fn(async () => ""),
+      gatewayEnv: () => env,
+      hold: { isValid: () => true },
+      logger: { log: vi.fn(), warn: vi.fn() },
+      managedDir,
+      resolvePackageDir: () => packageDir,
+      loadAuthStore: vi.fn(() => ({ profiles })),
+    };
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it("runs on the first boot, records it, and skips a same-build boot with an unchanged state", async () => {
+    await expect(boot()).resolves.toEqual({ status: "ok" });
+    expect(ranHelpers()).toBe(2);
+    expect(logged()).toContain("[alphaclaw] Codex migration and plugin reconciliation running: no record of a completed run");
+    const stamp = JSON.parse(fs.readFileSync(stampFile(), "utf8"));
+    expect(stamp).toMatchObject({ schema: "alphaclaw.codex-maintenance.v1", inputs: { openclawBuild: "2026.10.7-release-aaaa" } });
+    expect(fs.readFileSync(stampFile(), "utf8")).not.toMatch(/synthetic-/);
+
+    await expect(boot()).resolves.toEqual({ status: "skipped", reason: "current" });
+    expect(ranHelpers()).toBe(2);
+    expect(logged().at(-1)).toMatch(/^\[alphaclaw\] Codex migration and plugin reconciliation skipped: already done for OpenClaw 2026\.10\.7-release-aaaa with this config \(/);
+  });
+
+  it("a token refresh alone does not run it again", async () => {
+    await boot();
+    profiles["openai:default"] = { ...profiles["openai:default"], access: "synthetic-access-two", refresh: "synthetic-refresh-two" };
+    await expect(boot()).resolves.toEqual({ status: "skipped", reason: "current" });
+  });
+
+  it.each([
+    ["OpenClaw build changed", () => writeBuild("2026.10.8-release-bbbb")],
+    ["openclaw.json changed", () => fs.writeFileSync(env.OPENCLAW_CONFIG_PATH, JSON.stringify({ auth: { profiles: { "openai:codex-cli": { provider: "openai", mode: "oauth" } } } }))],
+    ["auth profiles changed", () => { profiles["openai:codex-cli"] = { provider: "openai", type: "oauth" }; }],
+    ["legacy auth store changed", () => fs.writeFileSync(path.join(stateDir, "agents", "main", "agent", "auth-profiles.json"), "{}")],
+    ["Codex plugin install changed", () => {
+      const pkg = path.join(stateDir, "npm", "projects", "openclaw-codex-1234", "node_modules", "@openclaw", "codex");
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ version: "2026.10.1" }));
+    }],
+  ])("runs again when the %s", async (reason, change) => {
+    await boot();
+    change();
+    await expect(boot()).resolves.toEqual({ status: "ok" });
+    expect(ranHelpers()).toBe(4);
+    expect(logged()).toContain(`[alphaclaw] Codex migration and plugin reconciliation running: ${reason}`);
+    await expect(boot()).resolves.toEqual({ status: "skipped", reason: "current" });
+  });
+
+  it("records the config the migration left, so its own write does not run it again", async () => {
+    deps.execFileCmd.mockImplementationOnce(async () => {
+      fs.writeFileSync(env.OPENCLAW_CONFIG_PATH, JSON.stringify({ migrated: true }));
+    });
+    await boot();
+    await expect(boot()).resolves.toEqual({ status: "skipped", reason: "current" });
+  });
+
+  it("never records a run in which a helper failed, so the next boot retries", async () => {
+    deps.execFileCmd.mockRejectedValueOnce(Object.assign(new Error("exit"), { code: 1 }));
+    await expect(boot()).resolves.toEqual({ status: "ok" });
+    expect(fs.existsSync(stampFile())).toBe(false);
+    await expect(boot()).resolves.toEqual({ status: "ok" });
+    expect(ranHelpers()).toBe(4);
+    expect(fs.existsSync(stampFile())).toBe(true);
+  });
+
+  it("drops the record before running, so an interrupted run is retried", async () => {
+    await boot();
+    writeBuild("2026.10.8-release-bbbb");
+    deps.execFileCmd.mockRejectedValueOnce(Object.assign(new Error("timed out"), { timedOut: true }));
+    await expect(boot()).rejects.toMatchObject({ code: "boot_native_timeout" });
+    expect(fs.existsSync(stampFile())).toBe(false);
+  });
+
+  it.each([
+    ["no build metadata", () => { fs.rmSync(packageDir, { recursive: true }); }],
+    ["an unreadable auth store", () => { deps.loadAuthStore.mockReturnValue({ profiles: {}, unavailable: true }); }],
+    ["a throwing auth store", () => { deps.loadAuthStore.mockImplementation(() => { throw new Error("locked"); }); }],
+  ])("runs every time with %s, and records nothing", async (_label, setup) => {
+    setup();
+    await boot();
+    await boot();
+    expect(ranHelpers()).toBe(4);
+    expect(fs.existsSync(stampFile())).toBe(false);
+    expect(logged()).toContain("[alphaclaw] Codex migration and plugin reconciliation running: inputs unreadable");
+  });
+
+  it("runs when the maintenance sources changed since the record", () => {
+    const { decideCodexMaintenance } = require("../../lib/server/boot-native-maintenance-stamp");
+    const inputs = { openclawBuild: "b", scripts: "s2", config: "c", authProfiles: "a", legacyAuthFiles: "l", codexPlugin: "p" };
+    expect(decideCodexMaintenance({ stamp: { inputs: { ...inputs, scripts: "s1" } }, inputs })).toBe("maintenance scripts changed");
+    expect(decideCodexMaintenance({ stamp: { inputs }, inputs })).toBe(null);
+  });
+
+  it("ignores a stamp with another schema", async () => {
+    await boot();
+    const stamp = JSON.parse(fs.readFileSync(stampFile(), "utf8"));
+    fs.writeFileSync(stampFile(), JSON.stringify({ ...stamp, schema: "alphaclaw.codex-maintenance.v0" }));
+    await expect(boot()).resolves.toEqual({ status: "ok" });
+  });
+
+  it("reads every agent's auth store by a valid agent id only", async () => {
+    fs.mkdirSync(path.join(stateDir, "agents", "ops", "agent"), { recursive: true });
+    fs.mkdirSync(path.join(stateDir, "agents", ".hidden"), { recursive: true });
+    await boot();
+    expect(deps.loadAuthStore.mock.calls.map(([id]) => id).sort()).toEqual(["main", "main", "ops", "ops"]);
+  });
+});
+
 describe("admitted boot native maintenance", () => {
   let root;
   let env;
@@ -81,13 +215,25 @@ describe("admitted boot native maintenance", () => {
     expect(JSON.stringify(deps.logger.warn.mock.calls)).not.toContain("do-not-log");
   });
 
-  it("reports child diagnostics without printing their contents", async () => {
+  it("logs a short redacted summary of child diagnostics", async () => {
+    env.OPENCLAW_GATEWAY_TOKEN = "gateway-token-do-not-log";
     deps.execFileCmd.mockImplementationOnce(async (_file, _args, options) => {
-      options.onOutput("access_token=do-not-log", "stderr");
+      options.onOutput("[alphaclaw] Codex migration warning: access_token=do-not-log\n", "stderr");
+      options.onOutput("Authorization: Bearer do-not-log-bearer-1234\nechoed gateway-token-do-not-log\nline four\nline four\nline five\n", "stderr");
     });
     await runBootNativeMaintenance(deps);
-    expect(deps.logger.warn).toHaveBeenCalledWith("[alphaclaw] Codex migration emitted diagnostics; child output withheld");
+    const line = deps.logger.warn.mock.calls.map(([text]) => text).find((text) => text.startsWith("[alphaclaw] Codex migration completed with diagnostics"));
+    expect(line).toBe("[alphaclaw] Codex migration completed with diagnostics, 5 lines: [alphaclaw] Codex migration warning: access_token=*** | Authorization: *** | echoed *** (+2 more)");
     expect(JSON.stringify(deps.logger.warn.mock.calls)).not.toContain("do-not-log");
+  });
+
+  it("adds the diagnostics summary to a failed helper's line", async () => {
+    deps.execFileCmd.mockImplementationOnce(async (_file, _args, options) => {
+      options.onOutput("[alphaclaw] Codex migration failed: refresh=do-not-log\n", "stderr");
+      throw Object.assign(new Error("exit"), { code: 1 });
+    });
+    await runBootNativeMaintenance(deps);
+    expect(deps.logger.warn).toHaveBeenCalledWith("[alphaclaw] Codex migration process failed (exit 1); continuing admitted boot; diagnostics, 1 line: [alphaclaw] Codex migration failed: refresh=***");
   });
 
   it("cancels a timed-out helper and never starts the next helper", async () => {
@@ -139,7 +285,7 @@ describe("native boot maintenance composition", () => {
   it("wires server startup to the shared argv primitive and gateway logical environment", () => {
     const source = fs.readFileSync(path.resolve(__dirname, "../../lib/server/init/register-server-routes.js"), "utf8");
     expect(source).toContain('require("../boot-native-maintenance")');
-    expect(source).toMatch(/runBootNativeMaintenance: \(options\) => runBootNativeMaintenance\(\{\s*\.\.\.options,\s*execFileCmd,\s*gatewayEnv,\s*\}\)/);
+    expect(source).toMatch(/runBootNativeMaintenance: \(options\) => runBootNativeMaintenance\(\{\s*\.\.\.options,\s*execFileCmd,\s*gatewayEnv,\s*managedDir: constants\.kOpenclawManagedDir,\s*\}\)/);
     expect(source).toContain("signal: bootSignal,");
     const server = fs.readFileSync(path.resolve(__dirname, "../../lib/server.js"), "utf8");
     expect(server.slice(server.indexOf("} = registerServerRoutes({"))).toContain("bootSignal: shutdownAbort.signal,");

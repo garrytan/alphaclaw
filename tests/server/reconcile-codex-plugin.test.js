@@ -136,6 +136,55 @@ describe("scripts/reconcile-codex-plugin", () => {
     });
   });
 
+  it("reports a failed plugin list as unknown, not as not-installed", () => {
+    const exec = vi.fn((file, args = []) => {
+      if (args[0] === "--version") return "OpenClaw 2026.7.1-2\n";
+      throw new Error("plugins list timed out");
+    });
+
+    expect(getInstalledCodexPlugin({ exec })).toBe(null);
+    expect(reconcileCodexPlugin({ exec, logger: { log: vi.fn() } })).toEqual({
+      changed: false,
+      reason: "plugins-unknown",
+    });
+  });
+
+  it.each([
+    ["an unknown active version", { activeVersion: null }],
+    ["an unreadable plugin list", { activeVersion: "2026.7.1-2", plugins: "not-a-list" }],
+  ])("exits 1 as the main module on %s, so the next boot retries", (_label, options) => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const originalExecFileSync = childProcess.execFileSync;
+    const cachedModule = require.cache[modulePath];
+    childProcess.execFileSync = buildExec(options);
+    try {
+      delete require.cache[modulePath];
+      Module._load(modulePath, null, true);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = undefined;
+      childProcess.execFileSync = originalExecFileSync;
+      delete require.cache[modulePath];
+      if (cachedModule) require.cache[modulePath] = cachedModule;
+    }
+  });
+
+  it("exits 0 as the main module when the plugin is current", () => {
+    const originalExecFileSync = childProcess.execFileSync;
+    const cachedModule = require.cache[modulePath];
+    childProcess.execFileSync = buildExec({ activeVersion: "2026.7.1-2", plugins: [{ id: "codex", origin: "global", version: "2026.7.1-2" }] });
+    try {
+      delete require.cache[modulePath];
+      Module._load(modulePath, null, true);
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      process.exitCode = undefined;
+      childProcess.execFileSync = originalExecFileSync;
+      delete require.cache[modulePath];
+      if (cachedModule) require.cache[modulePath] = cachedModule;
+    }
+  });
+
   it("runs reconciliation when executed as the main module and warns on failure", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -159,7 +208,9 @@ describe("scripts/reconcile-codex-plugin", () => {
       expect(warnSpy).toHaveBeenCalledWith(
         "[alphaclaw] Codex plugin reconciliation warning: install blew up",
       );
+      expect(process.exitCode).toBe(1);
     } finally {
+      process.exitCode = undefined;
       process.mainModule = originalMainModule;
       childProcess.execFileSync = originalExecFileSync;
       delete require.cache[modulePath];
