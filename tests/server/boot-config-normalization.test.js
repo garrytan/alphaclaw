@@ -8,13 +8,16 @@ describe("admitted boot config normalization", () => {
   let root;
   let configPath;
   let deps;
+  let logFile;
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-boot-config-"));
     configPath = path.join(root, "openclaw.json");
+    logFile = path.join(root, "logs", "openclaw", "openclaw-YYYY-MM-DD.log");
     deps = {
       hold: { isValid: () => true },
       env: { OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_STATE_DIR: root },
       logger: { log: vi.fn() },
+      logFile,
     };
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -110,6 +113,7 @@ describe("admitted boot config normalization", () => {
     const operatorConfig = {
       tools: { sessions: { visibility: "all" }, swarm: { maxConcurrent: 4 } },
       gateway: { cliAgents: { enabled: true } },
+      logging: { file: "/var/log/openclaw/gateway.log" },
       agents: { entries: { main: {} }, defaults: { subagents: { maxSpawnDepth: 3 } } },
       plugins: {
         allow: ["usage-tracker"],
@@ -126,6 +130,61 @@ describe("admitted boot config normalization", () => {
   it("does not manufacture a config when none exists", () => {
     expect(normalizeBootConfig(deps)).toEqual({ changed: false });
     expect(fs.existsSync(configPath)).toBe(false);
+    expect(fs.existsSync(path.dirname(logFile))).toBe(false);
+  });
+
+  it("points an unset logging.file at the managed log dir once, keeping the other logging keys", () => {
+    fs.writeFileSync(configPath, JSON.stringify({
+      logging: { level: "debug", maxFileBytes: 1048576, redactSensitive: "tools" },
+    }));
+    expect(normalizeBootConfig(deps)).toEqual({ changed: true });
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    expect(cfg.logging).toEqual({ level: "debug", maxFileBytes: 1048576, redactSensitive: "tools", file: logFile });
+    expect(deps.logger.log).toHaveBeenCalledWith(`[alphaclaw] OpenClaw file log set to ${logFile} (logging.file was unset)`);
+    const bytes = fs.readFileSync(configPath);
+    deps.logger.log.mockClear();
+    expect(normalizeBootConfig(deps)).toEqual({ changed: false });
+    expect(fs.readFileSync(configPath)).toEqual(bytes);
+    expect(deps.logger.log).not.toHaveBeenCalled();
+  });
+
+  it("adds the logging block when the config has none", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ gateway: { port: 18789 } }));
+    expect(normalizeBootConfig(deps)).toEqual({ changed: true });
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).logging).toEqual({ file: logFile });
+  });
+
+  it.each(["", "   "])("treats a blank logging.file (%j) as unset", (file) => {
+    fs.writeFileSync(configPath, JSON.stringify({ logging: { file, level: "info" } }));
+    expect(normalizeBootConfig(deps)).toEqual({ changed: true });
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).logging).toEqual({ file: logFile, level: "info" });
+  });
+
+  it.each(["/tmp/openclaw/openclaw-YYYY-MM-DD.log", "~/openclaw.log", "/data/logs/gateway.log"])(
+    "never overrides an operator logging.file (%s)",
+    (file) => {
+      const cfg = {
+        logging: { file, level: "warn" },
+        tools: { sessions: { visibility: "tree" }, swarm: false },
+        gateway: { cliAgents: { enabled: false } },
+        agents: { defaults: { subagents: { maxSpawnDepth: 1 } } },
+        plugins: {
+          allow: ["usage-tracker"],
+          load: { paths: [kUsageTrackerPluginPath] },
+          entries: { "usage-tracker": { enabled: true, hooks: { allowConversationAccess: true } } },
+        },
+      };
+      fs.writeFileSync(configPath, JSON.stringify(cfg));
+      const bytes = fs.readFileSync(configPath);
+      expect(normalizeBootConfig(deps)).toEqual({ changed: false });
+      expect(fs.readFileSync(configPath)).toEqual(bytes);
+    },
+  );
+
+  it("leaves a non-object logging value alone", () => {
+    fs.writeFileSync(configPath, JSON.stringify({ logging: "verbose", gateway: { port: 1 } }));
+    normalizeBootConfig(deps);
+    expect(JSON.parse(fs.readFileSync(configPath, "utf8")).logging).toBe("verbose");
   });
 
   it.each([null, {}, { isValid: () => false }])("refuses normalization without current ownership: %j", (hold) => {

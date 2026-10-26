@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.143] - 2026-10-26
+
+OpenClaw's own file log now goes to the data volume instead of the container's /tmp. With no `logging.file` in `openclaw.json`, OpenClaw 2026.10.7 writes a daily log to `/tmp/openclaw/openclaw-YYYY-MM-DD.log`. That directory is hard-coded and does not follow TMPDIR. The log rotates by size at 100 MB and keeps five older files, so one day can reach about 600 MB. On hosts like Render, /tmp is a small volume with its own limit, and the instance is replaced when it fills.
+
+### Changed
+- **Boot sets `logging.file` when the operator has not.** `normalizeBootConfig` runs on every boot and after onboarding, before the gateway launches. If `logging.file` is missing, null, empty or whitespace, it sets it to `<root>/logs/openclaw/openclaw-YYYY-MM-DD.log` (`kOpenclawLogDir`, `lib/server/openclaw-log-file.js`). The write goes through the same single `updateOpenclawConfig` call as the rest of the boot normalization, and AlphaClaw logs `[alphaclaw] OpenClaw file log set to <path> (logging.file was unset)` once. The literal `openclaw-YYYY-MM-DD.log` name keeps OpenClaw's daily rolling and its 24-hour pruning. The log gets a directory of its own because that pruning deletes every `openclaw-*.log` in the log file's directory. The other `logging` keys are kept. An operator path is never replaced, including one under /tmp, and a `logging` value that is not an object is left alone. `<root>/logs` was already included in the disk-space census.
+- AlphaClaw's own log readers are unchanged. The Watchdog Logs view, `alphaclaw diagnose`, the incident overseer and incident bundles read `<root>/logs/process.log`. `openclaw logs` and the Control UI Logs page read whichever file `logging.file` names, so they follow the new path. README has a new "Log files" section.
+
+### Tests
+- `boot-config-normalization.test.js`: sets the path when it is unset, adds a missing `logging` block, treats `""` and whitespace as unset, never replaces an operator path (`/tmp/openclaw/…`, `~/…`, `/data/…`), keeps `level`, `maxFileBytes` and `redactSensitive`, leaves a non-object `logging` alone, writes nothing on the second run, and creates no config or log directory when there is no config. `openclaw-log-file.test.js` covers the pure helper and the path constant.
+- `tests/live/openclaw-file-log.e2e.test.js` (live tier) runs the real normalization on a scratch root, then boots the pinned 2026.10.7 gateway. Today's `openclaw-<local date>.log` appears in `<root>/logs/openclaw` with gateway lines, and the gateway's `log file:` startup line names it. `openclaw logs --json` reads it over the `logs.tail` RPC (`sourceKind: "file"`, no local fallback). The gateway writes nothing to `/tmp/openclaw`.
+
 ## [0.10.142] - 2026-10-26
 
 A model a chat can pick with `/model` but the provider will not serve now explains itself. On OpenClaw 2026.10.7, `/model` accepts any ref the allowlist permits. When the provider then rejects the model, the reply is "⚠️ This model was not found. Choose another model in the Control UI or run `openclaw configure`". That reply names neither the model, the provider, nor what the provider said. A `/model` choice also turns off the configured fallbacks, so that chat stays broken until someone sends `/model default` (ALPH-47).
