@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.132] - 2026-10-25
+
+Back up now archives and OpenClaw's Doctor and update captures no longer pile up forever: the periodic sweep keeps the newest 3 and anything younger than 7 days, and removes only what those features made (ALPH-40, 5 of 7).
+
+### Added
+- **Copy retention** (`lib/server/copy-retention.js`), run by the watchdog's existing 30-minute sweep right after the snapshot-copy sweep. Per family it keeps the newest `ALPHACLAW_BACKUP_RETENTION_KEEP` (default 3) and anything younger than `ALPHACLAW_BACKUP_RETENTION_DAYS` (default 7), and removes the rest one item at a time. Both are deployment env only: from `.env` an agent could shrink them and have the sweep delete backups.
+- **Only the feature's own copies are candidates.** A Back up now archive must be a regular file named like OpenClaw's archives (`<timestamp>-openclaw-backup.tar.gz`) and owned by AlphaClaw's user. An update capture must be a directory owned by AlphaClaw's user that carries OpenClaw's private capture marker with its exact content and is sealed (`manifest.json` present, no `manifest.json.partial`); its age is the manifest's mtime. An operator's own file or folder in either place is never touched, whatever its age. Nothing a process holds open is removed (read from `/proc` right before the delete; without `/proc` nothing is removed). Each sweep that finds something due logs one `[alphaclaw] retention sweep` line. Like the snapshot sweep it runs under the operator box lock (step `sweep-delete`) when one is configured, without waiting: while another operator holds it the sweep is skipped and the next one retries.
+- **`GET /api/box/disk` shows it.** The `alphaclaw_backups` and `openclaw_update_captures` groups carry `retention` (`keep`, `days`, how many are `due`, and the last sweep's removed count, freed bytes, held and failed), and each item its verdict: `kept_newest`, `kept_recent`, `due` or `not_managed:<reason>`. The box schedule list names the retention removals in the sweep's last detail.
+
+### Tests
+- `copy-retention.test.js`: the env policy and its fallbacks, newest-3/7-days verdicts, an operator's archive and a directory with an archive name never planned, captures without the marker, with a forged marker, unsealed or unpublished never planned, another owner's items never planned, removal of what is due with a held-open item kept, nothing removed without `/proc`, a quiet sweep, and the verdicts in the disk view.
+
 ## [0.10.131] - 2026-10-25
 
 Disk use of the box by folder: the volumes, the state directory's top-level folders, the temporary copies each feature leaves behind, and who still holds files open under a path (ALPH-40, 4 of 7).
