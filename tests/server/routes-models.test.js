@@ -596,4 +596,49 @@ describe("server/routes/models auth-store reads and writes", () => {
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ ok: false, error: "schema drift" });
   });
+
+  describe("model check (ALPH-47)", () => {
+    const lastRun = { checkedAt: "2026-10-26T15:00:00.000Z", probe: true, results: [], problems: 0 };
+    const makeModelCheck = () => ({
+      run: vi.fn(async () => lastRun),
+      getLastRun: vi.fn(() => lastRun),
+      isRunning: vi.fn(() => false),
+    });
+
+    it("GET returns the last run and recent failures; 503 without a check", async () => {
+      const deps = createModelDeps();
+      expect((await request(createApp(deps)).get("/api/models/check")).status).toBe(503);
+      deps.modelCheck = makeModelCheck();
+      deps.modelFailureWatch = { getState: () => ({ failures: [{ model: "fx/a" }] }) };
+      const res = await request(createApp(deps)).get("/api/models/check");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true, running: false, lastRun, failures: [{ model: "fx/a" }] });
+    });
+
+    it("POST runs the check with the given refs and probe flag", async () => {
+      const deps = createModelDeps();
+      deps.modelCheck = makeModelCheck();
+      const app = createApp(deps);
+      const all = await request(app).post("/api/models/check").send({});
+      expect(all.status).toBe(200);
+      expect(all.body).toEqual({ ok: true, ...lastRun });
+      expect(deps.modelCheck.run).toHaveBeenLastCalledWith({ refs: null, probe: true });
+      await request(app).post("/api/models/check").send({ refs: [" meta/muse-wonder-1.0 "], probe: false });
+      expect(deps.modelCheck.run).toHaveBeenLastCalledWith({ refs: ["meta/muse-wonder-1.0"], probe: false });
+    });
+
+    it.each([
+      [{ probe: "yes" }],
+      [{ refs: "meta/x" }],
+      [{ refs: ["no-slash"] }],
+      [{ refs: ["a/b; rm -rf /"] }],
+      [{ refs: Array.from({ length: 51 }, (_, i) => `p/m${i}`) }],
+    ])("POST rejects %j with a 400", async (body) => {
+      const deps = createModelDeps();
+      deps.modelCheck = makeModelCheck();
+      const res = await request(createApp(deps)).post("/api/models/check").send(body);
+      expect(res.status).toBe(400);
+      expect(deps.modelCheck.run).not.toHaveBeenCalled();
+    });
+  });
 });

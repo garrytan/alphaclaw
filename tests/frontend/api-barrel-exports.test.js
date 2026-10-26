@@ -80,6 +80,7 @@ const kExpectedApiExports = [
   "fetchGmailConfig",
   "fetchGoogleAccounts",
   "fetchGoogleCredentials",
+  "fetchModelCheck",
   "fetchModelStatus",
   "fetchModels",
   "fetchModelsConfig",
@@ -143,6 +144,7 @@ const kExpectedApiExports = [
   "routeExecToNode",
   "runBuzzSetupAction",
   "runChannelAccountLogin",
+  "runModelCheck",
   "runOnboard",
   "saveEnvVars",
   "saveFileContent",
@@ -197,7 +199,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(186);
+    expect(kExpectedApiExports).toHaveLength(188);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

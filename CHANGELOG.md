@@ -5,6 +5,35 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.142] - 2026-10-26
+
+A model a chat can pick with `/model` but the provider will not serve now explains itself. On OpenClaw 2026.10.7, `/model` accepts any ref the allowlist permits. When the provider then rejects the model, the reply is "⚠️ This model was not found. Choose another model in the Control UI or run `openclaw configure`". That reply names neither the model, the provider, nor what the provider said. A `/model` choice also turns off the configured fallbacks, so that chat stays broken until someone sends `/model default` (ALPH-47).
+
+### Added
+- **Model check** (`lib/server/model-check/`, `GET`/`POST /api/models/check`, admin ops `models.check.read` and `models.check.run`, a Model check card on the Models tab). It reads every ref `openclaw.json` offers: primaries, fallbacks, the `agents.defaults.models` and `modelPolicy.allow` allowlists and their aliases, for the defaults and each agent. For each ref it asks OpenClaw's own listing (`openclaw models list --json`) whether the ref resolves. For custom providers (a `models.providers` entry with a `baseUrl` on `openai-completions`, `openai-responses` or `anthropic-messages`), it sends one request of at most 16 output tokens on the configured API, with the credential OpenClaw would use (`${VAR}`, a bare env name, an env SecretRef, `request.auth`, or the provider's auth profile). When the provider rejects the id, the check also tries the other OpenAI API shape and reads the provider's `/models` list. Each result has a status, the provider's own redacted answer, and one fix:
+  - `wrong_api`: the provider serves the model on the other API. Set `models.providers.<p>.api`.
+  - `model_rejected` with an empty list: the key works but has access to no models. Enable model access in the provider's dashboard; no config change is needed.
+  - `model_rejected` with a list that lacks the id: enable that model for the key, or use one of the listed ids.
+  - `unresolved` (no plugin or `models.providers` entry provides the provider), `no_credential` (naming the unset env var), `auth_rejected`, `endpoint_not_found`, `unreachable`, `inconclusive`.
+
+  Plugin-managed providers are reported from OpenClaw's listing without a request. The check never writes config, never returns or logs a credential, and probes only when asked.
+- **model_not_found watch** (`lib/server/model-failure-watch.js`). It reads OpenClaw's `model fallback decision: decision=candidate_failed … reason=model_not_found` lines and the `configured fallbacks disabled by user model override` note from the gateway output. It then runs the model check for that one ref and tells the owner, at most once per model per six hours:
+  - which model failed and what OpenClaw reported;
+  - that the `/model` choice turned off the fallbacks, and to send `/model default` in that chat;
+  - the check's reason and fix.
+
+  It also writes a `model_not_found` watchdog event, and `GET /api/models/check` lists recent failures. When a fallback answered instead, the notice says so.
+- `alphaclaw-admin` skill (`models.md`): what the agent does when a model will not run. It runs `models.check.run` for the ref, relays the reason and fix, tells the user about `/model default`, and never edits `models.providers` or the allowlist without the owner.
+
+### Tests
+- `model-check.test.js`: target collection across scopes and aliases, secret resolution, connection building, answer classification, and a local provider for every status. Covered: the wrong-API case, the empty-entitlement case, a list without the id, an unset env var, a refused key, an unresolved provider, at most 16 tokens per probe, nothing sent with `probe: false`, and no credential in any result even when the provider echoes it.
+- `model-failure-watch.test.js`: the notice text with and without a session override, a fallback that answered, the six-hour throttle, split output chunks, secret redaction, and a failed check. `routes-models.test.js`: the check routes and their input validation.
+- `tests/live/model-not-found.e2e.test.js` (live tier, pinned 2026.10.7): a provider serves `wonder-1` only on the Responses API, but the config says `openai-completions`.
+  - `/model wonder` is accepted, and the next message fails with "This model was not found" and fallbacks off.
+  - The watch's notice names the model, the provider's 404 answer, the override and the `api` fix, and the check agrees.
+  - A second provider whose `/models` list is empty gets the provider-dashboard fix.
+  - After the fix is applied, the next reply and the check succeed.
+
 ## [0.10.141] - 2026-10-26
 
 AlphaClaw's own cron job now gets the box's temp directory. cron starts every job with a minimal environment, so the hourly git sync and anything it spawns wrote temp files to the container's own /tmp even where the deployment routes temp onto the persistent disk (the Render template exports `TMPDIR=/data/tmp`). A full /tmp is what made Render replace an instance on Oct 25 (ALPH-24); the deploy-replay e2e (ALPH-46) found that AlphaClaw's cron.d file still left TMPDIR out.
