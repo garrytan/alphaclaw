@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.134] - 2026-10-25
+
+A compact Box card on the Watchdog tab: processes, the last restart and MCP servers at a glance, schedules and disk one click away (ALPH-40, 7 of 7).
+
+### Added
+- **Watchdog → Box card**, below Resources. Always shown: processes per owner (count and RSS), the last gateway restart (outcome, when, who asked, downtime, reason) and the gateway's last unexpected exit, and the MCP servers with each failing server's last error. **Schedules and disk** expands OpenClaw, AlphaClaw and system cron counts with the next run and failing cron jobs, free space, the state dir's largest folders and each feature's copies with how many are due for cleanup. Problems (a failing MCP server, a restart that did not reach ready, failing cron jobs, cron lines without a cron daemon) show as badges in the header without expanding. Read-only: the card has no actions.
+- The card reads the box views every minute while the tab is visible (schedules and disk only while expanded; disk every 5 minutes), all cached server-side.
+
+### Tests
+- `watchdog-box-card.test.js`: the view model for every view, the header badges, a failed restart, nothing loaded yet, and the collapsed and expanded rendering.
+
 ## [0.10.133] - 2026-10-25
 
 Which MCP servers the gateway has, how many tools each brings and why one did not start, plus one owner notice when a server fails to start (ALPH-40, 6 of 7).
