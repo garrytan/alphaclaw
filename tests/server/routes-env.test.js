@@ -37,6 +37,29 @@ const createApp = (deps) => {
   return app;
 };
 
+describe("GET /api/env", () => {
+  it("reports a key the deployment sets as deployment, without its value, while its .env line is empty", async () => {
+    const deps = createDeps([{ key: "OPENAI_API_KEY", value: "" }]);
+    deps.getDeploymentEnvBaseline = () => ({ OPENAI_API_KEY: "fixture-deployment-value" });
+    const res = await request(createApp(deps)).get("/api/env");
+    const row = res.body.vars.find((entry) => entry.key === "OPENAI_API_KEY");
+    expect(row).toMatchObject({ source: "deployment", value: "" });
+    expect(JSON.stringify(res.body)).not.toContain("fixture-deployment-value");
+  });
+
+  it("reports the .env value when the file sets one, and unset when neither does", async () => {
+    const withFile = createDeps([{ key: "OPENAI_API_KEY", value: "fixture-file" }]);
+    withFile.getDeploymentEnvBaseline = () => ({ OPENAI_API_KEY: "fixture-deployment-value" });
+    const fileRow = (await request(createApp(withFile)).get("/api/env")).body.vars.find((entry) => entry.key === "OPENAI_API_KEY");
+    expect(fileRow).toMatchObject({ source: "env_file", value: "fixture-file" });
+
+    const neither = createDeps([]);
+    neither.getDeploymentEnvBaseline = () => null;
+    const unsetRow = (await request(createApp(neither)).get("/api/env")).body.vars.find((entry) => entry.key === "OPENAI_API_KEY");
+    expect(unsetRow).toMatchObject({ source: "unset", value: "" });
+  });
+});
+
 describe("PATCH /api/env", () => {
   it("sets one key and leaves every other key as it is", async () => {
     const deps = createDeps([

@@ -1044,6 +1044,29 @@ describe("server/alphaclaw-version", () => {
     }
   });
 
+  it("the respawned process boots from the recorded deployment env, not this process's .env-merged env", async () => {
+    const { recordDeploymentEnvBaseline, getDeploymentEnvBaseline } = require("../../lib/server/deployment-only-env");
+    recordDeploymentEnvBaseline({ PATH: "/usr/bin", SETUP_PASSWORD: "from-platform" });
+    vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit ${code}`);
+    });
+    const originalSpawn = childProcess.spawn;
+    childProcess.spawn = vi.fn(() => ({ unref: vi.fn() }));
+    const savedFileValue = process.env.ALPH50_FROM_DOTENV;
+    process.env.ALPH50_FROM_DOTENV = "loaded-from-env-file";
+    try {
+      const { service } = createService({ env: {}, fsImpl: { ...fs, existsSync: vi.fn(() => false) }, drain: vi.fn(async () => {}) });
+      await expect(service.restartProcess()).rejects.toThrow("exit 0");
+      const spawnOptions = childProcess.spawn.mock.calls[0][2];
+      expect(spawnOptions.env).toBe(getDeploymentEnvBaseline());
+      expect(spawnOptions.env).toEqual({ PATH: "/usr/bin", SETUP_PASSWORD: "from-platform" });
+    } finally {
+      childProcess.spawn = originalSpawn;
+      if (savedFileValue === undefined) delete process.env.ALPH50_FROM_DOTENV;
+      else process.env.ALPH50_FROM_DOTENV = savedFileValue;
+    }
+  });
+
   it("spawns a detached replacement process outside containers, draining first", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
       throw new Error(`exit ${code}`);

@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.147] - 2026-10-27
+
+An external rewrite of the .env file no longer drops platform-set keys from AlphaClaw's environment. On a production box a key set in the platform's environment, with an empty line for it in .env, was deleted from AlphaClaw's env on every external rewrite and logged as "removed". Every API, channel or team restart reloads the env first, and the gateway env is built from AlphaClaw's, so platform-set provider keys and bot tokens with empty template lines also vanished from the gateway (ALPH-50).
+
+### Fixed
+- **A reload produces what a fresh boot would.** `bin/alphaclaw.js` records the deployment environment once, before anything changes `process.env` (`recordDeploymentEnvBaseline` in `deployment-only-env.js`). Boot and `reloadEnv` share one rule for what the .env file contributes (`resolveEnvFileOverlay`): entries in file order, and an empty value contributes nothing (so `KEY=a` then `KEY=` leaves `a` in both). Deployment-only keys never apply. On reload, a key whose .env line is empty or gone falls back to its deployment value (logged as `restored from deployment env KEY`, key names only). It is removed only when the deployment never set it. The keys boot derives after the .env load (`ALPHACLAW_ROOT_DIR`, `PORT`, `PATH`, `HOME`, `OPENCLAW_HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, `XDG_CONFIG_HOME`, `GOG_KEYRING_PASSWORD`) are never touched by a reload.
+- **Envars and every .env writer read a duplicate key the way boot does.** `normalizeEnvVars` keeps one entry per key with the last non-empty value, so with `KEY=a` then `KEY=`, Envars shows `a` (the live value) and the next unrelated save writes `KEY=a` instead of dropping it.
+- **The .env watcher notices an edit to any line.** Its change signature keeps every line in file order, duplicates included. It used to collapse duplicates to the last line, so with `KEY=a` then `KEY=`, an edit of the first line (the effective value) was skipped as unchanged.
+- **Envars shows a platform-provided key as set.** `GET /api/env` reports `source: "deployment"` (never the value) for a known key whose .env line is empty while the deployment sets it, and the field reads "set by the deployment platform" instead of "not set". Clearing it in Envars no longer looks like revoking it.
+- **A self-update respawn starts from the deployment environment.** The replacement process is spawned with the recorded baseline as its env, not with `process.env`. That env holds this boot's .env values and lacks keys a reload removed, and the child would have recorded it as its own deployment baseline.
+
+### Behavior changes
+- Clearing a platform-provided key no longer unsets it at runtime; the platform value stays, as it already did after a reboot. This covers every path that clears a .env key: editing .env, the Envars page, removing a provider API key on the Models page, and deleting a channel. A channel deleted in AlphaClaw while the platform still sets its bot token (`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN` …) keeps that token in AlphaClaw's and the gateway's env, and watchdog notices keep using it; to revoke it, remove it from the platform's environment. Envars shows such keys as "set by the deployment platform". A process that did not boot through `bin/alphaclaw.js` (no recorded baseline) keeps the old rule: an empty or missing key is removed.
+
+### Tests
+- `env.test.js`: platform-set SETUP_PASSWORD, provider key and bot token with empty lines survive a rewrite and are not logged as removed; a .env override, then cleared, restores the platform value; a file-only key is removed; a known key missing from the file keeps its platform value; duplicate keys ending empty (also shown in Envars and kept through the next save); boot-managed keys untouched; the watcher reloads when only an earlier non-empty duplicate changes; reloading an unchanged file after boot changes nothing (four cases); bin records the baseline before the first `process.env` write and loads .env through the shared rule.
+- `alphaclaw-version.test.js`: the respawned process gets the recorded baseline as its env.
+- `routes-env.test.js`: a deployment-set key with an empty .env line reads `deployment` with no value in the response; file and unset cases.
+
 ## [0.10.146] - 2026-10-27
 
 A pin-bump boot that takes longer than 10 minutes no longer tells the owner the box is back while OpenClaw is still upgrading its data. On a production deploy (OpenClaw 2026.10.7 → 2026.10.8, a 5.2 GB agent database), `doctor --fix` ran for 632 s, so the sidecars' 10-minute fallback fired first and called the deploy announcer: the owner got "back: down 10 min 51 s" and deploy status recorded 651 s, while the gateway was down 733 s (ALPH-50).
