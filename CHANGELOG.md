@@ -7,7 +7,13 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.145] - 2026-10-27
 
-Pin OpenClaw 2026.10.8 (WIP).
+Pin OpenClaw 2026.10.8 (npm `latest` since 2026-10-27 11:24Z). It is a patch release of 162 PRs on top of 2026.10.7: update and Doctor recovery, restart-recovery fences that no longer wedge sessions, retries for transient agent-database lock contention at startup, channel default accounts that keep their secrets, and Codex and Claude CLI turn fixes. It moves neither `openclaw.schemaVersions` (state 20, agent 25) nor `engines.node` (`>=24.22.1 <25 || >=26.12.1`). On real state, 2026.10.7 boots again after 2026.10.8's Doctor has run, so the pin can be rolled back without restoring a backup.
+
+### Changed
+- **OpenClaw pin 2026.10.7 → 2026.10.8.** No `lib/` change was needed. Every OpenClaw contract AlphaClaw reads is unchanged in the 2026.10.8 dist: the `gateway-drain` chunk is byte-identical (drain lines, `backgroundExecSessions`), `STOP_DRAIN_TIMEOUT_MS` is still 20 s, `closeOwnedStdioProcess` keeps its stdin EOF / 2 s / SIGTERM / 2 s / SIGKILL close, the owner heartbeat is still 90 s with the same `wait N s and retry` refusal, the restart-recovery note to the model is unchanged, the `model fallback decision … reason=model_not_found` line is unchanged, `openclaw.control.token.v1` is still the Control UI token key, and every export the Codex migration helpers load by name resolves.
+
+### Tests
+- `tests/live/database-fixture.js`: `kObservedSchemas` gains the 2026.10.8 row (state 20, agent 25), observed on real 2026.10.7 state after 2026.10.8's `doctor --fix --non-interactive`.
 
 ## [0.10.144] - 2026-10-26
 
