@@ -5,6 +5,10 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.145] - 2026-10-27
+
+Pin OpenClaw 2026.10.8 (WIP).
+
 ## [0.10.144] - 2026-10-26
 
 A deploy's SIGTERM no longer runs out the ask's window on a gateway that runs a slow-exiting stdio MCP server. OpenClaw 2026.10.7 closes the children it owns as process trees (stdio MCP servers, each under a `service-child-group-anchor.js`) only after the restart drain: stdin EOF, 2 s, SIGTERM, 2 s, SIGKILL. With a server that takes 3 s to exit after its stdin closes, the post-drain close took 7.1 s instead of about 3.5 s on the live tier (3.65 s of it was the child) and 8.9 s in the Render deploy replay. The gateway outlived the ask's window, and v0.10.140's 25 s budget ended it with a signal: `stopped how=sigkill ms=19368` on the live tier, `how=sigterm ms=19095` in the replay (ALPH-46, ALPH-48).
