@@ -14,6 +14,7 @@ Pin OpenClaw 2026.10.8 (npm `latest` since 2026-10-27 11:24Z). It is a patch rel
 
 ### Tests
 - `tests/live/database-fixture.js`: `kObservedSchemas` gains the 2026.10.8 row (state 20, agent 25), observed on real 2026.10.7 state after 2026.10.8's `doctor --fix --non-interactive`.
+- `tests/live/workspace-alias-move.e2e.test.js`: the doctor-module census strips chunk hashes that contain `-`. 2026.10.8 ships `doctor-repair-mode-CZY1Y--S.mjs`, and the old `[A-Za-z0-9_]{8}` pattern left that hash on the name, so the census failed even though the set of modules was unchanged.
 
 ## [0.10.144] - 2026-10-26
 

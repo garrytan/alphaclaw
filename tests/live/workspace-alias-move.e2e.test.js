@@ -95,7 +95,7 @@ describeLive("live: OpenClaw's workspace-alias stop and the confirmed move", () 
       .readdirSync(distDir)
       .filter((name) => name.endsWith(".mjs"))
       .filter((name) => /confirmAggressiveAutoFix|prompter\.shouldForce|repairMode\.shouldForce|requiresForce/.test(fs.readFileSync(path.join(distDir, name), "utf8")))
-      .map((name) => name.replace(/-[A-Za-z0-9_]{8}\.mjs$/, ""))
+      .map((name) => name.replace(/-[A-Za-z0-9_-]{8}\.mjs$/, ""))
       .sort();
     // doctor-prompter / doctor-repair-mode define the flag; doctor-workspace-alias
     // (the move), doctor-ui (stale Control UI rebuild, needs <package>/ui sources)
