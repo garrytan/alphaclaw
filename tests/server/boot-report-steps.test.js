@@ -241,7 +241,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
     expect(report.serverPhase).toEqual(
       expect.objectContaining({
         status: kServerPhaseStatuses.recorded,
-        migration: { status: "ok", reason: null, ran: true, class: null, detail: null, captureUnavailable: null },
+        migration: { status: "ok", reason: null, ran: true, class: null, detail: null, doctorSummary: null, captureUnavailable: null },
         gatewayHeld: false,
         config: {
           sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -383,12 +383,12 @@ describe("boot-report-steps: finalizeBootReport", () => {
     await steps.recordBootReportServerPhase();
     await steps.finalizeBootReport({ migration: { status: "failed", ran: true, reason: "timed out" }, gatewayHeld: false });
     let server = readJson(bootReport.reportPath).serverPhase;
-    expect(server.migration).toEqual({ status: "failed", reason: "timed out", ran: true, class: null, detail: null, captureUnavailable: null });
+    expect(server.migration).toEqual({ status: "failed", reason: "timed out", ran: true, class: null, detail: null, doctorSummary: null, captureUnavailable: null });
     expect(server.gatewayHeld).toBe(false);
 
     await steps.finalizeBootReport({ migration: { status: "error", reason: "doctor exploded" }, gatewayHeld: true });
     server = readJson(bootReport.reportPath).serverPhase;
-    expect(server.migration).toEqual({ status: "error", reason: "doctor exploded", ran: false, class: null, detail: null, captureUnavailable: null });
+    expect(server.migration).toEqual({ status: "error", reason: "doctor exploded", ran: false, class: null, detail: null, doctorSummary: null, captureUnavailable: null });
     expect(server.gatewayHeld).toBe(true);
 
     await steps.finalizeBootReport({ migration: null });
@@ -404,6 +404,7 @@ describe("boot-report-steps: finalizeBootReport", () => {
       reason: "atomic_replace_refused",
       class: "deterministic",
       detail: "Atomic replace parent must be a real directory: /data/.openclaw",
+      doctorSummary: "[alphaclaw] doctor --fix summary source=boot total=4.0s steps=untraced recoveryCopy=unknown configFile=same-bytes migrations=0 changes=0",
       captureUnavailable: { cause: "SQLite staging ancestor must not allow another user to replace its child: /data" },
     };
     await steps.finalizeBootReport({ migration });

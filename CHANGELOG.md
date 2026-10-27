@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.148] - 2026-10-27
+
+Every `openclaw doctor --fix` run now says where its time went and what it changed, and a boot names the agent databases behind OpenClaw's "database is not a configured target" lines. On a production pin bump (OpenClaw 2026.10.7 → 2026.10.8, a 5.2 GB agent database) Doctor ran 632 s. About 240 s was believed to be OpenClaw's recovery copy, and nothing said where the other ~390 s went, or which four databases the gateway skipped at start (ALPH-50).
+
+### Added
+- **One summary line per Doctor run.** `doctor-report.js` builds the report from OpenClaw's startup trace (v0.10.146 turned it on for the Doctor child): the top-level phases (`maintenance.begin`, `database-preflight`, `config-flow`, `contributions`, `maintenance-ready`, `maintenance.finish`, `maintenance.release`), with the recovery copy (`preserve-original-state`) and `legacy-state-migrations` listed under their parent and never added up; the time the phases do not cover (`unattributed`, from AlphaClaw's own clock); the five slowest contribution checks; the "Doctor changes" notes (the first 20, and a count); and whether `openclaw.json` was rewritten (its raw bytes before and after the run, read in memory; `unknown` when either side is unreadable; this says nothing about effective settings). A fact without evidence is `unknown`, never "unchanged". Example: `[alphaclaw] doctor --fix summary source=boot total=632s maintenance.begin=…(recovery-copy=…) … unattributed=… slowestChecks=… recoveryCopy=unknown configFile=rewritten migrations=0 changes=3`.
+- **Where the report lives.** `lastOutcome.report` on `.alphaclaw/openclaw-boot-migration.json`; `lastRun` in `GET /api/openclaw/upgrade-status` for admin sessions only (the change notes and the recovery copy's path come from OpenClaw's output; members and the agent never see it); the boot's line as `migration.doctorSummary` in the boot report.
+- **After the gateway first serves** (`doctor-after-serving.js`, off the path to serving): this boot's recovery copy is measured (only a direct `doctor-*` child of `<realpath(state)>.update-captures`, a bounded walk that never follows a symlink), added to the report as `captureBytes` and logged; and the state database's `agent_databases` registry is read read-only for rows whose agent is not configured (`agent-database-registry.js`), logged once with ids and sizes (the file and its WAL on disk, else the registry's `size_bytes`, else "size unknown"). Both go into the boot report. Nothing is deleted or notified. OpenClaw matches a registry row by path, AlphaClaw by agent id, so a configured agent's row under an unusual path is not listed.
+
+### Changed
+- `createDoctorPhaseTracker` frames stdout and stderr separately (the trace is on stderr) and drains a last line without a newline; a "Doctor changes" box only collects lines of the stream that opened it.
+
+### Tests
+- `doctor-report.test.js`: a real 2026.10.8 run's stdout and stderr (`tests/fixtures/doctor-trace-2026.10.8`, paths rewritten) fed interleaved in 37-byte chunks gives every phase, nesting, unattributed time, the five slowest checks and the capped change notes; a last line without a newline; an untraced run; the summary line; config same bytes / rewritten / unknown; the recovery copy measured only inside the capture root and never through a symlink; unconfigured databases from a real SQLite registry (on-disk size with WAL, registered size, unknown size, implicit main agent, no database, no table, unreadable); the after-serving step patches only this boot's run and never throws.
+- `openclaw-upgrade-status.test.js`: `lastRun` for admins only and only for the installed pin.
+- `boot-report-steps.test.js`, `openclaw-boot-migration.test.js`, `doctor-fix-runner.test.js`: the new `doctorSummary` and `report` fields.
+- Live tier `doctor-report-contract.e2e.test.js`: the pinned OpenClaw's `doctor --fix` with the trace on prints every phase the report names, keeps the recovery copy its manifest line names, and its state database has the `agent_databases` columns read here.
+
 ## [0.10.146] - 2026-10-27
 
 A pin-bump boot that takes longer than 10 minutes no longer tells the owner the box is back while OpenClaw is still upgrading its data. On a production deploy (OpenClaw 2026.10.7 → 2026.10.8, a 5.2 GB agent database), `doctor --fix` ran for 632 s, so the sidecars' 10-minute fallback fired first and called the deploy announcer: the owner got "back: down 10 min 51 s" and deploy status recorded 651 s, while the gateway was down 733 s (ALPH-50).

@@ -567,6 +567,7 @@ describe("server/doctor-fix-runner heartbeat", () => {
         detail: "Atomic replace parent must be a real directory: /data/.openclaw",
         captureState: "unavailable",
         captureCause: "SQLite staging ancestor must not allow another user to replace its child: /data",
+        report: expect.objectContaining({ traced: false, configFileRewritten: null, captureBytes: null }),
         openclawVersion: "2026.10.4",
         source: "medic",
         durationMs: 0,

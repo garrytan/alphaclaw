@@ -78,6 +78,15 @@ describe("openclaw-upgrade-status: the alert matrix", () => {
     expect(status.alert.sentence).toMatch(/next time the AlphaClaw server starts/);
   });
 
+  it("the last run's report for this pin goes to admin sessions only", () => {
+    const report = { totalMs: 632_000, traced: true, steps: [{ step: "maintenance.begin", ms: 240_000, nested: [] }], changes: ["- Disabled 1password"], captureManifest: "/data/.openclaw.update-captures/doctor-1/manifest.json" };
+    const record = { completedForVersion: kPin, lastOutcome: { status: "ok", source: "boot", openclawVersion: kPin, at: 10, report } };
+    expect(buildUpgradeStatus({ record, installedVersion: kPin, isAdmin: true }).lastRun).toEqual({ source: "boot", status: "ok", at: 10, ...report });
+    expect(buildUpgradeStatus({ record, installedVersion: kPin, isAdmin: false })).not.toHaveProperty("lastRun");
+    expect(JSON.stringify(buildUpgradeStatus({ record, installedVersion: kPin, isAdmin: false }))).not.toContain("update-captures");
+    expect(buildUpgradeStatus({ record, installedVersion: "2026.10.5", isAdmin: true }).lastRun).toBeNull();
+  });
+
   it("a completed upgrade then a failed repair Doctor raises no failure alert", () => {
     const status = buildUpgradeStatus({
       record: { completedForVersion: kPin, lastOutcome: failed({ source: "repair" }) },

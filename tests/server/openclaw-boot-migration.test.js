@@ -297,6 +297,7 @@ describe("server/openclaw-boot-migration", () => {
       class: "deterministic",
       detail: "Atomic replace parent must be a real directory: /data/.openclaw",
       captureUnavailable: { cause: "SQLite staging ancestor must not allow another user to replace its child: /data" },
+      doctorSummary: null,
     });
     const failed = readMigrationRecord({ managedDir: box.managedDir }).failed;
     expect(failed).toMatchObject({ reason: "atomic_replace_refused", attempts: 1, at: kNow });
