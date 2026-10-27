@@ -27,12 +27,12 @@ describeLive("live: doctor --fix report contract", () => {
     const stateDir = path.join(home, ".openclaw");
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(path.join(stateDir, "openclaw.json"), JSON.stringify({ gateway: { mode: "local" } }, null, 2));
-    const cliEnv = liveHelpers.scrubTestRunnerEnv({
-      ...process.env,
+    const cliEnv = {
+      ...liveHelpers.scrubTestRunnerEnv(),
       HOME: home,
       OPENCLAW_STATE_DIR: stateDir,
       OPENCLAW_CONFIG_PATH: path.join(stateDir, "openclaw.json"),
-    });
+    };
     materializeDatabases({ openclawBin, cliEnv, stateDir, version });
 
     const run = spawnSync(process.execPath, [openclawBin, "doctor", "--fix", "--yes"], {
