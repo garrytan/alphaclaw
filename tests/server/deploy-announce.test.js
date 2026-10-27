@@ -14,7 +14,7 @@ let seq = 0;
 const makeRoot = () => fs.mkdtempSync(path.join(kRoot, `case-${(seq += 1)}-`));
 afterAll(() => fs.rmSync(kRoot, { recursive: true, force: true }));
 
-const makeAnnouncer = ({ rootDir = makeRoot(), clock, processStartedAtMs = 0, sidecarResults = [] } = {}) => {
+const makeAnnouncer = ({ rootDir = makeRoot(), clock, processStartedAtMs = 0, sidecarResults = [], gatewayExpectedAtBoot = true } = {}) => {
   const notices = [];
   const sidecarCalls = [];
   const events = [];
@@ -22,6 +22,7 @@ const makeAnnouncer = ({ rootDir = makeRoot(), clock, processStartedAtMs = 0, si
   let flushed = 0;
   const announcer = createDeployAnnouncer({
     retireNotices: (matchesId) => retirements.push(matchesId),
+    gatewayExpectedAtBoot,
     rootDir,
     now: () => clock.now,
     processStartedAtMs,
@@ -165,6 +166,27 @@ describe("deploy announcements", () => {
     await stopping.announcer.onShutdown({ reason: "SIGINT" });
     expect(await stopping.announcer.onDataUpgradeStart({ toVersion: "2026.10.8" })).toEqual({ notified: false });
     expect(stopping.notices).toEqual([]);
+  });
+
+  it("a box not onboarded at boot measures no outage when its gateway first serves after onboarding", async () => {
+    const clock = { now: T0 };
+    const rootDir = makeRoot();
+    const before = makeAnnouncer({ rootDir, clock, processStartedAtMs: T0 - 60_000 });
+    await before.announcer.onShutdown({ reason: "SIGTERM" });
+    clock.now += 30_000;
+    const unonboarded = makeAnnouncer({ rootDir, clock, processStartedAtMs: clock.now, gatewayExpectedAtBoot: false });
+    clock.now += 3 * 3600_000;
+    await unonboarded.announcer.onShutdown({ reason: "SIGTERM" });
+    expect(unonboarded.announcer.getStatus().lastShutdown.at).toBe(new Date(clock.now).toISOString().replace(/\.\d{3}Z$/, "Z"));
+
+    clock.now += 30_000;
+    const onboardedLater = makeAnnouncer({ rootDir, clock, processStartedAtMs: clock.now, gatewayExpectedAtBoot: false });
+    clock.now += 2 * 3600_000;
+    const result = await onboardedLater.announcer.onGatewayReady({ readyAt: new Date(clock.now).toISOString() });
+
+    expect(result).toMatchObject({ measured: false, reason: "not_onboarded_at_boot" });
+    expect(onboardedLater.notices.filter((notice) => notice.message.includes("back"))).toEqual([]);
+    expect(onboardedLater.announcer.getStatus().lastShutdown).toBeNull();
   });
 
   it("serving retires every boot's upgrading notice, and a late Doctor start sends none", async () => {

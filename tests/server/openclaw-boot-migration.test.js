@@ -70,6 +70,24 @@ describe("server/openclaw-boot-migration", () => {
     expect(readCompletedForVersion({ managedDir: box.managedDir })).toBe("2026.9.8");
   });
 
+  it("records the pin upgrade's duration only for a real version change, and other Doctor runs leave it alone", async () => {
+    const box = newBox();
+    let now = kNow;
+    const runDoctorFix = vi.fn(async () => {
+      now += 632_000;
+      return { ok: true };
+    });
+    await runBootMigration({ ...box, installedVersion: "2026.10.7", runDoctorFix, nowFn: () => now, logger: silentLogger() });
+    expect(readMigrationRecord({ managedDir: box.managedDir }).lastPinUpgrade).toBeUndefined();
+
+    await runBootMigration({ ...box, installedVersion: "2026.10.8", runDoctorFix, nowFn: () => now, logger: silentLogger() });
+    const pinUpgrade = { durationMs: 632_000, fromVersion: "2026.10.7", toVersion: "2026.10.8", at: now };
+    expect(readMigrationRecord({ managedDir: box.managedDir }).lastPinUpgrade).toEqual(pinUpgrade);
+
+    recordDoctorOutcome({ managedDir: box.managedDir, outcome: { status: "ok", source: "repair", durationMs: 4_000, openclawVersion: "2026.10.8", at: now } });
+    expect(readMigrationRecord({ managedDir: box.managedDir }).lastPinUpgrade).toEqual(pinUpgrade);
+  });
+
   it.each([
     ["an unexplained exit", { ok: false, code: 1 }, "exit_1"],
     ["a timeout", { ok: false, timedOut: true }, "timed_out"],

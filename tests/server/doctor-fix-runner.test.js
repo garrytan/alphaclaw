@@ -351,6 +351,9 @@ describe("server/doctor-fix-runner heartbeat", () => {
 
     now = 7_000;
     tracker.onOutput("\n", "stderr");
+    expect(tracker.lastLine()).toBe("abcdef");
+    expect(tracker.lastOutputAgeMs()).toBe(0);
+    tracker.onOutput("\n", "stdout");
     expect(tracker.lastLine()).toBe("ghi");
     expect(tracker.lastOutputAgeMs()).toBe(0);
     now = 9_500;
@@ -359,6 +362,18 @@ describe("server/doctor-fix-runner heartbeat", () => {
     // Blank lines never replace the last meaningful one.
     tracker.onOutput("\n   \n", "stdout");
     expect(tracker.lastLine()).toBe("ghi");
+  });
+
+  it("frames stdout and stderr separately, so interleaved chunks never splice two lines", () => {
+    const tracker = createOutputLineTracker({ nowFn: () => 0, startedAt: 0 });
+
+    tracker.onOutput("Doctor could not ", "stdout");
+    tracker.onOutput("[gateway] startup trace: doctor.contributions 12.", "stderr");
+    tracker.onOutput("enter maintenance.\n", "stdout");
+    tracker.onOutput("5ms total=900.1ms\n", "stderr");
+
+    expect(tracker.lastDetailLine()).toBe("Doctor could not enter maintenance.");
+    expect(tracker.lastLine()).toBe("[gateway] startup trace: doctor.contributions 12.5ms total=900.1ms");
   });
 
   it("caps the partial-line buffer at 4 KB by dropping the head", () => {
