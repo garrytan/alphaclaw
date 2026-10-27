@@ -38,6 +38,16 @@ describe("doctor phase tracker (ALPH-23)", () => {
     expect(tracker.snapshot().phase).toBe("checks");
   });
 
+  it("keeps counting agent migrations that come after the checks marker (2026.10.8 order, startup trace on)", () => {
+    const tracker = createDoctorPhaseTracker();
+    tracker.onOutput(kRealDoctorLines.captureDone.join("\n") + "\n");
+    tracker.onOutput(kRealDoctorLines.backupDone + "\n");
+    tracker.onOutput(kRealDoctorLines.migrationsDone + "\n");
+    expect(tracker.snapshot().phase).toBe("checks");
+    tracker.onOutput(`${kRealDoctorLines.migrating}\n${kRealDoctorLines.migrating}\n`);
+    expect(tracker.snapshot()).toEqual({ phase: "migrate", migrated: 2 });
+  });
+
   it("never moves backwards", () => {
     const tracker = createDoctorPhaseTracker();
     tracker.onOutput(kRealDoctorLines.migrationsDone + "\n" + kRealDoctorLines.captureDone[2] + "\n");

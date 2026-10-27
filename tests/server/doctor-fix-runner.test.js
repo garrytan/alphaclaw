@@ -84,11 +84,13 @@ describe("server/doctor-fix-runner", () => {
     expect(runStream.runStreamed).toHaveBeenCalledWith({
       command: "openclaw",
       args: ["doctor", "--fix", "--yes"],
-      env: kGatewayEnv,
+      env: { ...kGatewayEnv, OPENCLAW_GATEWAY_STARTUP_TRACE: "1" },
       timeoutMs: 10 * 60 * 1000,
       killGraceMs: 1000,
       onOutput: expect.any(Function),
     });
+    // The trace is the Doctor child's only: the gateway env is not changed.
+    expect(kGatewayEnv).not.toHaveProperty("OPENCLAW_GATEWAY_STARTUP_TRACE");
     // A succeeded run carries no hang diagnostics.
     expect(result).not.toHaveProperty("lastOutputAgeMs");
     expect(result).not.toHaveProperty("lastOutputLine");
@@ -438,6 +440,19 @@ describe("server/doctor-fix-runner heartbeat", () => {
       lastOutputAgeMs: 30_000,
       lastOutputLine: "Step 2 (slow)",
     });
+
+    const traced = scriptedRunStream({
+      outputs: [
+        { at: 0, text: "Failing check doctor:state-integrity: agent database is malformed\n" },
+        { at: 1_000, text: "[gateway] startup trace: doctor.contributions 812.4ms total=9000.1ms start=8187.7ms\n" },
+      ],
+      settleAt: 2_000,
+      result: { ok: false, code: 1, tail: "" },
+    });
+    const third = createRunner(openclawDir, { runStream: traced });
+    const pendingTraced = third.run();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await pendingTraced).lastOutputLine).toBe("Failing check doctor:state-integrity: agent database is malformed");
 
     const succeeded = scriptedRunStream({
       outputs: [{ at: 0, text: "Doctor complete\n" }],

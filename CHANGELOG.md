@@ -5,6 +5,28 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.146] - 2026-10-27
+
+A pin-bump boot that takes longer than 10 minutes no longer tells the owner the box is back while OpenClaw is still upgrading its data. On a production deploy (OpenClaw 2026.10.7 → 2026.10.8, a 5.2 GB agent database), `doctor --fix` ran for 632 s, so the sidecars' 10-minute fallback fired first and called the deploy announcer: the owner got "back: down 10 min 51 s" and deploy status recorded 651 s, while the gateway was down 733 s (ALPH-50).
+
+### Fixed
+- **"Back" means serving.** The sidecar service keeps two latches on its `/readyz` poll: the sidecar start (a native ready, or the 10-minute fallback, as before) and the gateway serving (the downtime note's `isServingObservation`: ready, or unready only because a channel component fails). The deploy announcer's `onGatewayReady` fires once, on the first serving answer, never at the fallback. After the fallback the poll continues every 5 s (so the measured downtime is at most 5 s late) until the gateway serves, `stopAll`, or shutdown, and a probe that resolves after shutdown began is ignored. A ready answer still measures the downtime before the post-boot hook runs.
+- **A never-ready boot that is redeployed keeps the outage start.** `onShutdown` keeps the earlier shutdown record when this process never saw its gateway serve, so the next boot measures the whole outage instead of only the last container's share. `onGatewayReady` returns early once this process is shutting down.
+
+### Added
+- **One "upgrading OpenClaw data" notice.** When the boot starts `doctor --fix` for a pin change, the owner gets "⏳ AlphaClaw is upgrading OpenClaw's data after the update to <version>; replies resume when it finishes. The last data upgrade took about N min." (N from the last successful boot Doctor, omitted when unknown; a watchdog repair or medic run is no estimate). It expires 5 minutes after the expected end, so a queued copy is never delivered after "back".
+- **Every Doctor run prints OpenClaw's startup trace.** `doctor-fix-runner` sets `OPENCLAW_GATEWAY_STARTUP_TRACE=1` (documented in OpenClaw's `docs/gateway/doctor/running.md`) on the Doctor child only, never on the gateway, so `doctor-last-run.log` and the gateway log time each Doctor phase and contribution check on the next pin bump.
+
+### Behavior changes
+- The sidecars status `gatewayReadyAt` is the first serving time (null until then); the new `sidecarsStartedAt` is when the gateway sidecars started.
+- The post-boot hook gets `ALPHACLAW_SIDECARS_STARTED_AT`. After a fallback start, its `ALPHACLAW_GATEWAY_READY_AT` and `ALPHACLAW_LAST_DOWNTIME_SECONDS` are empty.
+- With the trace on, the boot and Retry cards show Doctor's "Checking sessions and transcripts" phase, and an agent schema migration line moves the card back to "Migrating agent databases" (OpenClaw 2026.10.8 migrates agent databases after its checks). A failed Doctor's detail line skips trace timings; the heartbeat's `last=` still shows the newest line.
+
+### Tests
+- `sidecars-service.test.js`: the fallback starts sidecars but the announcer waits for serving; components-only unready counts as back while sidecars wait for the fallback; a never-serving gateway gets no call and `stopAll` ends the polling; shutdown during an in-flight probe; ready measures before the hook; a fallback hook gets no ready time and a slow hook does not delay the serving notice.
+- `deploy-announce.test.js`: a 733 s boot with one upgrading notice records 733 s; the notice without an estimate and never while shutting down; a ready answer after SIGTERM; a redeployed never-ready boot keeps the outage start.
+- `doctor-fix-runner.test.js`, `doctor-progress.test.js`: the trace env on the Doctor child only; a trace line never becomes the failure detail; migrations after the checks marker are counted.
+
 ## [0.10.145] - 2026-10-27
 
 Pin OpenClaw 2026.10.8 (npm `latest` since 2026-10-27 11:24Z). It is a patch release of 162 PRs on top of 2026.10.7: update and Doctor recovery, restart-recovery fences that no longer wedge sessions, retries for transient agent-database lock contention at startup, channel default accounts that keep their secrets, and Codex and Claude CLI turn fixes. It moves neither `openclaw.schemaVersions` (state 20, agent 25) nor `engines.node` (`>=24.22.1 <25 || >=26.12.1`). On real state, 2026.10.7 boots again after 2026.10.8's Doctor has run, so the pin can be rolled back without restoring a backup.

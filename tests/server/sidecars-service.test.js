@@ -100,6 +100,140 @@ describe("sidecar service (real processes)", () => {
     expect(service.getStatus().startedBy).toBe("fallback");
   });
 
+  it("the fallback starts sidecars but is not 'back': the announcer fires once, at the first serving answer", async () => {
+    let serving = false;
+    const readyCalls = [];
+    const { service } = makeService({
+      ready: () => serving,
+      readyFallbackMs: 200,
+      servingPollAfterFallbackMs: 50,
+      onGatewayReady: async (payload) => readyCalls.push(payload),
+      sidecars: [{ name: "guard", command: ["sleep", "30"] }],
+    });
+    await service.start();
+    await waitFor(() => status(service, "guard").status === "running", 4000, "guard running");
+    expect(service.getStatus()).toMatchObject({ startedBy: "fallback", gatewayReadyAt: null, sidecarsStartedAt: expect.any(String) });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(readyCalls).toEqual([]);
+    serving = true;
+    const servedAfter = Date.now();
+    await waitFor(() => readyCalls.length === 1, 4000, "announcer called");
+    expect(readyCalls[0]).toEqual({ readyAt: service.getStatus().gatewayReadyAt, source: "gateway_ready" });
+    expect(Date.parse(readyCalls[0].readyAt)).toBeGreaterThanOrEqual(servedAfter - 1000);
+    expect(Date.parse(readyCalls[0].readyAt)).toBeGreaterThan(Date.parse(service.getStatus().sidecarsStartedAt));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(readyCalls).toHaveLength(1);
+  });
+
+  it("a gateway that serves with one failing component is back, while gateway sidecars still wait for ready or the fallback", async () => {
+    let observation = { ok: false, kind: "unready" };
+    const readyCalls = [];
+    const { service } = makeService({
+      probeReadiness: async () => observation,
+      readyFallbackMs: 400,
+      onGatewayReady: async (payload) => readyCalls.push(payload),
+      sidecars: [{ name: "late", command: ["sleep", "30"] }],
+    });
+    await service.start();
+    observation = { ok: true, kind: "unready", unreadyReason: "components", status: 503 };
+    await waitFor(() => readyCalls.length === 1, 4000, "announcer called on components-only unready");
+    expect(status(service, "late").status).toBe("idle");
+    await waitFor(() => status(service, "late").status === "running", 4000, "late running after the fallback");
+    expect(service.getStatus().startedBy).toBe("fallback");
+    expect(readyCalls).toHaveLength(1);
+  });
+
+  it("a gateway that never serves: no announcer call, and stopAll ends the post-fallback polling", async () => {
+    let probes = 0;
+    const readyCalls = [];
+    const { service } = makeService({
+      probeReadiness: async () => {
+        probes += 1;
+        return { ok: false, kind: "unready" };
+      },
+      readyFallbackMs: 100,
+      servingPollAfterFallbackMs: 50,
+      onGatewayReady: async (payload) => readyCalls.push(payload),
+      sidecars: [{ name: "guard", command: ["sleep", "30"] }],
+    });
+    await service.start();
+    await waitFor(() => status(service, "guard").status === "running", 4000, "guard running");
+    await service.stopAll();
+    const after = probes;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(probes).toBe(after);
+    expect(readyCalls).toEqual([]);
+  });
+
+  it("shutdown during an in-flight probe: no announcer call", async () => {
+    let shuttingDown = false;
+    let releaseProbe;
+    const readyCalls = [];
+    const { service } = makeService({
+      probeReadiness: () => new Promise((resolve) => {
+        releaseProbe = () => resolve({ ok: true, kind: "ready" });
+      }),
+      isShuttingDown: () => shuttingDown,
+      onGatewayReady: async (payload) => readyCalls.push(payload),
+      sidecars: [{ name: "late", command: ["sleep", "30"] }],
+    });
+    await service.start();
+    await waitFor(() => typeof releaseProbe === "function", 2000, "probe in flight");
+    shuttingDown = true;
+    releaseProbe();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(readyCalls).toEqual([]);
+    expect(status(service, "late").status).toBe("idle");
+  });
+
+  it("a ready answer measures the downtime before the post-boot hook runs, and the hook gets both times", async () => {
+    const order = [];
+    const hookArgs = [];
+    const { service } = makeService({
+      env: { ALPHACLAW_POST_BOOT_HOOK: "/opt/hooks/post-boot" },
+      onGatewayReady: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        order.push("ready");
+      },
+      runPostBootHook: async (args) => {
+        order.push("hook");
+        hookArgs.push(args);
+      },
+      sidecars: [],
+    });
+    await service.start();
+    await waitFor(() => order.length === 2, 4000, "ready and hook");
+    expect(order).toEqual(["ready", "hook"]);
+    expect(hookArgs[0]).toMatchObject({ readyAt: expect.any(String), sidecarsStartedAt: expect.any(String) });
+  });
+
+  it("a fallback-started post-boot hook runs without a ready time, and a slow hook does not delay the serving notice", async () => {
+    let serving = false;
+    let releaseHook;
+    const readyCalls = [];
+    const hookArgs = [];
+    const { service } = makeService({
+      env: { ALPHACLAW_POST_BOOT_HOOK: "/opt/hooks/post-boot" },
+      ready: () => serving,
+      readyFallbackMs: 100,
+      servingPollAfterFallbackMs: 50,
+      onGatewayReady: async (payload) => readyCalls.push(payload),
+      runPostBootHook: (args) => {
+        hookArgs.push(args);
+        return new Promise((resolve) => {
+          releaseHook = resolve;
+        });
+      },
+      sidecars: [],
+    });
+    await service.start();
+    await waitFor(() => hookArgs.length === 1, 4000, "hook started at the fallback");
+    expect(hookArgs[0]).toMatchObject({ readyAt: null, sidecarsStartedAt: expect.any(String) });
+    serving = true;
+    await waitFor(() => readyCalls.length === 1, 4000, "serving noticed while the hook runs");
+    releaseHook();
+  });
+
   it("a bash guard runs in its own process group: stop kills it and what it spawned", async () => {
     const rootDir = makeRoot();
     const script = path.join(rootDir, "guard.sh");
