@@ -66,6 +66,21 @@ describe("server/env", () => {
     ]);
   });
 
+  it("shows and keeps the live value of a duplicate key whose last line is empty", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, ".env"),
+      ["OPENAI_API_KEY=fixture-live", "BRIGHTDATA_API_KEY=bright", "OPENAI_API_KEY="].join("\n"),
+    );
+    const env = loadEnvModule(tmpDir);
+
+    expect(env.readEnvFile()).toEqual([
+      { key: "BRIGHTDATA_API_KEY", value: "bright" },
+      { key: "OPENAI_API_KEY", value: "fixture-live" },
+    ]);
+    env.updateEnvFile((vars) => vars.map((entry) => (entry.key === "BRIGHTDATA_API_KEY" ? { ...entry, value: "changed" } : entry)));
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("BRIGHTDATA_API_KEY=changed\nOPENAI_API_KEY=fixture-live");
+  });
+
   it("reloads duplicate keys idempotently after the effective value is loaded", () => {
     fs.writeFileSync(
       path.join(tmpDir, ".env"),
@@ -224,6 +239,122 @@ describe("server/env", () => {
     );
   });
 
+  describe("reload matches boot (ALPH-50)", () => {
+    const kKeys = ["SETUP_PASSWORD", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "CUSTOM_FROM_FILE", "HOME", "PATH"];
+    let saved;
+    beforeEach(() => {
+      saved = Object.fromEntries(kKeys.map((key) => [key, process.env[key]]));
+    });
+    afterEach(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    // Boots the way bin/alphaclaw.js does: the deployment env, recorded,
+    // then the .env file's values through the shared overlay rule.
+    const sharedModulePath = "../../lib/server/deployment-only-env";
+    const boot = (deploymentEnv, envFileText) => {
+      fs.writeFileSync(path.join(tmpDir, ".env"), envFileText);
+      for (const modulePath of [envModulePath, constantsModulePath, sharedModulePath]) {
+        delete require.cache[require.resolve(modulePath)];
+      }
+      const env = loadEnvModule(tmpDir);
+      const shared = require(sharedModulePath);
+      for (const key of kKeys) delete process.env[key];
+      Object.assign(process.env, deploymentEnv);
+      shared.recordDeploymentEnvBaseline({ ...process.env });
+      const entries = envFileText
+        .split("\n")
+        .filter((line) => line.includes("="))
+        .map((line) => ({ key: line.slice(0, line.indexOf("=")).trim(), value: line.slice(line.indexOf("=") + 1) }))
+        .filter(({ key }) => !shared.kDeploymentOnlyEnvKeys.includes(key));
+      for (const [key, value] of shared.resolveEnvFileOverlay(entries)) process.env[key] = value;
+      return env;
+    };
+    const rewrite = (text) => fs.writeFileSync(path.join(tmpDir, ".env"), text);
+
+    it("platform-set keys with empty .env lines survive an external rewrite and are not logged as removed", () => {
+      const env = boot(
+        { SETUP_PASSWORD: "platform-pw", ANTHROPIC_API_KEY: "sk-ant-platform", TELEGRAM_BOT_TOKEN: "123:platform" },
+        "SETUP_PASSWORD=\nANTHROPIC_API_KEY=\nTELEGRAM_BOT_TOKEN=\n",
+      );
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      rewrite("SETUP_PASSWORD=\nANTHROPIC_API_KEY=\nTELEGRAM_BOT_TOKEN=\nCUSTOM_FROM_FILE=x\n");
+      expect(env.reloadEnv()).toBe(true);
+      expect(process.env.SETUP_PASSWORD).toBe("platform-pw");
+      expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-platform");
+      expect(process.env.TELEGRAM_BOT_TOKEN).toBe("123:platform");
+      expect(logSpy.mock.calls.map(([line]) => line)).toEqual(["[alphaclaw] Env updated: added CUSTOM_FROM_FILE"]);
+    });
+
+    it("a .env value overrides the platform; clearing it restores the platform value; a file-only key is removed", () => {
+      const env = boot({ ANTHROPIC_API_KEY: "sk-ant-platform" }, "ANTHROPIC_API_KEY=sk-ant-file\nOPENAI_API_KEY=sk-file-only\n");
+      expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-file");
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      rewrite("ANTHROPIC_API_KEY=\nOPENAI_API_KEY=\n");
+      expect(env.reloadEnv()).toBe(true);
+      expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-platform");
+      expect(process.env.OPENAI_API_KEY).toBeUndefined();
+      expect(logSpy.mock.calls.map(([line]) => line)).toEqual([
+        "[alphaclaw] Env updated: restored from deployment env ANTHROPIC_API_KEY; removed OPENAI_API_KEY",
+      ]);
+      expect(logSpy.mock.calls.join("\n")).not.toContain("sk-ant");
+    });
+
+    it("a known key missing from the file keeps its platform value", () => {
+      const env = boot({ TELEGRAM_BOT_TOKEN: "123:platform" }, "CUSTOM_FROM_FILE=x\n");
+      rewrite("CUSTOM_FROM_FILE=y\n");
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      env.reloadEnv();
+      expect(process.env.TELEGRAM_BOT_TOKEN).toBe("123:platform");
+      expect(process.env.CUSTOM_FROM_FILE).toBe("y");
+    });
+
+    it("duplicate keys ending in an empty value keep the earlier value, as at boot", () => {
+      const env = boot({}, "OPENAI_API_KEY=first\nOPENAI_API_KEY=\n");
+      expect(process.env.OPENAI_API_KEY).toBe("first");
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      expect(env.reloadEnv()).toBe(false);
+      expect(process.env.OPENAI_API_KEY).toBe("first");
+    });
+
+    it("never touches the keys boot manages after the .env load", () => {
+      const env = boot({ HOME: "/platform-home", PATH: "/usr/bin" }, "");
+      process.env.HOME = "/data/root";
+      process.env.PATH = "/data/root/bin:/usr/bin";
+      rewrite("HOME=/elsewhere\nPATH=/tmp/evil\n");
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      env.reloadEnv();
+      expect(process.env.HOME).toBe("/data/root");
+      expect(process.env.PATH).toBe("/data/root/bin:/usr/bin");
+    });
+
+    it("boot and reload agree: reloading an unchanged file after boot changes nothing", () => {
+      const cases = [
+        [{ SETUP_PASSWORD: "pw" }, "SETUP_PASSWORD=\n"],
+        [{ ANTHROPIC_API_KEY: "platform" }, "ANTHROPIC_API_KEY=file\n"],
+        [{}, "OPENAI_API_KEY=a\nOPENAI_API_KEY=\nCUSTOM_FROM_FILE=c\n"],
+        [{ TELEGRAM_BOT_TOKEN: "t" }, "ALPHACLAW_SIDECARS=[]\n"],
+      ];
+      for (const [deploymentEnv, text] of cases) {
+        const env = boot(deploymentEnv, text);
+        const before = Object.fromEntries(kKeys.map((key) => [key, process.env[key]]));
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        expect(env.reloadEnv()).toBe(false);
+        expect(Object.fromEntries(kKeys.map((key) => [key, process.env[key]]))).toEqual(before);
+      }
+    });
+  });
+
+  it("bin/alphaclaw.js records the deployment baseline before anything changes process.env, and loads .env through the shared overlay", () => {
+    const binSource = fs.readFileSync(path.join(__dirname, "../../bin/alphaclaw.js"), "utf8");
+    const record = binSource.indexOf("recordDeploymentEnvBaseline(process.env)");
+    expect(record).toBeGreaterThan(-1);
+    expect(record).toBeLessThan(binSource.indexOf("process.env.ALPHACLAW_ROOT_DIR ="));
+    expect(binSource).toContain("resolveEnvFileOverlay(entries)");
+  });
+
   it("logs env changes as key names only, never values, whatever the key is called", () => {
     const saved = {
       APP_DATABASE_URL: process.env.APP_DATABASE_URL,
@@ -304,6 +435,26 @@ describe("server/env", () => {
         String(line).includes("changed externally, reloading"),
       ),
     ).toHaveLength(0);
+  });
+
+  it("reloads when only an earlier non-empty duplicate changes before an unchanged empty one", () => {
+    vi.useFakeTimers();
+    fs.writeFileSync(path.join(tmpDir, ".env"), "OPENAI_API_KEY=fixture-a\nOPENAI_API_KEY=");
+    const env = loadEnvModule(tmpDir);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let watchHandler = null;
+    vi.spyOn(fs, "watchFile").mockImplementation((filePath, options, handler) => {
+      watchHandler = handler;
+    });
+
+    env.reloadEnv();
+    expect(process.env.OPENAI_API_KEY).toBe("fixture-a");
+    env.startEnvWatcher();
+    fs.writeFileSync(path.join(tmpDir, ".env"), "OPENAI_API_KEY=fixture-b\nOPENAI_API_KEY=");
+    watchHandler();
+    vi.advanceTimersByTime(250);
+
+    expect(process.env.OPENAI_API_KEY).toBe("fixture-b");
   });
 
   it("debounces env watcher events and ignores AlphaClaw's own writes", () => {

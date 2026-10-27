@@ -16,6 +16,11 @@ process.on("uncaughtException", (error) => {
   process.exit(1);
 });
 
+// The deployment environment as received, before anything below changes
+// process.env: a runtime .env reload falls back to it (lib/server/env.js) and
+// a self-update respawn starts from it (lib/server/alphaclaw-version.js).
+require("../lib/server/deployment-only-env").recordDeploymentEnvBaseline(process.env);
+
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -525,11 +530,13 @@ try {
 const {
   kDeploymentOnlyEnvKeys,
   noteIgnoredDeploymentEnvKey,
+  resolveEnvFileOverlay,
 } = require("../lib/server/deployment-only-env");
 const { normalizeEnvKey } = require("../lib/server/utils/env-values");
 
 if (fs.existsSync(envFilePath)) {
   const content = fs.readFileSync(envFilePath, "utf8");
+  const entries = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -539,7 +546,6 @@ if (fs.existsSync(envFilePath)) {
     // used to load as the key "FOO " here and "FOO" in the server.
     const key = normalizeEnvKey(trimmed.slice(0, eqIdx));
     const value = trimmed.slice(eqIdx + 1);
-    if (!key) continue;
     // Deployment-only keys must come from the real deployment environment
     // ONLY. The agent can write this .env (HOME=rootDir, exec full), so
     // honoring them here would let it self-grant broader gateway-child env
@@ -549,8 +555,11 @@ if (fs.existsSync(envFilePath)) {
       if (value) noteIgnoredDeploymentEnvKey(key);
       continue;
     }
-    if (value) process.env[key] = value;
+    entries.push({ key, value });
   }
+  // The rule the runtime reload shares (resolveEnvFileOverlay): entries in
+  // file order, and an empty value contributes nothing.
+  for (const [key, value] of resolveEnvFileOverlay(entries)) process.env[key] = value;
   console.log("[alphaclaw] Loaded .env");
 }
 
