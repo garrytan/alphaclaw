@@ -5,7 +5,6 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-<<<<<<< HEAD
 ## [0.10.148] - 2026-10-27
 
 Every `openclaw doctor --fix` run now says where its time went and what it changed, and a boot names the agent databases behind OpenClaw's "database is not a configured target" lines. On a production pin bump (OpenClaw 2026.10.7 → 2026.10.8, a 5.2 GB agent database) Doctor ran 632 s. About 240 s was believed to be OpenClaw's recovery copy, and nothing said where the other ~390 s went, or which four databases the gateway skipped at start (ALPH-50).
@@ -23,7 +22,7 @@ Every `openclaw doctor --fix` run now says where its time went and what it chang
 - `openclaw-upgrade-status.test.js`: `lastRun` for admins only and only for the installed pin.
 - `boot-report-steps.test.js`, `openclaw-boot-migration.test.js`, `doctor-fix-runner.test.js`: the new `doctorSummary` and `report` fields.
 - Live tier `doctor-report-contract.e2e.test.js`: the pinned OpenClaw's `doctor --fix` with the trace on prints every phase the report names, keeps the recovery copy its manifest line names, and its state database has the `agent_databases` columns read here.
-=======
+
 ## [0.10.147] - 2026-10-27
 
 An external rewrite of the .env file no longer drops platform-set keys from AlphaClaw's environment. On a production box a key set in the platform's environment, with an empty line for it in .env, was deleted from AlphaClaw's env on every external rewrite and logged as "removed". Every API, channel or team restart reloads the env first, and the gateway env is built from AlphaClaw's, so platform-set provider keys and bot tokens with empty template lines also vanished from the gateway (ALPH-50).
@@ -42,7 +41,6 @@ An external rewrite of the .env file no longer drops platform-set keys from Alph
 - `env.test.js`: platform-set SETUP_PASSWORD, provider key and bot token with empty lines survive a rewrite and are not logged as removed; a .env override, then cleared, restores the platform value; a file-only key is removed; a known key missing from the file keeps its platform value; duplicate keys ending empty (also shown in Envars and kept through the next save); boot-managed keys untouched; the watcher reloads when only an earlier non-empty duplicate changes; reloading an unchanged file after boot changes nothing (four cases); bin records the baseline before the first `process.env` write and loads .env through the shared rule.
 - `alphaclaw-version.test.js`: the respawned process gets the recorded baseline as its env.
 - `routes-env.test.js`: a deployment-set key with an empty .env line reads `deployment` with no value in the response; file and unset cases.
->>>>>>> origin/main
 
 ## [0.10.146] - 2026-10-27
 
