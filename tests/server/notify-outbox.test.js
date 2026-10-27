@@ -1240,6 +1240,70 @@ describe("server/upgrade-notifier routing", () => {
   });
 });
 
+describe("server/upgrade-notifier retire", () => {
+  const kPrefs = {
+    preferredChannel: null,
+    adminTargets: [{ channel: "telegram", target: "111" }, { channel: "whatsapp", target: "222" }],
+  };
+  const makeRetireNotifier = ({ outbox, sendToTarget }) =>
+    createUpgradeNotifier({
+      notifier: { notify: vi.fn(async () => ({ ok: true })), sendToTarget },
+      outbox,
+      operatorsStore: { read: () => ({ notifications: kPrefs }) },
+      logger: kSilentLogger,
+    });
+  const kUpgrading = { id: "deploy-upgrading-1", eventType: "deploy", expiresAt: 1_000_000 + 900_000 };
+
+  it("a queued notice whose delivery was held is never sent once retired", async () => {
+    const { outbox, nowRef } = makeOutbox();
+    const sendToTarget = vi.fn(async () => ({ ok: false, reason: "channel not ready" }));
+    const notifier = makeRetireNotifier({ outbox, sendToTarget });
+    outbox.enqueue({ ...kUpgrading, message: "upgrading" });
+    await outbox.flush({ deliver: notifier.deliverEvent });
+    expect(sendToTarget).toHaveBeenCalledTimes(2);
+
+    expect(notifier.retire((id) => id.startsWith("deploy-upgrading-"))).toBe(1);
+    sendToTarget.mockImplementation(async () => ({ ok: true }));
+    nowRef.now += 120_000;
+    await outbox.flush({ deliver: notifier.deliverEvent });
+
+    expect(sendToTarget).toHaveBeenCalledTimes(2);
+    expect(outbox.listEvents()[0]).toMatchObject({ suppressedReason: "expired", deliveredAt: null });
+  });
+
+  it("a later process draining the file retires its predecessor's notice before sending it", async () => {
+    const first = makeOutbox();
+    first.outbox.enqueue({ ...kUpgrading, message: "upgrading" });
+    const outbox = createNotifyOutbox({ openclawDir: first.openclawDir, nowFn: () => first.nowRef.now, logger: kSilentLogger });
+    const sendToTarget = vi.fn(async () => ({ ok: true }));
+    const notifier = makeRetireNotifier({ outbox, sendToTarget });
+
+    notifier.retire((id) => id.startsWith("deploy-upgrading-"));
+    await outbox.flush({ deliver: notifier.deliverEvent });
+
+    expect(sendToTarget).not.toHaveBeenCalled();
+  });
+
+  it("a send in flight stops before its next target once retired, and other notices are untouched", async () => {
+    const { outbox } = makeOutbox();
+    let notifier = null;
+    const sendToTarget = vi.fn(async () => {
+      notifier.retire((id) => id.startsWith("deploy-upgrading-"));
+      return { ok: false, reason: "timeout" };
+    });
+    notifier = makeRetireNotifier({ outbox, sendToTarget });
+    outbox.enqueue({ ...kUpgrading, message: "upgrading" });
+    outbox.enqueue({ id: "deploy-back-1", eventType: "deploy", message: "back" });
+
+    await outbox.flush({ deliver: notifier.deliverEvent });
+
+    const sentMessages = sendToTarget.mock.calls.map(([, message]) => message);
+    expect(sentMessages.filter((message) => message === "upgrading")).toHaveLength(1);
+    expect(sentMessages.filter((message) => message === "back")).toHaveLength(2);
+    expect(outbox.listEvents().find((entry) => entry.id === "deploy-upgrading-1").suppressedReason).toBe("expired");
+  });
+});
+
 describe("server/upgrade-notifier flush scheduling", () => {
   const makeNotifier = () => {
     const { outbox } = makeOutbox();

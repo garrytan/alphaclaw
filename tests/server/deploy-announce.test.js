@@ -18,8 +18,10 @@ const makeAnnouncer = ({ rootDir = makeRoot(), clock, processStartedAtMs = 0, si
   const notices = [];
   const sidecarCalls = [];
   const events = [];
+  const retirements = [];
   let flushed = 0;
   const announcer = createDeployAnnouncer({
+    retireNotices: (matchesId) => retirements.push(matchesId),
     rootDir,
     now: () => clock.now,
     processStartedAtMs,
@@ -39,7 +41,7 @@ const makeAnnouncer = ({ rootDir = makeRoot(), clock, processStartedAtMs = 0, si
     insertEvent: (event) => events.push(event.details),
     logger: { log() {}, warn() {}, error() {} },
   });
-  return { announcer, notices, sidecarCalls, events, rootDir, flushes: () => flushed };
+  return { announcer, notices, sidecarCalls, events, retirements, rootDir, flushes: () => flushed };
 };
 
 const T0 = Date.parse("2026-10-25T18:00:00Z");
@@ -163,6 +165,23 @@ describe("deploy announcements", () => {
     await stopping.announcer.onShutdown({ reason: "SIGINT" });
     expect(await stopping.announcer.onDataUpgradeStart({ toVersion: "2026.10.8" })).toEqual({ notified: false });
     expect(stopping.notices).toEqual([]);
+  });
+
+  it("serving retires every boot's upgrading notice, and a late Doctor start sends none", async () => {
+    const clock = { now: T0 };
+    const boot = makeAnnouncer({ clock, processStartedAtMs: T0 });
+    await boot.announcer.onDataUpgradeStart({ fromVersion: "2026.10.7", toVersion: "2026.10.8" });
+    const upgradingId = boot.notices[0].opts.id;
+    clock.now += 60_000;
+    await boot.announcer.onGatewayReady({ readyAt: new Date(clock.now).toISOString() });
+
+    expect(boot.retirements).toHaveLength(1);
+    const [matchesId] = boot.retirements;
+    expect(matchesId(upgradingId)).toBe(true);
+    expect(matchesId(`deploy-upgrading-${T0 - 900_000}`)).toBe(true);
+    expect(matchesId(`deploy-back-${T0}`)).toBe(false);
+    expect(matchesId(`deploy-shutdown-${T0}`)).toBe(false);
+    expect(await boot.announcer.onDataUpgradeStart({ fromVersion: "2026.10.7", toVersion: "2026.10.8" })).toEqual({ notified: false });
   });
 
   it("a ready answer that lands after SIGTERM sends no back notice and keeps the shutdown record", async () => {
