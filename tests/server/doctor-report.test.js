@@ -142,34 +142,46 @@ const makeStateDb = (openclawDir, rows, { table = true } = {}) => {
 };
 
 describe("unconfigured agent databases", () => {
-  it("names registered databases no configured agent owns, with their size on disk or as registered", () => {
+  it("names registered databases no configured agent owns, with their size on disk resolved against the state dir", () => {
     const openclawDir = path.join(makeDir(), ".openclaw");
-    const agentDb = (id) => path.join(openclawDir, "agents", id, "agent", "openclaw-agent.sqlite");
+    const relDb = (id) => path.join("agents", id, "agent", "openclaw-agent.sqlite");
+    const agentDb = (id) => path.join(openclawDir, relDb(id));
     fs.mkdirSync(path.dirname(agentDb("retired-a")), { recursive: true });
     fs.writeFileSync(agentDb("retired-a"), "a".repeat(3000));
     fs.writeFileSync(agentDb("retired-a") + "-wal", "w".repeat(500));
+    fs.mkdirSync(path.dirname(agentDb("retired-d")), { recursive: true });
+    fs.writeFileSync(agentDb("retired-d"), "d".repeat(25_000_000));
+    fs.mkdirSync(agentDb("retired-c"), { recursive: true });
     makeStateDb(openclawDir, [
-      { agentId: "main", path: agentDb("main"), sizeBytes: 5_200_000_000 },
+      { agentId: "main", path: relDb("main"), sizeBytes: 5_200_000_000 },
       { agentId: "ops", path: agentDb("ops"), sizeBytes: 10 },
-      { agentId: "retired-a", path: agentDb("retired-a"), sizeBytes: 1 },
-      { agentId: "retired-b", path: agentDb("retired-b"), sizeBytes: 1_200_000_000 },
-      { agentId: "retired-c", path: agentDb("retired-c"), sizeBytes: null },
+      { agentId: "retired-a", path: relDb("retired-a"), sizeBytes: 1 },
+      { agentId: "retired-b", path: relDb("retired-b"), sizeBytes: 1_200_000_000 },
+      { agentId: "retired-c", path: relDb("retired-c"), sizeBytes: null },
+      { agentId: "retired-d", path: agentDb("retired-d"), sizeBytes: 1 },
     ]);
     const config = { agents: { list: [{ id: "main" }, { id: "ops" }] } };
-
-    const registry = readUnconfiguredAgentDatabases({ openclawDir, config });
+    const cwd = process.cwd();
+    process.chdir(os.tmpdir());
+    let registry;
+    try {
+      registry = readUnconfiguredAgentDatabases({ openclawDir, config });
+    } finally {
+      process.chdir(cwd);
+    }
 
     expect(registry).toEqual({
       available: true,
       reason: null,
       databases: [
-        { agentId: "retired-a", path: agentDb("retired-a"), bytes: 3500 },
-        { agentId: "retired-b", path: agentDb("retired-b"), bytes: 1_200_000_000 },
-        { agentId: "retired-c", path: agentDb("retired-c"), bytes: null },
+        { agentId: "retired-a", path: relDb("retired-a"), bytes: 3500, missing: false },
+        { agentId: "retired-b", path: relDb("retired-b"), bytes: null, missing: true },
+        { agentId: "retired-c", path: relDb("retired-c"), bytes: null, missing: false },
+        { agentId: "retired-d", path: agentDb("retired-d"), bytes: 25_000_000, missing: false },
       ],
     });
     expect(formatUnconfiguredAgentDatabasesLine(registry)).toBe(
-      "[alphaclaw] 3 agent databases belong to no configured agent: retired-a (0.00 GB), retired-b (1.2 GB), retired-c (size unknown)." +
+      "[alphaclaw] 4 agent databases belong to no configured agent: retired-a (0.0 MB), retired-b (file missing), retired-c (size unknown), retired-d (0.03 GB)." +
         " OpenClaw logs \"database is not a configured target\" for these at gateway start and leaves them untouched;" +
         " doctor --fix still includes them in its recovery copy. Nothing was deleted.",
     );
@@ -212,13 +224,13 @@ describe("doctor facts after the gateway serves", () => {
     recordDoctorOutcome({ managedDir: box.managedDir, outcome: { status: "ok", source: "boot", at: 5_000, report: { totalMs: 9, captureBytes: null, captureManifest: box.manifestPath } } });
     const mergeBootReport = vi.fn();
     const log = logger();
-    const registry = { available: true, databases: [{ agentId: "retired-a", path: "/x", bytes: 7 }] };
+    const registry = { available: true, databases: [{ agentId: "retired-a", path: "/x", bytes: 7, missing: false }] };
 
     const facts = reportDoctorFactsAfterServing({
       ...box, processStartedAtMs: 1_000, readConfig: () => ({}), mergeBootReport, logger: log, readRegistry: () => registry,
     });
 
-    expect(facts).toEqual({ doctorRecoveryCopyBytes: 2000, unconfiguredAgentDatabases: [{ agentId: "retired-a", bytes: 7 }] });
+    expect(facts).toEqual({ doctorRecoveryCopyBytes: 2000, unconfiguredAgentDatabases: [{ agentId: "retired-a", bytes: 7, missing: false }] });
     expect(readMigrationRecord({ managedDir: box.managedDir }).lastOutcome.report.captureBytes).toBe(2000);
     expect(mergeBootReport).toHaveBeenCalledWith(facts);
     expect(log.log).toHaveBeenCalledWith("[alphaclaw] doctor --fix recovery copy kept: 0.00 GB");

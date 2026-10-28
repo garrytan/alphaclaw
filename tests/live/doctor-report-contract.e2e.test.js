@@ -73,5 +73,10 @@ describeLive("live: doctor --fix report contract", () => {
     }
     expect(columns).toEqual(expect.arrayContaining(["agent_id", "path", "size_bytes"]));
     expect(readUnconfiguredAgentDatabases({ openclawDir: stateDir, config: {} })).toEqual({ available: true, reason: null, databases: [] });
+    const [mainRow] = readUnconfiguredAgentDatabases({ openclawDir: stateDir, config: { agents: { ownership: "explicit", list: [{ id: "someone-else" }] } } }).databases;
+    expect(path.isAbsolute(mainRow.path)).toBe(false);
+    const mainFile = path.join(stateDir, mainRow.path);
+    const walBytes = fs.existsSync(mainFile + "-wal") ? fs.statSync(mainFile + "-wal").size : 0;
+    expect(mainRow).toMatchObject({ agentId: "main", missing: false, bytes: fs.statSync(mainFile).size + walBytes });
   }, 10 * 60 * 1000);
 });

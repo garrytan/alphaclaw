@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.149] - 2026-10-28
+
+The boot line that names agent databases belonging to no configured agent now reads each file's real size. OpenClaw 2026.10.8 registers those paths relative to its state directory, and v0.10.148 looked them up relative to AlphaClaw's working directory, so it never found a file and printed the registry's `size_bytes` instead: no WAL, and a stale size for a file that is gone (ALPH-50).
+
+### Fixed
+- `agent-database-registry.js` resolves each registered path against the state directory. A file that exists reports its size plus its `-wal`; a registered file that is gone is reported as `file missing` (Doctor's recovery copy lists it as missing and copies nothing), never with the registry's size. Sizes under 10 MB print in MB, so a small leftover no longer reads `0.00 GB`. The boot report's `unconfiguredAgentDatabases` entries gain `missing`.
+
+### Tests
+- `doctor-report.test.js`: relative registry paths read from another working directory (size with WAL, missing file, non-file, absolute path, MB and GB formatting).
+- Live tier `doctor-report-contract.e2e.test.js`: the pinned OpenClaw registers a relative path, and the reader's size equals the file plus its WAL.
+
 ## [0.10.148] - 2026-10-27
 
 Every `openclaw doctor --fix` run now says where its time went and what it changed, and a boot names the agent databases behind OpenClaw's "database is not a configured target" lines. On a production pin bump (OpenClaw 2026.10.7 → 2026.10.8, a 5.2 GB agent database) Doctor ran 632 s. About 240 s was believed to be OpenClaw's recovery copy, and nothing said where the other ~390 s went, or which four databases the gateway skipped at start (ALPH-50).
