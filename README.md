@@ -226,6 +226,42 @@ alphaclaw admin DELETE /api/agents/legacy-bot --confirm ABCD-EFGH
 ```
 
 **Honest framing (same convention as team mode).** This is not a hard security boundary against the agent. Since v0.9.63 the gateway child no longer inherits AlphaClaw's secrets (`SETUP_PASSWORD` and the internal credentials are withheld by the allowlist in `lib/server/gateway-env-policy.js`), but the agent still runs as AlphaClaw's own uid with `HOME` under the data root, so an unsandboxed exec can read `.env` and the state dir from disk. Agent Administration exists to keep secrets out of chat transcripts, attribute actions for audit, enable revocation, and add tiered guardrails and structured errors.
+## Deleted agents' data
+
+**Delete Agent** (Agents tab) asks the running OpenClaw gateway to delete the agent through OpenClaw's own `agents.delete` (with `deleteFiles: true`). OpenClaw removes the agent from `openclaw.json` with its channel bindings, cron jobs and exec approvals, drops its session rows and its entry in the agent database registry, and moves its database, transcripts and workspace to a Trash folder (`<ALPHACLAW_ROOT_DIR>/.Trash`, the gateway's home, on a Linux box). The gateway keeps serving the other agents and does not restart. AlphaClaw itself removes nothing under the state directory. While the gateway is down, Delete Agent is unavailable; it never falls back to deleting files itself.
+
+**Snapshot.** "Keep a snapshot" is on by default. Before anything is deleted, AlphaClaw saves the agent's chat history with OpenClaw's `openclaw backup sqlite create --agent <id>` (verified with `backup sqlite verify`) and copies its workspace. If the snapshot fails or would not fit on the disk, nothing is deleted. Each snapshot is a folder:
+
+```text
+<ALPHACLAW_ROOT_DIR>/archives/agents/<UTC date>-<agent id>-<6 hex>/   (mode 0700)
+  manifest.json            agent id, name, model, workspace and agentDir paths, binding and cron counts,
+                           sizes, versions, snapshot time, and OpenClaw's answer to the delete
+  database/<snapshot id>/  OpenClaw's SQLite snapshot (manifest.json + database.sqlite)
+  workspace/               the workspace copy (left out when another agent uses the same workspace)
+```
+
+A snapshot holds session content and can hold plugin or auth state, so treat it like the state directory. It is on the same disk (not a backup), outside the state directory and git sync, and never served by the Setup UI. Nothing prunes snapshots; the boot log counts them. Remove a folder you no longer need with `rm -rf`. `archives/agents/.operations/` records each delete so a restart in the middle of one is settled from OpenClaw's deletion record at the next boot.
+
+**Restoring is manual.** From a shell on the box (the `openclaw` wrapper AlphaClaw installs points at the right state directory), with the gateway running:
+
+```bash
+A=<ALPHACLAW_ROOT_DIR>/archives/agents/<snapshot folder>
+ID=<agent id>
+WS=<workspace path from manifest.json config.workspace>
+mkdir -p -m 700 <ALPHACLAW_ROOT_DIR>/.openclaw/agents/$ID/agent
+openclaw backup sqlite restore "$A"/database/*/ --target <ALPHACLAW_ROOT_DIR>/.openclaw/agents/$ID/agent/openclaw-agent.sqlite
+cp -a "$A/workspace" "$WS"
+openclaw gateway call agents.create --params "{\"name\":\"$ID\",\"workspace\":\"$WS\"}" --json
+```
+
+`agents.create` registers the restored database and brings the agent back with its sessions. Channel bindings, cron jobs, model and identity are not restored: `manifest.json` lists what the agent had, and you set them again in the Agents tab.
+
+**Reusing an id.** OpenClaw keeps a deleted agent's id reserved until its own agent creation claims it, so the Agents tab refuses to create a new agent under that id. Restore the agent as above, or create a fresh one under the id with the same `agents.create` call without restoring the database. Restoring an `openclaw.json` from before the delete (for example from git) brings the entry back without a usable database: its turns fail with "agent database is unavailable while agent <id> is deleted". Delete it again, or restore it as above.
+
+**Deletion not finished.** When OpenClaw deletes the agent but cannot finish cleaning up its files, the Agents tab shows **Finish deleting**, which sends the same `agents.delete` again without a new snapshot.
+
+**Leftovers from older versions.** Before Delete Agent went through OpenClaw, AlphaClaw removed the agent from `openclaw.json` and deleted its files itself, so OpenClaw kept a registry row for a database it could no longer find, and Doctor warns that the database "is not a configured target". The boot log names these rows ("left by agent deletes from before Delete Agent went through OpenClaw"). AlphaClaw does not remove them.
+
 ## Team Access (beta)
 
 The **Team** tab turns a single-password AlphaClaw into a multi-member workspace. It needs the OpenClaw 2026.8.1-beta line (on older builds the tab explains that it needs a newer OpenClaw).

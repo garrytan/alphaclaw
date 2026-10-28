@@ -6,8 +6,8 @@
 // any roster save made the next gateway start exit 78 and every CLI command
 // refuse; the hermetic suites cannot see that, only the pinned validator can.
 //
-// Drives AlphaClaw's own agents domain (create / set default / update /
-// delete) against a real temp OpenClaw dir and runs `openclaw config
+// Drives AlphaClaw's own agents domain (create / set default / update)
+// against a real temp OpenClaw dir and runs `openclaw config
 // validate --json` after every write, then replays the issue #126 loop: a
 // legacy roster migrated by the pinned `doctor --fix`, followed by an
 // AlphaClaw save.
@@ -69,7 +69,7 @@ const createBox = () => {
 
 describeLive("live: AlphaClaw's roster writes against the pinned validator", () => {
   it(
-    "create, set default, update and delete keep openclaw.json valid",
+    "create, set default and update keep openclaw.json valid (a delete is OpenClaw's own agents.delete: agent-delete.e2e)",
     async () => {
       const box = createBox();
       box.writeConfig({
@@ -98,9 +98,8 @@ describeLive("live: AlphaClaw's roster writes against the pinned validator", () 
       box.expectValid("updateAgent main");
 
       box.service.setDefaultAgent("main");
-      box.service.deleteAgent("ops");
-      box.expectValid("deleteAgent ops");
-      expect(Object.keys(box.readConfig().agents.entries)).toEqual(["main"]);
+      box.expectValid("setDefaultAgent main");
+      expect(Object.keys(box.readConfig().agents.entries)).toEqual(["main", "ops"]);
     },
     kTestTimeoutMs,
   );

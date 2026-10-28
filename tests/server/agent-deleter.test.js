@@ -484,6 +484,15 @@ describe("agent deleter (OpenClaw's agents.delete on the serving gateway)", () =
     expect(deleter.listDeletions().deletions).toEqual([expect.objectContaining({ agentId: "old", outcome: "cleanup_incomplete", opId: null })]);
   });
 
+  it("names the ids OpenClaw still holds a deletion record for, finished or not", async () => {
+    const box = makeBox();
+    box.exec("INSERT INTO agent_deletion_journal (agent_id, operation_id, cleanup_completed, delete_files) VALUES ('old', 'x', 1, 1)");
+    const { deleter } = makeDeleter(box);
+    expect(deleter.findDeletionRecord("old")).toMatchObject({ operationId: "x", complete: true });
+    expect(deleter.findDeletionRecord("ops")).toBeNull();
+    expect(deleter.findDeletionRecord("../x")).toBeNull();
+  });
+
   it("after a restart: settles a delete that was sent but never answered, from OpenClaw's facts, and tells the owner once", async () => {
     const box = makeBox();
     const cli = makeCli(box, { onDelete: () => new Promise(() => {}) });

@@ -88,6 +88,18 @@ describe("Delete Agent routes", () => {
     expect((await request(app).get("/api/agents/ghost/delete-preview")).status).toBe(404);
   });
 
+  it("creating an agent under an id OpenClaw still holds a deletion record for answers 409", async () => {
+    const createAgent = vi.fn(() => ({ id: "fresh" }));
+    const deleter = deleterMock({ findDeletionRecord: vi.fn((id) => (id === "ops" ? { operationId: "op", complete: true } : null)) });
+    const app = makeApp(deleter, { createAgent });
+    const reserved = await request(app).post("/api/agents").send({ id: "ops" });
+    expect(reserved.status).toBe(409);
+    expect(reserved.body).toMatchObject({ ok: false, code: "agent_id_reserved" });
+    expect(reserved.body.error).toMatch(/^"ops" belonged to a deleted agent, and OpenClaw keeps that id reserved\./);
+    expect(createAgent).not.toHaveBeenCalled();
+    expect((await request(app).post("/api/agents").send({ id: "fresh" })).status).toBe(201);
+  });
+
   it("an agent or binding write blocked by an in-flight delete answers 409", async () => {
     const agentsService = {
       updateAgent: vi.fn(() => {
