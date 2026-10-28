@@ -123,7 +123,7 @@ describe("server/agents/service coverage", () => {
     // OpenClaw 2026.10 refuses `default` markers and `agents.list` at
     // runtime (gateway exit 78); fleets carry ownership "explicit" and the
     // default agent is agents.defaults.systemAgent.agentId.
-    it("never persists default markers through create, set-default and delete (2026.10 roster)", () => {
+    it("never persists default markers through create and set-default (2026.10 roster)", () => {
       const { service, fsMock } = buildService({
         initialConfig: { agents: { entries: { main: { workspace: "/w/main" } } } },
       });
@@ -145,13 +145,10 @@ describe("server/agents/service coverage", () => {
       expect(markers()).toEqual([]);
       expect(written.agents.defaults.systemAgent).toEqual({ agentId: "ops" });
       expect(service.listAgents().find((agent) => agent.default).id).toBe("ops");
-      expect(() => service.deleteAgent("ops")).toThrow("Default agent cannot be deleted");
 
       service.setDefaultAgent("main");
-      service.deleteAgent("ops");
       written = fsMock.readConfig();
-      expect(Object.keys(written.agents.entries)).toEqual(["main"]);
-      expect(written.agents.ownership).toBeUndefined();
+      expect(written.agents.defaults.systemAgent).toEqual({ agentId: "main" });
       expect(markers()).toEqual([]);
     });
 
@@ -174,40 +171,6 @@ describe("server/agents/service coverage", () => {
       expect(Object.keys(written.agents.entries)).toEqual(["a", "b"]);
       expect(written.agents.defaults.systemAgent).toEqual({ agentId: "b" });
       expect(written.agents.ownership).toBe("explicit");
-    });
-
-    it("clears surface owners naming a deleted agent and refuses auth or session-store owners", () => {
-      const { service, fsMock } = buildService({
-        initialConfig: {
-          agents: {
-            ownership: "explicit",
-            defaults: {
-              systemAgent: { agentId: "main" },
-              heartbeat: { agentId: "ops", every: "30m" },
-            },
-            entries: { main: {}, ops: {}, auth: {} },
-          },
-          talk: { agentId: "ops" },
-        },
-      });
-      service.deleteAgent("ops");
-      const written = fsMock.readConfig();
-      expect(written.agents.defaults.heartbeat).toEqual({ every: "30m" });
-      expect(written.talk).toBeUndefined();
-      expect(written.agents.defaults.systemAgent).toEqual({ agentId: "main" });
-
-      const owners = buildService({
-        initialConfig: {
-          agents: {
-            ownership: "explicit",
-            defaults: { authInheritance: { agentId: "auth" } },
-            entries: { main: {}, auth: {} },
-          },
-        },
-      });
-      expect(() => owners.service.deleteAgent("auth")).toThrow(
-        'Agent "auth" owns agents.defaults.authInheritance and cannot be deleted',
-      );
     });
 
     it("reports empty workspace paths for blank workspace values", () => {

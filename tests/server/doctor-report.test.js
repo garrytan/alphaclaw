@@ -181,10 +181,33 @@ describe("unconfigured agent databases", () => {
       ],
     });
     expect(formatUnconfiguredAgentDatabasesLine(registry)).toBe(
-      "[alphaclaw] 4 agent databases belong to no configured agent: retired-a (0.0 MB), retired-b (file missing), retired-c (size unknown), retired-d (0.03 GB)." +
+      "[alphaclaw] 4 agent databases belong to no configured agent: retired-a (0.0 MB), retired-b (registry row only, files already removed), retired-c (size unknown), retired-d (0.03 GB)." +
+        " These were left by agent deletes from before Delete Agent went through OpenClaw." +
         " OpenClaw logs \"database is not a configured target\" for these at gateway start and leaves them untouched;" +
-        " doctor --fix still includes them in its recovery copy. Nothing was deleted.",
+        " doctor --fix still includes them in its recovery copy. Nothing was deleted (README: Deleted agents' data).",
     );
+  });
+
+  it("reports a deletion OpenClaw journaled but didn't finish separately, not as a leftover", () => {
+    const openclawDir = path.join(makeDir(), ".openclaw");
+    makeStateDb(openclawDir, [
+      { agentId: "main", path: "agents/main/agent/openclaw-agent.sqlite", sizeBytes: 1 },
+      { agentId: "half", path: "agents/half/agent/openclaw-agent.sqlite", sizeBytes: 1 },
+      { agentId: "old", path: "agents/old/agent/openclaw-agent.sqlite", sizeBytes: 1 },
+    ]);
+    const db = new DatabaseSync(path.join(openclawDir, "state", "openclaw.sqlite"));
+    db.exec("CREATE TABLE agent_deletion_journal (agent_id TEXT PRIMARY KEY, cleanup_completed INTEGER)");
+    db.prepare("INSERT INTO agent_deletion_journal VALUES (?, ?)").run("half", 0);
+    db.close();
+    const registry = readUnconfiguredAgentDatabases({ openclawDir, config: {} });
+    expect(registry.databases).toEqual([
+      { agentId: "half", path: "agents/half/agent/openclaw-agent.sqlite", bytes: null, missing: true, deletionPending: true },
+      { agentId: "old", path: "agents/old/agent/openclaw-agent.sqlite", bytes: null, missing: true },
+    ]);
+    expect(formatUnconfiguredAgentDatabasesLine(registry).split("\n")).toEqual([
+      expect.stringMatching(/^\[alphaclaw\] 1 agent database belongs to no configured agent: old \(registry row only, files already removed\)\. These were left/),
+      "[alphaclaw] Deletion not finished for half: OpenClaw started deleting it but couldn't clean up. Use Finish deleting on the Agents tab.",
+    ]);
   });
 
   it("an implicit main agent counts as configured, and none unconfigured is an empty list", () => {
@@ -235,6 +258,22 @@ describe("doctor facts after the gateway serves", () => {
     expect(mergeBootReport).toHaveBeenCalledWith(facts);
     expect(log.log).toHaveBeenCalledWith("[alphaclaw] doctor --fix recovery copy kept: 0.00 GB");
     expect(log.log).toHaveBeenCalledWith(formatUnconfiguredAgentDatabasesLine(registry));
+  });
+
+  it("counts the deleted-agent snapshots Delete Agent kept, from their manifests", () => {
+    const box = makeBox();
+    const archivesRoot = path.join(makeDir(), "archives", "agents");
+    for (const [name, db, ws] of [["2026-10-28-a-000001", 1_000_000, 500], ["2026-10-28-b-000002", 0, 20]]) {
+      fs.mkdirSync(path.join(archivesRoot, name), { recursive: true });
+      fs.writeFileSync(path.join(archivesRoot, name, "manifest.json"), JSON.stringify({ database: db ? { manifest: { artifact: { sizeBytes: db } } } : null, workspace: { bytes: ws } }));
+    }
+    fs.mkdirSync(path.join(archivesRoot, ".operations"), { recursive: true });
+    const log = logger();
+    const facts = reportDoctorFactsAfterServing({
+      ...box, archivesRoot, processStartedAtMs: 1_000, readConfig: () => ({}), logger: log, readRegistry: () => ({ available: false }),
+    });
+    expect(facts.agentArchives).toEqual({ count: 2, bytes: 1_000_520 });
+    expect(log.log).toHaveBeenCalledWith(`[alphaclaw] 2 deleted-agent snapshots kept in ${archivesRoot} (0.00 GB); nothing prunes them.`);
   });
 
   it("leaves an earlier boot's or another caller's run alone, and never throws", () => {

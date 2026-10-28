@@ -81,7 +81,6 @@ const createAgentsServiceMock = () => ({
   updateAgent: vi.fn((id, patch) => ({ id, ...patch })),
   addBinding: vi.fn((id, input) => ({ agentId: id, match: { ...input } })),
   removeBinding: vi.fn(() => ({ ok: true })),
-  deleteAgent: vi.fn(() => ({ ok: true })),
   setDefaultAgent: vi.fn((id) => ({ id, default: true })),
 });
 
@@ -589,34 +588,6 @@ describe("server/routes/agents", () => {
     expect(response.status).toBe(200);
     expect(response.body.ok).toBe(true);
     expect(agentsService.setDefaultAgent).toHaveBeenCalledWith("ops");
-  });
-
-  it("deletes an agent on DELETE /api/agents/:id", async () => {
-    const agentsService = createAgentsServiceMock();
-    const app = createApp(agentsService);
-
-    const response = await request(app).delete(
-      "/api/agents/ops?keepWorkspace=false",
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
-    expect(agentsService.deleteAgent).toHaveBeenCalledWith("ops", {
-      keepWorkspace: false,
-    });
-  });
-
-  it("returns 400 on DELETE /api/agents/:id for guard rails", async () => {
-    const agentsService = createAgentsServiceMock();
-    agentsService.deleteAgent.mockImplementation(() => {
-      throw new Error("The default main agent cannot be deleted");
-    });
-    const app = createApp(agentsService);
-
-    const response = await request(app).delete("/api/agents/main");
-
-    expect(response.status).toBe(400);
-    expect(response.body.ok).toBe(false);
   });
 
   it("lists bindings on GET /api/agents/:id/bindings", async () => {

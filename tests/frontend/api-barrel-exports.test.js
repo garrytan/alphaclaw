@@ -41,6 +41,8 @@ const kExpectedApiExports = [
   "expediteGatewayRestart",
   "fetchAgentAdminConfirms",
   "fetchAgentBindings",
+  "fetchAgentDeletePreview",
+  "fetchAgentDeletions",
   "fetchAgentSessions",
   "fetchAgentWorkspaceSize",
   "fetchAgents",
@@ -120,6 +122,7 @@ const kExpectedApiExports = [
   "fetchWebhookRequest",
   "fetchWebhookRequests",
   "fetchWebhooks",
+  "finishAgentDelete",
   "getTelegramTopics",
   "logout",
   "logoutClaudeCodeLocal",
@@ -199,7 +202,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(188);
+    expect(kExpectedApiExports).toHaveLength(191);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

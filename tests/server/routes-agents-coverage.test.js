@@ -20,7 +20,6 @@ const createAgentsServiceMock = () => ({
   updateAgent: vi.fn(() => ({ id: "main" })),
   addBinding: vi.fn(() => ({})),
   removeBinding: vi.fn(() => ({ ok: true })),
-  deleteAgent: vi.fn(() => ({ ok: true })),
   setDefaultAgent: vi.fn(() => ({ id: "ops", default: true })),
 });
 
@@ -376,19 +375,6 @@ describe("server/routes/agents coverage", () => {
       .delete("/api/agents/main/bindings")
       .send({});
     expect(invalid.status).toBe(400);
-  });
-
-  it("maps agent deletion failures to 404", async () => {
-    const agentsService = createAgentsServiceMock();
-    agentsService.deleteAgent.mockImplementation(() => {
-      throw new Error('Agent "ghost" not found');
-    });
-    const app = createApp(agentsService);
-
-    const res = await request(app).delete("/api/agents/ghost");
-
-    expect(res.status).toBe(404);
-    expect(res.body.ok).toBe(false);
   });
 
   it("maps default agent selection failures to 404 or 400", async () => {

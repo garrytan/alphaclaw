@@ -1013,6 +1013,49 @@ class FakeEventSource {
   }
 }
 
+describe("frontend/api agent delete wrappers", () => {
+  afterEach(() => {
+    delete global.fetch;
+    delete global.window;
+  });
+
+  const load = async (status, body) => {
+    global.fetch = vi.fn().mockResolvedValue(mockJsonResponse(status, body));
+    global.window = { location: { href: "http://localhost/" } };
+    return loadApiModule();
+  };
+
+  it("deleteAgent sends snapshot and resolves with any outcome, whatever the status", async () => {
+    let api = await load(200, { ok: true, outcome: "deleted", archive: { name: "a", bytes: 1 } });
+    await expect(api.deleteAgent("a1")).resolves.toMatchObject({ outcome: "deleted", status: 200 });
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/agents/a1?snapshot=true");
+    expect(global.fetch.mock.calls[0][1].method).toBe("DELETE");
+
+    api = await load(202, { ok: false, outcome: "unknown" });
+    await expect(api.deleteAgent("a1", { snapshot: false })).resolves.toMatchObject({ outcome: "unknown", status: 202 });
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/agents/a1?snapshot=false");
+
+    api = await load(502, { ok: false, outcome: "not_deleted", message: "OpenClaw didn't delete a1." });
+    await expect(api.deleteAgent("a1")).resolves.toMatchObject({ outcome: "not_deleted" });
+  });
+
+  it("deleteAgent throws a refusal made before the send, with its status and code", async () => {
+    const api = await load(409, { ok: false, code: "gateway_not_serving", error: "The gateway isn't running." });
+    await expect(api.deleteAgent("a1")).rejects.toMatchObject({ status: 409, code: "gateway_not_serving", message: "The gateway isn't running." });
+  });
+
+  it("finishAgentDelete posts to finish-delete; fetchAgentDeletePreview returns the preview", async () => {
+    let api = await load(200, { ok: true, outcome: "deleted" });
+    await expect(api.finishAgentDelete("a1")).resolves.toMatchObject({ outcome: "deleted" });
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/agents/a1/finish-delete");
+    expect(global.fetch.mock.calls[0][1].method).toBe("POST");
+
+    api = await load(200, { ok: true, preview: { agentId: "a1", state: "configured" } });
+    await expect(api.fetchAgentDeletePreview("a1")).resolves.toEqual({ agentId: "a1", state: "configured" });
+    expect(global.fetch.mock.calls[0][0]).toBe("/api/agents/a1/delete-preview");
+  });
+});
+
 describe("frontend/api endpoint wrapper coverage", () => {
   beforeEach(() => {
     global.fetch = vi.fn().mockResolvedValue(mockJsonResponse(200, { ok: true }));
@@ -1216,13 +1259,7 @@ describe("frontend/api endpoint wrapper coverage", () => {
     ["fetchAgentBindings", ["a1"], "/api/agents/a1/bindings", undefined],
     ["createAgent", [{ name: "Ops" }], "/api/agents", "POST"],
     ["updateAgent", ["a1", { name: "Ops" }], "/api/agents/a1", "PUT"],
-    ["deleteAgent", ["a1"], "/api/agents/a1?keepWorkspace=true", "DELETE"],
-    [
-      "deleteAgent",
-      ["a1", { keepWorkspace: false }],
-      "/api/agents/a1?keepWorkspace=false",
-      "DELETE",
-    ],
+    ["fetchAgentDeletions", [], "/api/agent-deletions", undefined],
     ["setDefaultAgent", ["a1"], "/api/agents/a1/default", "POST"],
     ["fetchCodexStatus", [], "/api/codex/status", undefined],
     ["disconnectCodex", [], "/api/codex/disconnect", "POST"],
