@@ -21,6 +21,14 @@ Particle's `particle-1` is available as `particle/particle-1` on every install. 
 - `owned-providers.test.js`, `model-check-owned-provider.test.js`, `model-policy.test.js` (real `openclaw.json`: the Models, agent and Particle saves leave every `modelPolicy` byte-identical, and the launch writer then adds them), the guard `model-policy-writes.guard.test.js` (only `requestGatewayLaunch` writes a `modelPolicy`), a `gateway.test.js` order test (policy write before the spawn, none beside an incumbent), restart marking in `routes-models.test.js`, and onboarding order in `routes-onboarding.test.js`. A registry-sync test covers every list, and a tripwire fails when the pinned OpenClaw ships its own `particle` plugin.
 - Live tier `particle-provider.e2e.test.js` (pinned OpenClaw 2026.10.8 and a stub of Particle's documented SSE wire format). The policy is added at launch and the model is listed only then. The request carries `particle-1`, the env key as bearer, `stream_options.include_usage`, `prompt_cache_key`, `max_completion_tokens: 131072`, tools and `reasoning_effort` low, then `none` after `/think off`. A streamed tool call loops to a final answer, and usage is priced from the block.
 - `particle-real-api.e2e.test.js`: opt-in and paid (`PARTICLE_LIVE_E2E=1` + a key). It runs a two-turn tool loop through a counting proxy: output capped at 4,096 tokens, at most 4 model requests, a 600 KB input budget, and the spend bound printed first. It was not run against the real API in this change.
+## [0.10.154] - 2026-10-29
+
+`npm test` uses every core on machines with 4 cores or fewer, instead of half. That covers the GitHub runner (4 vCPU) and Capy agent machines. The suite spends its time waiting on real git, filesystem and child-process work, so at 2 workers half of a 4-vCPU machine sat idle. On a dedicated 4-vCPU VM a full run went from 159-164 s (5 runs at 2 workers) to 91-95 s (10 runs at 4), with the same tests, statuses and assertion counts, and the same retried and flaky tests at both counts (ALPH-52).
+
+### Changed
+- `vitest.config.js`: `maxWorkers` is the core count on machines with 4 cores or fewer. Bigger machines are unchanged (half the cores, clamped 2..6, where the existing comment measured flakes at 8 and 16).
+- `tests/server/system-resources.test.js`: a new case walks the process tree through a pid with no `VmRSS` line and leaves out one with no `PPid` line. At 2 workers those two branches were reached only incidentally, by a booted server's background resource poll in a slower file, and at 4 workers they were not; the location-by-location coverage diff caught it.
+- `ALPHACLAW_TEST_MAX_WORKERS` overrides the worker count, for example on a machine several agents share (AGENTS.md).
 
 ## [0.10.153] - 2026-10-29
 

@@ -409,6 +409,19 @@ describe("server/system-resources", () => {
       expect(getProcessTreeUsage(100).rssBytes).toBe(100 * 1024 * 1024);
     });
 
+    it("walks through a pid with no VmRSS line and leaves out a pid with no PPid line", () => {
+      // 100 → 200 (a zombie: no VmRSS) → 300; 400 has no PPid line at all.
+      const files = procTree({
+        100: { ppid: 1, rssMb: 40 },
+        300: { ppid: 200, rssMb: 60 },
+      });
+      files["/proc/200/status"] = "Name:\tzombie\nPPid:\t100\n";
+      files["/proc/400/status"] = "Name:\torphan\nVmRSS:\t512000 kB\n";
+      createFileSystem(files);
+      spyProcDir([100, 200, 300, 400]);
+      expect(getProcessTreeUsage(100).rssBytes).toBe(100 * 1024 * 1024);
+    });
+
     it("does not loop forever on a cyclic PPid graph", () => {
       // Pathological: 100↔200 claim each other as parent.
       createFileSystem(
