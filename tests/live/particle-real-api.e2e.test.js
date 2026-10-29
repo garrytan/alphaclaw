@@ -128,7 +128,7 @@ describeReal(`LIVE (paid) Particle real API against the ${readDeclaredPin()} pin
       channels: {},
     }, null, 2));
     const presets = kOwnedProviderPresets.map((preset) => ({ ...preset, baseUrl: `http://127.0.0.1:${proxy.server.address().port}/v1` }));
-    expect(ensureOwnedProviders({ openclawDir: OPENCLAW_DIR, env: process.env, presets })).toMatchObject({ ok: true, changed: true });
+    expect(ensureOwnedProviders({ openclawDir: OPENCLAW_DIR, env: { PARTICLE_API_KEY: process.env.PARTICLE_API_KEY }, presets })).toMatchObject({ ok: true, changed: true });
     fs.writeFileSync(kOnboardingMarkerPath, JSON.stringify({ live: true }));
     process.env.OPENCLAW_GATEWAY_TOKEN = token;
     gateway = require("../../lib/server/gateway");
