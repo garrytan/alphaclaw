@@ -14,6 +14,18 @@ Versions follow this repository's `package.json` release counter.
 - `tests/server/system-resources.test.js`: a new case walks the process tree through a pid with no `VmRSS` line and leaves out one with no `PPid` line. At 2 workers those two branches were reached only incidentally, by a booted server's background resource poll in a slower file, and at 4 workers they were not; the location-by-location coverage diff caught it.
 - `ALPHACLAW_TEST_MAX_WORKERS` overrides the worker count, for example on a machine several agents share (AGENTS.md).
 
+## [0.10.153] - 2026-10-29
+
+The nightly live tier runs again instead of failing on the runner. Since v0.10.137 (#277), `gateway-stale-heartbeat-relaunch` failed every night on GitHub's Ubuntu 24.04 runner, because AppArmor there blocks unprivileged user namespaces (`unshare: write failed /proc/self/uid_map`) and the test fails rather than skips under `CI`. The tier had also grown to about 44 minutes and timed out at its 45-minute limit on Oct 27 (ALPH-52).
+
+### Changed
+- `live-e2e.yml`: the job runs on a pinned `ubuntu-24.04` image. A new step lifts `kernel.apparmor_restrict_unprivileged_userns`, then runs the heartbeat test's own `unshare` probe and fails with a message naming the runner image if namespaces are still unavailable.
+- The job limit is 75 minutes instead of 45, until the tier runs as parallel legs.
+- The tier writes a JSON report (every test with its status) to `tests/live/artifacts/report.json`, which is uploaded with the other artifacts on every outcome.
+
+### Tests
+- `tests/ci/workflow-contract.test.js` pins the image, the sysctl, the probe (it reads the flags from the test file, so the two can't drift apart) and the report.
+
 ## [0.10.152] - 2026-10-29
 
 Every `test (24)` run now records a test inventory, and PRs are checked against their base commit's inventory. A test or test file that disappears, or a passing test that becomes skipped, shows up as a coverage loss unless a commit in the PR declares it. The check is report-only for its first week. Main also gets a hermetic coverage report for every commit, and new scripts compare inventories and coverage location by location (ALPH-52).

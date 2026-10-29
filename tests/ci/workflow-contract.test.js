@@ -122,6 +122,19 @@ describe("ci/merge-gate workflow contract", () => {
     expect(readFileSync(path.join(__dirname, "..", "..", "vitest.config.js"), "utf8")).toContain('"tests/setup-inventory.js"');
   });
 
+  it("live-e2e lifts the runner's user-namespace restriction with the heartbeat test's own probe and keeps its JSON report", () => {
+    const live = wf("live-e2e.yml");
+    const probeFlags = readFileSync(
+      path.join(__dirname, "..", "live", "gateway-stale-heartbeat-relaunch.e2e.test.js"),
+      "utf8",
+    ).match(/kNamespaceFlags = \[([^\]]+)\]/)[1].match(/"([^"]+)"/g).map((flag) => flag.slice(1, -1));
+    expect(live).toMatch(/runs-on:\s*ubuntu-24\.04/);
+    expect(live).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
+    expect(live).toContain(`unshare ${probeFlags.join(" ")} true`);
+    expect(live).toMatch(/npm run test:live -- --reporter=default --reporter=json --outputFile=tests\/live\/artifacts\/report\.json/);
+    expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*path: tests\/live\/artifacts\//);
+  });
+
   it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {
     // soak.yml (v0.9.62) was deleted deliberately, not lost in a refactor.
     // This inverse pin keeps a well-meaning cleanup from resurrecting it and
