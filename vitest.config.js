@@ -13,6 +13,9 @@ const kLiveE2eEnabled = process.env.OPENCLAW_LIVE_E2E === "1";
 //   OPENCLAW_CONTAINER_E2E=1 → `npm run test:container` (~20-35 min)
 const kContainerE2eEnabled = process.env.OPENCLAW_CONTAINER_E2E === "1";
 
+const kCores = os.availableParallelism();
+const kMaxWorkersOverride = Number.parseInt(process.env.ALPHACLAW_TEST_MAX_WORKERS ?? "", 10) || 0;
+
 export default defineConfig({
   test: {
     globals: true,
@@ -45,8 +48,15 @@ export default defineConfig({
     // misalignment — the long-standing "1-3 rotating failures" class).
     // Measured on a 16-core M-series: capped at 6 the suite is 5x faster
     // (30s → 6s) and repeatedly green; at 8 the rotating flakes return; at 16
-    // (the default) they hit every other run.
-    maxWorkers: Math.max(2, Math.min(6, Math.floor(os.availableParallelism() / 2))),
+    // (the default) they hit every other run. Half the cores, clamped 2..6,
+    // on machines with more than 4 cores. On 4 cores or fewer (the GitHub
+    // runner, Capy agent machines) every core: the suite waits on real git,
+    // fs and child processes, so 2 workers left half the CPU idle (4-vCPU
+    // VM: 159-164 s at 2 workers, 91-95 s at 4, the same retried and flaky
+    // tests at both; ALPH-52).
+    // ALPHACLAW_TEST_MAX_WORKERS overrides it, e.g. on a machine several
+    // agents share.
+    maxWorkers: kMaxWorkersOverride || Math.max(2, Math.min(6, kCores <= 4 ? kCores : Math.floor(kCores / 2))),
     // Residual safety net for pure CPU-contention blips (a mock resolving one
     // tick late, a throttle-window test under a stalled event loop). A real
     // regression fails both attempts and stays red; a retried pass is marked

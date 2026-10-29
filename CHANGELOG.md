@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.154] - 2026-10-29
+
+`npm test` uses every core on machines with 4 cores or fewer, instead of half. That covers the GitHub runner (4 vCPU) and Capy agent machines. The suite spends its time waiting on real git, filesystem and child-process work, so at 2 workers half of a 4-vCPU machine sat idle. On a dedicated 4-vCPU VM a full run went from 159-164 s (5 runs at 2 workers) to 91-95 s (10 runs at 4), with the same tests, statuses and assertion counts, and the same retried and flaky tests at both counts (ALPH-52).
+
+### Changed
+- `vitest.config.js`: `maxWorkers` is the core count on machines with 4 cores or fewer. Bigger machines are unchanged (half the cores, clamped 2..6, where the existing comment measured flakes at 8 and 16).
+- `ALPHACLAW_TEST_MAX_WORKERS` overrides the worker count, for example on a machine several agents share (AGENTS.md).
+
 ## [0.10.152] - 2026-10-29
 
 Every `test (24)` run now records a test inventory, and PRs are checked against their base commit's inventory. A test or test file that disappears, or a passing test that becomes skipped, shows up as a coverage loss unless a commit in the PR declares it. The check is report-only for its first week. Main also gets a hermetic coverage report for every commit, and new scripts compare inventories and coverage location by location (ALPH-52).
