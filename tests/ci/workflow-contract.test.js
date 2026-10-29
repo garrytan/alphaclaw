@@ -89,6 +89,8 @@ describe("ci/merge-gate workflow contract", () => {
     expect(live).toContain(`unshare ${probeFlags.join(" ")} true`);
     expect(live).toMatch(/npm run test:live -- --reporter=default --reporter=json --outputFile=tests\/live\/artifacts\/report\.json/);
     expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*path: tests\/live\/artifacts\//);
+  });
+
   it("container-e2e runs one job per shard-map leg, each with exactly its own files, and covers every container test file once", () => {
     const c = wf("container-e2e.yml");
     const { legs } = JSON.parse(
