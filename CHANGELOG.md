@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.155] - 2026-10-29
+## [0.10.156] - 2026-10-29
 
 Particle's `particle-1` is available as `particle/particle-1` on every install. OpenClaw ships no Particle provider, so AlphaClaw writes and owns the `models.providers.particle` block while `PARTICLE_API_KEY` is set. Models picked in AlphaClaw are also added to a governing `modelPolicy.allow` list, but only at the next gateway launch: on OpenClaw 2026.10.8 a hot reload of any `modelPolicy` change revokes in-flight session work. A production box showed it: a background command's result never reached the agent (ALPH-53, ALPH-24).
 
@@ -20,7 +20,20 @@ Particle's `particle-1` is available as `particle/particle-1` on every install. 
 ### Tests
 - `owned-providers.test.js`, `model-check-owned-provider.test.js`, `model-policy.test.js` (real `openclaw.json`: the Models, agent and Particle saves leave every `modelPolicy` byte-identical, and the launch writer then adds them), the guard `model-policy-writes.guard.test.js` (only `requestGatewayLaunch` writes a `modelPolicy`), a `gateway.test.js` order test (policy write before the spawn, none beside an incumbent), restart marking in `routes-models.test.js`, and onboarding order in `routes-onboarding.test.js`. A registry-sync test covers every list, and a tripwire fails when the pinned OpenClaw ships its own `particle` plugin.
 - Live tier `particle-provider.e2e.test.js` (pinned OpenClaw 2026.10.8 and a stub of Particle's documented SSE wire format). The policy is added at launch and the model is listed only then. The request carries `particle-1`, the env key as bearer, `stream_options.include_usage`, `prompt_cache_key`, `max_completion_tokens: 131072`, tools and `reasoning_effort` low, then `none` after `/think off`. A streamed tool call loops to a final answer, and usage is priced from the block.
-- `particle-real-api.e2e.test.js`: opt-in and paid (`PARTICLE_LIVE_E2E=1` + a key). It runs a two-turn tool loop through a counting proxy: output capped at 4,096 tokens, at most 4 model requests, a 600 KB input budget, and the spend bound printed first. It was not run against the real API in this change.
+- `particle-real-api.e2e.test.js`: opt-in and paid (`PARTICLE_LIVE_E2E=1` + a key). It runs a two-turn tool loop through a counting proxy: output capped at 4,096 tokens, at most 4 model requests, a 600 KB input budget, and the spend bound printed first. It was not run against the real API in this change. Both live files sit in the nightly's `leg2` (`tests/live/shards.json`).
+
+## [0.10.155] - 2026-10-29
+
+The nightly live tier runs as three parallel legs instead of one serial job. The serial run took 57 minutes, with 3,020 s of tests; each leg now carries about 1,007 s of measured tests on its own runner (ALPH-52).
+
+### Changed
+- `.github/workflows/live-e2e.yml`: one `live (<leg>)` job per leg of `tests/live/shards.json`, each running only its own files with `--no-file-parallelism`. Only the browser leg installs Playwright. Every leg runs the user-namespace probe, writes `report-<leg>.json`, checks it ran exactly its files, warns when it ran 25 % over its budget, and uploads `live-artifacts-<leg>` on every outcome. `npm run test:live` stays serial and whole for local runs.
+- Each leg's job limit is the larger of its budget × 2.5 and its longest declared test timeout plus a 10-minute reserve: 42, 75 (gateway-restart-loop declares 65 minutes) and 42 minutes. Before its tests, a leg fails if a test now declares a timeout its limit cannot cover.
+
+### Added
+- `scripts/ci/balance-live-shards.mjs`: generates `tests/live/shards.json` from nightly JSON reports. It places the longest file first on the lightest leg, puts every Chromium file (direct or through `control-ui-live.js`) on the one browser leg, and reads declared test timeouts by collecting the files through vitest. `--check <leg>` is the per-leg timeout check.
+- `tests/ci/live-shards.test.js` (balancer fixtures) and a `workflow-contract` case: matrix legs, browser flag and limits equal the shard map, every live file sits in exactly one leg, and every browser file is on the browser leg.
+
 ## [0.10.154] - 2026-10-29
 
 `npm test` uses every core on machines with 4 cores or fewer, instead of half. That covers the GitHub runner (4 vCPU) and Capy agent machines. The suite spends its time waiting on real git, filesystem and child-process work, so at 2 workers half of a 4-vCPU machine sat idle. On a dedicated 4-vCPU VM a full run went from 159-164 s (5 runs at 2 workers) to 91-95 s (10 runs at 4), with the same tests, statuses and assertion counts, and the same retried and flaky tests at both counts (ALPH-52).

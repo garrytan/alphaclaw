@@ -122,7 +122,7 @@ describe("ci/merge-gate workflow contract", () => {
     expect(readFileSync(path.join(__dirname, "..", "..", "vitest.config.js"), "utf8")).toContain('"tests/setup-inventory.js"');
   });
 
-  it("live-e2e lifts the runner's user-namespace restriction with the heartbeat test's own probe and keeps its JSON report", () => {
+  it("live-e2e lifts the runner's user-namespace restriction with the heartbeat test's own probe on every leg", () => {
     const live = wf("live-e2e.yml");
     const probeFlags = readFileSync(
       path.join(__dirname, "..", "live", "gateway-stale-heartbeat-relaunch.e2e.test.js"),
@@ -131,8 +131,47 @@ describe("ci/merge-gate workflow contract", () => {
     expect(live).toMatch(/runs-on:\s*ubuntu-24\.04/);
     expect(live).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
     expect(live).toContain(`unshare ${probeFlags.join(" ")} true`);
-    expect(live).toMatch(/npm run test:live -- --reporter=default --reporter=json --outputFile=tests\/live\/artifacts\/report\.json/);
-    expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*path: tests\/live\/artifacts\//);
+    const probeStep = live.split("name: Allow unprivileged user namespaces")[1].split(/\n\s{6}- /)[0];
+    expect(probeStep).not.toMatch(/if:/);
+  });
+
+  it("live-e2e runs one job per shard-map leg with exactly its files, the map's browser flag and limits, and a JSON report per leg", async () => {
+    const live = wf("live-e2e.yml");
+    const { legs } = JSON.parse(readFileSync(path.join(__dirname, "..", "live", "shards.json"), "utf8"));
+    const { liveTestFiles, isBrowserFile, legTimeoutMinutes } = await import("../../scripts/ci/balance-live-shards.mjs");
+    const matrix = [...live.matchAll(/- leg: (\S+)\n\s+browser: (true|false)\n\s+timeout: (\d+)/g)].map(([, leg, browser, timeout]) => ({
+      leg,
+      browser: browser === "true",
+      timeout: Number(timeout),
+    }));
+    expect(matrix.map(({ leg }) => leg)).toEqual(Object.keys(legs));
+    for (const { leg, browser, timeout } of matrix) {
+      expect({ leg, browser, timeout }).toEqual({ leg, browser: legs[leg].browser, timeout: legs[leg].timeoutMinutes });
+      expect(timeout).toBeGreaterThanOrEqual(legTimeoutMinutes(legs[leg]));
+      expect(legs[leg].files.length).toBeGreaterThan(0);
+    }
+    expect(live).toMatch(/timeout-minutes: \$\{\{ matrix\.timeout \}\}/);
+    const sharded = Object.values(legs).flatMap((leg) => leg.files);
+    expect(new Set(sharded).size).toBe(sharded.length);
+    expect([...sharded].sort()).toEqual(liveTestFiles());
+    const browserLegs = Object.entries(legs).filter(([, leg]) => leg.browser).map(([name]) => name);
+    expect(browserLegs).toHaveLength(1);
+    const browserFiles = liveTestFiles().filter(isBrowserFile);
+    expect(browserFiles.length).toBeGreaterThan(0);
+    expect(browserFiles.filter((file) => !legs[browserLegs[0]].files.includes(file))).toEqual([]);
+    for (const step of ["name: Resolve pinned Playwright version", "uses: actions/cache@v4", "run: npx playwright install --with-deps chromium"]) {
+      const before = live.slice(0, live.indexOf(step)).split(/\n\s{6}- /).pop() + live.slice(live.indexOf(step)).split(/\n\s{6}- /)[0];
+      expect(before).toContain("if: matrix.browser");
+    }
+    expect(live).toMatch(/npx vitest run --no-file-parallelism \$LEG_FILES --reporter=default --reporter=json --outputFile="tests\/live\/artifacts\/report-\$LEG\.json"/);
+    expect(live).not.toMatch(/run:\s*npm run test:live/);
+    expect(live).toMatch(/OPENCLAW_LIVE_E2E: "1"/);
+    expect(live).toContain('run: node scripts/ci/balance-live-shards.mjs --check "$LEG"');
+    expect(live).toMatch(/fail-fast:\s*false/);
+    expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*name: live-artifacts-\$\{\{ matrix\.leg \}\}[\s\S]*path: tests\/live\/artifacts\//);
+    // Local runs stay serial and whole.
+    const pkg = JSON.parse(readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8"));
+    expect(pkg.scripts["test:live"]).toBe("OPENCLAW_LIVE_E2E=1 vitest run tests/live --no-file-parallelism");
   });
 
   it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {
