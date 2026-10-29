@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.152] - 2026-10-29
+## [0.10.153] - 2026-10-29
 
 The nightly live tier runs again instead of failing on the runner. Since v0.10.137 (#277), `gateway-stale-heartbeat-relaunch` failed every night on GitHub's Ubuntu 24.04 runner, because AppArmor there blocks unprivileged user namespaces (`unshare: write failed /proc/self/uid_map`) and the test fails rather than skips under `CI`. The tier had also grown to about 44 minutes and timed out at its 45-minute limit on Oct 27 (ALPH-52).
 
@@ -16,6 +16,26 @@ The nightly live tier runs again instead of failing on the runner. Since v0.10.1
 
 ### Tests
 - `tests/ci/workflow-contract.test.js` pins the image, the sysctl, the probe (it reads the flags from the test file, so the two can't drift apart) and the report.
+
+## [0.10.152] - 2026-10-29
+
+Every `test (24)` run now records a test inventory, and PRs are checked against their base commit's inventory. A test or test file that disappears, or a passing test that becomes skipped, shows up as a coverage loss unless a commit in the PR declares it. The check is report-only for its first week. Main also gets a hermetic coverage report for every commit, and new scripts compare inventories and coverage location by location (ALPH-52).
+
+### Added
+- `tests/setup-inventory.js` (in `setupFiles`) records each test's assertion count and retry count into its `meta`, which vitest's JSON reporter already writes out.
+- `scripts/ci/test-inventory.mjs` turns one or more JSON reports (the legs of a tier) into an inventory keyed by file, full name and occurrence, with status, assertions and retries. It refuses an empty report or a file that ran in two legs, and it keys a name that embeds the clock on a `<timestamp>` placeholder.
+- `scripts/ci/inventory-diff.mjs` compares two inventories as multisets. These count as losses: a removed test or file, a passing test that is now skipped, todo or failed, and a test that ran twice; with `--strict` also fewer assertions, with `--no-retries` any retry. Declarations are `Removed-test-file:`, `Removed-test:` and `Skipped-test:` lines anywhere in a commit message, so they survive a squash, and a failure prints the exact lines to add.
+- `scripts/ci/coverage-diff.mjs` compares two `coverage-final.json` files. For every unchanged source file, each statement, branch arm and function covered before must still be covered after; locations that differ between two identical runs can be passed as a noise list (`--noise-from`).
+- `scripts/ci/inventory-guard.sh` gets the inventory of the PR's exact base commit: it waits up to 6 minutes for that commit's push-run artifact, or regenerates it from an isolated checkout of the same commit. It runs the base commit's copy of the diff and builder whenever the base has them.
+
+### Changed
+- `ci.yml`: `npm test` also writes a JSON report. The Node 24 lane builds the inventory, uploads it on pushes to main (`test-inventory-node24`) and runs the guard on PRs (`INVENTORY_GUARD: report`). A new `coverage` job runs on pushes to main and uploads `coverage-node24`. The workflow token gains `actions: read` to download artifacts.
+- CLAUDE.md, Merge unification safety: removing or skipping a test is declared, never silent.
+
+### Tests
+- `tests/ci/inventory-tools.test.js` uses fixtures for: pass to skip, removed test and file, squashed declarations, a duplicated leg, fewer assertions, retries, the CLI's exit codes, a swapped branch arm at equal percentages, noise, and a changed file.
+- `tests/ci/test-lanes.test.js` checks that every test-shaped file under `tests/` runs in exactly one lane; the browser smokes are allowlisted as manual.
+- The contract test pins the inventory steps, the guard, the artifact and the coverage job.
 
 ## [0.10.151] - 2026-10-29
 

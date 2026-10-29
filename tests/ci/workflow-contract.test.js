@@ -78,19 +78,6 @@ describe("ci/merge-gate workflow contract", () => {
     expect(c).not.toMatch(/pattern='[^']*package\.json/);
   });
 
-  it("live-e2e lifts the runner's user-namespace restriction with the heartbeat test's own probe and keeps its JSON report", () => {
-    const live = wf("live-e2e.yml");
-    const probeFlags = readFileSync(
-      path.join(__dirname, "..", "live", "gateway-stale-heartbeat-relaunch.e2e.test.js"),
-      "utf8",
-    ).match(/kNamespaceFlags = \[([^\]]+)\]/)[1].match(/"([^"]+)"/g).map((flag) => flag.slice(1, -1));
-    expect(live).toMatch(/runs-on:\s*ubuntu-24\.04/);
-    expect(live).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
-    expect(live).toContain(`unshare ${probeFlags.join(" ")} true`);
-    expect(live).toMatch(/npm run test:live -- --reporter=default --reporter=json --outputFile=tests\/live\/artifacts\/report\.json/);
-    expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*path: tests\/live\/artifacts\//);
-  });
-
   it("container-e2e runs one job per shard-map leg, each with exactly its own files, and covers every container test file once", () => {
     const c = wf("container-e2e.yml");
     const { legs } = JSON.parse(
@@ -117,6 +104,35 @@ describe("ci/merge-gate workflow contract", () => {
     expect(c).toContain("vitest\\.config\\.js");
     expect(c).toContain("\\.github/workflows/container-e2e\\.yml");
     expect(c).toMatch(/grep -qE '\^\[-\+\]\\s\*"test:container":'/);
+  });
+
+  it("ci.yml records a test inventory on every run, publishes main's, guards PRs against the exact base, and covers main", () => {
+    const ci = wf("ci.yml");
+    expect(ci).toMatch(/^permissions:\n\s+contents: read\n(\s+#.*\n)*\s+actions: read/m);
+    expect(ci).toContain("npm test -- --reporter=default --reporter=json --outputFile=test-reports/vitest.json");
+    expect(ci).toContain("node scripts/ci/test-inventory.mjs --out test-reports/inventory.json test-reports/vitest.json");
+    expect(ci).toMatch(/if: always\(\) && github\.event_name == 'push' && matrix\.node-version == 24[^\n]*\n\s+with:\n\s+name: test-inventory-node24/);
+    const guard = ci.split("name: Test inventory guard")[1].split(/\n\s{2}\w/)[0];
+    expect(guard).toMatch(/if: github\.event_name == 'pull_request' && matrix\.node-version == 24/);
+    expect(guard).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
+    expect(guard).toMatch(/INVENTORY_GUARD: (report|enforce)/);
+    expect(guard).toContain("run: bash scripts/ci/inventory-guard.sh");
+    expect(ci).toMatch(/^\s{2}coverage:\n\s+if: github\.event_name == 'push'/m);
+    expect(ci).toContain("--coverage.reportOnFailure=true --coverage.reporter=json");
+    expect(readFileSync(path.join(__dirname, "..", "..", "vitest.config.js"), "utf8")).toContain('"tests/setup-inventory.js"');
+  });
+
+  it("live-e2e lifts the runner's user-namespace restriction with the heartbeat test's own probe and keeps its JSON report", () => {
+    const live = wf("live-e2e.yml");
+    const probeFlags = readFileSync(
+      path.join(__dirname, "..", "live", "gateway-stale-heartbeat-relaunch.e2e.test.js"),
+      "utf8",
+    ).match(/kNamespaceFlags = \[([^\]]+)\]/)[1].match(/"([^"]+)"/g).map((flag) => flag.slice(1, -1));
+    expect(live).toMatch(/runs-on:\s*ubuntu-24\.04/);
+    expect(live).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
+    expect(live).toContain(`unshare ${probeFlags.join(" ")} true`);
+    expect(live).toMatch(/npm run test:live -- --reporter=default --reporter=json --outputFile=tests\/live\/artifacts\/report\.json/);
+    expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*path: tests\/live\/artifacts\//);
   });
 
   it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {

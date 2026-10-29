@@ -16,3 +16,6 @@ tests/live/artifacts/
 
 # QA working artifacts (reports/screenshots) stay local
 .gstack/
+
+# CI test inventory (scripts/ci/test-inventory.mjs)
+test-reports/
