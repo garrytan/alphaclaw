@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.151] - 2026-10-29
+
+The container gate runs its four test files on three runners at once instead of one after another, so a PR's required checks wait for the slowest leg (boot durability, about 6–7 minutes with its image build) instead of all four files (median 12.5 minutes over the last 25 PR runs) (ALPH-52).
+
+### Changed
+- `container-e2e.yml`: the heavy job is a matrix over the legs in `tests/container/shards.json` (`durability`, `self-upgrade`, `boot-progress` with the snapshot preflight). Each leg calls vitest with its own files only, writes a JSON report, checks that the report holds exactly its files, and uploads its artifacts on every outcome (`container-e2e-artifacts-<leg>`). The required `gate` check is unchanged and fails when any leg fails or is cancelled.
+- The path filter also runs the heavy job for edits to `container-e2e.yml`, `vitest.config.js` and the `test:container` script, which can change what the tier runs.
+- `npm run test:container` still runs the whole tier serially for local runs.
+
+### Tests
+- `tests/ci/workflow-contract.test.js` checks that the matrix legs equal the shard map's legs and that every `tests/container/*.test.js` file sits in exactly one non-empty leg. It also pins the leg-only vitest call, the per-leg artifacts and the new filter entries.
+
 ## [0.10.150] - 2026-10-28
 
 Delete Agent now deletes through OpenClaw's own `agents.delete` on the serving gateway, and can keep a snapshot of the agent first. Until now AlphaClaw removed the agent from `openclaw.json` and deleted its files itself: OpenClaw kept a registry row for a database it could no longer find (Doctor warned "not a configured target" on every run afterwards), and the files went away under a gateway that might still have them open (ALPH-51).

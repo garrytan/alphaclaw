@@ -58,7 +58,7 @@ jobs:
           # every routes/* module load, so PRs changing any of them run it.
           # The journey waits on login.html and signs in through the auth
           # API, so login.html is part of the filter too (fix wave F173).
-          pattern='^(lib/server/openclaw-|lib/server/boot-|lib/server/server-pidfile\.js|lib/engines-range\.js|lib/node-runtime\.js|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/diagnose/|lib/server\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/login\.html)'
+          pattern='^(lib/server/openclaw-|lib/server/boot-|lib/server/server-pidfile\.js|lib/engines-range\.js|lib/node-runtime\.js|lib/server/gateway|lib/server/watchdog|lib/server/doctor|lib/server/routes/|lib/server/startup\.js|lib/server/diagnose/|lib/server\.js|bin/alphaclaw\.js|Dockerfile|tests/container/|lib/boot-placeholder|lib/public/login\.html|vitest\.config\.js|\.github/workflows/container-e2e\.yml)'
           if echo "$changed" | grep -qE "$pattern"; then
             echo "run_heavy=true" >> "$GITHUB_OUTPUT"
             echo "boot/gateway/container surface touched → heavy job runs"
@@ -68,6 +68,10 @@ jobs:
           elif git diff "origin/${BASE_REF}...HEAD" -- package.json | grep -qE '^[-+]\s*"openclaw":'; then
             echo "run_heavy=true" >> "$GITHUB_OUTPUT"
             echo "openclaw pin changed in package.json → heavy job runs"
+          # Same for the script that selects the tier.
+          elif git diff "origin/${BASE_REF}...HEAD" -- package.json | grep -qE '^[-+]\s*"test:container":'; then
+            echo "run_heavy=true" >> "$GITHUB_OUTPUT"
+            echo "test:container script changed in package.json → heavy job runs"
           else
             echo "run_heavy=false" >> "$GITHUB_OUTPUT"
             echo "no matching paths → heavy job skipped (gate reports success)"
@@ -77,11 +81,18 @@ jobs:
     needs: filter
     if: needs.filter.outputs.run_heavy == 'true'
     runs-on: ubuntu-latest
-    # Budget: image build (~5 min) + the boot-durability journey (fresh boot,
-    # two docker restarts, the seeded-volume boot) + the immutable old-image
-    # → candidate shared-volume journey (two image builds, up to 60 min); the
-    # job limit must exceed the tests' own worst case so vitest reports a
-    # timeout instead of the runner killing the process.
+    # One job per leg of tests/container/shards.json, each on its own runner,
+    # so the gate waits for the slowest leg instead of the sum of all four
+    # files (median 752 s serially). `gate` aggregates the matrix: any failed
+    # or cancelled leg fails it.
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [durability, self-upgrade, boot-progress]
+    # Budget: image build (~5 min) + the leg's journey (the self-upgrade leg
+    # builds two images and allows up to 60 min); the job limit must exceed
+    # the tests' own worst case so vitest reports a timeout instead of the
+    # runner killing the process.
     timeout-minutes: 110
     steps:
       - uses: actions/checkout@v4
@@ -98,16 +109,52 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run test:container
+      # The leg's files come from the shard map, never from a ${{ }}
+      # expression inside a script. Vitest is called with those files only:
+      # `npm run test:container -- <files>` would keep the script's own
+      # tests/container argument and run every file in every leg.
+      - name: Resolve the leg's test files
+        id: leg
         env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          set -euo pipefail
+          files=$(node -e 'const leg = require("./tests/container/shards.json").legs[process.env.LEG]; if (!leg || !leg.files.length) { console.error("no files for leg " + process.env.LEG); process.exit(1); } console.log(leg.files.join(" "));')
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+
+      - name: Run the leg
+        env:
+          OPENCLAW_CONTAINER_E2E: "1"
+          LEG: ${{ matrix.leg }}
+          LEG_FILES: ${{ steps.leg.outputs.files }}
           # Authenticated GitHub API calls (AlphaClaw release notes) — the
           # anonymous quota is shared per runner IP and flakes.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          npx vitest run --no-file-parallelism $LEG_FILES --reporter=default --reporter=json --outputFile="tests/container/artifacts/report-$LEG.json"
+
+      # The report must hold exactly the leg's files: a selection that ran
+      # more (or fewer) files fails here, not silently.
+      - name: Check the leg ran exactly its files
+        env:
+          LEG: ${{ matrix.leg }}
+          LEG_FILES: ${{ steps.leg.outputs.files }}
+        run: |
+          node -e '
+            const path = require("path");
+            const report = require(path.resolve("tests/container/artifacts/report-" + process.env.LEG + ".json"));
+            const ran = report.testResults.map((r) => path.relative(process.cwd(), r.name)).sort();
+            const want = process.env.LEG_FILES.split(" ").sort();
+            if (JSON.stringify(ran) !== JSON.stringify(want)) { console.error("leg ran", ran, "expected", want); process.exit(1); }
+            console.log("leg " + process.env.LEG + ": " + ran.length + " files, " + report.numTotalTests + " tests");
+          '
 
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
-          name: container-e2e-artifacts
+          name: container-e2e-artifacts-${{ matrix.leg }}
           path: tests/container/artifacts/
           if-no-files-found: ignore
 

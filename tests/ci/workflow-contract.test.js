@@ -1,4 +1,4 @@
-const { readFileSync } = require("node:fs");
+const { readFileSync, readdirSync } = require("node:fs");
 const path = require("node:path");
 
 // Structural guards over the merge-gate CI (which cannot be executed in the
@@ -76,6 +76,34 @@ describe("ci/merge-gate workflow contract", () => {
     // the bare `package.json` path, which every version bump touches.
     expect(c).toMatch(/git diff .*-- package\.json \| grep -qE '\^\[-\+\]\\s\*"openclaw":'/);
     expect(c).not.toMatch(/pattern='[^']*package\.json/);
+  });
+
+  it("container-e2e runs one job per shard-map leg, each with exactly its own files, and covers every container test file once", () => {
+    const c = wf("container-e2e.yml");
+    const { legs } = JSON.parse(
+      readFileSync(path.join(__dirname, "..", "container", "shards.json"), "utf8"),
+    );
+    const matrixLegs = c.match(/leg:\s*\[([^\]]+)\]/)[1].split(",").map((leg) => leg.trim());
+    expect(matrixLegs.sort()).toEqual(Object.keys(legs).sort());
+    const sharded = Object.values(legs).flatMap((leg) => leg.files);
+    expect(Object.values(legs).every((leg) => leg.files.length > 0)).toBe(true);
+    expect(new Set(sharded).size).toBe(sharded.length);
+    const containerFiles = readdirSync(path.join(__dirname, "..", "container"))
+      .filter((name) => name.endsWith(".test.js"))
+      .map((name) => `tests/container/${name}`);
+    expect(sharded.sort()).toEqual(containerFiles.sort());
+    // Vitest gets the leg's files only: the test:container script's own
+    // tests/container argument would select every file in every leg.
+    expect(c).toMatch(/npx vitest run --no-file-parallelism \$LEG_FILES/);
+    expect(c).not.toMatch(/run:\s*npm run test:container/);
+    expect(c).toMatch(/OPENCLAW_CONTAINER_E2E: "1"/);
+    expect(c).toMatch(/fail-fast:\s*false/);
+    expect(c).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*name: container-e2e-artifacts-\$\{\{ matrix\.leg \}\}/);
+    expect(c).toMatch(/gate:[\s\S]*needs: \[filter, container-e2e\]/);
+    // Edits that change what the tier runs also run it.
+    expect(c).toContain("vitest\\.config\\.js");
+    expect(c).toContain("\\.github/workflows/container-e2e\\.yml");
+    expect(c).toMatch(/grep -qE '\^\[-\+\]\\s\*"test:container":'/);
   });
 
   it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {
