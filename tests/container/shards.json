@@ -1,0 +1,21 @@
+{
+  "$comment": "Container E2E legs: container-e2e.yml runs one job per leg, each on its own runner. Every tests/container/*.test.js file sits in exactly one leg (tests/ci/workflow-contract.test.js). Legs are balanced on measured CI times; boot-durability (about 250 s of tests plus a cold image build) is the long pole.",
+  "legs": {
+    "durability": {
+      "files": [
+        "tests/container/openclaw-container-boot-durability.e2e.test.js"
+      ]
+    },
+    "self-upgrade": {
+      "files": [
+        "tests/container/alphaclaw-container-self-upgrade.e2e.test.js"
+      ]
+    },
+    "boot-progress": {
+      "files": [
+        "tests/container/boot-progress.e2e.test.js",
+        "tests/container/openclaw-container-snapshot-preflight.e2e.test.js"
+      ]
+    }
+  }
+}
