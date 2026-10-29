@@ -11,6 +11,7 @@ Versions follow this repository's `package.json` release counter.
 
 ### Changed
 - `vitest.config.js`: `maxWorkers` is the core count on machines with 4 cores or fewer. Bigger machines are unchanged (half the cores, clamped 2..6, where the existing comment measured flakes at 8 and 16).
+- `tests/server/system-resources.test.js`: a new case walks the process tree through a pid with no `VmRSS` line and leaves out one with no `PPid` line. At 2 workers those two branches were reached only incidentally, by a booted server's background resource poll in a slower file, and at 4 workers they were not; the location-by-location coverage diff caught it.
 - `ALPHACLAW_TEST_MAX_WORKERS` overrides the worker count, for example on a machine several agents share (AGENTS.md).
 
 ## [0.10.152] - 2026-10-29
