@@ -141,9 +141,38 @@ the container E2E runs against an image built from it (docker required).
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
 | **Watchdog**  | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, gateway memory trend + leak-detection settings, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
-| **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram) and model selection                 |
+| **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Particle, Mistral, Voyage, Groq, Deepgram) and model selection       |
 | **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
 | **Webhooks**  | Webhook endpoints, transform modules, request history, payload inspection, OAuth callbacks, Gmail watch delivery flows   |
+
+## Particle (particle-1)
+
+[Particle](https://particle.ai)'s `particle-1` is available as `particle/particle-1` on every install. OpenClaw ships no Particle provider, so AlphaClaw configures it: set `PARTICLE_API_KEY` (Models tab, onboarding, Envars, or the deployment env; keys start with `pai-` and come from platform.particle.ai) and AlphaClaw writes this block into `openclaw.json` at boot, onboarding and every save that changes the key:
+
+```json
+"models": { "providers": { "particle": {
+  "baseUrl": "https://api.particle.ai/v1",
+  "api": "openai-completions",
+  "apiKey": "${PARTICLE_API_KEY}",
+  "models": [{
+    "id": "particle-1", "name": "Particle-1", "reasoning": true, "input": ["text", "image"],
+    "contextWindow": 1048576, "maxTokens": 131072,
+    "cost": { "input": 0.25, "output": 1, "cacheRead": 0.03, "cacheWrite": 0 },
+    "compat": {
+      "supportsTools": true, "supportsUsageInStreaming": true, "supportsPromptCacheKey": true,
+      "supportedReasoningEfforts": ["none", "low", "high", "max"],
+      "reasoningEffortMap": { "off": "none" }
+    }
+  }]
+} } }
+```
+
+- **The key never enters the file.** The block refers to the env var, which the gateway reads from its own environment, so setting or replacing the key needs a gateway restart (the restart banner says so). A key that is unset, blank or `placeholder` writes nothing, and AlphaClaw never removes the block.
+- **AlphaClaw owns only what it writes** (`baseUrl`, `api`, `apiKey` and the `particle-1` row). Keys you add (a `timeoutSeconds`, more model rows) are kept. Change an owned key and the block becomes yours: AlphaClaw stops updating it and **Check models** says so, and names the host when `baseUrl` no longer points at `api.particle.ai`, because that host receives the key.
+- **Thinking levels.** OpenClaw sends `reasoning_effort`: `/think off` is `none`, the default and `minimal`/`low`/`medium` are `low`, `high` is `high`, `max` is `max`. Particle has no `adaptive`.
+- **No context cap.** OpenClaw compacts against the full 1M window. Particle caches repeated prompt prefixes (billed at $0.03/M), though a hit is not guaranteed.
+- **Check models** probes Particle with thinking off and a 45 s timeout (Particle queues requests under load). An empty balance (402) is reported as a billing problem, 503/504 as a provider outage, and a probe that times out while the model list answers as a busy queue. Particle lists the model as `particle-ai/particle-1`, which the check counts as `particle-1`.
+- **Model policy.** On a box whose `openclaw.json` has `agents.defaults.modelPolicy.allow` (or an agent's own list), OpenClaw refuses a model that list does not name, even one in the Models tab. AlphaClaw adds the models you pick to the list that governs them, but only at the next gateway launch: on OpenClaw 2026.10.8 changing `modelPolicy` while the gateway runs interrupts running work (a background command's result never reaches the agent). Until the restart, the save says which models wait for it and the restart banner shows **Model policy update waits for a restart**.
 
 ## Open Claude Code Launcher
 
@@ -479,6 +508,7 @@ A platform SIGTERM starts one graceful exit with a hard deadline of `ALPHACLAW_S
 | `GITHUB_TOKEN`                    | Yes      | GitHub PAT for workspace repo |
 | `GITHUB_WORKSPACE_REPO`           | Yes      | GitHub repo for workspace sync (e.g. `owner/repo`) |
 | `ALPHACLAW_TOPIC_DISCOVERY`       | Optional | Kill switch for Telegram topic discovery (the 15-minute sweep that learns forum topics from agent replies, plus label-path upserts and name enrichment). On by default; `false`/`0`/`off`/`no`/`disabled` turns it off |
+| `PARTICLE_API_KEY`                | Optional | Particle API key (`pai-…`); AlphaClaw configures `particle/particle-1` while it is set (see [Particle](#particle-particle-1)) |
 | `TELEGRAM_BOT_TOKEN`              | Optional | Telegram bot token                                 |
 | `DISCORD_BOT_TOKEN`               | Optional | Discord bot token                                  |
 | `SLACK_BOT_TOKEN`                 | Optional | Slack bot token (Socket Mode)                      |

@@ -322,7 +322,8 @@ describe("server/auth-profiles", () => {
     expect(config.gateway.port).toBe(18789);
   });
 
-  it("adds a new primary to OpenClaw's model allowlist so it is not swapped for an allowed model", () => {
+  it("leaves a new primary's modelPolicy.allow entry to the next launch, never the save", () => {
+    const { findModelPolicyGaps, applyModelPolicyGaps } = require("../../lib/server/model-policy");
     const configPath = path.join(tmpDir, ".openclaw", "openclaw.json");
     const config = readJson("openclaw.json");
     config.meta = { migrations: { modelPolicyAllowlist: true } };
@@ -333,7 +334,13 @@ describe("server/auth-profiles", () => {
       primary: "openai/gpt-6-astra",
       configuredModels: { "openai/gpt-6-astra": {}, "anthropic/claude-opus-4-6": {} },
     });
-    expect(readJson("openclaw.json").agents.defaults.modelPolicy.allow).toEqual([
+    const saved = readJson("openclaw.json");
+    expect(saved.agents.defaults.modelPolicy.allow).toEqual(["anthropic/claude-opus-4-6"]);
+    expect(findModelPolicyGaps(saved)).toEqual([{ agentId: null, ref: "openai/gpt-6-astra" }]);
+
+    applyModelPolicyGaps(saved);
+    fs.writeFileSync(configPath, JSON.stringify(saved, null, 2));
+    expect(saved.agents.defaults.modelPolicy.allow).toEqual([
       "anthropic/claude-opus-4-6",
       "openai/gpt-6-astra",
     ]);
@@ -343,6 +350,7 @@ describe("server/auth-profiles", () => {
       "anthropic/claude-opus-4-6",
       "openai/gpt-6-astra",
     ]);
+    expect(findModelPolicyGaps(readJson("openclaw.json"))).toEqual([]);
   });
 
   it("leaves an empty allowlist, a provider wildcard and migrated models maps alone", () => {

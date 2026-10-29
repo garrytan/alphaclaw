@@ -584,6 +584,30 @@ describe("server/routes/models auth-store reads and writes", () => {
     expect(available.body.unavailable).toBeUndefined();
   });
 
+  it("marks a gateway restart when a save sets or replaces an AlphaClaw-owned provider key, and only then", async () => {
+    const deps = createModelDeps();
+    deps.authProfiles.getEnvVarForApiKeyProvider.mockImplementation((provider) =>
+      ({ particle: "PARTICLE_API_KEY", openai: "OPENAI_API_KEY" })[provider] || "",
+    );
+    deps.restartRequiredState = { markRequired: vi.fn(), hasReason: vi.fn(() => false) };
+    const app = createApp(deps);
+
+    const openai = await request(app).put("/api/models/auth/openai:default").send({ type: "api_key", provider: "openai", key: "sk-routes-1" });
+    expect(openai.status).toBe(200);
+    expect(deps.restartRequiredState.markRequired).not.toHaveBeenCalledWith("env_vars_changed");
+
+    const particle = await request(app).put("/api/models/auth/particle:default").send({ type: "api_key", provider: "particle", key: "pai-routes-1" });
+    expect(particle.status).toBe(200);
+    expect(deps.writeEnvFile).toHaveBeenLastCalledWith(expect.arrayContaining([{ key: "PARTICLE_API_KEY", value: "pai-routes-1" }]));
+    expect(deps.restartRequiredState.markRequired).toHaveBeenCalledWith("env_vars_changed");
+
+    deps.restartRequiredState.markRequired.mockClear();
+    deps.readEnvFile.mockReturnValue([{ key: "PARTICLE_API_KEY", value: "pai-routes-1" }]);
+    const unchanged = await request(app).put("/api/models/auth/particle:default").send({ type: "api_key", provider: "particle", key: "pai-routes-1" });
+    expect(unchanged.status).toBe(200);
+    expect(deps.restartRequiredState.markRequired).not.toHaveBeenCalledWith("env_vars_changed");
+  });
+
   it("auth-store write failures map to 500", async () => {
     const deps = createModelDeps();
     deps.authProfiles.upsertProfile.mockImplementation(() => {

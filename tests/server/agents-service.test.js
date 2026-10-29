@@ -130,7 +130,8 @@ describe("server/agents/service", () => {
     });
   });
 
-  it("adds an agent's new primary to the allowlist that governs it", async () => {
+  it("leaves an agent's new primary for the governing modelPolicy.allow to the next launch", async () => {
+    const { applyModelPolicyGaps } = require("../../lib/server/model-policy");
     const fsMock = buildFsMock({
       initialConfig: {
         meta: { migrations: { modelPolicyAllowlist: true } },
@@ -154,14 +155,23 @@ describe("server/agents/service", () => {
     await service.updateAgent("lab", { model: { primary: "google/gemini-3.1-pro" } });
     service.createAgent({ id: "intake", model: { primary: "openai/gpt-6-luna" } });
 
-    const { agents } = fsMock.readConfig();
-    const find = (id) => agents.entries?.[id] ?? agents.list?.find((entry) => entry.id === id);
+    const saved = fsMock.readConfig();
+    const findIn = (cfg, id) => cfg.agents.entries?.[id] ?? cfg.agents.list?.find((entry) => entry.id === id);
+    expect(saved.agents.defaults.modelPolicy.allow).toEqual(["anthropic/claude-opus-5-5"]);
+    expect(findIn(saved, "lab").modelPolicy.allow).toEqual(["google/*"]);
+
+    const launched = { ...saved, agents: { ...saved.agents, list: saved.agents.list ?? Object.entries(saved.agents.entries).map(([id, entry]) => ({ id, ...entry })) } };
+    applyModelPolicyGaps(launched);
+    const { agents } = launched;
+    const find = (id) => findIn(launched, id);
     expect(agents.defaults.modelPolicy.allow).toEqual([
       "anthropic/claude-opus-5-5",
       "openai/gpt-6-astra",
       "openai/gpt-6-luna",
     ]);
-    expect(find("lab").modelPolicy.allow).toEqual(["google/*", "openai/gpt-6.1-sol"]);
+    // Only the primary standing at launch is added: lab's interim openai pick
+    // was replaced by a google model its wildcard already covers.
+    expect(find("lab").modelPolicy.allow).toEqual(["google/*"]);
   });
 
   // H10: a mutation must fail closed on an existing-but-unparseable config

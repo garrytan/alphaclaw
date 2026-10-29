@@ -629,6 +629,38 @@ describe("server/routes/onboarding", () => {
     expect(seededAt).toBeLessThan(deps.execFileCmd.mock.invocationCallOrder[modelsSetIndex]);
   });
 
+  it("writes AlphaClaw's provider blocks after openclaw onboard and before models set, from the submitted key", async () => {
+    const deps = createBaseDeps();
+    deps.ensureOwnedProviders = vi.fn(() => ({ ok: true, changed: true, results: [] }));
+    deps.authProfiles.getEnvVarForApiKeyProvider.mockImplementation((provider) => (provider === "particle" ? "PARTICLE_API_KEY" : ""));
+    const app = createApp(deps);
+    mockGithubVerifyAndCreate();
+
+    const res = await request(app).post("/api/onboard").send({
+      modelKey: "particle/particle-1",
+      vars: [
+        { key: "PARTICLE_API_KEY", value: "pai-onboarding-test-123456789" },
+        { key: "GITHUB_TOKEN", value: "ghp_test_123456789" },
+        { key: "GITHUB_WORKSPACE_REPO", value: "owner/repo" },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(deps.ensureOwnedProviders).toHaveBeenCalledTimes(1);
+    const [{ openclawDir, env }] = deps.ensureOwnedProviders.mock.calls[0];
+    expect(openclawDir).toBe("/tmp/openclaw");
+    expect(env.PARTICLE_API_KEY).toBe("pai-onboarding-test-123456789");
+    const calls = deps.execFileCmd.mock.calls;
+    const onboardIndex = calls.findIndex(([file, args]) => file === "openclaw" && args[0] === "onboard");
+    const modelsSetIndex = calls.findIndex(([file, args]) => file === "openclaw" && args[0] === "models" && args[1] === "set");
+    expect(calls[modelsSetIndex][1]).toEqual(["models", "set", "--", "particle/particle-1"]);
+    const ensuredAt = deps.ensureOwnedProviders.mock.invocationCallOrder[0];
+    expect(onboardIndex).toBeGreaterThanOrEqual(0);
+    expect(ensuredAt).toBeGreaterThan(deps.execFileCmd.mock.invocationCallOrder[onboardIndex]);
+    expect(ensuredAt).toBeLessThan(deps.execFileCmd.mock.invocationCallOrder[modelsSetIndex]);
+    expect(deps.authProfiles.upsertApiKeyProfileForEnvVar).toHaveBeenCalledWith("particle", "pai-onboarding-test-123456789");
+  });
+
   it("still seeds API-key auth profiles when an import skips openclaw onboard", async () => {
     const deps = createBaseDeps();
     mockGithubVerifyAndCreate();

@@ -1,5 +1,5 @@
 {
-  "comment": "Hand-curated catalog rows merged into kFallbackOnboardingModels at load (lib/server/constants.js). model-catalog-bootstrap.json is regenerated VERBATIM from the pinned CLI by scripts/refresh-model-bootstrap.mjs, which would erase hand edits \u2014 rows the pinned CLI does not emit live here instead. On a key collision the generated row wins (freshest-from-CLI beats hand-curated). Added for upstream PR #111: the 2026.7.1-2 CLI emits no direct minimax/minimax-cn rows. Claude 5.5, GPT-6.x and Gemini 3.1 Pro rows added for the upstream 043ac5de sync: the 2026.7.1-2 snapshot predates them, and on 2026.10.4 a box without a running gateway lists no provider models, so onboarding renders from this fallback.",
+  "comment": "Hand-curated catalog rows merged into kFallbackOnboardingModels at load (lib/server/constants.js). model-catalog-bootstrap.json is regenerated VERBATIM from the pinned CLI by scripts/refresh-model-bootstrap.mjs, which would erase hand edits — rows the pinned CLI does not emit live here instead. On a key collision the generated row wins (freshest-from-CLI beats hand-curated). Added for upstream PR #111: the 2026.7.1-2 CLI emits no direct minimax/minimax-cn rows. Claude 5.5, GPT-6.x and Gemini 3.1 Pro rows added for the upstream 043ac5de sync: the 2026.7.1-2 snapshot predates them, and on 2026.10.4 a box without a running gateway lists no provider models, so onboarding renders from this fallback. Particle-1 added for ALPH-53: no OpenClaw plugin serves it; AlphaClaw writes models.providers.particle (lib/server/providers/presets.js).",
   "models": [
     {
       "key": "anthropic/claude-haiku-5-5",
@@ -82,6 +82,11 @@
       "agentRuntime": {
         "id": "codex"
       }
+    },
+    {
+      "key": "particle/particle-1",
+      "provider": "particle",
+      "label": "Particle-1"
     }
   ]
 }
