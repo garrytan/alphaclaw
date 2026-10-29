@@ -3599,25 +3599,192 @@ describe("server/gateway restart behavior", () => {
       expect(removedChannels).toEqual(["telegram"]);
     });
 
-    it("still removes whatsapp when its owner number is cleared (pinned behavior)", async () => {
-      // whatsapp declares `sync: false` but the flag is deliberately NOT
-      // honored this wave: its env-clear removal lifecycle must stay
-      // byte-identical (see TODOS for the flag's fate).
-      setupConfig(
-        JSON.stringify({ channels: { whatsapp: { enabled: true } } }),
-      );
-      childProcess.execFile = execFileOk("");
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
+    describe("whatsapp (sync:false) removal", () => {
+      const removedChannels = () =>
+        childProcess.execFile.mock.calls
+          .map((call) => call[1])
+          .filter((args) => args[0] === "channels" && args[1] === "remove")
+          .map((args) => args[args.indexOf("--channel") + 1]);
 
-      await gateway.syncChannelConfig([], "remove");
+      it("still removes an AlphaClaw-created whatsapp (env reference) when its owner number is cleared", async () => {
+        // The AlphaClaw add flow writes allowFrom: ["${WHATSAPP_OWNER_NUMBER}"];
+        // that config is derived from the env key and goes with it.
+        setupConfig(
+          JSON.stringify({
+            channels: {
+              whatsapp: {
+                enabled: true,
+                allowFrom: ["${WHATSAPP_OWNER_NUMBER}"],
+                dmPolicy: "allowlist",
+                selfChatMode: true,
+              },
+            },
+          }),
+        );
+        childProcess.execFile = execFileOk("");
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
 
-      expect(childProcess.execFile).toHaveBeenCalledWith(
-        "openclaw",
-        ["channels", "remove", "--channel", "whatsapp", "--delete"],
-        expect.objectContaining({ timeout: 15000 }),
-        expect.any(Function),
+        await gateway.syncChannelConfig([], "remove");
+
+        expect(childProcess.execFile).toHaveBeenCalledWith(
+          "openclaw",
+          ["channels", "remove", "--channel", "whatsapp", "--delete"],
+          expect.objectContaining({ timeout: 15000 }),
+          expect.any(Function),
+        );
+      });
+
+      it("still removes a per-account env reference (${WHATSAPP_OWNER_NUMBER_<SUFFIX>})", async () => {
+        setupConfig(
+          JSON.stringify({
+            channels: {
+              whatsapp: {
+                enabled: true,
+                accounts: { work: { allowFrom: ["${WHATSAPP_OWNER_NUMBER_WORK}"] } },
+              },
+            },
+          }),
+        );
+        childProcess.execFile = execFileOk("");
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+
+        await gateway.syncChannelConfig([], "all");
+
+        expect(removedChannels()).toEqual(["whatsapp"]);
+      });
+
+      it.each(["remove", "all"])(
+        "never removes an OpenClaw-native whatsapp config (no env reference), mode=%s",
+        async (mode) => {
+          setupConfig(
+            JSON.stringify({
+              channels: {
+                whatsapp: {
+                  enabled: true,
+                  dmPolicy: "allowlist",
+                  allowFrom: ["+15550100", "+15550101"],
+                  selfChatMode: false,
+                  groupPolicy: "disabled",
+                },
+              },
+              bindings: [
+                {
+                  agentId: "a",
+                  match: { channel: "whatsapp", peer: { kind: "direct", id: "+15550100" } },
+                },
+              ],
+            }),
+          );
+          childProcess.execFile = execFileOk("");
+          delete require.cache[modulePath];
+          const gateway = require(modulePath);
+
+          await gateway.syncChannelConfig([], mode);
+
+          expect(removedChannels()).toEqual([]);
+          expect(childProcess.execFile).not.toHaveBeenCalled();
+        },
       );
+
+      it.each(["remove", "all"])(
+        "leaves the production native shape (no enabled key, peer bindings) byte-identical, mode=%s",
+        async (mode) => {
+          const initial = JSON.stringify({
+            channels: {
+              whatsapp: {
+                dmPolicy: "allowlist",
+                allowFrom: ["+15550100", "+15550101"],
+                selfChatMode: false,
+                groupPolicy: "disabled",
+              },
+            },
+            bindings: [
+              {
+                agentId: "a",
+                match: { channel: "whatsapp", peer: { kind: "direct", id: "+15550100" } },
+              },
+            ],
+          });
+          const state = setupConfig(initial);
+          childProcess.execFile = execFileOk("");
+          delete require.cache[modulePath];
+          const gateway = require(modulePath);
+
+          await gateway.syncChannelConfig([], mode);
+
+          expect(childProcess.execFile).not.toHaveBeenCalled();
+          expect(state.raw).toBe(initial);
+        },
+      );
+
+      it.each(["remove", "all"])(
+        "does not remove the fresh-onboarding whatsapp shape (owner number stored literally), mode=%s",
+        async (mode) => {
+          // onboarding/openclaw.js writes the owner number literally, not as an env
+          // reference. Intentional behavior change: clearing the key no longer
+          // deletes it (and its linked session) automatically.
+          const initial = JSON.stringify({
+            channels: {
+              whatsapp: {
+                enabled: true,
+                allowFrom: ["+15550100"],
+                groupAllowFrom: ["+15550100"],
+                dmPolicy: "allowlist",
+                groupPolicy: "allowlist",
+                selfChatMode: true,
+              },
+            },
+          });
+          const state = setupConfig(initial);
+          childProcess.execFile = execFileOk("");
+          delete require.cache[modulePath];
+          const gateway = require(modulePath);
+
+          await gateway.syncChannelConfig([], mode);
+
+          expect(childProcess.execFile).not.toHaveBeenCalled();
+          expect(state.raw).toBe(initial);
+        },
+      );
+
+      it("does not touch a native whatsapp config while other managed channels still sync", async () => {
+        setupConfig(
+          JSON.stringify({
+            channels: {
+              whatsapp: { enabled: true, allowFrom: ["+15550100"] },
+              telegram: { enabled: true },
+            },
+          }),
+        );
+        childProcess.execFile = execFileOk("");
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+
+        await gateway.syncChannelConfig([], "all");
+
+        // telegram (no sync:false) keeps its remove-on-cleared-token behavior.
+        expect(removedChannels()).toEqual(["telegram"]);
+      });
+
+      it("leaves a native whatsapp config alone when the owner number is present", async () => {
+        setupConfig(
+          JSON.stringify({
+            channels: { whatsapp: { enabled: true, allowFrom: ["+15550100"] } },
+          }),
+        );
+        childProcess.execFile = execFileOk("");
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+
+        await gateway.syncChannelConfig(
+          [{ key: "WHATSAPP_OWNER_NUMBER", value: "+15550100" }],
+          "all",
+        );
+
+        expect(childProcess.execFile).not.toHaveBeenCalled();
+      });
     });
 
     it("logs channel remove failures", async () => {

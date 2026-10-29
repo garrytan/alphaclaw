@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.157] - 2026-10-29
+
+Boot sync and env saves no longer delete a WhatsApp channel that AlphaClaw did not write. `syncChannelConfig` ran `openclaw channels remove --channel whatsapp --delete` whenever `channels.whatsapp.enabled` was true and `WHATSAPP_OWNER_NUMBER` was absent from the saved env, so a channel configured with OpenClaw's own options (literal `allowFrom` numbers, peer bindings, no env reference) was removed on the next boot or env save (#292).
+
+### Fixed
+- **WhatsApp's declared `sync: false` now governs removal** (`lib/server/gateway.js`). A `sync: false` channel is auto-removed only when its config references its env key (`${WHATSAPP_OWNER_NUMBER}` or a per-account `${WHATSAPP_OWNER_NUMBER_<SUFFIX>}`), i.e. config AlphaClaw derived from that variable; clearing the owner number still removes it then, as before. A config with no reference is left alone, including the shape onboarding writes when it stores the owner number literally, so clearing `WHATSAPP_OWNER_NUMBER` no longer removes that one. The add path is unchanged. This settles the `sync: false` item of the v0.9.49 fix-wave deferrals in `TODOS.md` by enforcing it.
+
+### Tests
+- `gateway.test.js`: the "still removes whatsapp when its owner number is cleared (pinned behavior)" case is replaced by native and env-referencing cases: a native config (no env reference) is never removed in any sync mode; the production native shape (no `enabled` key, peer bindings) stays byte-identical; a config referencing `${WHATSAPP_OWNER_NUMBER}` (top level or per account) is still removed when the key is cleared; the fresh-onboarding shape, which stores the owner number literally, is not removed; a native config is left alone while other managed channels still sync and when the owner number is present.
+
 ## [0.10.156] - 2026-10-29
 
 Particle's `particle-1` is available as `particle/particle-1` on every install. OpenClaw ships no Particle provider, so AlphaClaw writes and owns the `models.providers.particle` block while `PARTICLE_API_KEY` is set. Models picked in AlphaClaw are also added to a governing `modelPolicy.allow` list, but only at the next gateway launch: on OpenClaw 2026.10.8 a hot reload of any `modelPolicy` change revokes in-flight session work. A production box showed it: a background command's result never reached the agent (ALPH-53, ALPH-24).
