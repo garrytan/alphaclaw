@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.151] - 2026-10-29
+
+The nightly live tier runs again instead of failing on the runner. Since v0.10.137 (#277), `gateway-stale-heartbeat-relaunch` failed every night on GitHub's Ubuntu 24.04 runner, because AppArmor there blocks unprivileged user namespaces (`unshare: write failed /proc/self/uid_map`) and the test fails rather than skips under `CI`. The tier had also grown to about 44 minutes and timed out at its 45-minute limit on Oct 27 (ALPH-52).
+
+### Changed
+- `live-e2e.yml`: the job runs on a pinned `ubuntu-24.04` image. A new step lifts `kernel.apparmor_restrict_unprivileged_userns`, then runs the heartbeat test's own `unshare` probe and fails with a message naming the runner image if namespaces are still unavailable.
+- The job limit is 75 minutes instead of 45, until the tier runs as parallel legs.
+- The tier writes a JSON report (every test with its status) to `tests/live/artifacts/report.json`, which is uploaded with the other artifacts on every outcome.
+
+### Tests
+- `tests/ci/workflow-contract.test.js` pins the image, the sysctl, the probe (it reads the flags from the test file, so the two can't drift apart) and the report.
+
 ## [0.10.150] - 2026-10-28
 
 Delete Agent now deletes through OpenClaw's own `agents.delete` on the serving gateway, and can keep a snapshot of the agent first. Until now AlphaClaw removed the agent from `openclaw.json` and deleted its files itself: OpenClaw kept a registry row for a database it could no longer find (Doctor warned "not a configured target" on every run afterwards), and the files went away under a gateway that might still have them open (ALPH-51).
