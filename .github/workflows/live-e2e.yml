@@ -26,11 +26,13 @@ permissions:
 
 jobs:
   live:
-    runs-on: ubuntu-latest
-    # The memory-leak and gateway suites each allow up to 12 minutes; leave
-    # room for their own timeouts to report failures before the runner kills
-    # the job.
-    timeout-minutes: 45
+    # Pinned image: the namespace step below depends on the image's AppArmor
+    # policy (Ubuntu 24.04 restricts unprivileged user namespaces).
+    runs-on: ubuntu-24.04
+    # The tier runs serially and has grown to ~44 minutes (33 files); it hit
+    # the old 45-minute limit on Oct 27. 75 leaves room for a retried long
+    # file to report through vitest until the tier runs as parallel legs.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +62,25 @@ jobs:
 
       - run: npx playwright install --with-deps chromium
 
-      - run: npm run test:live
+      # tests/live/gateway-stale-heartbeat-relaunch.e2e.test.js needs
+      # unprivileged user + PID namespaces and FAILS under CI without them.
+      # Ubuntu 24.04's AppArmor policy blocks them (unshare: write failed
+      # /proc/self/uid_map), so lift the restriction, then run the test's own
+      # probe so a changed runner image fails here with a clear message.
+      - name: Allow unprivileged user namespaces
+        run: |
+          set -euo pipefail
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if ! timeout 10 unshare -U --map-current-user -pf --mount-proc --kill-child true; then
+            echo "::error::Unprivileged user and PID namespaces are unavailable on runner image ${ImageOS:-unknown} ${ImageVersion:-}; gateway-stale-heartbeat-relaunch cannot run."
+            exit 1
+          fi
+
+      # The JSON report is the tier's test inventory (every test with its
+      # status), uploaded with the other artifacts on every outcome.
+      - run: npm run test:live -- --reporter=default --reporter=json --outputFile=tests/live/artifacts/report.json
 
       # Preserve the exact cold-start convergence refusal and any later failure.
       - uses: actions/upload-artifact@v4

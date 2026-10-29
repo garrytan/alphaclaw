@@ -1,4 +1,4 @@
-const { readFileSync } = require("node:fs");
+const { readFileSync, readdirSync } = require("node:fs");
 const path = require("node:path");
 
 // Structural guards over the merge-gate CI (which cannot be executed in the
@@ -76,6 +76,63 @@ describe("ci/merge-gate workflow contract", () => {
     // the bare `package.json` path, which every version bump touches.
     expect(c).toMatch(/git diff .*-- package\.json \| grep -qE '\^\[-\+\]\\s\*"openclaw":'/);
     expect(c).not.toMatch(/pattern='[^']*package\.json/);
+  });
+
+  it("container-e2e runs one job per shard-map leg, each with exactly its own files, and covers every container test file once", () => {
+    const c = wf("container-e2e.yml");
+    const { legs } = JSON.parse(
+      readFileSync(path.join(__dirname, "..", "container", "shards.json"), "utf8"),
+    );
+    const matrixLegs = c.match(/leg:\s*\[([^\]]+)\]/)[1].split(",").map((leg) => leg.trim());
+    expect(matrixLegs.sort()).toEqual(Object.keys(legs).sort());
+    const sharded = Object.values(legs).flatMap((leg) => leg.files);
+    expect(Object.values(legs).every((leg) => leg.files.length > 0)).toBe(true);
+    expect(new Set(sharded).size).toBe(sharded.length);
+    const containerFiles = readdirSync(path.join(__dirname, "..", "container"))
+      .filter((name) => name.endsWith(".test.js"))
+      .map((name) => `tests/container/${name}`);
+    expect(sharded.sort()).toEqual(containerFiles.sort());
+    // Vitest gets the leg's files only: the test:container script's own
+    // tests/container argument would select every file in every leg.
+    expect(c).toMatch(/npx vitest run --no-file-parallelism \$LEG_FILES/);
+    expect(c).not.toMatch(/run:\s*npm run test:container/);
+    expect(c).toMatch(/OPENCLAW_CONTAINER_E2E: "1"/);
+    expect(c).toMatch(/fail-fast:\s*false/);
+    expect(c).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*name: container-e2e-artifacts-\$\{\{ matrix\.leg \}\}/);
+    expect(c).toMatch(/gate:[\s\S]*needs: \[filter, container-e2e\]/);
+    // Edits that change what the tier runs also run it.
+    expect(c).toContain("vitest\\.config\\.js");
+    expect(c).toContain("\\.github/workflows/container-e2e\\.yml");
+    expect(c).toMatch(/grep -qE '\^\[-\+\]\\s\*"test:container":'/);
+  });
+
+  it("ci.yml records a test inventory on every run, publishes main's, guards PRs against the exact base, and covers main", () => {
+    const ci = wf("ci.yml");
+    expect(ci).toMatch(/^permissions:\n\s+contents: read\n(\s+#.*\n)*\s+actions: read/m);
+    expect(ci).toContain("npm test -- --reporter=default --reporter=json --outputFile=test-reports/vitest.json");
+    expect(ci).toContain("node scripts/ci/test-inventory.mjs --out test-reports/inventory.json test-reports/vitest.json");
+    expect(ci).toMatch(/if: always\(\) && github\.event_name == 'push' && matrix\.node-version == 24[^\n]*\n\s+with:\n\s+name: test-inventory-node24/);
+    const guard = ci.split("name: Test inventory guard")[1].split(/\n\s{2}\w/)[0];
+    expect(guard).toMatch(/if: github\.event_name == 'pull_request' && matrix\.node-version == 24/);
+    expect(guard).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
+    expect(guard).toMatch(/INVENTORY_GUARD: (report|enforce)/);
+    expect(guard).toContain("run: bash scripts/ci/inventory-guard.sh");
+    expect(ci).toMatch(/^\s{2}coverage:\n\s+if: github\.event_name == 'push'/m);
+    expect(ci).toContain("--coverage.reportOnFailure=true --coverage.reporter=json");
+    expect(readFileSync(path.join(__dirname, "..", "..", "vitest.config.js"), "utf8")).toContain('"tests/setup-inventory.js"');
+  });
+
+  it("live-e2e lifts the runner's user-namespace restriction with the heartbeat test's own probe and keeps its JSON report", () => {
+    const live = wf("live-e2e.yml");
+    const probeFlags = readFileSync(
+      path.join(__dirname, "..", "live", "gateway-stale-heartbeat-relaunch.e2e.test.js"),
+      "utf8",
+    ).match(/kNamespaceFlags = \[([^\]]+)\]/)[1].match(/"([^"]+)"/g).map((flag) => flag.slice(1, -1));
+    expect(live).toMatch(/runs-on:\s*ubuntu-24\.04/);
+    expect(live).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
+    expect(live).toContain(`unshare ${probeFlags.join(" ")} true`);
+    expect(live).toMatch(/npm run test:live -- --reporter=default --reporter=json --outputFile=tests\/live\/artifacts\/report\.json/);
+    expect(live).toMatch(/upload-artifact[\s\S]*if: always\(\)[\s\S]*path: tests\/live\/artifacts\//);
   });
 
   it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {

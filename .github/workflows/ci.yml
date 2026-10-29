@@ -11,6 +11,8 @@ on:
 # step env; nothing here needs to write to the repo.
 permissions:
   contents: read
+  # The PR test-inventory guard downloads the base commit's inventory artifact.
+  actions: read
 
 jobs:
   test:
@@ -61,4 +63,62 @@ jobs:
 
       - run: npm install --global pnpm@11.15.1
 
-      - run: npm test
+      # The JSON report is this run's test inventory (tests/setup-inventory.js
+      # adds assertion and retry counts).
+      - run: npm test -- --reporter=default --reporter=json --outputFile=test-reports/vitest.json
+
+      - name: Build the test inventory
+        if: always() && matrix.node-version == 24 && hashFiles('test-reports/vitest.json') != ''
+        run: node scripts/ci/test-inventory.mjs --out test-reports/inventory.json test-reports/vitest.json
+
+      # Main's inventory per commit: the base every PR is compared against.
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'push' && matrix.node-version == 24 && hashFiles('test-reports/inventory.json') != ''
+        with:
+          name: test-inventory-node24
+          path: test-reports/inventory.json
+
+      # A test or test file that disappears, or a passing test that becomes
+      # skipped, is a coverage loss unless a commit in the PR declares it
+      # (Removed-test-file: / Removed-test: / Skipped-test: lines; see
+      # CLAUDE.md). Report-only for its first week, then enforce.
+      - name: Test inventory guard
+        if: github.event_name == 'pull_request' && matrix.node-version == 24
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INVENTORY_GUARD: report
+        run: bash scripts/ci/inventory-guard.sh
+
+  # Hermetic coverage for every commit on main: the before/after reference for
+  # changes to the test setup (scripts/ci/coverage-diff.mjs compares two
+  # coverage-final.json files location by location).
+  coverage:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          check-latest: true
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build:ui
+
+      - run: npm install --global pnpm@11.15.1
+
+      - run: npx vitest run --coverage --coverage.reportOnFailure=true --coverage.reporter=json --coverage.reporter=json-summary --coverage.reporter=text-summary --coverage.reportsDirectory=coverage
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-node24
+          path: |
+            coverage/coverage-final.json
+            coverage/coverage-summary.json
+          if-no-files-found: ignore

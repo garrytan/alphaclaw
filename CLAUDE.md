@@ -60,6 +60,15 @@ these rules on every branch:
   lockfile → merge sequence runs for one PR at a time: the next PR merges
   `main`, renumbers and pushes only after the previous one has landed
   (`tag-release.yml` fails loudly when two merges claim one version).
+- **Removing or skipping a test is declared, never silent.** `test (24)`
+  compares the PR's test inventory with its base commit's
+  (`scripts/ci/inventory-guard.sh`): a test file or test that disappears, or
+  a passing test that becomes skipped, is a coverage loss unless a commit
+  message in the PR carries a line naming it — `Removed-test-file: <file>`,
+  `Removed-test: <file> :: <full name>` or `Skipped-test: <file> :: <full
+  name>` (the check prints the exact lines to add; a renamed test is a
+  removal plus an addition). Assertion-count changes are reported, never
+  failed.
 - **Deleting or rewriting code merged within the last 7 days requires a
   "Supersedes recent work" section in the PR body:** name the prior PR, each
   file removed or rewritten, and why replacement beats extension.
