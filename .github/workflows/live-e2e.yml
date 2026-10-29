@@ -26,13 +26,31 @@ permissions:
 
 jobs:
   live:
+    name: live (${{ matrix.leg }})
     # Pinned image: the namespace step below depends on the image's AppArmor
     # policy (Ubuntu 24.04 restricts unprivileged user namespaces).
     runs-on: ubuntu-24.04
-    # The tier runs serially and has grown to ~44 minutes (33 files); it hit
-    # the old 45-minute limit on Oct 27. 75 leaves room for a retried long
-    # file to report through vitest until the tier runs as parallel legs.
-    timeout-minutes: 75
+    # One job per leg of tests/live/shards.json, each on its own runner, so
+    # the nightly waits for the slowest leg instead of the sum of every file.
+    # Leg names, the browser flag and the limits must equal the shard map
+    # (tests/ci/workflow-contract.test.js): scripts/ci/balance-live-shards.mjs
+    # sets each limit to the larger of the leg's budget x 2.5 and its longest
+    # declared test timeout plus a 10-minute reserve, so the runner never ends
+    # a test before vitest's own timeout reports it.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: leg1
+            browser: false
+            timeout: 42
+          - leg: leg2
+            browser: false
+            timeout: 75
+          - leg: leg3
+            browser: true
+            timeout: 42
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,27 +64,32 @@ jobs:
 
       - run: npm ci
 
-      # tests/live/control-ui-styles.e2e.test.js drives a REAL Chromium through
-      # the /openclaw proxy (the "Styles failed to load" banner check). With
-      # CI set, that suite FAILS when no browser launches — never skips — so
-      # install one here. Cache keyed on the pinned Playwright version.
+      # Files that drive a REAL Chromium (the control-ui suites: the "Styles
+      # failed to load" banner check and its siblings) all sit on the one
+      # browser leg. With CI set, those suites FAIL when no browser launches,
+      # never skip, so only that leg installs one. Cache keyed on the pinned
+      # Playwright version.
       - id: playwright-version
+        if: matrix.browser
         name: Resolve pinned Playwright version
         run: |
           echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
+        if: matrix.browser
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
 
-      - run: npx playwright install --with-deps chromium
+      - if: matrix.browser
+        run: npx playwright install --with-deps chromium
 
       # tests/live/gateway-stale-heartbeat-relaunch.e2e.test.js needs
       # unprivileged user + PID namespaces and FAILS under CI without them.
       # Ubuntu 24.04's AppArmor policy blocks them (unshare: write failed
       # /proc/self/uid_map), so lift the restriction, then run the test's own
-      # probe so a changed runner image fails here with a clear message.
+      # probe so a changed runner image fails here with a clear message. Every
+      # leg runs it, so a rebalance can move that file anywhere.
       - name: Allow unprivileged user namespaces
         run: |
           set -euo pipefail
@@ -78,14 +101,65 @@ jobs:
             exit 1
           fi
 
-      # The JSON report is the tier's test inventory (every test with its
+      # The leg's files come from the shard map, never from a ${{ }}
+      # expression inside a script. Vitest is called with those files only:
+      # `npm run test:live -- <files>` would keep the script's own tests/live
+      # argument and run every file in every leg.
+      - name: Resolve the leg's test files
+        id: leg
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          set -euo pipefail
+          files=$(node -e 'const leg = require("./tests/live/shards.json").legs[process.env.LEG]; if (!leg || !leg.files.length) { console.error("no files for leg " + process.env.LEG); process.exit(1); } console.log(leg.files.join(" "));')
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+
+      # A test that now declares a longer timeout than the leg's limit covers
+      # fails here, before the runner could kill it mid-test.
+      - name: Check the leg's limit covers its declared test timeouts
+        env:
+          LEG: ${{ matrix.leg }}
+        run: node scripts/ci/balance-live-shards.mjs --check "$LEG"
+
+      # The JSON report is the leg's test inventory (every test with its
       # status), uploaded with the other artifacts on every outcome.
-      - run: npm run test:live -- --reporter=default --reporter=json --outputFile=tests/live/artifacts/report.json
+      - name: Run the leg
+        env:
+          OPENCLAW_LIVE_E2E: "1"
+          LEG: ${{ matrix.leg }}
+          LEG_FILES: ${{ steps.leg.outputs.files }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          npx vitest run --no-file-parallelism $LEG_FILES --reporter=default --reporter=json --outputFile="tests/live/artifacts/report-$LEG.json"
+
+      # The report must hold exactly the leg's files, and a leg that ran over
+      # its budget asks for a rebalance (a warning, not a failure).
+      - name: Check the leg ran exactly its files, within budget
+        if: always() && steps.leg.outcome == 'success'
+        env:
+          LEG: ${{ matrix.leg }}
+          LEG_FILES: ${{ steps.leg.outputs.files }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const file = path.resolve("tests/live/artifacts/report-" + process.env.LEG + ".json");
+            if (!fs.existsSync(file)) { console.error("no report for leg " + process.env.LEG); process.exit(1); }
+            const report = JSON.parse(fs.readFileSync(file, "utf8"));
+            const ran = report.testResults.map((r) => path.relative(process.cwd(), r.name)).sort();
+            const want = process.env.LEG_FILES.split(" ").sort();
+            if (JSON.stringify(ran) !== JSON.stringify(want)) { console.error("leg ran", ran, "expected", want); process.exit(1); }
+            const seconds = Math.round(report.testResults.reduce((sum, r) => sum + (r.endTime - r.startTime), 0) / 1000);
+            const budget = require("./tests/live/shards.json").legs[process.env.LEG].budgetSeconds;
+            console.log("leg " + process.env.LEG + ": " + ran.length + " files, " + report.numTotalTests + " tests, " + seconds + " s (budget " + budget + " s)");
+            if (seconds > budget * 1.25) console.log("::warning::live leg " + process.env.LEG + " took " + seconds + " s against a " + budget + " s budget; rerun scripts/ci/balance-live-shards.mjs on the nightly reports.");
+          '
 
       # Preserve the exact cold-start convergence refusal and any later failure.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: live-release-artifacts
+          name: live-artifacts-${{ matrix.leg }}
           path: tests/live/artifacts/
           if-no-files-found: ignore

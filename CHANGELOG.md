@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.155] - 2026-10-29
+
+The nightly live tier runs as three parallel legs instead of one serial job. The serial run took 57 minutes, with 3,020 s of tests; each leg now carries about 1,007 s of measured tests on its own runner (ALPH-52).
+
+### Changed
+- `.github/workflows/live-e2e.yml`: one `live (<leg>)` job per leg of `tests/live/shards.json`, each running only its own files with `--no-file-parallelism`. Only the browser leg installs Playwright. Every leg runs the user-namespace probe, writes `report-<leg>.json`, checks it ran exactly its files, warns when it ran 25 % over its budget, and uploads `live-artifacts-<leg>` on every outcome. `npm run test:live` stays serial and whole for local runs.
+- Each leg's job limit is the larger of its budget × 2.5 and its longest declared test timeout plus a 10-minute reserve: 42, 75 (gateway-restart-loop declares 65 minutes) and 42 minutes. Before its tests, a leg fails if a test now declares a timeout its limit cannot cover.
+
+### Added
+- `scripts/ci/balance-live-shards.mjs`: generates `tests/live/shards.json` from nightly JSON reports. It places the longest file first on the lightest leg, puts every Chromium file (direct or through `control-ui-live.js`) on the one browser leg, and reads declared test timeouts by collecting the files through vitest. `--check <leg>` is the per-leg timeout check.
+- `tests/ci/live-shards.test.js` (balancer fixtures) and a `workflow-contract` case: matrix legs, browser flag and limits equal the shard map, every live file sits in exactly one leg, and every browser file is on the browser leg.
+
 ## [0.10.154] - 2026-10-29
 
 `npm test` uses every core on machines with 4 cores or fewer, instead of half. That covers the GitHub runner (4 vCPU) and Capy agent machines. The suite spends its time waiting on real git, filesystem and child-process work, so at 2 workers half of a 4-vCPU machine sat idle. On a dedicated 4-vCPU VM a full run went from 159-164 s (5 runs at 2 workers) to 91-95 s (10 runs at 4), with the same tests, statuses and assertion counts, and the same retried and flaky tests at both counts (ALPH-52).
