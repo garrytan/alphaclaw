@@ -28,7 +28,9 @@ export default defineConfig({
     // Disables HTTP keep-alive: with it on (Node >=19 default), a pooled
     // socket can outlive its supertest server and answer a later test's
     // request bound to a reused ephemeral port — see tests/setup-agent.js.
-    setupFiles: ["tests/setup-agent.js"],
+    // setup-inventory.js records assertion and retry counts into each test's
+    // meta for the test inventory (scripts/ci/test-inventory.mjs).
+    setupFiles: ["tests/setup-agent.js", "tests/setup-inventory.js"],
     // One private TMPDIR per run, removed at teardown: mkdtemp-heavy tests
     // leaked ~3k directories per full run into the shared /tmp (measured:
     // 139k entries / 7 GB on a dev box). Runs in the main process before any

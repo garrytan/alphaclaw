@@ -106,6 +106,22 @@ describe("ci/merge-gate workflow contract", () => {
     expect(c).toMatch(/grep -qE '\^\[-\+\]\\s\*"test:container":'/);
   });
 
+  it("ci.yml records a test inventory on every run, publishes main's, guards PRs against the exact base, and covers main", () => {
+    const ci = wf("ci.yml");
+    expect(ci).toMatch(/^permissions:\n\s+contents: read\n(\s+#.*\n)*\s+actions: read/m);
+    expect(ci).toContain("npm test -- --reporter=default --reporter=json --outputFile=test-reports/vitest.json");
+    expect(ci).toContain("node scripts/ci/test-inventory.mjs --out test-reports/inventory.json test-reports/vitest.json");
+    expect(ci).toMatch(/if: always\(\) && github\.event_name == 'push' && matrix\.node-version == 24[^\n]*\n\s+with:\n\s+name: test-inventory-node24/);
+    const guard = ci.split("name: Test inventory guard")[1].split(/\n\s{2}\w/)[0];
+    expect(guard).toMatch(/if: github\.event_name == 'pull_request' && matrix\.node-version == 24/);
+    expect(guard).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
+    expect(guard).toMatch(/INVENTORY_GUARD: (report|enforce)/);
+    expect(guard).toContain("run: bash scripts/ci/inventory-guard.sh");
+    expect(ci).toMatch(/^\s{2}coverage:\n\s+if: github\.event_name == 'push'/m);
+    expect(ci).toContain("--coverage.reportOnFailure=true --coverage.reporter=json");
+    expect(readFileSync(path.join(__dirname, "..", "..", "vitest.config.js"), "utf8")).toContain('"tests/setup-inventory.js"');
+  });
+
   it("the soak gate stays removed (v0.9.65 owner decision — see AGENTS.md merge-gate section)", () => {
     // soak.yml (v0.9.62) was deleted deliberately, not lost in a refactor.
     // This inverse pin keeps a well-meaning cleanup from resurrecting it and
