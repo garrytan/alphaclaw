@@ -5,6 +5,38 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.158] - 2026-10-31
+
+Pin OpenClaw 2026.10.9 (npm `latest` since 2026-10-29 15:46Z). It is a 48-PR maintenance release on the stable train: dependency security backports, credential masking, update and rollback safety, Doctor repair of FTS indexes after a SQLite tokenizer change, and full-disk recovery. It moves neither `openclaw.schemaVersions` (state 20, agent 25) nor `engines.node` (`>=24.22.1 <25 || >=26.12.1`). On populated state (5 sessions holding 33 messages, one of them reset, plus the memory index) with AlphaClaw's own `doctor --fix --yes`, the pin goes from 2026.10.8 to 2026.10.9, back to 2026.10.8 and up again. Every gateway reaches `/readyz`, all histories read back intact, and new turns run on both versions. The data change 2026.10.9's Doctor makes is the same one 2026.10.8's Doctor makes on the same state (ALPH-54).
+
+### Changed
+- **OpenClaw pin 2026.10.8 → 2026.10.9.** No `lib/` change was needed. After normalising chunk hashes, the dist chunks behind every contract AlphaClaw reads are identical:
+  - the restart ask and drain: drain lines, `backgroundExecSessions`, `STOP_DRAIN_TIMEOUT_MS` 20 s, the restart-handoff row, and the owner heartbeat;
+  - `owned-stdio` and `mcp-client-lifecycle`, so the MCP child close is the same. `service-child-group-anchor.js` keeps its name; only bundled state-worker and redaction code changed inside it;
+  - the `openclaw.control.token.v1` Control UI key;
+  - the `model fallback decision … reason=model_not_found` line;
+  - thinking defaults and the effort maps;
+  - the workspace bootstrap file lists;
+  - the session-event config check.
+- **Security fixes that reach an AlphaClaw install:**
+  - nodemailer 10.1.4 sender parsing, bundled in the imap extension;
+  - the bounded Zod 3 traversal in the A2UI and Discord embedded-app bundles;
+  - MSAL Node 7.1.1, but only when the msteams plugin is installed.
+
+  The fast-uri 4.2.3 backport doesn't apply: npm resolves fast-uri 3.1.9 on both pins.
+- **Lockfile:** besides `openclaw` and `@openclaw/ai`, four transitive patch releases move with the pin: `@modelcontextprotocol/sdk`'s `qs` 6.17.0 → 6.17.1, `express-rate-limit` 8.7.1 → 8.7.2, `jose` 6.2.13 → 6.2.14 and `@opentelemetry/semantic-conventions` 1.43.0 → 1.44.0. AlphaClaw's own `express` and `body-parser` keep their `qs`.
+- README: the model-policy note now says the hot-reload interruption applies "on OpenClaw 2026.10.8 and later (checked through 2026.10.9; GST-122)".
+
+### Behavior changes (from OpenClaw 2026.10.9)
+- `tools.fs.workspaceOnly`, or a session permission mode, now also confines Gateway-built tools (media, delegate) (#185094). AlphaClaw never sets it, so installs keep unrestricted tools unless an operator set it.
+- `openclaw mcp list/show --json` redacts credentials. AlphaClaw only reads `mcp.servers` from config and runs `mcp probe --json`, which is unchanged.
+- OpenClaw's log redaction also masks Google OAuth client secrets (`GOCSPX-…`).
+- `openclaw doctor --fix`, which AlphaClaw runs at boot after a pin change, rebuilds FTS indexes that a SQLite tokenizer change made malformed, after saving a backup. Measured moving state from Node 24 to Node 26.12.1 (SQLite 3.53.4 → 3.54.0): 2026.10.8's Doctor refuses that database and 2026.10.9's repairs it. Booting still quarantines it on both versions; the startup auto-repair didn't fire. The Docker image is `node:24-slim`, so it doesn't take this path.
+- An agent recovers after a full disk once space is free, without a restart (#176902). Overlapping model refreshes no longer fail waiting requests (#179144). Reapproved node connections stay alive (#187461).
+
+### Tests
+- `tests/live/database-fixture.js`: `kObservedSchemas` gains the 2026.10.9 row (state 20, agent 25), observed on real 2026.10.8 state after 2026.10.9's Doctor.
+
 ## [0.10.157] - 2026-10-29
 
 Boot sync and env saves no longer delete a WhatsApp channel that AlphaClaw did not write. `syncChannelConfig` ran `openclaw channels remove --channel whatsapp --delete` whenever `channels.whatsapp.enabled` was true and `WHATSAPP_OWNER_NUMBER` was absent from the saved env, so a channel configured with OpenClaw's own options (literal `allowFrom` numbers, peer bindings, no env reference) was removed on the next boot or env save (#292).
