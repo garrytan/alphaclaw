@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.159] - 2026-11-01
+
+`alphaclaw admin` now sends a `--data` body on DELETE requests (#299).
+
+### Fixed
+- **DELETE with `--data` or `--data-stdin` reached the server with an empty body.** The CLI wrote the body without a `Content-Length` header. Node's HTTP client falls back to chunked encoding for POST, PUT and PATCH, but not for DELETE, so the server saw no framing and `express.json()` read `{}`. Four manifest operations were broken through the CLI: `agents.binding-remove`, `channels.account-remove` and `browse.delete` were rejected with 400, and `webhooks.delete` ignored `deleteTransformDir`. The dashboard wasn't affected. The CLI now sets `Content-Length` to the body's byte length on every request that carries a body (`lib/cli/admin.js`).
+
+### Tests
+- `admin-cli.test.js`: a DELETE with `--data` arrives at a local server with the matching `Content-Length` and the full body. This test fails on v0.10.158.
+
 ## [0.10.158] - 2026-10-31
 
 Pin OpenClaw 2026.10.9 (npm `latest` since 2026-10-29 15:46Z). It is a 48-PR maintenance release on the stable train: dependency security backports, credential masking, update and rollback safety, Doctor repair of FTS indexes after a SQLite tokenizer change, and full-disk recovery. It moves neither `openclaw.schemaVersions` (state 20, agent 25) nor `engines.node` (`>=24.22.1 <25 || >=26.12.1`). On populated state (5 sessions holding 33 messages, one of them reset, plus the memory index) with AlphaClaw's own `doctor --fix --yes`, the pin goes from 2026.10.8 to 2026.10.9, back to 2026.10.8 and up again. Every gateway reaches `/readyz`, all histories read back intact, and new turns run on both versions. The data change 2026.10.9's Doctor makes is the same one 2026.10.8's Doctor makes on the same state (ALPH-54).

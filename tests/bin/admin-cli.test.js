@@ -186,6 +186,22 @@ describe("cli/admin runAdminCommand", () => {
     expect(stub.received[0].headers["x-alphaclaw-confirm"]).toBe("ABCD-2345");
   });
 
+  it("sends a --data body on DELETE with a Content-Length the server can read", async () => {
+    writeToken(rootDir);
+    const stub = await useStub(jsonHandler(200, { ok: true }));
+    const bodyJson = JSON.stringify({ channel: "telegram", accountId: "default" });
+
+    const code = await runAdminCommand({
+      argv: ["DELETE", "/api/agents/foo/bindings", "--data", bodyJson],
+      rootDir,
+    });
+
+    expect(code).toBe(0);
+    expect(stub.received).toHaveLength(1);
+    expect(stub.received[0].headers["content-length"]).toBe(String(Buffer.byteLength(bodyJson)));
+    expect(stub.received[0].body).toBe(bodyJson);
+  });
+
   it("falls back to the static manifest when the live server is down", async () => {
     writeToken(rootDir); // present, so `manifest` tries live first
     await useClosedPort();
