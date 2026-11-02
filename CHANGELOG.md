@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.160] - 2026-11-02
+
+Particle (`particle/particle-1`) thinks on high by default (GST-121).
+
+### Changed
+- **Particle's default thinking is `high`, not OpenClaw's `low`.** OpenClaw 2026.10.9 reads a per-model thinking level only from the model's `agents.defaults.models` row, and with none set it sent Particle `reasoning_effort: "low"`. At each gateway launch, while `PARTICLE_API_KEY` is set, AlphaClaw now fills `params.thinking: "high"` into the `particle/particle-1` row (`lib/server/providers/model-defaults.js`, from the preset's `thinkingDefaults`). A fresh setup and an upgraded box both get it at the next launch; a Particle model picked in the Models tab gets it at the next restart. It writes nothing when the row already has a `thinking` param (any value, `false` included) or `agents.defaults.thinkingDefault` is set, and it never creates the row, because `agents.defaults.models` keys are an allowlist before Doctor's migration and every row is a `modelPolicy` gap after it. Like `modelPolicy`, it is written only in the no-gateway window of `requestGatewayLaunch`. Other models and `/think` are unchanged.
+
+### Tests
+- `owned-providers.test.js`: fresh setup (the row `openclaw models set` creates), an operator's explicit `low`/`medium`/`off`/`false`/`null` kept, an upgrade from a row with other params, no row created, `thinkingDefault` respected, key unset, and a second launch that skips the write.
+- `gateway.test.js`: the launch writes model policy, then thinking defaults, then spawns, and writes neither beside an incumbent.
+- Live tier `particle-provider.e2e.test.js`: against the pinned OpenClaw 2026.10.9 and a local Particle stub, the launch writes the row and the first request carries `reasoning_effort: "high"`; `/think off` still sends `none`.
+
 ## [0.10.159] - 2026-11-01
 
 `alphaclaw admin` now sends a `--data` body on DELETE requests (#299).

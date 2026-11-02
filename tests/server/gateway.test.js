@@ -2450,13 +2450,19 @@ describe("server/gateway restart behavior", () => {
       gateway.setGatewayLaunchHandler(null);
     });
 
-    it("writes the model policy only in the no-gateway window, right before the spawn, and never beside an incumbent", async () => {
+    it("writes the model policy and provider thinking defaults only in the no-gateway window, right before the spawn, and never beside an incumbent", async () => {
       const modelPolicy = require("../../lib/server/model-policy");
+      const modelDefaults = require("../../lib/server/providers/model-defaults");
       const originalApply = modelPolicy.applyModelPolicyBeforeLaunch;
+      const originalDefaults = modelDefaults.applyOwnedProviderThinkingDefaultsBeforeLaunch;
       const order = [];
       modelPolicy.applyModelPolicyBeforeLaunch = vi.fn(() => {
         order.push("model_policy");
         return { ok: true, added: [] };
+      });
+      modelDefaults.applyOwnedProviderThinkingDefaultsBeforeLaunch = vi.fn(() => {
+        order.push("thinking_defaults");
+        return { ok: true, applied: [] };
       });
       try {
         childProcess.spawn = vi.fn(() => {
@@ -2468,19 +2474,23 @@ describe("server/gateway restart behavior", () => {
         delete require.cache[modulePath];
         const gateway = require(modulePath);
         expect(await gateway.requestGatewayLaunch({ site: "crash restart" })).toMatchObject({ outcome: "launch_requested" });
-        expect(order).toEqual(["model_policy", "spawn"]);
+        expect(order).toEqual(["model_policy", "thinking_defaults", "spawn"]);
         expect(modelPolicy.applyModelPolicyBeforeLaunch).toHaveBeenCalledWith({ openclawDir: OPENCLAW_DIR });
+        expect(modelDefaults.applyOwnedProviderThinkingDefaultsBeforeLaunch).toHaveBeenCalledWith({ openclawDir: OPENCLAW_DIR });
 
         installFakeProc(kIncumbentTree);
         childProcess.spawn = vi.fn(() => createChild());
         net.createConnection = vi.fn(() => createSocket(true));
         modelPolicy.applyModelPolicyBeforeLaunch.mockClear();
+        modelDefaults.applyOwnedProviderThinkingDefaultsBeforeLaunch.mockClear();
         delete require.cache[modulePath];
         const served = require(modulePath);
         expect(await served.requestGatewayLaunch({ site: "crash restart" })).toMatchObject({ outcome: "incumbent_present" });
         expect(modelPolicy.applyModelPolicyBeforeLaunch).not.toHaveBeenCalled();
+        expect(modelDefaults.applyOwnedProviderThinkingDefaultsBeforeLaunch).not.toHaveBeenCalled();
       } finally {
         modelPolicy.applyModelPolicyBeforeLaunch = originalApply;
+        modelDefaults.applyOwnedProviderThinkingDefaultsBeforeLaunch = originalDefaults;
       }
     });
 
