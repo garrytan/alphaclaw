@@ -5,8 +5,12 @@
 const { WebSocket } = require("ws");
 
 const { classifyError } = require("../../lib/server/chat/errors");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const {
   createChatBridgeTestKit,
+  createDurableTestStore,
   waitUntil,
 } = require("./helpers/chat-gateway-harness");
 
@@ -40,6 +44,26 @@ describe("server/chat gateway disconnect lifecycle", () => {
         // best-effort cleanup
       }
     }
+  });
+
+  it("close() settles started runs while the store is still open, and nothing writes after it", async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-chat-close-"));
+    cleanups.push(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+    const store = createDurableTestStore({ cleanups, rootDir });
+    const harness = await kit.startGatewayHarness();
+    const service = kit.createService(harness, { chatRunsStore: store });
+    const browser = await kit.openBrowser(service);
+    await kit.startRun({ harness, browser, sessionKey: "c-1", runId: "rc1", clientMsgId: "cm-c1" });
+
+    service.close();
+
+    expect(store.findRun({ sessionKey: "c-1", clientMsgId: "cm-c1" })).toMatchObject({ status: "interrupted" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    store.closeChatRunsDb();
+    await sleep(100);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(service.getChatStats().storeFailures).toBe(0);
+    await expect(service.fetchHistory("c-1")).rejects.toThrow("Chat bridge closed");
   });
 
   it("terminalizes every started run when the gateway drops, and recovers on reconnect", async () => {
