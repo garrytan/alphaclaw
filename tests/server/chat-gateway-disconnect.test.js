@@ -55,7 +55,7 @@ describe("server/chat gateway disconnect lifecycle", () => {
     const browser = await kit.openBrowser(service);
     await kit.startRun({ harness, browser, sessionKey: "c-1", runId: "rc1", clientMsgId: "cm-c1" });
 
-    service.close();
+    await service.close();
 
     expect(store.findRun({ sessionKey: "c-1", clientMsgId: "cm-c1" })).toMatchObject({ status: "interrupted" });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -64,6 +64,29 @@ describe("server/chat gateway disconnect lifecycle", () => {
     expect(warnSpy).not.toHaveBeenCalled();
     expect(service.getChatStats().storeFailures).toBe(0);
     await expect(service.fetchHistory("c-1")).rejects.toThrow("Chat bridge closed");
+  });
+
+  it("close() settles a send still awaiting chat.send before it resolves", async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-chat-close-"));
+    cleanups.push(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+    const store = createDurableTestStore({ cleanups, rootDir });
+    const harness = await kit.startGatewayHarness();
+    const service = kit.createService(harness, { chatRunsStore: store });
+    const browser = await kit.openBrowser(service);
+    browser.send({ type: "message", clientMsgId: "cm-p1", sessionKey: "p-1", content: "go" });
+    await waitUntil(() => harness.requests.some((frame) => frame.method === "chat.send"), "chat.send written");
+
+    await service.close();
+
+    expect(store.findRun({ sessionKey: "p-1", clientMsgId: "cm-p1" })).toMatchObject({
+      status: "unknown",
+      errorCode: "unknown_outcome",
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    store.closeChatRunsDb();
+    await sleep(100);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(service.getChatStats().storeFailures).toBe(0);
   });
 
   it("terminalizes every started run when the gateway drops, and recovers on reconnect", async () => {
