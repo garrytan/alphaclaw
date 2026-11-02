@@ -112,7 +112,7 @@ const createChatBridgeTestKit = ({ cleanups }) => {
     if (config !== undefined) {
       fs.writeFileSync(path.join(tempDir, "openclaw.json"), JSON.stringify(config));
     }
-    return createChatWsService({
+    const service = createChatWsService({
       fs,
       openclawDir: tempDir,
       chatRunsStore: createDurableTestStore({ cleanups, rootDir: tempDir }),
@@ -120,6 +120,8 @@ const createChatBridgeTestKit = ({ cleanups }) => {
         typeof portOrHarness === "number" ? portOrHarness : portOrHarness.port,
       ...serviceOptions,
     });
+    cleanups.push(() => service.close());
+    return service;
   };
 
   const openBrowser = async (service) => {

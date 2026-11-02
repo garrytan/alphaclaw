@@ -4,6 +4,7 @@ const path = require("path");
 
 const envModulePath = "../../lib/server/env";
 const constantsModulePath = "../../lib/server/constants";
+const sharedModulePath = "../../lib/server/deployment-only-env";
 
 const loadEnvModule = (rootDir) => {
   vi.resetModules();
@@ -11,7 +12,7 @@ const loadEnvModule = (rootDir) => {
   return require(envModulePath);
 };
 
-describe("server/env", () => {
+describe("server/env", { retry: 0 }, () => {
   let tmpDir;
   let previousRootDir;
   let previousOpenAiApiKey;
@@ -31,6 +32,7 @@ describe("server/env", () => {
     vi.restoreAllMocks();
     delete require.cache[require.resolve(envModulePath)];
     delete require.cache[require.resolve(constantsModulePath)];
+    delete require.cache[require.resolve(sharedModulePath)];
     if (previousRootDir === undefined) {
       delete process.env.ALPHACLAW_ROOT_DIR;
     } else {
@@ -253,7 +255,6 @@ describe("server/env", () => {
     });
     // Boots the way bin/alphaclaw.js does: the deployment env, recorded,
     // then the .env file's values through the shared overlay rule.
-    const sharedModulePath = "../../lib/server/deployment-only-env";
     const boot = (deploymentEnv, envFileText) => {
       fs.writeFileSync(path.join(tmpDir, ".env"), envFileText);
       for (const modulePath of [envModulePath, constantsModulePath, sharedModulePath]) {
