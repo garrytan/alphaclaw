@@ -4,7 +4,7 @@ const {
   kMaxInboundFramesPerWindow,
 } = require("../../lib/server/chat/protocol");
 
-describe("server/chat transport guards", () => {
+describe("server/chat transport guards", { retry: 0 }, () => {
   let originalGatewayToken;
   let cleanups;
   let kit;

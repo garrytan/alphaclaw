@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.160] - 2026-11-02
+
+Two hermetic tests that failed their first attempt on every run, and passed only on `retry: 1`, now pass on the first attempt and opt out of the retry (GST-94).
+
+### Fixed
+- **The chat bridge had no teardown.** `createChatWsService` now returns `close()`: it clears the keepalive and stall-sweep timers, settles started runs through the gateway disconnect path, terminates browser sockets and refuses later gateway connects. Its promise resolves once the sends that disconnect rejected have written their outcome too. `disposeServices` awaits it before `closeChatRunsDb`, so neither a chat timer nor an in-flight send writes to a closed store during shutdown (`lib/server/chat/index.js`, `lib/server/chat/gateway-client.js`, `lib/server.js`).
+
+### Tests
+- `chat-transport-guards.test.js` "a throwing chat-runs store blocks dispatch…": the previous test's chat service was never closed, and the kit closed its store before its fake gateway. That service's gateway close landed during the next test, failed its write to the closed store and logged its own "chat-runs store unavailable" warning into the next test's spy (2 warnings, expected 1). The retry passed because the leaked service had already warned once. The test kit now closes every service it creates before its store.
+- `env.test.js` "logs env changes as key names only…": the deployment baseline lives in `deployment-only-env.js` module state, and the outer `afterEach` cleared `env.js` from `require.cache` but not that module (`vi.resetModules()` does not reach Node's CJS cache). The test inherited the ALPH-50 block's `TELEGRAM_BOT_TOKEN` baseline and logged "restored from deployment env TELEGRAM_BOT_TOKEN". The retry passed because the first attempt left that token in `process.env`. The `afterEach` now clears the module too.
+- Both suites set `{ retry: 0 }`, so a regression fails on its first attempt. `chat-gateway-disconnect.test.js` adds two `close()` tests: a started run and a send still waiting on `chat.send` both reach the store before `close()` resolves, and nothing writes after the store closes.
+
 ## [0.10.159] - 2026-11-01
 
 `alphaclaw admin` now sends a `--data` body on DELETE requests (#299).
