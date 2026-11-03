@@ -129,12 +129,16 @@ vi.mock("../../lib/public/js/components/doctor/findings-list.js", () => ({
 vi.mock("../../lib/public/js/components/doctor/fix-card-modal.js", () => ({
   DoctorFixCardModal: () => null,
 }));
+vi.mock("../../lib/public/js/components/doctor/context-injection-panel.js", () => ({
+  ContextInjectionPanel: () => null,
+}));
 
 import * as preactHooks from "preact/hooks";
 import { __pollRegistry } from "../../lib/public/js/hooks/usePolling.js";
 import { startDoctorRun } from "../../lib/public/js/lib/api.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { DoctorTab } from "../../lib/public/js/components/doctor/index.js";
+import { ContextInjectionPanel } from "../../lib/public/js/components/doctor/context-injection-panel.js";
 
 const harness = preactHooks.__harness;
 
@@ -268,6 +272,16 @@ describe("frontend/doctor-tab run button", () => {
     tree = renderTab();
     expect(runDoctorButton(tree).props.loading).toBe(true);
     expect(runDoctorButton(tree).props.loadingLabel).toBe("Running...");
+  });
+
+  it("shows the context panel beside the empty state before any Drift Doctor run", () => {
+    statusSlot().data = { status: { lastRunAt: "", runInProgress: false, changeSummary: { changedPaths: [] } } };
+    runsSlot().data = { runs: [] };
+    cardsSlot().data = { cards: [] };
+    const nodes = collectNodes(renderTab());
+    expect(runDoctorButton(nodes)).toBeTruthy();
+    expect(nodes.filter((vnode) => vnode.type === ContextInjectionPanel)).toHaveLength(1);
+    expect(nodes.filter((vnode) => vnode.props?.id === "doctor-context-section")).toHaveLength(1);
   });
 
   it("skips the initial filter refresh and refreshes only on filter changes", () => {
