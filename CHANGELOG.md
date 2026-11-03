@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.162] - 2026-11-02
+
+The Doctor tab shows the context OpenClaw actually injected on the agent's last run, next to the existing estimate (GST-176).
+
+### Added
+- **Measured context view.** `GET /api/doctor/context/measured?agentId=` (default `main`, admin manifest op `doctor.context-measured`, tier safe) reads OpenClaw's own run report: `sessions.list` for the agent's newest sessions (main and direct sessions first, at most 3 tried), then a key-scoped `sessions.usage` with `includeContextWeight`. It returns the system prompt size and each injected workspace file's raw and injected chars, truncated and missing flags, and whether AlphaClaw manages it. Paths are workspace-relative, so no absolute host path reaches the browser; files a native harness reports without verification are marked unverified and kept out of totals. With no run yet the answer is `available: false` with `no_run`, and a gateway or contract failure says so (`gateway`, `unsupported`) instead of guessing. Successes are cached 60 s, failures 5 s, and one read per agent is in flight at a time (`lib/server/context-measure/`).
+- **Measured / Estimate switch in Doctor.** The context card (`lib/public/js/components/doctor/context-injection-panel.js`) defaults to Measured once a run report exists, with an agent picker, a refresh button, chars with an approximate token count (chars/4), and a link to OpenClaw's Usage view. The Doctor's estimate is unchanged and stays one click away.
+
+### Changed
+- `gateway call` JSON reads share one helper, `lib/server/gateway-call.js`; the post-relaunch wedge sweep uses it instead of its own copy. Behaviour is unchanged.
+
+### Tests
+- `context-measure.test.js`: normalizer and reader against a real `sessions.usage` capture from OpenClaw 2026.10.9 (`tests/fixtures/context-weight/`, synthetic workspace), covering session choice, path relativising, managed files, unverified native files, the no-run, gateway and unsupported answers, caching and single flight.
+- `routes-doctor.test.js`: the default agent, a traversal-shaped agent id refused with 400 and an input audit line, and `unsupported` when no reader is wired. `doctor-context-measured.test.js`: the card model and rendering.
+- Live tier `context-measured.e2e.test.js` (leg 3): one turn on a real onboarded install with the pinned OpenClaw, then the reader returns AlphaClaw's bootstrap files workspace-relative and untruncated, with `rawChars` equal to each file's on-disk length.
+
 ## [0.10.161] - 2026-11-02
 
 Particle (`particle/particle-1`) thinks on high by default (GST-121).

@@ -1,0 +1,117 @@
+{
+  "$comment": "sessions.usage {agentId:'main', key:'agent:main:main', range:'7d', includeContextWeight:true} from openclaw 2026.10.9 after one turn on a fresh onboarded AlphaClaw install (live probe, ALPH-58, 2026-11-03). Temp workspace path replaced; skills/tools are empty because the mock model disables tools.",
+  "startDate": "2026-10-28",
+  "endDate": "2026-11-03",
+  "sessions": [
+    {
+      "key": "agent:main:main",
+      "agentId": "main",
+      "modelProvider": "mock",
+      "model": "echo",
+      "hasContextWeight": true,
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "updatedAt": 1793676624344,
+      "contextWeight": {
+        "source": "run",
+        "generatedAt": 1793676565158,
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "sessionKey": "agent:main:main",
+        "provider": "mock",
+        "model": "echo",
+        "workspaceDir": "/data/.openclaw/workspace",
+        "bootstrapMaxChars": 20000,
+        "bootstrapTotalMaxChars": 60000,
+        "bootstrapTruncation": {
+          "warningMode": "always",
+          "warningShown": false,
+          "truncatedFiles": 0,
+          "nearLimitFiles": 0,
+          "totalNearLimit": false
+        },
+        "sandbox": {
+          "mode": "off",
+          "sandboxed": false
+        },
+        "systemPrompt": {
+          "chars": 34702,
+          "hash": "a8fde544deb9bbbb589549243446c40f80034baf4375a8b3c45baa28e2a7e4c6",
+          "projectContextChars": 29440,
+          "nonProjectContextChars": 5262
+        },
+        "injectedWorkspaceFiles": [
+          {
+            "name": "AGENTS.md",
+            "path": "/data/.openclaw/workspace/AGENTS.md",
+            "missing": false,
+            "rawChars": 6449,
+            "injectedChars": 6449,
+            "truncated": false
+          },
+          {
+            "name": "SOUL.md",
+            "path": "/data/.openclaw/workspace/SOUL.md",
+            "missing": false,
+            "rawChars": 1526,
+            "injectedChars": 1526,
+            "truncated": false
+          },
+          {
+            "name": "IDENTITY.md",
+            "path": "/data/.openclaw/workspace/IDENTITY.md",
+            "missing": false,
+            "rawChars": 1453,
+            "injectedChars": 1453,
+            "truncated": false
+          },
+          {
+            "name": "USER.md",
+            "path": "/data/.openclaw/workspace/USER.md",
+            "missing": false,
+            "rawChars": 1136,
+            "injectedChars": 1136,
+            "truncated": false
+          },
+          {
+            "name": "BOOTSTRAP.md",
+            "path": "/data/.openclaw/workspace/BOOTSTRAP.md",
+            "missing": false,
+            "rawChars": 7475,
+            "injectedChars": 7475,
+            "truncated": false
+          },
+          {
+            "name": "AGENTS.md",
+            "path": "/data/.openclaw/workspace/hooks/bootstrap/AGENTS.md",
+            "missing": false,
+            "rawChars": 8084,
+            "injectedChars": 8084,
+            "truncated": false
+          },
+          {
+            "name": "AGENTS.md",
+            "path": "/data/.openclaw/workspace/hooks/bootstrap/reference/AGENTS.md",
+            "missing": false,
+            "rawChars": 202,
+            "injectedChars": 202,
+            "truncated": false
+          }
+        ],
+        "skills": {
+          "promptChars": 0,
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "entries": []
+        },
+        "tools": {
+          "listChars": 0,
+          "schemaChars": 0,
+          "entries": []
+        },
+        "currentTurn": {
+          "promptChars": 20,
+          "runtimeContextChars": 0,
+          "modelOnlyPromptChars": 0
+        }
+      }
+    }
+  ]
+}
