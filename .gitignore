@@ -14,8 +14,10 @@ lib/public/css/vendor/
 tests/container/artifacts/
 tests/live/artifacts/
 
-# QA working artifacts (reports/screenshots) stay local
-.gstack/
+# QA working artifacts (reports/screenshots) stay local; the pregate policy
+# (/ship's CI carry) is committed
+.gstack/*
+!.gstack/pregate.json
 
 # CI test inventory (scripts/ci/test-inventory.mjs)
 test-reports/

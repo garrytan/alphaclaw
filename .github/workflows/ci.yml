@@ -71,6 +71,25 @@ jobs:
         if: always() && matrix.node-version == 24 && hashFiles('test-reports/vitest.json') != ''
         run: node scripts/ci/test-inventory.mjs --out test-reports/inventory.json test-reports/vitest.json
 
+      # The tree this run tested and every test file it ran (gstack run
+      # evidence, read by the `ci/test-24` profile in .gstack/pregate.json):
+      # /ship carries the lanes `ship_lanes_from` maps from this record instead
+      # of running them again. Written only from a green report.
+      - name: Record the tested tree
+        if: success() && matrix.node-version == 24
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tested-tree"
+          node scripts/ci/tested-tree.mjs --out "$RUNNER_TEMP/tested-tree/tree.json" test-reports/vitest.json
+
+      - uses: actions/upload-artifact@v4
+        if: success() && matrix.node-version == 24
+        with:
+          name: tested-tree
+          path: ${{ runner.temp }}/tested-tree/tree.json
+          if-no-files-found: error
+
       # Main's inventory per commit: the base every PR is compared against.
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'push' && matrix.node-version == 24 && hashFiles('test-reports/inventory.json') != ''

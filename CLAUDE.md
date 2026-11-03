@@ -25,6 +25,13 @@ Key routing rules:
 
 Run `npm test` (Vitest). UI bundle: `npm run build:ui` after any lib/public/js change.
 
+/ship lanes on this repo use these exact commands: `npm test` (hermetic) and
+`npx vitest run tests/server/guards` (guards). `.gstack/pregate.json` maps
+both, byte for byte, to CI's `test (24)` job (`ship_lanes_from`, profile
+`ci/test-24`), so /ship carries them from the green CI run at the same clean
+tree instead of running them again (gstack `docs/pregate.md#ci-carry`). Push
+before the lanes run; any other lane command runs locally.
+
 ## Merge unification safety
 
 Parallel agent branches on the same subsystem have repeatedly destroyed each
