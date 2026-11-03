@@ -4,6 +4,8 @@
 // `ship_lanes_from` from this record instead of running the suite again, so it
 // is written only from a green report: a failed test, an empty report or a
 // checkout that is not the commit the run names is an error, never a record.
+// A file counts as run only when one of its tests passed: vitest's JSON
+// reporter marks a file whose tests were all skipped as "passed".
 //
 // Usage: node scripts/ci/tested-tree.mjs [--root <dir>] --out <tree.json> <vitest report.json>
 // Reads GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_EVENT_NAME, GITHUB_SHA,
@@ -34,10 +36,10 @@ export const buildTreeRecord = (report, { root, env, head, tree }) => {
   if (!kSha.test(headSha ?? "")) throw new Error("a pull_request run needs PR_HEAD_SHA");
   if (!kSha.test(tree ?? "")) throw new Error(`not a tree id: ${tree}`);
   const files = report.testResults
-    .filter((result) => result.status === "passed")
+    .filter((result) => result.status === "passed" && result.assertionResults?.some((test) => test.status === "passed"))
     .map((result) => path.relative(root, result.name).split(path.sep).join("/"))
     .sort();
-  if (!files.length) throw new Error("no test file passed");
+  if (!files.length) throw new Error("no test file ran a passing test");
   return {
     run_id: runId,
     run_attempt: runAttempt,

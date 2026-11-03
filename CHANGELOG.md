@@ -11,11 +11,11 @@ Versions follow this repository's `package.json` release counter.
 
 ### Added
 - **`.gstack/pregate.json`** (now committed; `.gitignore` still ignores the rest of `.gstack/`): run profile `ci/test-24` (`ci.yml`, `pull_request` and `push` runs, job `test (24)`, artifact `tested-tree`) and `ship_lanes_from` for the two /ship lanes, `npm test` and `npx vitest run tests/server/guards`. Each lane's inventory is the test files it runs, from `git ls-files` (the same 631 and 14 files `vitest list` selects). A lane carries only when a verified `test (24)` run at HEAD's exact tree lists every one of them; otherwise it runs locally as before. Required checks and the container and live tiers are unchanged.
-- **`scripts/ci/tested-tree.mjs`**: `test (24)` writes `tree.json` from its vitest JSON report and uploads it as `tested-tree`: run id and attempt, event, the commit tested (the merge commit on a pull request) and the pull request head, `git rev-parse HEAD^{tree}`, the runner OS, every passed test file and the passed test count. It writes nothing from a red or empty report or from a checkout that is not the run's commit, and the upload step runs only on success.
+- **`scripts/ci/tested-tree.mjs`**: `test (24)` writes `tree.json` from its vitest JSON report and uploads it as `tested-tree`: run id and attempt, event, the commit tested (the merge commit on a pull request) and the pull request head, `git rev-parse HEAD^{tree}`, the runner OS, every test file that ran a passing test (vitest's JSON report marks an all-skipped file as passed, so the script reads each file's tests) and the passed test count. It writes nothing from a red or empty report or from a checkout that is not the run's commit, and the upload step runs only on success.
 - CLAUDE.md names the exact lane commands, since a lane carries only on a byte-identical command.
 
 ### Tests
-- `tests/ci/tested-tree.test.js`: push and pull_request records, no record from a red, empty or all-skipped report, a wrong checkout or a malformed run id.
+- `tests/ci/tested-tree.test.js`: push and pull_request records, an all-skipped file left out, and no record from a red, empty or all-skipped report, a wrong checkout, a malformed run id or tree, or an unsupported event.
 - `tests/ci/workflow-contract.test.js`: `ci.yml` records and uploads `tested-tree` from Node 24 on success, and `.gstack/pregate.json`'s profile and lane map match it.
 
 ## [0.10.162] - 2026-11-02

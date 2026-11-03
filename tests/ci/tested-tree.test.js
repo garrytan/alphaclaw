@@ -12,9 +12,9 @@ const report = (overrides = {}) => ({
   numFailedTestSuites: 0,
   numPassedTests: 5,
   testResults: [
-    { name: "/r/tests/server/b.test.js", status: "passed" },
-    { name: "/r/tests/a.test.js", status: "passed" },
-    { name: "/r/tests/skipped.test.js", status: "skipped" },
+    { name: "/r/tests/server/b.test.js", status: "passed", assertionResults: [{ status: "passed" }, { status: "skipped" }] },
+    { name: "/r/tests/a.test.js", status: "passed", assertionResults: [{ status: "passed" }] },
+    { name: "/r/tests/skipped.test.js", status: "passed", assertionResults: [{ status: "skipped" }, { status: "pending" }, { status: "todo" }] },
   ],
   ...overrides,
 });
@@ -29,7 +29,7 @@ const env = (overrides = {}) => ({
 });
 
 describe("ci/tested-tree", () => {
-  it("records a push run's tree with every passed test file, repo-relative and sorted", async () => {
+  it("records a push run's tree with every file that ran a passing test, repo-relative and sorted", async () => {
     const { buildTreeRecord } = await load();
     expect(buildTreeRecord(report(), { root: "/r", env: env(), head: kHead, tree: kTree })).toEqual({
       run_id: 123,
@@ -64,12 +64,17 @@ describe("ci/tested-tree", () => {
     expect(() => buildTreeRecord(report({ success: false, numFailedTests: 1 }), opts)).toThrow(/not green/);
     expect(() => buildTreeRecord(report({ numFailedTestSuites: 1 }), opts)).toThrow(/not green/);
     expect(() => buildTreeRecord(report({ testResults: [] }), opts)).toThrow(/no test files/);
-    expect(() => buildTreeRecord(report({ testResults: [{ name: "/r/tests/a.test.js", status: "skipped" }] }), opts)).toThrow(/no test file passed/);
+    expect(() =>
+      buildTreeRecord(report({ testResults: [{ name: "/r/tests/a.test.js", status: "passed", assertionResults: [{ status: "skipped" }] }] }), opts),
+    ).toThrow(/no test file ran a passing test/);
   });
 
-  it("refuses a checkout that is not the commit the run names, and a malformed run id", async () => {
+  it("refuses a checkout that is not the commit the run names, a malformed run id or tree, and an unsupported event", async () => {
     const { buildTreeRecord } = await load();
     expect(() => buildTreeRecord(report(), { root: "/r", env: env(), head: kMerge, tree: kTree })).toThrow(/not the run's commit/);
+    expect(() => buildTreeRecord(report(), { root: "/r", env: env({ GITHUB_SHA: "" }), head: "", tree: kTree })).toThrow(/not the run's commit/);
+    expect(() => buildTreeRecord(report(), { root: "/r", env: env(), head: kHead, tree: "nope" })).toThrow(/not a tree id/);
+    expect(() => buildTreeRecord(report(), { root: "/r", env: env({ GITHUB_EVENT_NAME: "schedule" }), head: kHead, tree: kTree })).toThrow(/unsupported event/);
     expect(() => buildTreeRecord(report(), { root: "/r", env: env({ GITHUB_RUN_ID: "" }), head: kHead, tree: kTree })).toThrow(/positive integers/);
   });
 });
