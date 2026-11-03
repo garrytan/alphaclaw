@@ -75,6 +75,12 @@ describe("frontend/doctor measured context", () => {
     ]);
   });
 
+  it("opens files from main's report only, since the file browser serves main's workspace", () => {
+    expect(buildMeasuredContextModel(kMeasured).rows.every((row) => row.openable)).toBe(true);
+    const ops = buildMeasuredContextModel({ ...kMeasured, agentId: "ops" });
+    expect(ops.rows.some((row) => row.openable)).toBe(false);
+  });
+
   it("explains each unavailable reason in plain words", () => {
     expect(buildMeasuredContextModel({ available: false, reason: "no_run" }).message).toMatch(/No run recorded yet/);
     expect(buildMeasuredContextModel({ available: false, reason: "unsupported" }).message).toMatch(/does not report/);
