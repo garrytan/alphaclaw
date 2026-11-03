@@ -1,0 +1,29 @@
+{
+  "run_profiles": {
+    "ci/test-24": {
+      "workflow": "ci.yml",
+      "events": [
+        "pull_request",
+        "push"
+      ],
+      "jobs": [
+        "test (24)"
+      ],
+      "artifact": "tested-tree"
+    }
+  },
+  "ship_lanes_from": {
+    "npm test": {
+      "profiles": [
+        "ci/test-24"
+      ],
+      "inventory": "git ls-files -- 'tests/*.test.js' | grep -vE '^tests/(live|container)/'"
+    },
+    "npx vitest run tests/server/guards": {
+      "profiles": [
+        "ci/test-24"
+      ],
+      "inventory": "git ls-files -- 'tests/server/guards/*.test.js'"
+    }
+  }
+}

@@ -106,6 +106,19 @@ describe("ci/merge-gate workflow contract", () => {
     expect(c).toMatch(/grep -qE '\^\[-\+\]\\s\*"test:container":'/);
   });
 
+  it("ci.yml uploads the tested tree that .gstack/pregate.json's run profile reads, and ship_lanes_from maps the /ship lanes to it", () => {
+    const ci = wf("ci.yml");
+    const step = ci.split("name: Record the tested tree")[1].split("if-no-files-found")[0];
+    expect(step).toMatch(/if: success\(\) && matrix\.node-version == 24/);
+    expect(step).toContain("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}");
+    expect(step).toContain("node scripts/ci/tested-tree.mjs --out \"$RUNNER_TEMP/tested-tree/tree.json\" test-reports/vitest.json");
+    expect(step).toMatch(/upload-artifact@v4\n\s+if: success\(\) && matrix\.node-version == 24\n\s+with:\n\s+name: tested-tree\n\s+path: \$\{\{ runner\.temp \}\}\/tested-tree\/tree\.json/);
+    const policy = JSON.parse(readFileSync(path.join(__dirname, "..", "..", ".gstack", "pregate.json"), "utf8"));
+    expect(policy.run_profiles["ci/test-24"]).toEqual({ workflow: "ci.yml", events: ["pull_request", "push"], jobs: ["test (24)"], artifact: "tested-tree" });
+    expect(Object.keys(policy.ship_lanes_from).sort()).toEqual(["npm test", "npx vitest run tests/server/guards"]);
+    for (const lane of Object.values(policy.ship_lanes_from)) expect(lane.profiles).toEqual(["ci/test-24"]);
+  });
+
   it("ci.yml records a test inventory on every run, publishes main's, guards PRs against the exact base, and covers main", () => {
     const ci = wf("ci.yml");
     expect(ci).toMatch(/^permissions:\n\s+contents: read\n(\s+#.*\n)*\s+actions: read/m);
