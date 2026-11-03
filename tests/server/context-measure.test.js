@@ -224,6 +224,46 @@ describe("createMeasuredContextReader", () => {
     expect(down).toHaveBeenCalledTimes(2);
   });
 
+  it("runs one read at a time across distinct agents", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const clawCmd = vi.fn(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return okJson({ sessions: [] });
+    });
+    const reader = createMeasuredContextReader({ clawCmd });
+    const results = await Promise.all(["a1", "a2", "a3", "a4"].map((id) => reader.read(id)));
+    expect(results.every((result) => result.reason === "no_run")).toBe(true);
+    expect(clawCmd).toHaveBeenCalledTimes(4);
+    expect(maxActive).toBe(1);
+  });
+
+  it("keeps reading after a queued read throws", async () => {
+    const clawCmd = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("spawn failed"))
+      .mockResolvedValue(okJson({ sessions: [] }));
+    const reader = createMeasuredContextReader({ clawCmd });
+    const [first, second] = await Promise.all([reader.read("a1"), reader.read("a2")]);
+    expect(first.reason).toBe("gateway");
+    expect(second.reason).toBe("no_run");
+  });
+
+  it("drops expired cache entries when it writes a new one", async () => {
+    let nowMs = 1_000;
+    const { clawCmd } = createFakeClaw({ rows: [] });
+    const reader = createMeasuredContextReader({ clawCmd, now: () => nowMs });
+    await reader.read("a1");
+    await reader.read("a2");
+    expect(reader.cacheSize()).toBe(2);
+    nowMs += 5_001;
+    await reader.read("a3");
+    expect(reader.cacheSize()).toBe(1);
+  });
+
   it("answers gateway instead of throwing when the CLI wrapper throws", async () => {
     const throwing = vi.fn(async () => {
       throw new Error("spawn failed");

@@ -640,7 +640,7 @@ describe("server/routes/doctor combined atomic settings write (adversarial C-ADV
 });
 
 describe("GET /api/doctor/context/measured", () => {
-  const createMeasuredApp = (measuredContextReader) => {
+  const createMeasuredApp = (measuredContextReader, isKnownAgent) => {
     const app = express();
     app.use(express.json());
     registerDoctorRoutes({
@@ -648,6 +648,7 @@ describe("GET /api/doctor/context/measured", () => {
       requireAuth: (req, res, next) => next(),
       doctorService: createDoctorService(),
       measuredContextReader,
+      isKnownAgent,
     });
     return app;
   };
@@ -674,6 +675,19 @@ describe("GET /api/doctor/context/measured", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("answers 404 for an agent that is not on the roster, never reading", async () => {
+    const reader = { read: vi.fn(async (agentId) => ({ available: true, agentId })) };
+    const isKnownAgent = vi.fn((agentId) => agentId === "main" || agentId === "ops");
+    const app = createMeasuredApp(reader, isKnownAgent);
+    const unknown = await request(app).get("/api/doctor/context/measured?agentId=ghost");
+    expect(unknown.status).toBe(404);
+    expect(unknown.body).toEqual({ ok: false, error: "Agent not found" });
+    expect(reader.read).not.toHaveBeenCalled();
+    const ops = await request(app).get("/api/doctor/context/measured?agentId=ops");
+    expect(ops.status).toBe(200);
+    expect(reader.read.mock.calls.map(([id]) => id)).toEqual(["ops"]);
   });
 
   it("answers unsupported when no reader is wired (older wiring)", async () => {
