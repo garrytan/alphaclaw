@@ -164,12 +164,28 @@ chars and replaces the middle with policy-looking lines picked from the whole fi
 single merged `hooks/bootstrap/AGENTS.md` grew past the cap on a box with a large topic registry,
 the topic table and most of the Google section fell in that middle.
 
-AlphaClaw therefore writes two extras, in this order:
+AlphaClaw therefore writes two extras, in this order, plus one file that is never injected:
 
 | Path | Content | Size |
 |------|---------|------|
-| `hooks/bootstrap/AGENTS.md` | core-prompts `AGENTS.md` (safety, persistence, git rules), then core-prompts `TOOLS.md` (harness, tabs, webhooks), machine resources, the agent-admin stanza | fixed, about 8k chars |
-| `hooks/bootstrap/reference/AGENTS.md` | Google accounts, then the topic registry | rendered to stay under 85% of the effective `bootstrapMaxChars`; topic rows past the budget are dropped (discovered rows first) and counted in the "N more topics not shown — run `alphaclaw telegram topics list`" line |
+| `hooks/bootstrap/AGENTS.md` | core-prompts `AGENTS.md` (safety, persistence, git rules), then core-prompts `TOOLS.md` (harness, the Setup UI map pointer, env vars, Telegram links and the thread rule when Telegram is on, webhooks), machine resources, the agent-admin stanza | fixed: about 4.8k chars on a default install with the machine profile, 5.4k with the git writer, the admin stanza and the Telegram rule (a test caps them at 5,000 and 5,800); it was about 8k before v0.10.163 |
+| `hooks/bootstrap/reference/AGENTS.md` | Google accounts, then the topic registry | rendered to stay under 85% of the effective `bootstrapMaxChars`; the topic rows are capped at 2,000 chars (`kTopicInlineMaxChars`, about 25 rows) or that budget, whichever is smaller, with the pointer line and the Sync Rules outside the cap. Rows past it are dropped (discovered rows first) and counted in the "N more topics not shown — run `alphaclaw telegram topics list` [--agent <id>] for the full set. Never guess a thread ID." line. A 450-topic registry renders about 3.2k chars (it was about 17k) |
+| `hooks/bootstrap/reference/setup-ui.md` | the Setup UI tab map (core-prompts `setup-ui.md`, same variables) | about 2.8k chars, written for every agent and never listed in `bootstrap-extra-files` (the rules file points at it; a hand-added path to it is dropped, since `setup-ui.md` is not a valid extras basename) |
+
+An operator may take the reference path out of `bootstrap-extra-files` on purpose (v0.10.163). The
+sync counts it as a removal only when the entry exists, it and `hooks.internal` are enabled, it
+still lists the rules path, and the reference file was already on disk before the sync (proof that
+an AlphaClaw which injects it had run; a rules-only entry written before v0.10.117 gets both paths).
+The decision is made from the live config inside the locked `openclaw.json` write
+(`resolveBootstrapExtraEntryPlan`) and recorded once in `alphaclaw.json` as
+`promptFiles.reference = { enabled: false, detectedAt, by: "operator-config" }`; later syncs read
+the flag, so a wiped entry or disabled hooks come back with the rules path only. The flag never
+removes a path: when the reference path is listed again (a hand edit, onboarding's managed shell)
+the flag clears, and `POST /api/doctor/prompt-files/reference` (`{"enabled": true}`, humans only,
+outside the admin manifest) puts the path back and clears it. The rules path is always restored,
+with one `bootstrap_sync` watchdog event (`source: rules-restored`) and a
+`promptFiles.rulesRestoredAt` stamp. Drift Doctor shows `det:prompt-files:reference-off` (P2) and
+`det:prompt-files:rules-restored:<stamp>` (P1).
 
 The effective cap per workspace follows OpenClaw's per-agent ladder (`resolveAgentBootstrapBudget`
 in `lib/server/doctor/bootstrap-context.js`). A file that still exceeds it (for example the rules

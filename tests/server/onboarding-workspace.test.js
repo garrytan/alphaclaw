@@ -68,6 +68,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
 
   const kToolsTemplatePath = path.join(kSetupDir, "core-prompts", "TOOLS.md");
   const kAgentsSourcePath = path.join(kSetupDir, "core-prompts", "AGENTS.md");
+  const kSetupUiTemplatePath = path.join(kSetupDir, "core-prompts", "setup-ui.md");
   const kConfigPath = path.join(OPENCLAW_DIR, "openclaw.json");
   const kGoogleStatePath = path.join(OPENCLAW_DIR, "gogcli", "state.json");
 
@@ -262,7 +263,13 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
         return kSetupTextExtensions.has(path.extname(entry.name)) ? [full] : [];
       });
     const offenders = [];
-    for (const file of collect(kSetupDir)) {
+    const scanned = collect(kSetupDir);
+    // Every core-prompts template is scanned, the Setup UI map included.
+    const corePromptsDir = path.join(kSetupDir, "core-prompts");
+    const corePrompts = realFs.readdirSync(corePromptsDir).map((name) => path.join(corePromptsDir, name));
+    expect(corePrompts).toContain(path.join(corePromptsDir, "setup-ui.md"));
+    expect(scanned).toEqual(expect.arrayContaining(corePrompts));
+    for (const file of scanned) {
       realFs.readFileSync(file, "utf8").split("\n").forEach((line, index) => {
         const allowsMerge =
           /pull first|or a merge|finish or abort/i.test(line) ||
@@ -906,6 +913,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
       readFileSync: vi.fn((target) => {
         if (target === kToolsTemplatePath) return "Setup: {{SETUP_UI_URL}}";
         if (target === kAgentsSourcePath) return "AGENTS TEMPLATE";
+        if (target === kSetupUiTemplatePath) return "Setup UI map: {{SETUP_UI_URL}}";
         if (target === kConfigPath) return json5Config;
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }),

@@ -161,6 +161,10 @@ describe("api route-miss guard (real server)", () => {
     const gateway = await asAgent("GET", "/api/definitely-not-a-route");
     expect(gateway.status).toBe(403);
     expect(gateway.json.code).toBe("op_not_in_manifest");
+    // Human-only and kept out of the manifest (ALPH-58): a real route, so 403.
+    const promptFiles = await asAgent("POST", "/api/doctor/prompt-files/reference", { body: { enabled: true } });
+    expect(promptFiles.status).toBe(403);
+    expect(promptFiles.json.code).toBe("op_not_in_manifest");
     const events = await asAgent("GET", "/api/watchdog/events?limit=1&includeRoutine=1");
     expect(events.status).toBe(200);
     expect(events.json).toMatchObject({ ok: true, limit: 1 });

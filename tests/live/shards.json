@@ -9,6 +9,7 @@
         "tests/live/dashboard-launch.e2e.test.js",
         "tests/live/doctor-fix-dispatch-contract.e2e.test.js",
         "tests/live/gateway-downtime-note.e2e.test.js",
+        "tests/live/injected-context.e2e.test.js",
         "tests/live/openclaw-file-log.e2e.test.js",
         "tests/live/openclaw-live-cli-contract.e2e.test.js",
         "tests/live/openclaw-live-gateway.e2e.test.js",

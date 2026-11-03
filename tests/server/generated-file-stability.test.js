@@ -84,7 +84,7 @@ describe("generated files are byte-stable", () => {
       vi.spyOn(console, "log").mockImplementation(() => {});
       sync(first);
       sync(second);
-      for (const relative of ["AGENTS.md", path.join("reference", "AGENTS.md")]) {
+      for (const relative of ["AGENTS.md", path.join("reference", "AGENTS.md"), path.join("reference", "setup-ui.md")]) {
         const read = (dir) => realFs.readFileSync(path.join(dir, "hooks", "bootstrap", relative));
         expect(read(first).length).toBeGreaterThan(0);
         expect(read(second).equals(read(first))).toBe(true);
@@ -96,6 +96,7 @@ describe("generated files are byte-stable", () => {
       const files = [
         path.join(workspaceDir, "hooks", "bootstrap", "AGENTS.md"),
         path.join(workspaceDir, "hooks", "bootstrap", "reference", "AGENTS.md"),
+        path.join(workspaceDir, "hooks", "bootstrap", "reference", "setup-ui.md"),
       ];
       vi.spyOn(console, "log").mockImplementation(() => {});
       sync(workspaceDir);
@@ -116,15 +117,16 @@ describe("generated files are byte-stable", () => {
         " was regenerated with new content and git sync is off (ALPHACLAW_GIT_SYNC=off); commit it with the tool that owns this repository";
       expect(notices()).toEqual([
         `[alphaclaw] workspace/hooks/bootstrap/AGENTS.md${suffix}`,
+        `[alphaclaw] workspace/hooks/bootstrap/reference/setup-ui.md${suffix}`,
         `[alphaclaw] workspace/hooks/bootstrap/reference/AGENTS.md${suffix}`,
       ]);
 
       sync(workspaceDir);
-      expect(notices()).toHaveLength(2);
+      expect(notices()).toHaveLength(3);
 
       process.env.ALPHACLAW_GIT_WRITER_COMMAND = "/srv/ops/guard.sh commit";
       sync(workspaceDir, "/srv/ops/guard.sh commit");
-      const writerNotices = notices().slice(2);
+      const writerNotices = notices().slice(3);
       expect(writerNotices).toEqual([
         "[alphaclaw] workspace/hooks/bootstrap/AGENTS.md was regenerated with new content and git sync is off (ALPHACLAW_GIT_SYNC=off); commit it with this repository's writer (ALPHACLAW_GIT_WRITER_COMMAND)",
       ]);
