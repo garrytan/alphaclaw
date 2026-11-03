@@ -317,7 +317,7 @@ Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`
 | `alphaclaw doctor finding complete`                        | Mark a queued Doctor finding fixed after verification |
 | `alphaclaw telegram topic add --thread <id> --name <text>` | Register a Telegram topic mapping             |
 | `alphaclaw telegram topic create --group <id> --name <text>` | Create a Telegram forum topic and register it |
-| `alphaclaw telegram topics list`                           | List registered, discovered, and stale topics |
+| `alphaclaw telegram topics list [--group <id>] [--agent <id>]` | List registered, discovered, and stale topics; `--agent` lists the topics that agent's injected reference file is rendered from |
 | `alphaclaw diagnose [--json]`                              | Read-only diagnostic bundle from the data volume (boot reports, declared pin vs installed OpenClaw, boot migration, pidfile verdict, state DB schema, incidents, backups, log tail); markdown by default, one JSON line with `--json`. Works with the server down; the same bundle is served live at `GET /api/diagnose`. |
 | `alphaclaw admin <METHOD> /api/path`                       | Agent-admin CLI: drive the dashboard API (needs `features.agentAdmin`) |
 | `alphaclaw admin manifest`                                 | Print the agent-admin operation catalog       |
