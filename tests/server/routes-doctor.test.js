@@ -695,3 +695,65 @@ describe("GET /api/doctor/context/measured", () => {
     expect(res.body).toEqual({ ok: true, measured: { available: false, reason: "unsupported" } });
   });
 });
+
+describe("server/routes/doctor prompt-files reference re-enable (ALPH-58)", () => {
+  const createReferenceApp = ({ actor = null, enablePromptReference, syncPromptFiles }) => {
+    const app = express();
+    app.use(express.json());
+    if (actor) {
+      app.use((req, res, next) => {
+        req.alphaclawActor = actor;
+        next();
+      });
+    }
+    registerDoctorRoutes({
+      app,
+      requireAuth: (req, res, next) => next(),
+      doctorService: createDoctorService(),
+      enablePromptReference,
+      syncPromptFiles,
+    });
+    return app;
+  };
+
+  it("re-enables the reference file for a signed-in human, then resyncs", async () => {
+    const enablePromptReference = vi.fn(() => ({ referenceDisabled: false, rulesRestoredAt: null }));
+    const syncPromptFiles = vi.fn();
+    const app = createReferenceApp({ enablePromptReference, syncPromptFiles });
+
+    const res = await request(app).post("/api/doctor/prompt-files/reference").send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, promptFiles: { referenceDisabled: false, rulesRestoredAt: null } });
+    expect(enablePromptReference).toHaveBeenCalledTimes(1);
+    expect(syncPromptFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses the agent actor before touching anything", async () => {
+    const enablePromptReference = vi.fn();
+    const app = createReferenceApp({ actor: { type: "agent" }, enablePromptReference, syncPromptFiles: vi.fn() });
+
+    const res = await request(app).post("/api/doctor/prompt-files/reference").send({ enabled: true });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("denied");
+    expect(enablePromptReference).not.toHaveBeenCalled();
+  });
+
+  it("accepts only {enabled: true}", async () => {
+    const enablePromptReference = vi.fn();
+    const app = createReferenceApp({ enablePromptReference, syncPromptFiles: vi.fn() });
+
+    for (const body of [{}, { enabled: false }, { enabled: "true" }]) {
+      const res = await request(app).post("/api/doctor/prompt-files/reference").send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(enablePromptReference).not.toHaveBeenCalled();
+  });
+
+  it("stays out of the admin manifest", () => {
+    const manifest = require("../../lib/server/admin-manifest");
+    expect(manifest.findOp("POST", "/api/doctor/prompt-files/reference")).toBeFalsy();
+    expect(manifest.kUnmanifestedRoutes.has("POST /api/doctor/prompt-files/reference")).toBe(true);
+  });
+});

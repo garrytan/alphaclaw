@@ -124,7 +124,7 @@ describe("bootstrap files stay under OpenClaw's per-file cap", () => {
     const onOverCap = vi.fn();
     const mockFs = makeFs({
       channels: { telegram: { groups: telegramGroups } },
-      agents: { defaults: { bootstrapMaxChars: 6000 } },
+      agents: { defaults: { bootstrapMaxChars: 4000 } },
     });
 
     syncBootstrapPromptFiles({
@@ -136,15 +136,15 @@ describe("bootstrap files stay under OpenClaw's per-file cap", () => {
 
     // The reference file shrinks to fit 85% of the lowered cap...
     const reference = written(mockFs, kReferencePath);
-    expect(reference.length).toBeLessThanOrEqual(5100);
-    expect(findTruncatedSections(reference, 6000)).toEqual([]);
+    expect(reference.length).toBeLessThanOrEqual(3400);
+    expect(findTruncatedSections(reference, 4000)).toEqual([]);
     // ...but the rules file cannot, so it is reported once, by section.
     expect(onOverCap).toHaveBeenCalledTimes(1);
     const report = onOverCap.mock.calls[0][0];
-    expect(report).toMatchObject({ path: "hooks/bootstrap/AGENTS.md", capChars: 6000 });
-    expect(report.chars).toBeGreaterThan(6000);
+    expect(report).toMatchObject({ path: "hooks/bootstrap/AGENTS.md", capChars: 4000 });
+    expect(report.chars).toBeGreaterThan(4000);
     expect(report.sections.length).toBeGreaterThan(0);
-    expect(report.sections).toEqual(findTruncatedSections(written(mockFs, kRulesPath), 6000));
+    expect(report.sections).toEqual(findTruncatedSections(written(mockFs, kRulesPath), 4000));
   });
 });
 

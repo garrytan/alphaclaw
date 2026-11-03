@@ -12,7 +12,7 @@ const path = require("path");
 const liveHelpers = require("./live-helpers");
 const { syncBootstrapPromptFiles } = require("../../lib/server/onboarding/workspace");
 const { OPENCLAW_DIR, WORKSPACE_DIR, kSetupDir } = require("../../lib/server/constants");
-const { kRegistryPath } = require("../../lib/server/topic-registry");
+const { kRegistryPath, renderTopicRegistryMarkdown } = require("../../lib/server/topic-registry");
 
 const describeLive = liveHelpers.kLiveEnabled ? describe : describe.skip;
 const kTestTimeoutMs = 4 * 60 * 1000;
@@ -78,8 +78,11 @@ const renderAlphaclawBootstrapFiles = () => {
       target === kRegistryPath ? registry : original.call(realFs, target, ...rest),
     );
   const quiet = ["log", "warn", "error"].map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+  let fullRegistry;
   try {
     syncBootstrapPromptFiles({ fs, workspaceDir: WORKSPACE_DIR, baseUrl: "https://setup.example.com" });
+    // The whole registry, as the single merged file used to inline it.
+    fullRegistry = renderTopicRegistryMarkdown({ includeSyncGuidance: true, telegramEnabled: true });
   } finally {
     spy.mockRestore();
     for (const mock of quiet) mock.mockRestore();
@@ -87,6 +90,7 @@ const renderAlphaclawBootstrapFiles = () => {
   return {
     rules: writes.get(path.join(WORKSPACE_DIR, "hooks", "bootstrap", "AGENTS.md")),
     reference: writes.get(path.join(WORKSPACE_DIR, "hooks", "bootstrap", "reference", "AGENTS.md")),
+    fullRegistry,
   };
 };
 
@@ -128,11 +132,11 @@ describeLive("bootstrap extras vs OpenClaw's per-file cap (live)", () => {
   it(
     "the old merged file is flagged; the rules and reference files are not",
     () => {
-      const { rules, reference } = renderAlphaclawBootstrapFiles();
+      const { rules, reference, fullRegistry } = renderAlphaclawBootstrapFiles();
       expect(rules).toBeTruthy();
       expect(reference).toBeTruthy();
 
-      expect(lintBootstrap({ "hooks/bootstrap/AGENTS.md": rules + reference })).toEqual([
+      expect(lintBootstrap({ "hooks/bootstrap/AGENTS.md": rules + fullRegistry })).toEqual([
         "hooks/bootstrap/AGENTS.md",
       ]);
       expect(
@@ -145,7 +149,7 @@ describeLive("bootstrap extras vs OpenClaw's per-file cap (live)", () => {
       expect(
         lintBootstrap({
           "hooks/bootstrap/AGENTS.md": rules,
-          "hooks/bootstrap/reference/AGENTS.md": reference + "| g | t | 1 |\n".repeat(400),
+          "hooks/bootstrap/reference/AGENTS.md": reference + "| g | t | 1 |\n".repeat(1600),
         }),
       ).toEqual(["hooks/bootstrap/reference/AGENTS.md"]);
     },

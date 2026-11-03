@@ -254,6 +254,7 @@ describe("import-scanner", () => {
     const fs = createMockFs(
       {
         "/tmp/test/hooks/bootstrap/AGENTS.md": "custom",
+        "/tmp/test/hooks/bootstrap/reference/setup-ui.md": "custom map",
         "/tmp/test/.gitignore": "# user gitignore",
       },
       ["/tmp/test/.alphaclaw"],
@@ -262,6 +263,9 @@ describe("import-scanner", () => {
     expect(result.managedConflicts.found).toBe(true);
     expect(result.managedConflicts.files).toContain(
       "hooks/bootstrap/AGENTS.md",
+    );
+    expect(result.managedConflicts.files).toContain(
+      "hooks/bootstrap/reference/setup-ui.md",
     );
     expect(result.managedConflicts.files).toContain(".gitignore");
     expect(result.managedConflicts.dirs).toContain(".alphaclaw");

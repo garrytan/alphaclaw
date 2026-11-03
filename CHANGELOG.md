@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.163] - 2026-11-03
+## [0.10.164] - 2026-11-02
 
 /ship carries its test lanes from CI's green run at the same clean tree instead of running them again (R66 F1, gstack GSTA-258).
 
@@ -17,6 +17,25 @@ Versions follow this repository's `package.json` release counter.
 ### Tests
 - `tests/ci/tested-tree.test.js`: push and pull_request records, an all-skipped file left out, and no record from a red, empty or all-skipped report, a wrong checkout, a malformed run id or tree, or an unsupported event.
 - `tests/ci/workflow-contract.test.js`: `ci.yml` records and uploads `tested-tree` from Node 24 on success, and `.gstack/pregate.json`'s profile and lane map match it.
+## [0.10.163] - 2026-11-02
+
+AlphaClaw's injected rules file is about 40% smaller and its topic table is capped, with every safety clause kept word for word (ALPH-58, GST-175). Reported in #291 (exGeni).
+
+### Changed
+- **The rules file (`hooks/bootstrap/AGENTS.md`) drops from about 8,000 to about 4,800 chars on a default install.** Every agent turn, and every subagent turn, pays for it. The Setup UI tab table (2.6k chars) moved to a new generated file, `hooks/bootstrap/reference/setup-ui.md`, written to every agent workspace and never injected; one pointer line in the rules file tells the agent to read it when someone needs to find something in the UI. The second copy of the persistent-storage rules is gone (its "local tooling and helper files" wording is folded into the one copy), and the harness and Google Workspace paragraphs are one line each. The env-var, webhook, git and approval rules are unchanged.
+- **The topic table in `hooks/bootstrap/reference/AGENTS.md` shows about 25 rows.** Its rows are capped at 2,000 chars, or the agent's own reference budget when that is smaller; the Sync Rules render outside the cap. A 450-topic registry now renders about 3,200 chars instead of about 17,000. The pointer line names the command for the rest and says never to guess a thread ID.
+- **A Telegram thread rule rides the rules file when Telegram is on:** pass the thread ID as `message_thread_id`, never guess one, use the topic table when it is in context, otherwise run `alphaclaw telegram topics list --agent <id>`.
+- **`alphaclaw telegram topics list` takes `--agent <id>`**, which lists the topics that agent's reference file is rendered from (the groups it owns and the topics pinned to it).
+- **An operator can take the reference file out of the injected extras, and it stays out.** Before, the next sync put `hooks/bootstrap/reference/AGENTS.md` back into `bootstrap-extra-files`. Now a removal from a live entry that still lists the rules file is recorded once in `alphaclaw.json` (`promptFiles.reference = { enabled: false, detectedAt, by: "operator-config" }`, decided from the live config inside the locked `openclaw.json` write), with one watchdog event, and later syncs read that flag. An install that already lacks the path gets the flag on its first sync. A deleted entry, disabled hooks, an `openclaw onboard` rewrite and a rules-only entry written by an AlphaClaw older than v0.10.117 are never read as a removal. Drift Doctor explains it (`det:prompt-files:reference-off`), and the human-only `POST /api/doctor/prompt-files/reference` with `{"enabled": true}` turns it back on; it is outside the admin manifest, so the agent is refused.
+- **The rules file is always put back** when it goes missing from `bootstrap-extra-files`, now with one watchdog event, a `promptFiles.rulesRestoredAt` stamp and a Drift Doctor warning (`det:prompt-files:rules-restored:<stamp>`) until it is dismissed.
+- `hooks/bootstrap/reference/setup-ui.md` is a managed file for the import scanner. A hand-added `bootstrap-extra-files` path to it is dropped (it is not a valid extras basename).
+
+### Tests
+- `bootstrap-protected-clauses.test.js`: anchors for the 12 protected clauses (P1–P12), first passed against the previous templates, with present and absent sets per variant (git writer, admin skill, Telegram, reference off, machine profile, an unsafe template value). It also holds the size budget (at most 5,000 chars with the machine profile, 5,800 with writer, admin stanza and Telegram rule), no duplicate headings, `setup-ui.md` written for every agent and never in the paths, a 450-topic registry's rows at most 2,000 chars, and a small per-agent cap winning.
+- `bootstrap-prompt-files-optout.test.js`: a first install, an older rules-only config, a deliberate removal (flag and event once), the flag read after an entry wipe or disabled hooks, an onboard rewrite, the rules restore, the re-enable, and a damaged `alphaclaw.json` left untouched.
+- `doctor-prompt-files-cards.test.js`, `routes-doctor.test.js` (human re-enable, agent refused, body check, outside the manifest), the api-route-miss guard (the agent gets 403), `telegram-topics-cli.test.js` (`--agent`), and the git-rule test now asserts it scans every core-prompts template.
+- Updated for the new sizes and file: `bootstrap-budget.test.js`, `generated-file-stability.test.js`, `agent-tabs-table.test.js` (the table now lives in `setup-ui.md`), `import-scanner.test.js`.
+- Live tier `injected-context.e2e.test.js`: the system prompt the pinned OpenClaw sends a mock model holds every rules-file anchor and the pointer, and not the tab table; it logs the before and after sizes against a copy of the previous templates.
 
 ## [0.10.162] - 2026-11-02
 
