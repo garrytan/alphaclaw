@@ -272,7 +272,7 @@ describeLive(`LIVE Delete Agent against the ${readDeclaredPin()} pin`, () => {
     expect(journalOf("ops")).toMatchObject({ cleanup_completed: 1 });
     const turn = cliRaw(["agent", "--agent", "ops", "-m", "hello again", "--json"]);
     expect(turn.status).not.toBe(0);
-    expect(turn.stdout + turn.stderr).toContain("OpenClaw agent database is unavailable while agent ops is deleted.");
+    expect(turn.stdout + turn.stderr).toContain("Agent ops deletion is in progress; new work is unavailable.");
 
     const deleter = makeDeleter();
     expect(deleter.findDeletionRecord("ops")).toMatchObject({ complete: true });

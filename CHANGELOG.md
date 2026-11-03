@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.165] - 2026-11-03
+
+Pins OpenClaw 2026.10.10 with the compatibility fixes it needs (ALPH-59). Held as a draft until a 2026.10.10.x carries the large-session memory fix (openclaw/openclaw#172970).
+
+### Changed
+- **OpenClaw pin 2026.10.9 → 2026.10.10.** Its first boot migrates the state database (schema 20 → 22) and agent databases (25 → 27) one way; README's OpenClaw Version section says how to go back.
+- **Auth store:** schemas 21 and 22 are read and written through the shared layout, as before. A store newer than 22 is refused with `AUTH_STORE_UNREADABLE` / `unsupported_schema` and a 409 naming the version found, the supported range (12–22) and the fix. The Codex manual exchange now returns that envelope too instead of a 500.
+- **Model catalog without a gateway:** since 2026.10.10, `openclaw models list --all --json` with no gateway lists only the configured models. AlphaClaw no longer persists that list or serves it as fresh. With nothing better cached it is merged over the bundled catalog, and the backoff retry loads the full catalog once the gateway is up.
+- README: a deleted agent's turns now fail with "Agent <id> deletion is in progress; new work is unavailable." (2026.10.10's wording); the model-policy note is checked through 2026.10.10.
+
+### Tests
+- `auth-profiles-kv.test.js`: schemas 21 and 22 in the matrix; schema 23 refused with a 409 from `/api/codex/exchange`.
+- `model-catalog-cache.test.js`: the configured-only catalog listed without a gateway is never written to disk nor served as fresh, and the retry replaces it.
+- `node-runtime.test.js`: AlphaClaw's engines range must sit inside the pin's (2026.10.10 relaxed to 24.16 / 26.1; AlphaClaw keeps 24.22.1 / 26.12.1).
+- `owned-providers.test.js`: the Particle tripwire checks for a bundled or installed plugin; 2026.10.10's catalog only lists `@openclaw/particle-provider` as installable.
+- Fixtures: `cron-pinned-runtime.mjs` finds `projectCronRunHistoryPage` in `run-history-*.mjs`; `database-fixture.js` records 2026.10.10's schemas (state 22, agent 27).
+- Live tier: the restart ladder and memory telemetry assert one process where Node offers `process.execve` (2026.10.10's launcher execs the gateway in place); the CLI contract row asserts the offline `models list` shape; agent-delete asserts the new wording; the Particle stub skips 2026.10.10's runtime-context user message when finding the person's turn and the tool result.
+
 ## [0.10.164] - 2026-11-02
 
 /ship carries its test lanes from CI's green run at the same clean tree instead of running them again (R66 F1, gstack GSTA-258).

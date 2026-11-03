@@ -63,20 +63,24 @@ const startStub = () => {
         res.writeHead(404);
         return res.end("{}");
       }
+      // 2026.10.10 sends its runtime context as a user message after the
+      // person's message (and after a tool result), so the person's turn is
+      // the last user message that is not that context.
       const messages = parsed.messages || [];
-      const last = messages[messages.length - 1] || {};
-      const lastUser = JSON.stringify([...messages].reverse().find((m) => m.role === "user")?.content || "");
+      const lastHumanIndex = messages.findLastIndex((m) => m.role === "user" && !JSON.stringify(m.content || "").includes("OpenClaw runtime context:"));
+      const lastUser = JSON.stringify(messages[lastHumanIndex]?.content || "");
+      const toolAnswered = messages.slice(lastHumanIndex + 1).some((m) => m.role === "tool");
       const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id: "chatcmpl-live", object: "chat.completion.chunk", created: 1, model: kStubModel, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       const usage = `data: ${JSON.stringify({ id: "chatcmpl-live", object: "chat.completion.chunk", created: 1, model: kStubModel, choices: [], usage: { prompt_tokens: 12, completion_tokens: 9, total_tokens: 21, prompt_tokens_details: { cached_tokens: 0 }, completion_tokens_details: { reasoning_tokens: 3 } } })}\n\n`;
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(chunk({ role: "assistant" }));
       res.write(chunk({ reasoning_content: "thinking it over" }));
-      if (lastUser.includes("TOOLCALL") && last.role !== "tool") {
+      if (lastUser.includes("TOOLCALL") && !toolAnswered) {
         const tool = (parsed.tools || []).map((entry) => entry.function?.name).find(Boolean);
         res.write(chunk({ tool_calls: [{ index: 0, id: "call_live_1", type: "function", function: { name: tool, arguments: "{}" } }] }));
         res.write(chunk({}, "tool_calls"));
       } else {
-        res.write(chunk({ content: last.role === "tool" ? "tool loop done" : "pong particle" }));
+        res.write(chunk({ content: toolAnswered ? "tool loop done" : "pong particle" }));
         res.write(chunk({}, "stop"));
       }
       res.write(usage);
@@ -203,8 +207,9 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
       const toolTurn = chatRequests().slice(-2);
       expect(toolTurn[0].body.messages.at(-1).role).toBe("user");
       const followUp = toolTurn[1].body.messages;
-      const toolResult = followUp.at(-1);
-      const callingTurn = followUp.at(-2);
+      const toolIndex = followUp.findLastIndex((message) => message.role === "tool");
+      const toolResult = followUp[toolIndex];
+      const callingTurn = followUp[toolIndex - 1];
       console.log(`[live] tool round trip: ${JSON.stringify({ calls: callingTurn.tool_calls, result: { role: toolResult.role, tool_call_id: toolResult.tool_call_id } })}`);
       expect(toolResult.role).toBe("tool");
       expect(callingTurn.role).toBe("assistant");

@@ -36,6 +36,8 @@ const { kLiveEnabled, waitFor, readDeclaredPin } = liveHelpers;
 const describeLive = kLiveEnabled ? describe : describe.skip;
 const kTestTimeoutMs = 10 * 60 * 1000;
 
+const kLauncherExecsInPlace = process.platform !== "win32" && typeof process.execve === "function";
+
 describeLive(`LIVE restart ladder against the ${readDeclaredPin()} pin`, () => {
   let gateway;
   let gatewayIdentity;
@@ -91,7 +93,7 @@ describeLive(`LIVE restart ladder against the ${readDeclaredPin()} pin`, () => {
   };
 
   it(
-    "boots a managed launcher→worker tree, restarts it gracefully with a fresh env, then stops it by SIGTERM in under its grace",
+    "boots the managed gateway, restarts it gracefully with a fresh env, then stops it by SIGTERM in under its grace",
     async () => {
       const launches = [];
       gateway.setGatewayLaunchHandler((payload) => launches.push(payload));
@@ -102,11 +104,14 @@ describeLive(`LIVE restart ladder against the ${readDeclaredPin()} pin`, () => {
       expect(child?.pid).toEqual(expect.any(Number));
       await waitFor(async () => (await readyz()).status === 200, 180_000, "first gateway /readyz 200");
 
-      // Launcher/worker split, one process group, worker resolved as servingPid.
+      // One process group, worker resolved as servingPid. 2026.10.10's
+      // compile-cache launcher replaces itself with the gateway (execve) where
+      // Node offers it, so the worker IS the launcher; elsewhere it respawns.
       const identity = gateway.resolveGatewayIdentity();
       expect(identity).toMatchObject({ owner: "managed", rootPid: child.pid, pgid: child.pid });
       expect(identity.workerPid).toEqual(expect.any(Number));
-      expect(identity.workerPid).not.toBe(child.pid);
+      if (kLauncherExecsInPlace) expect(identity.workerPid).toBe(child.pid);
+      else expect(identity.workerPid).not.toBe(child.pid);
       expect(gatewayIdentity.readProcessGroupId(identity.workerPid)).toBe(child.pid);
       await waitFor(async () => launches.length > 0, 10_000, "launch handler");
       expect(launches[0]).toMatchObject({ pid: child.pid, servingPid: identity.workerPid, supervision: "managed" });

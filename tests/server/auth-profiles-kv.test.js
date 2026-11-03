@@ -48,7 +48,7 @@ const read = (version = 17) => {
 afterEach(() => { fs.rmSync(path.join(root, ".openclaw"), { recursive: true, force: true }); });
 afterAll(() => { delete process.env.ALPHACLAW_ROOT_DIR; fs.rmSync(root, { recursive: true, force: true }); });
 
-describe.each([12, 13, 16, 17, 18, 19, 20])("auth shared schema %s", (version) => {
+describe.each([12, 13, 16, 17, 18, 19, 20, 21, 22])("auth shared schema %s", (version) => {
   it.each([["api_key", "key", "keyRef"], ["token", "token", "tokenRef"]])("replaces inherited %s references only for a new nonempty inline source", (type, field, refField) => {
     seed(version);
     const id = "referenced:default";
@@ -125,6 +125,30 @@ it("treats missing rows as empty, but rejects malformed runtime state and unknow
   db.exec("PRAGMA user_version = 999");
   db.close();
   expect(ap.getAuthStoreAvailability().unavailable).toBe(true);
+});
+
+it("refuses a newer shared schema with its version and the fix, as a 409 from the Codex exchange", async () => {
+  seed(23);
+  expect(() => ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "synthetic" })).toThrow(expect.objectContaining({
+    code: "AUTH_STORE_UNREADABLE",
+    reason: "unsupported_schema",
+    userVersion: 23,
+    message: expect.stringMatching(/uses schema 23; this AlphaClaw reads schemas 12-22\. Update AlphaClaw .* Do not downgrade OpenClaw/),
+  }));
+  const app = express();
+  app.use(express.json());
+  registerCodexRoutes({ app, authProfiles: ap, createPkcePair: () => ({ verifier: "v", challenge: "c" }),
+    parseCodexAuthorizationInput: (input) => Object.fromEntries(new URL(input).searchParams), getCodexAccountId: () => "synthetic-account" });
+  const start = await request(app).get("/auth/codex/start");
+  const oauthState = new URL(start.headers.location).searchParams.get("state");
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600 }) });
+  try {
+    const exchange = await request(app).post("/api/codex/exchange").send({ input: `http://localhost/callback?code=synthetic-code&state=${oauthState}` });
+    expect(exchange.status).toBe(409);
+    expect(exchange.body).toMatchObject({ ok: false, code: "config_unreadable", reason: "unsupported_schema", userVersion: 23, supportedSchemas: { min: 12, max: 22 } });
+    expect(exchange.body.error).toContain("Do not downgrade OpenClaw");
+  } finally { fetchSpy.mockRestore(); }
+  expect(read(23).store).toEqual(secrets());
 });
 
 it("rolls back both documents when the second write fails", () => {
