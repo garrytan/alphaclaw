@@ -117,8 +117,8 @@ describe("generated files are byte-stable", () => {
         " was regenerated with new content and git sync is off (ALPHACLAW_GIT_SYNC=off); commit it with the tool that owns this repository";
       expect(notices()).toEqual([
         `[alphaclaw] workspace/hooks/bootstrap/AGENTS.md${suffix}`,
-        `[alphaclaw] workspace/hooks/bootstrap/reference/AGENTS.md${suffix}`,
         `[alphaclaw] workspace/hooks/bootstrap/reference/setup-ui.md${suffix}`,
+        `[alphaclaw] workspace/hooks/bootstrap/reference/AGENTS.md${suffix}`,
       ]);
 
       sync(workspaceDir);

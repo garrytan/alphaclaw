@@ -120,6 +120,50 @@ describe("bootstrap extras: operator opt-out of the reference file (ALPH-58 deci
     expect(events).toHaveBeenCalledTimes(1);
   });
 
+  it("a first sync whose config reconcile fails leaves no reference file, so the retry adds both paths", () => {
+    const onFailure = vi.fn();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const vfs = makeVfs({
+      [kConfigPath]: configWith({ entry: { enabled: true, paths: [kRules] } }),
+    });
+    const writeFileSync = vfs.writeFileSync.getMockImplementation();
+    let blocked = false;
+    vfs.writeFileSync.mockImplementation((target, content) => {
+      if (!blocked && String(target).startsWith(kConfigPath)) {
+        blocked = true;
+        throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+      }
+      return writeFileSync(target, content);
+    });
+    sync(vfs, { onFailure });
+    expect(onFailure).toHaveBeenCalledWith("config-reconcile", expect.any(Error));
+    expect(vfs.store.has(kReferenceFile)).toBe(false);
+    expect(entryPaths(vfs)).toEqual([kRules]);
+
+    sync(vfs, { onFailure });
+    expect(entryPaths(vfs)).toEqual([kRules, kReference]);
+    expect(vfs.store.get(kReferenceFile)).toContain("# AlphaClaw Workspace Reference");
+    expect(promptFiles(vfs)).toBeUndefined();
+    expect(events).not.toHaveBeenCalled();
+  });
+
+  it("decides from the list OpenClaw injects: an alias shadowed by a non-empty paths is not evidence", () => {
+    const vfs = makeVfs({
+      [kConfigPath]: configWith({
+        entry: { enabled: true, paths: [kRules, "notes/USER.md"], patterns: [kReference] },
+      }),
+      [kReferenceFile]: "x",
+    });
+    sync(vfs);
+    expect(entryPaths(vfs)).toEqual([kRules, "notes/USER.md"]);
+    expect(promptFiles(vfs).reference.enabled).toBe(false);
+
+    sync(vfs);
+    expect(entryPaths(vfs)).toEqual([kRules, "notes/USER.md"]);
+    expect(promptFiles(vfs).reference.enabled).toBe(false);
+    expect(events).toHaveBeenCalledTimes(1);
+  });
+
   it("reads the flag on later syncs: a wiped entry or disabled hooks come back with the rules path only", () => {
     const flag = JSON.stringify({ promptFiles: { reference: { enabled: false, detectedAt: 1, by: "operator-config" } } });
     for (const config of [

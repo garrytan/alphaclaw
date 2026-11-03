@@ -20,6 +20,12 @@ describe("doctor prompt-files cards (ALPH-58)", () => {
     expect(card.fixPrompt).toBeUndefined();
   });
 
+  it("says 'an earlier sync' when the flag carries no detection time, never the epoch", () => {
+    const [card] = buildPromptFilesCards({ referenceDisabled: true, referenceDetectedAt: null });
+    expect(card.summary).toContain("noticed an earlier sync");
+    expect(card.summary).not.toContain("1970");
+  });
+
   it("warns once per rules restore, so dismissing one never hides the next", () => {
     const [first] = buildPromptFilesCards({ rulesRestoredAt: 1000 });
     const [second] = buildPromptFilesCards({ rulesRestoredAt: 2000 });
