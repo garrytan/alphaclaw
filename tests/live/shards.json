@@ -45,6 +45,7 @@
         "tests/live/admin-skill-references.e2e.test.js",
         "tests/live/autotune-container.e2e.test.js",
         "tests/live/bootstrap-budget.e2e.test.js",
+        "tests/live/context-measured.e2e.test.js",
         "tests/live/control-ui-direct-open.e2e.test.js",
         "tests/live/control-ui-hostnames.e2e.test.js",
         "tests/live/control-ui-styles.e2e.test.js",
