@@ -6,10 +6,12 @@
 // agents.defaults.modelPolicy.allow list that does not name Particle, the
 // shape of a migrated box. It proves:
 //   1. the launch adds particle/particle-1 to modelPolicy.allow while no
-//      gateway serves (model-policy.js), so the first turn is not refused;
+//      gateway serves (model-policy.js), so the first turn is not refused,
+//      and fills params.thinking=high into its agents.defaults.models row
+//      (providers/model-defaults.js; GST-121);
 //   2. the request OpenClaw sends: model id, the env key as a bearer token,
 //      streamed usage, prompt_cache_key, max_completion_tokens, tools, and
-//      reasoning_effort (low by default, none after /think off);
+//      reasoning_effort (high by default, none after /think off);
 //   3. a streamed tool call runs the tool loop to a final answer;
 //   4. streamed usage lands in the transcript, priced from the block;
 //   5. OpenClaw lists the model only once the policy names it.
@@ -169,7 +171,9 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
 
       await gateway.startGateway();
       await waitFor(readyzOk, 180_000, "gateway /readyz 200");
-      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).agents.defaults.modelPolicy.allow).toEqual(["openai/gpt-6-luna", "particle/particle-1"]);
+      const launched = JSON.parse(fs.readFileSync(configPath, "utf8")).agents.defaults;
+      expect(launched.modelPolicy.allow).toEqual(["openai/gpt-6-luna", "particle/particle-1"]);
+      expect(launched.models["particle/particle-1"]).toEqual({ params: { thinking: "high" } });
       expect(listParticle(gateway.gatewayEnv())).toMatchObject({ available: true, contextWindow: 1048576, input: "text+image" });
 
       send("Hi");
@@ -181,7 +185,7 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
         stream: true,
         stream_options: { include_usage: true },
         max_completion_tokens: 131072,
-        reasoning_effort: "low",
+        reasoning_effort: "high",
       });
       expect(typeof first.body.prompt_cache_key).toBe("string");
       expect(first.body.prompt_cache_key.length).toBeGreaterThan(0);

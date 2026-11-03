@@ -322,6 +322,33 @@ describe("server/auth-profiles", () => {
     expect(config.gateway.port).toBe(18789);
   });
 
+  it("setModelConfig keeps a saved row's params when the Models tab sends the row without them (GST-121)", () => {
+    const configPath = path.join(tmpDir, ".openclaw", "openclaw.json");
+    const config = readJson("openclaw.json");
+    config.agents.defaults.models = {
+      "particle/particle-1": { params: { thinking: "high" } },
+      "anthropic/claude-opus-4-6": { params: { thinking: "low" } },
+    };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    ap.setModelConfig({
+      primary: "particle/particle-1",
+      configuredModels: {
+        "particle/particle-1": {},
+        "anthropic/claude-opus-4-6": { params: { thinking: "medium" } },
+        "openai/gpt-6-astra": {},
+      },
+    });
+    expect(readJson("openclaw.json").agents.defaults.models).toEqual({
+      "particle/particle-1": { params: { thinking: "high" } },
+      "anthropic/claude-opus-4-6": { params: { thinking: "medium" } },
+      "openai/gpt-6-astra": {},
+    });
+
+    ap.setModelConfig({ configuredModels: { "openai/gpt-6-astra": {} } });
+    expect(readJson("openclaw.json").agents.defaults.models).toEqual({ "openai/gpt-6-astra": {} });
+  });
+
   it("leaves a new primary's modelPolicy.allow entry to the next launch, never the save", () => {
     const { findModelPolicyGaps, applyModelPolicyGaps } = require("../../lib/server/model-policy");
     const configPath = path.join(tmpDir, ".openclaw", "openclaw.json");

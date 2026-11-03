@@ -131,6 +131,101 @@ describe("server/providers ensureOwnedProviders", () => {
   });
 });
 
+describe("server/providers thinking defaults (GST-121)", () => {
+  const { applyOwnedProviderThinkingDefaults, applyOwnedProviderThinkingDefaultsBeforeLaunch } = require("../../lib/server/providers/model-defaults");
+  const env = { PARTICLE_API_KEY: kKey };
+  const ref = "particle/particle-1";
+  const withRow = (row, defaults = {}) => ({ agents: { defaults: { model: { primary: ref }, ...defaults, models: { [ref]: row } } } });
+
+  it("declares high for particle-1 only", () => {
+    expect(particle.thinkingDefaults).toEqual({ "particle-1": "high" });
+    expect(particle.models[0]).not.toHaveProperty("thinking");
+    expect(particle.models[0]).not.toHaveProperty("params");
+  });
+
+  it("fresh setup: fills high into the row `openclaw models set` creates, and nothing else", () => {
+    const config = { meta: { migrations: { modelPolicyAllowlist: true } }, ...withRow({}) };
+    config.agents.defaults.models["anthropic/claude-opus-5-5"] = {};
+    expect(applyOwnedProviderThinkingDefaults(config, { env })).toEqual([{ ref, thinking: "high" }]);
+    expect(config.agents.defaults.models).toEqual({ [ref]: { params: { thinking: "high" } }, "anthropic/claude-opus-5-5": {} });
+    expect(applyOwnedProviderThinkingDefaults(config, { env })).toEqual([]);
+  });
+
+  it.each([["low"], ["medium"], ["off"], [false], [null]])("keeps an operator's explicit thinking %j", (thinking) => {
+    const config = withRow({ params: { thinking } });
+    const before = structuredClone(config);
+    expect(applyOwnedProviderThinkingDefaults(config, { env })).toEqual([]);
+    expect(config).toEqual(before);
+  });
+
+  it("upgrade: a row from an earlier release keeps its alias and other params and gains thinking", () => {
+    const config = withRow({ alias: "particle", params: { temperature: 0.2 } });
+    expect(applyOwnedProviderThinkingDefaults(config, { env })).toEqual([{ ref, thinking: "high" }]);
+    expect(config.agents.defaults.models[ref]).toEqual({ alias: "particle", params: { temperature: 0.2, thinking: "high" } });
+  });
+
+  it("never creates the row: agents.defaults.models keys are an allowlist, and every row is a modelPolicy gap", () => {
+    for (const config of [
+      { agents: { defaults: { model: { primary: ref } } } },
+      { agents: { defaults: { model: { primary: ref }, models: { "anthropic/claude-opus-5-5": {} } } } },
+      { agents: { defaults: { model: { primary: ref }, models: {}, modelPolicy: { allow: ["anthropic/claude-opus-5-5"] } } } },
+    ]) {
+      const before = structuredClone(config);
+      expect(applyOwnedProviderThinkingDefaults(config, { env })).toEqual([]);
+      expect(config).toEqual(before);
+    }
+  });
+
+  it("leaves it to an operator's agents.defaults.thinkingDefault, which a per-model param would override", () => {
+    const config = withRow({}, { thinkingDefault: "medium" });
+    expect(applyOwnedProviderThinkingDefaults(config, { env })).toEqual([]);
+    expect(config.agents.defaults.models[ref]).toEqual({});
+  });
+
+  it("writes nothing while the key is unset or the placeholder, or when the row's params is not an object", () => {
+    for (const value of [undefined, "", "placeholder"]) {
+      const config = withRow({});
+      expect(applyOwnedProviderThinkingDefaults(config, { env: { PARTICLE_API_KEY: value } })).toEqual([]);
+      expect(config.agents.defaults.models[ref]).toEqual({});
+    }
+    const odd = withRow({ params: "high" });
+    expect(applyOwnedProviderThinkingDefaults(odd, { env })).toEqual([]);
+    expect(odd.agents.defaults.models[ref]).toEqual({ params: "high" });
+  });
+
+  describe("before launch", () => {
+    let root;
+    let configPath;
+    beforeEach(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-thinking-defaults-"));
+      configPath = path.join(root, "openclaw.json");
+    });
+    afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+    it("writes once with a log line, then skips the write entirely (same bytes, same mtime)", () => {
+      fs.writeFileSync(configPath, JSON.stringify(withRow({}), null, 2));
+      const log = vi.fn();
+      expect(applyOwnedProviderThinkingDefaultsBeforeLaunch({ openclawDir: root, env, logger: { log, warn: () => {} } })).toEqual({ ok: true, applied: [{ ref, thinking: "high" }] });
+      expect(log).toHaveBeenCalledWith('[alphaclaw] provider defaults: agents.defaults.models["particle/particle-1"].params.thinking=high before launch');
+      const bytes = fs.readFileSync(configPath, "utf8");
+      expect(JSON.parse(bytes).agents.defaults.models[ref]).toEqual({ params: { thinking: "high" } });
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(configPath, past, past);
+      const mtime = fs.statSync(configPath).mtimeMs;
+      expect(applyOwnedProviderThinkingDefaultsBeforeLaunch({ openclawDir: root, env, logger: quietLogger })).toEqual({ ok: true, applied: [] });
+      expect(fs.readFileSync(configPath, "utf8")).toBe(bytes);
+      expect(fs.statSync(configPath).mtimeMs).toBe(mtime);
+    });
+
+    it("never throws: an unreadable config is a warning and the next launch retries", () => {
+      fs.writeFileSync(configPath, "{ not json");
+      const warn = vi.fn();
+      expect(applyOwnedProviderThinkingDefaultsBeforeLaunch({ openclawDir: root, env, logger: { log: () => {}, warn } })).toEqual({ ok: false, applied: [] });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/retried on the next launch/));
+    });
+  });
+});
+
 describe("server/providers at boot", () => {
   let root;
   let configPath;
