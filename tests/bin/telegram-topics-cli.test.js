@@ -440,6 +440,35 @@ describe("bin/alphaclaw telegram topic commands", () => {
       expect(result.stdout).not.toContain("-100123");
     });
 
+    it("filters rows with --agent the way that agent's reference file does", () => {
+      writeRegistry({
+        version: 2,
+        meta: { sweepWatermark: 0 },
+        groups: {
+          "-100123": {
+            channel: "telegram",
+            name: "Ops Group",
+            topics: { 12: { name: "Ops", agentId: "ops" }, 13: { name: "Chat" } },
+          },
+          "-100555": {
+            channel: "telegram",
+            name: "Ops Owned",
+            agentId: "ops",
+            topics: { 3: { name: "Owned" } },
+          },
+          "-100999": { channel: "telegram", name: "Other", topics: { 7: { name: "Misc" } } },
+        },
+      });
+      const result = runCli(["telegram", "topics", "list", "--agent", "ops", "--json"]);
+
+      expect(result.status).toBe(0);
+      const rows = JSON.parse(result.stdout.trim().split("\n").at(-1));
+      expect(rows.map((row) => `${row.groupId}:${row.threadId}`).sort()).toEqual([
+        "-100123:12",
+        "-100555:3",
+      ]);
+    });
+
     it("emits machine-readable output with --json", () => {
       seedRegistry();
       const result = runCli(["telegram", "topics", "list", "--json"]);

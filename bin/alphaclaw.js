@@ -228,6 +228,7 @@ telegram topic create options:
 
 telegram topics list options:
   --group <id>        Optional group ID filter
+  --agent <id>        Only the topics this agent's reference file lists
   --json              Machine-readable JSON output
 
 doctor finding complete options:
