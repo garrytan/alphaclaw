@@ -145,7 +145,7 @@ describe("server/env", { retry: 0 }, () => {
     ]);
 
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
-      "BRIGHTDATA_API_KEY=bright\nOPENAI_API_KEY=second\n",
+      ["BRIGHTDATA_API_KEY=bright", "OPENAI_API_KEY=second", ""].join("\n"),
     );
     // Secret-bearing file: 0600 on a fresh inode, even over a looser pre-existing one.
     if (process.platform !== "win32") {
@@ -175,7 +175,7 @@ describe("server/env", { retry: 0 }, () => {
     // Every line-break flavor (CR, LF, U+2028, U+2029) is stripped; real
     // spaces are legitimate values (the whole point of the shell-parser fix).
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
-      "OPENAI_API_KEY=line1EVIL_KEY=oops\nBRIGHTDATA_API_KEY='abcd e'\n",
+      ["OPENAI_API_KEY=line1EVIL_KEY=oops", "BRIGHTDATA_API_KEY='abcd e'", ""].join("\n"),
     );
   });
 

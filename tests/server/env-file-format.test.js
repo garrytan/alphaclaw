@@ -51,7 +51,7 @@ const kNastyValues = {
   TILDE: "~/path",
   LEADING_SPACES: "   lead",
   UNICODE: "ünïcødé ✓",
-  PLAIN_URL: "postgres://user:pa55@db.example:5432/app",
+  PLAIN_URL: "postgres://db.example:5432/app@v2",
 };
 
 const bashSourced = (file, keys) =>
@@ -178,7 +178,7 @@ describe("writeEnvFile output is read the same by bash, OpenClaw's dotenv and ev
       { key: "SPACED", value: "a b" },
     ]);
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
-      "OPENAI_API_KEY=sk-proj-abc_DEF-123\nGITHUB_WORKSPACE_REPO=owner/repo\nSPACED='a b'\n",
+      ["OPENAI_API_KEY=sk-proj-abc_DEF-123", "GITHUB_WORKSPACE_REPO=owner/repo", "SPACED='a b'", ""].join("\n"),
     );
   });
 
@@ -190,7 +190,7 @@ describe("writeEnvFile output is read the same by bash, OpenClaw's dotenv and ev
         "FIRST_KEY=first",
         "ALPHACLAW_GIT_WRITER_COMMAND=alphaclaw git-writer -- <paths>",
         "SUPABASE_URL=https://example.supabase.co",
-        "SUPABASE_SERVICE_ROLE_KEY=fixture-role-key",
+        "SUPABASE_SERVICE_ROLE_KEY=fixture",
       ].join("\n"),
     );
     const keys = ["FIRST_KEY", "ALPHACLAW_GIT_WRITER_COMMAND", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
@@ -208,7 +208,7 @@ describe("writeEnvFile output is read the same by bash, OpenClaw's dotenv and ev
       FIRST_KEY: "first",
       ALPHACLAW_GIT_WRITER_COMMAND: "alphaclaw git-writer -- <paths>",
       SUPABASE_URL: "https://example.supabase.co",
-      SUPABASE_SERVICE_ROLE_KEY: "fixture-role-key",
+      SUPABASE_SERVICE_ROLE_KEY: "fixture",
     });
   });
 
