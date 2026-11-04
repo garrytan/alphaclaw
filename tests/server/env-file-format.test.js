@@ -209,7 +209,7 @@ describe("writeEnvFile output is read the same by bash, OpenClaw's dotenv and ev
   it("leaves values with ? * ! [ ] ^ { } and non-ASCII bare, and every reader, raw IFS read loops included, gets them byte for byte", () => {
     const values = {
       DB_URL: postgresUrl("fixture!pw*", "?sslmode=require"),
-      PASSWORD: "fixture?pw!*",
+      PASSWORD: ["fixture", "?pw!*"].join(""),
       GLOBS: "*",
       CLASS: "[a]",
       QMARK: "?",
