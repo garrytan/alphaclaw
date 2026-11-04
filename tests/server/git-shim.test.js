@@ -184,6 +184,26 @@ describe("server git shim scripts", () => {
     expect(fs.existsSync(pwnedPath)).toBe(false);
   });
 
+  it("reads a single-quoted GITHUB_TOKEN with bash's '\\'' escape the way bash does", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-git-root-"));
+    const repoRoot = path.join(tempRoot, "repo");
+    const outsideDir = path.join(tempRoot, "outside");
+    fs.mkdirSync(repoRoot, { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, ".env"), "GITHUB_TOKEN='ghp a'\\''b $x'\n");
+
+    const harness = createBehaviorHarness({ repoRoot });
+    const env = spawnEnv();
+    delete env.GITHUB_TOKEN;
+    execFileSync(harness.shimPath, ["-C", repoRoot, "push", "origin", "main"], {
+      cwd: outsideDir,
+      env,
+      stdio: "pipe",
+    });
+
+    expect(fs.readFileSync(harness.logPath, "utf8")).toContain("ASKPASS_PASS=ghp a'b $x\n");
+  });
+
   it("passes auth through when valued global options precede -C repo push commands", () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-git-root-"));
     const repoRoot = path.join(tempRoot, "repo");

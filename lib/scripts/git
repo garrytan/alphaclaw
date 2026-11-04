@@ -129,7 +129,8 @@ if [ -z "${GITHUB_TOKEN:-}" ] && in_openclaw_root "$EFFECTIVE_PWD" && [ -f "$OPE
   # Extract ONLY GITHUB_TOKEN — never source (issue #26 sibling): sourcing
   # executed $(…) in any .env value with the agent's privileges, and a value
   # with spaces silently dropped the var. Last assignment wins (matching the
-  # JS reader); one layer of matching surrounding quotes is stripped.
+  # JS reader); one layer of matching surrounding quotes is stripped, and
+  # inside single quotes bash's '\'' escape becomes '.
   # NOTE: keep in sync with the twin parser in lib/setup/hourly-git-sync.sh.
   while IFS= read -r _env_line || [ -n "$_env_line" ]; do
     case "$_env_line" in
@@ -139,7 +140,7 @@ if [ -z "${GITHUB_TOKEN:-}" ] && in_openclaw_root "$EFFECTIVE_PWD" && [ -f "$OPE
     _env_val="${_env_line#GITHUB_TOKEN=}"
     case "$_env_val" in
       \"*\") _env_val="${_env_val#\"}"; _env_val="${_env_val%\"}" ;;
-      \'*\') _env_val="${_env_val#\'}"; _env_val="${_env_val%\'}" ;;
+      \'*\') _env_val="${_env_val#\'}"; _env_val="${_env_val%\'}"; _env_val="${_env_val//"'\\''"/"'"}" ;;
     esac
     GITHUB_TOKEN="$_env_val"
     export GITHUB_TOKEN

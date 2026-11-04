@@ -14,7 +14,10 @@ cd "$REPO"
 # alphaclaw's JS dotenv loader runs — turning an .env write into root code
 # execution. The `alphaclaw git-sync` child re-loads the full .env itself, so
 # nothing functional is lost. Values keep spaces; one layer of matching
-# surrounding quotes is stripped; nothing is ever expanded or executed.
+# surrounding quotes is stripped, and inside single quotes bash's '\'' escape
+# becomes ' (the form AlphaClaw writes for a value it cannot double-quote);
+# nothing is ever expanded or executed. A comment after a quoted value is not
+# supported here (AlphaClaw never writes one).
 # NOTE: keep in sync with the twin parser in lib/scripts/git (git shim).
 if [[ -f "$REPO/.env" ]]; then
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -34,6 +37,7 @@ if [[ -f "$REPO/.env" ]]; then
       val="${val:1:${#val}-2}"
     elif [[ ${#val} -ge 2 && "$val" == \'*\' && "$val" == *\' ]]; then
       val="${val:1:${#val}-2}"
+      val="${val//"'\\''"/"'"}"
     fi
     export "$key=$val"
   done < "$REPO/.env"
