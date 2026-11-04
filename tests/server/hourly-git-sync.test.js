@@ -131,6 +131,44 @@ describe("hourly-git-sync managed script", () => {
     expect(dump).toContain("LD_PRELOAD=\n");
   });
 
+  it("reads every value AlphaClaw's writer quotes exactly as written", () => {
+    const { formatEnvValue } = require("../../lib/server/utils/env-file-format");
+    const script = installScript();
+    const binDir = path.join(tmpDir, "bin");
+    const envDumpPath = path.join(tmpDir, "env-dump");
+    const values = {
+      GITHUB_WORKSPACE_REPO: "owner/it's repo",
+      ALPHACLAW_GIT_WRITER_COMMAND: "alphaclaw git-writer -- <paths>",
+      OPENCLAW_STATE_DIR: "it's $odd \"dir\"",
+    };
+    fs.mkdirSync(path.join(tmpDir, "cron"), { recursive: true });
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "cron", "system-sync.json"),
+      JSON.stringify({ enabled: true, schedule: "0 * * * *" }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, ".env"),
+      Object.entries(values).map(([key, value]) => `${key}=${formatEnvValue(value).text}\n`).join(""),
+    );
+    fs.writeFileSync(
+      path.join(binDir, "alphaclaw"),
+      [
+        "#!/usr/bin/env bash",
+        `node -e 'process.stdout.write(JSON.stringify({ GITHUB_WORKSPACE_REPO: process.env.GITHUB_WORKSPACE_REPO, ALPHACLAW_GIT_WRITER_COMMAND: process.env.ALPHACLAW_GIT_WRITER_COMMAND, OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR }))' > "${envDumpPath}"`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    execFileSync("bash", [script], {
+      cwd: tmpDir,
+      encoding: "utf8",
+      env: { PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+    });
+
+    expect(JSON.parse(fs.readFileSync(envDumpPath, "utf8"))).toEqual(values);
+  });
+
   // Issue #140: the script must not touch the repo itself (its old
   // runtime-only `git restore` raced the gateway's own writes) and must not
   // forward the writer-lock handoff variables from the agent-writable .env.

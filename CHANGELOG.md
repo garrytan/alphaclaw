@@ -5,6 +5,31 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.165] - 2026-11-04
+
+`.env` can be loaded with `. .env` again: AlphaClaw quotes every value that needs it, and every reader of the file reads the quoted and the old bare forms the same (ALPH-62, GST-1356). Found by ALPH-61 on a box where one unquoted `ALPHACLAW_GIT_WRITER_COMMAND=… -- <paths>` line cut off every later variable for the scripts that source the file.
+
+### Fixed
+- **`writeEnvFile` writes values shell-safe** (`lib/server/utils/env-file-format.js`). A value made only of `[A-Za-z0-9_./:@%+=,-]` stays bare, so most lines are unchanged and an older AlphaClaw still reads them after a rollback. Anything else is single-quoted, or double-quoted when it holds a single quote and no double quote, `$`, backtick or backslash. `set -a; . .env`, OpenClaw's dotenv (the package OpenClaw resolves, 18.0.5), the git shim, the hourly sync and AlphaClaw's parsers read every such value byte for byte.
+- **Every AlphaClaw reader uses one line parser:** the server (`readEnvFile`, reload, the watcher signature), the boot loader in `bin/alphaclaw.js`, the diagnose bundle's secret scrubber (a quoted secret used to be matched with its quotes and missed) and a sidecar `envFile`. A single-quoted value decodes as bash decodes it (including the `'\''` escape), a double-quoted one loses its outer pair, and a bare one reads exactly as before.
+- **The git shim and the hourly sync script** decode `'\''` inside single quotes, with parameter expansion only; nothing is sourced, expanded or executed.
+
+### Changed
+- **Envars and `PATCH`/`PUT /api/env` refuse a new value `.env` cannot store**, with a 400, the key, a fix and a code: `env_value_line_break` (CR, LF, U+2028, U+2029 or NUL; these were silently stripped before) or `env_value_unrepresentable` (a single quote mixed with a double quote, `$`, backtick or backslash, which bash and dotenv cannot agree on). The check runs before the channel sync or any write, and never echoes the value. A legacy value already in the file that no form can carry is resubmitted unchanged without error, and kept in bash's `'\''` form with one key-name-only warning per process (OpenClaw's dotenv misreads that form; change the value).
+
+### Behavior changes
+- A hand-quoted line such as `KEY='x'` now reads as `x`, as bash, dotenv and both shell parsers already read it; AlphaClaw used to keep the quotes. A value that really starts and ends with a quote is written in the other kind of quote and reads back exactly.
+- Trailing whitespace is dropped from a value before it is written. The line trim on read always dropped it from a bare value; inside quotes it would now survive.
+- A leading `export ` before a key is accepted (the key used to be read as `export KEY`).
+- A comment after a quoted value (`KEY='a b' # note`) is ignored, as in bash, by the JS readers; the shell parsers do not support it, and AlphaClaw never writes one.
+- The file ends with a newline, so a line appended with `>>` never joins the last one.
+- NUL is stripped from values and keys along with line breaks.
+- Values are rewritten in the new form on the next save; nothing rewrites the file at boot.
+
+### Tests
+- `tests/server/env-file-format.test.js`: the format and parse table; legacy bare lines; hand-quoted lines and the literal-quote edge case; a real bash `set -a; .` round trip, OpenClaw's dotenv, `readEnvFile`, the shared parser and the sidecar parser over spaces, `$`, backticks, `$(…)`, both quotes, `#`, ` #`, `=`, backslashes, shell operators, `~`, leading spaces and unicode; the Wintermute shape (later keys lost before, loaded after one no-op save); trailing whitespace; a legacy value no form can carry (bash exact, dotenv's misread pinned, one key-only warning); and the refusal rule.
+- `tests/server/routes-env.test.js`: both 400 codes on PATCH and PUT with the key, a fix and no value, nothing written and no channel sync; an unchanged legacy value still saves.
+- `tests/server/git-shim.test.js`, `tests/server/hourly-git-sync.test.js`: the `'\''` decode and every writer-quoted form. `tests/server/diagnose.test.js`: a quoted `.env` secret is scrubbed from the bundle. `tests/server/env.test.js`: exact-file expectations updated for the trailing newline and quoting.
 ## [0.10.164] - 2026-11-02
 
 /ship carries its test lanes from CI's green run at the same clean tree instead of running them again (R66 F1, gstack GSTA-258).
@@ -1728,7 +1753,7 @@ There is now one canonical server helper for each of these jobs (refactor plan P
 
 ### Changed
 
-- **Shell quoting.** The private single-quote escapers in `agents/shared.js`, `cron-service.js`, `routes/system.js` and `lib/cli/openclaw-config-restore.js` now call `quoteShellArg(value, { strategy: "single" })` from `utils/shell.js`. Single quotes inside a value are now written as `'"'"'` instead of `'\\''`. Both are standard POSIX quoting, so the shell passes every command the same argv. `doctor/service.js` (its Doctor-fix argument budget counts escaped bytes), onboarding and `watchdog.js` keep their own escapers.
+- **Shell quoting.** The private single-quote escapers in `agents/shared.js`, `cron-service.js`, `routes/system.js` and `lib/cli/openclaw-config-restore.js` now call `quoteShellArg(value, { strategy: "single" })` from `utils/shell.js`. Single quotes inside a value are now written as `'"'"'` instead of `'\''`. Both are standard POSIX quoting, so the shell passes every command the same argv. `doctor/service.js` (its Doctor-fix argument budget counts escaped bytes), onboarding and `watchdog.js` keep their own escapers.
 - **`utils/sleep.js`** replaces the three local `sleep` copies in `commands.js`, `doctor/workspace-fingerprint.js` and `team-auth-transition.js`. The ones in `gateway.js` and `watchdog.js` stay.
 - **`utils/object.js` `isNonArrayObject`** replaces eight copies of the same check: `auth-store`, `boot-progress/history`, `boot-report`, `boot-report-steps`, `diagnose/collect`, `diagnose/render`, `doctor/bootstrap-context` and `openclaw-config-migrations`. The strict variant in `utils/config-key-diff.js` and the helper in `control-ui-mount.js` keep their own definitions.
 - **Atomic writes.** Five hand-rolled temp-plus-rename writes now go through `writeFileAtomic(..., { durable: false })`: the Claude Code rescue state file (0600), the gateway state file, the notification outbox, team state (0600) and the boot-time system cron file (0644). The ones that set a mode now create their temp file exclusively under a fresh random name, so the mode always lands on a new file. Team state no longer needs its `chmod` fallback. `server-pidfile.js` and `watchdog.js` keep their own writes.

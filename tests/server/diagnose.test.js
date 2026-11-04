@@ -29,6 +29,9 @@ const { createSchema } = require("../../lib/server/db/watchdog/schema");
 const kNow = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
 const kIsoPattern = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/;
 const kEnvSecret = "tg-secret-value-7788";
+// Written quoted (it has spaces), the way writeEnvFile stores such a value:
+// the scrubber must match the value, not the value in quotes.
+const kQuotedEnvSecret = "quoted dc secret 4433";
 const kConfigSecret = "cfg-secret-token-9911";
 const kProcessEnvSecret = "env-secret-value-5566";
 // The installed OpenClaw matches AlphaClaw's real pin: the CLI path's runtime
@@ -66,7 +69,10 @@ const createRoot = () => {
 // Every persisted artifact the collector reads, in the shape its writer
 // leaves on the volume. Secrets are planted where evidence can echo them.
 const populate = ({ rootDir, openclawDir, installDir, managedDir, pidfile }) => {
-  fs.writeFileSync(path.join(rootDir, ".env"), `# comment\nTELEGRAM_BOT_TOKEN=${kEnvSecret}\nPLAIN=notsecret\n`);
+  fs.writeFileSync(
+    path.join(rootDir, ".env"),
+    `# comment\nTELEGRAM_BOT_TOKEN=${kEnvSecret}\nDISCORD_BOT_TOKEN='${kQuotedEnvSecret}'\nPLAIN=notsecret\n`,
+  );
   writeJson(path.join(openclawDir, "openclaw.json"), { gateway: { auth: { token: kConfigSecret } } });
 
   writeJson(path.join(managedDir, "alphaclaw-version.json"), {
@@ -236,7 +242,7 @@ const populate = ({ rootDir, openclawDir, installDir, managedDir, pidfile }) => 
   for (let i = 0; i < 250; i += 1) logLines.push(`[alphaclaw] boot line ${i}`);
   logLines.push("plain noise line without a tag");
   logLines.push("2026-09-06T00:00:00.000Z [watchdog] health probe failed");
-  logLines.push(`[gateway] exit code 1 token=${kEnvSecret} key ${kProcessEnvSecret}`);
+  logLines.push(`[gateway] exit code 1 token=${kEnvSecret} key ${kProcessEnvSecret} discord ${kQuotedEnvSecret}`);
   logLines.push("[openclaw-channel] boot sync: none");
   logLines.push("[cron] unrelated subsystem");
   fs.mkdirSync(path.join(rootDir, "logs"), { recursive: true });
@@ -517,6 +523,7 @@ describe("diagnose: collectDiagnose over a populated root (disk path)", () => {
   it("redaction: .env values, inline openclaw.json secrets and secret-named env values never appear in the JSON", () => {
     const json = JSON.stringify(bundle);
     expect(json).not.toContain(kEnvSecret);
+    expect(json).not.toContain(kQuotedEnvSecret);
     expect(json).not.toContain(kConfigSecret);
     expect(json).not.toContain(kProcessEnvSecret);
     expect(json).toContain("***");

@@ -116,6 +116,45 @@ describe("PATCH /api/env", () => {
     expect(res.body.error).toContain(message);
     expect(deps.writeEnvFile).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["fixture\nINJECTED=1", "env_value_line_break"],
+    ["it's $fixture", "env_value_unrepresentable"],
+  ])("refuses a value .env cannot store (%j) with a code, the key and a fix, never the value", async (value, code) => {
+    const deps = createDeps([{ key: "CUSTOM_FLAG", value: "on" }]);
+    const res = await request(createApp(deps)).patch("/api/env").send({ key: "CUSTOM_FLAG", value });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ ok: false, code, key: "CUSTOM_FLAG" });
+    expect(res.body.error).toMatch(/^CUSTOM_FLAG .*\. Remove /);
+    expect(JSON.stringify(res.body)).not.toContain("fixture");
+    expect(deps.writeEnvFile).not.toHaveBeenCalled();
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT /api/env value checks", () => {
+  it("refuses a new value .env cannot store before touching channels or the file", async () => {
+    const deps = createDeps([{ key: "CUSTOM_FLAG", value: "on" }]);
+    const res = await request(createApp(deps))
+      .put("/api/env")
+      .send({ vars: [{ key: "CUSTOM_FLAG", value: "on" }, { key: "NEW_KEY", value: "a\u2028b" }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ ok: false, code: "env_value_line_break", key: "NEW_KEY" });
+    expect(deps.writeEnvFile).not.toHaveBeenCalled();
+    expect(deps.syncChannelConfig).not.toHaveBeenCalled();
+  });
+
+  it("saves when a legacy value no form can carry is resubmitted unchanged", async () => {
+    const deps = createDeps([{ key: "LEGACY_ODD", value: "it's $fixture" }]);
+    const res = await request(createApp(deps))
+      .put("/api/env")
+      .send({ vars: [{ key: "LEGACY_ODD", value: "it's $fixture" }, { key: "CUSTOM_FLAG", value: "a b" }] });
+
+    expect(res.status).toBe(200);
+    expect(deps.writeEnvFile).toHaveBeenCalled();
+  });
 });
 
 describe("stale processes after an env save", () => {

@@ -80,7 +80,7 @@ describe("server/env", { retry: 0 }, () => {
       { key: "OPENAI_API_KEY", value: "fixture-live" },
     ]);
     env.updateEnvFile((vars) => vars.map((entry) => (entry.key === "BRIGHTDATA_API_KEY" ? { ...entry, value: "changed" } : entry)));
-    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("BRIGHTDATA_API_KEY=changed\nOPENAI_API_KEY=fixture-live");
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("BRIGHTDATA_API_KEY=changed\nOPENAI_API_KEY=fixture-live\n");
   });
 
   it("reloads duplicate keys idempotently after the effective value is loaded", () => {
@@ -145,7 +145,7 @@ describe("server/env", { retry: 0 }, () => {
     ]);
 
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
-      "BRIGHTDATA_API_KEY=bright\nOPENAI_API_KEY=second",
+      "BRIGHTDATA_API_KEY=bright\nOPENAI_API_KEY=second\n",
     );
     // Secret-bearing file: 0600 on a fresh inode, even over a looser pre-existing one.
     if (process.platform !== "win32") {
@@ -175,7 +175,7 @@ describe("server/env", { retry: 0 }, () => {
     // Every line-break flavor (CR, LF, U+2028, U+2029) is stripped; real
     // spaces are legitimate values (the whole point of the shell-parser fix).
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
-      "OPENAI_API_KEY=line1EVIL_KEY=oops\nBRIGHTDATA_API_KEY=abcd e",
+      "OPENAI_API_KEY=line1EVIL_KEY=oops\nBRIGHTDATA_API_KEY='abcd e'\n",
     );
   });
 
@@ -223,9 +223,9 @@ describe("server/env", { retry: 0 }, () => {
     expect(env.readEnvFile()).toEqual([good]);
     expect(env.readEnvFileStrict()).toEqual([good]);
     env.writeEnvFile(entries);
-    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("CUSTOM_FLAG=kept");
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("CUSTOM_FLAG=kept\n");
     env.updateEnvFile((current) => [...current, { key: "URL\0ignored", value: "private-value" }]);
-    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("CUSTOM_FLAG=kept");
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("CUSTOM_FLAG=kept\n");
   });
 
   it("clears process env vars whose file value became empty", () => {

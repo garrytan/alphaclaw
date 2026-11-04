@@ -534,19 +534,17 @@ const {
   resolveEnvFileOverlay,
 } = require("../lib/server/deployment-only-env");
 const { normalizeEnvKey } = require("../lib/server/utils/env-values");
+const { parseEnvFileContent } = require("../lib/server/utils/env-file-format");
 
 if (fs.existsSync(envFilePath)) {
-  const content = fs.readFileSync(envFilePath, "utf8");
   const entries = [];
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIdx = trimmed.indexOf("=");
-    if (eqIdx === -1) continue;
+  // The line format lib/server/env.js reads (utils/env-file-format.js):
+  // quoted values decode as bash reads them, bare ones as written.
+  for (const parsed of parseEnvFileContent(fs.readFileSync(envFilePath, "utf8"))) {
     // Trim the key like lib/server/env.js does (fix wave F006): "FOO =bar"
     // used to load as the key "FOO " here and "FOO" in the server.
-    const key = normalizeEnvKey(trimmed.slice(0, eqIdx));
-    const value = trimmed.slice(eqIdx + 1);
+    const key = normalizeEnvKey(parsed.key);
+    const value = parsed.value;
     // Deployment-only keys must come from the real deployment environment
     // ONLY. The agent can write this .env (HOME=rootDir, exec full), so
     // honoring them here would let it self-grant broader gateway-child env
