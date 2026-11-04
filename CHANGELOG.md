@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.166] - 2026-11-04
+
+`.env` values with `? * ! [ ] ^ { }` or non-ASCII characters stay bare, so scripts that read the file raw keep working after a save (ALPH-62, GST-1356). ALPH-61 found 67 scripts on Wintermute, plus the boot-written gbrain wrapper, that read `.env` with `IFS='=' read` and export the value as read. Under 0.10.165 a save would have quoted the database URLs, passwords and PAT those scripts use, and every gbrain process would have exported the quotes.
+
+### Changed
+- **The writer's bare set is wider** (`lib/server/utils/env-file-format.js`): ASCII letters and digits, `_ . / : @ % + = , -`, now also `? * ! [ ] ^ { }`, and printable non-ASCII. A bash assignment takes all of them literally (an assignment is never globbed, brace-expanded or word-split), and dotenv reads them as is. Whitespace, control and format characters (including no-break and zero-width spaces), `~ # ; & | < > ( ) $`, backtick, backslash and both quotes still force quoting, and so does a leading `=`, which 0.10.165 wrote bare. A postgres URL with a single `?sslmode=…` parameter stays bare. One with `&` in its query is still quoted, and a raw read loop sees that quoting.
+
+### Tests
+- `tests/server/env-file-format.test.js`: the widened set round-trips byte for byte through real bash `set -a; .` (run in a directory with files a glob or brace expansion would match), a raw `IFS='=' read` and export loop, OpenClaw's dotenv, `readEnvFile` and the sidecar parser. This covers a postgres URL with `!*` in the password and `?sslmode=require`, a lone `*`, `[a]`, `?`, `{1..3,x}`, `^`, `!!`, non-ASCII and a trailing `==`. A URL with `&` is quoted and still reads exactly in bash and dotenv. The format table now covers the new characters, a leading `=`, `~`, `#`, `&`, `( )`, a no-break space and a zero-width space.
+
 ## [0.10.165] - 2026-11-04
 
 `.env` can be loaded with `. .env` again: AlphaClaw quotes every value that needs it, and every reader of the file reads the quoted and the old bare forms the same (ALPH-62, GST-1356). Found by ALPH-61 on a box where one unquoted `ALPHACLAW_GIT_WRITER_COMMAND=… -- <paths>` line cut off every later variable for the scripts that source the file.
