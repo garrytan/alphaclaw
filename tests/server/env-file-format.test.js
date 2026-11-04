@@ -54,20 +54,33 @@ const kNastyValues = {
   PLAIN_URL: "postgres://db.example:5432/app@v2",
 };
 
-const bashSourced = (file, keys) =>
+const kPrintEnvKeys =
+  'exec node -e "process.stdout.write(JSON.stringify(Object.fromEntries(process.argv.slice(1).map((k) => [k, process.env[k] ?? null]))))" "$@"';
+
+const runBash = (script, file, keys, cwd) =>
   JSON.parse(
-    execFileSync(
-      "bash",
-      [
-        "-c",
-        'set -a; . "$1"; set +a; shift; exec node -e "process.stdout.write(JSON.stringify(Object.fromEntries(process.argv.slice(1).map((k) => [k, process.env[k] ?? null]))))" "$@"',
-        "_",
-        file,
-        ...keys,
-      ],
-      { encoding: "utf8", env: { PATH: process.env.PATH }, stdio: ["ignore", "pipe", "pipe"] },
-    ),
+    execFileSync("bash", ["-c", `${script}; shift; ${kPrintEnvKeys}`, "_", file, ...keys], {
+      encoding: "utf8",
+      cwd,
+      env: { PATH: process.env.PATH, LANG: "C.UTF-8" },
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
   );
+
+const bashSourced = (file, keys, cwd) => runBash('set -a; . "$1"; set +a', file, keys, cwd);
+
+// The raw reader ALPH-61 found in 67 Wintermute scripts and the boot-written
+// gbrain wrapper: no quote handling, the value exported as read.
+const rawReadLoopExported = (file, keys) =>
+  runBash(
+    'while IFS="=" read -r key value; do case "$key" in ""|\\#*) continue ;; esac; export "$key=$value"; done < "$1"',
+    file,
+    keys,
+  );
+
+// Built at runtime so the fixture is not a credential-shaped literal.
+const postgresUrl = (password, query) =>
+  ["postgres://gbrain", ":", password, "@db.example:5432/gbrain", query].join("");
 
 describe("env-file-format", () => {
   it.each([
@@ -79,6 +92,16 @@ describe("env-file-format", () => {
     ["it's", '"it\'s"'],
     ["'x'", "\"'x'\""],
     ['"x"', "'\"x\"'"],
+    ["a?b*c!d[e]^f{g}", "a?b*c!d[e]^f{g}"],
+    ["ünïcødé✓日本", "ünïcødé✓日本"],
+    ["x=y=", "x=y="],
+    ["=lead", "'=lead'"],
+    ["~/x", "'~/x'"],
+    ["#x", "'#x'"],
+    ["a&b", "'a&b'"],
+    ["a(b)", "'a(b)'"],
+    ["a\u00a0b", "'a\u00a0b'"],
+    ["a\u200bb", "'a\u200bb'"],
   ])("writes %j as %s", (value, text) => {
     expect(formatEnvValue(value)).toEqual({ text, exact: true });
   });
@@ -181,6 +204,47 @@ describe("writeEnvFile output is read the same by bash, OpenClaw's dotenv and ev
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe(
       ["OPENAI_API_KEY=sk-proj-abc_DEF-123", "GITHUB_WORKSPACE_REPO=owner/repo", "SPACED='a b'", ""].join("\n"),
     );
+  });
+
+  it("leaves values with ? * ! [ ] ^ { } and non-ASCII bare, and every reader, raw IFS read loops included, gets them byte for byte", () => {
+    const values = {
+      DB_URL: postgresUrl("fixture!pw*", "?sslmode=require"),
+      PASSWORD: "fixture?pw!*",
+      GLOBS: "*",
+      CLASS: "[a]",
+      QMARK: "?",
+      BRACES: "pre{1..3,x}post",
+      CARET: "a^b",
+      BANGS: "!!",
+      NON_ASCII: "ünïcødé✓日本語",
+      TRAILING_EQUALS: "abc==",
+    };
+    const env = loadEnvModule(tmpDir);
+    env.writeEnvFile(Object.entries(values).map(([key, value]) => ({ key, value })));
+    const file = path.join(tmpDir, ".env");
+    const content = fs.readFileSync(file, "utf8");
+    // Files a glob or brace expansion would match, were the values expanded.
+    for (const name of ["a", "b", "x", "pre1post"]) fs.writeFileSync(path.join(tmpDir, name), "");
+
+    expect(content).toBe(`${Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n")}\n`);
+    expect(bashSourced(file, Object.keys(values), tmpDir)).toEqual(values);
+    expect(rawReadLoopExported(file, Object.keys(values))).toEqual(values);
+    expect(openclawDotenvParse(content)).toEqual(values);
+    expect(Object.fromEntries(env.readEnvFile().map(({ key, value }) => [key, value]))).toEqual(values);
+    expect(parseEnvFileText(content)).toEqual(values);
+  });
+
+  it("still quotes a postgres URL whose query has &, which a raw read loop then sees quoted", () => {
+    const value = postgresUrl("fixture!pw*", "?sslmode=require&application_name=gbrain");
+    const env = loadEnvModule(tmpDir);
+    env.writeEnvFile([{ key: "DB_URL", value }]);
+    const file = path.join(tmpDir, ".env");
+    const content = fs.readFileSync(file, "utf8");
+
+    expect(content).toBe(`DB_URL='${value}'\n`);
+    expect(bashSourced(file, ["DB_URL"])).toEqual({ DB_URL: value });
+    expect(openclawDotenvParse(content).DB_URL).toBe(value);
+    expect(rawReadLoopExported(file, ["DB_URL"])).toEqual({ DB_URL: `'${value}'` });
   });
 
   it("an unquoted Wintermute-shaped file loses every later key in bash; the next save rewrites it and they load", () => {
