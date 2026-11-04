@@ -128,6 +128,7 @@ describe("env-file-format", () => {
       expect(findUnwritableEnvValue([{ key: "NEW_KEY", value }], current)).toMatchObject({
         key: "NEW_KEY",
         code: "env_value_line_break",
+        error: expect.stringContaining("line break or NUL character"),
       });
     }
     const refused = findUnwritableEnvValue([{ key: "PLAIN", value: "it's $secret-ish" }], current);
@@ -212,9 +213,9 @@ describe("writeEnvFile output is read the same by bash, OpenClaw's dotenv and ev
     });
   });
 
-  it("drops trailing whitespace before writing, as the line trim on read always did", () => {
+  it("drops trailing whitespace (as the line trim on read always did) and NUL before writing", () => {
     const env = loadEnvModule(tmpDir);
-    env.writeEnvFile([{ key: "PASTED_KEY", value: "sk-pasted  " }]);
+    env.writeEnvFile([{ key: "PASTED_KEY", value: "sk-pas\u0000ted  " }]);
     expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf8")).toBe("PASTED_KEY=sk-pasted\n");
   });
 
