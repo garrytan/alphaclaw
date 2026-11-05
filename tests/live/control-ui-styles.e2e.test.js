@@ -698,10 +698,15 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       ).toBeTruthy();
       // …and it goes THROUGH AlphaClaw (its port), not straight to the gateway.
       expect(new URL(gatewaySocket.url).port, gatewaySocket.url).toBe(String(port));
+      // 2026.11.1 answers a connect that lands while its startup sidecars
+      // still run with a retryable UNAVAILABLE ("gateway starting; retry
+      // shortly"), and the UI reconnects on a new socket, so any socket under
+      // the mount may carry the hello-ok.
+      const mountSockets = () => observed.sockets.filter((socket) => pathnameOf(socket.url).startsWith(kMountPath));
       await waitFor(
-        () => gatewaySocket.frames.some((frame) => frame.includes(kHelloOkMarker)),
+        () => mountSockets().some((socket) => socket.frames.some((frame) => frame.includes(kHelloOkMarker))),
         30_000,
-        `hello-ok frame on ${gatewaySocket.url} (frames: ${gatewaySocket.frames.length})`,
+        `hello-ok frame under ${kMountPath} (sockets: ${mountSockets().length}, frames: ${JSON.stringify(mountSockets().map((socket) => socket.frames.map((frame) => frame.slice(0, 160))))})`,
       );
 
       // The worker registered under the mount — never AlphaClaw's origin root.
