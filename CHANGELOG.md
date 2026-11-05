@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.167] - 2026-11-05
+
+The test inventory guard now fails a PR that loses coverage without declaring it (GST-95, closing out ALPH-52's plan).
+
+### Changed
+- **`INVENTORY_GUARD: enforce`** in `ci.yml`'s `test (24)` job. A test file or test that disappears, or a passing test that becomes skipped, now fails the job unless a commit message in the PR carries the `Removed-test-file:`, `Removed-test:` or `Skipped-test:` line the check prints. A renamed test counts as a removal plus an addition. In its week of report mode (33 guard runs on PRs into main since Oct 28), the guard raised no errors. It flagged 6 runs from 3 PRs, and every one was an undeclared test rename: #297, #307 and the still-open #311.
+
 ## [0.10.166] - 2026-11-04
 
 `.env` values with `? * ! [ ] ^ { }` or non-ASCII characters stay bare, so scripts that read the file raw keep working after a save (ALPH-62, GST-1356). ALPH-61 found 67 scripts on Wintermute, plus the boot-written gbrain wrapper, that read `.env` with `IFS='=' read` and export the value as read. Under 0.10.165 a save would have quoted the database URLs, passwords and PAT those scripts use, and every gbrain process would have exported the quotes.
