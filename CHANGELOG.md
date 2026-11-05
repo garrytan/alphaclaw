@@ -5,12 +5,12 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.165] - 2026-11-03
+## [0.10.168] - 2026-11-05
 
-Pins OpenClaw 2026.10.10 with the compatibility fixes it needs (ALPH-59). Held as a draft until a 2026.10.10.x carries the large-session memory fix (openclaw/openclaw#172970).
+Pins OpenClaw 2026.11.1 with the compatibility fixes it needs (ALPH-59). 2026.11.1 continues the 2026.10.10 release line and carries the large-session memory fix (openclaw/openclaw#172970, backported in 178409a5).
 
 ### Changed
-- **OpenClaw pin 2026.10.9 → 2026.10.10.** Its first boot migrates the state database (schema 20 → 22) and agent databases (25 → 27) one way; README's OpenClaw Version section says how to go back.
+- **OpenClaw pin 2026.10.9 → 2026.11.1.** Its first boot migrates the state database (schema 20 → 22) and agent databases (25 → 27) one way; README's OpenClaw Version section says how to go back.
 - **Auth store:** schemas 21 and 22 are read and written through the shared layout, as before. A store newer than 22 is refused with `AUTH_STORE_UNREADABLE` / `unsupported_schema` and a 409 naming the version found, the supported range (12–22) and the fix. The Codex manual exchange now returns that envelope too instead of a 500.
 - **Model catalog without a gateway:** since 2026.10.10, `openclaw models list --all --json` with no gateway lists only the configured models. AlphaClaw no longer persists that list or serves it as fresh. With nothing better cached it is merged over the bundled catalog, and the backoff retry loads the full catalog once the gateway is up.
 - README: a deleted agent's turns now fail with "Agent <id> deletion is in progress; new work is unavailable." (2026.10.10's wording); the model-policy note is checked through 2026.10.10.
@@ -22,6 +22,49 @@ Pins OpenClaw 2026.10.10 with the compatibility fixes it needs (ALPH-59). Held a
 - `owned-providers.test.js`: the Particle tripwire checks for a bundled or installed plugin; 2026.10.10's catalog only lists `@openclaw/particle-provider` as installable.
 - Fixtures: `cron-pinned-runtime.mjs` finds `projectCronRunHistoryPage` in `run-history-*.mjs`; `database-fixture.js` records 2026.10.10's schemas (state 22, agent 27).
 - Live tier: the restart ladder and memory telemetry assert one process where Node offers `process.execve` (2026.10.10's launcher execs the gateway in place); the CLI contract row asserts the offline `models list` shape; agent-delete asserts the new wording; the Particle stub skips 2026.10.10's runtime-context user message when finding the person's turn and the tool result.
+
+## [0.10.167] - 2026-11-05
+
+The test inventory guard now fails a PR that loses coverage without declaring it (GST-95, closing out ALPH-52's plan).
+
+### Changed
+- **`INVENTORY_GUARD: enforce`** in `ci.yml`'s `test (24)` job. A test file or test that disappears, or a passing test that becomes skipped, now fails the job unless a commit message in the PR carries the `Removed-test-file:`, `Removed-test:` or `Skipped-test:` line the check prints. A renamed test counts as a removal plus an addition. In its week of report mode (33 guard runs on PRs into main since Oct 28), the guard raised no errors. It flagged 6 runs from 3 PRs, and every one was an undeclared test rename: #297, #307 and the still-open #311.
+
+## [0.10.166] - 2026-11-04
+
+`.env` values with `? * ! [ ] ^ { }` or non-ASCII characters stay bare, so scripts that read the file raw keep working after a save (ALPH-62, GST-1356). ALPH-61 found 67 scripts on Wintermute, plus the boot-written gbrain wrapper, that read `.env` with `IFS='=' read` and export the value as read. Under 0.10.165 a save would have quoted the database URLs, passwords and PAT those scripts use, and every gbrain process would have exported the quotes.
+
+### Changed
+- **The writer's bare set is wider** (`lib/server/utils/env-file-format.js`): ASCII letters and digits, `_ . / : @ % + = , -`, now also `? * ! [ ] ^ { }`, and printable non-ASCII. A bash assignment takes all of them literally (an assignment is never globbed, brace-expanded or word-split), and dotenv reads them as is. Whitespace, control and format characters (including no-break and zero-width spaces), `~ # ; & | < > ( ) $`, backtick, backslash and both quotes still force quoting, and so does a leading `=`, which 0.10.165 wrote bare. A postgres URL with a single `?sslmode=…` parameter stays bare. One with `&` in its query is still quoted, and a raw read loop sees that quoting.
+
+### Tests
+- `tests/server/env-file-format.test.js`: the widened set round-trips byte for byte through real bash `set -a; .` (run in a directory with files a glob or brace expansion would match), a raw `IFS='=' read` and export loop, OpenClaw's dotenv, `readEnvFile` and the sidecar parser. This covers a postgres URL with `!*` in the password and `?sslmode=require`, a lone `*`, `[a]`, `?`, `{1..3,x}`, `^`, `!!`, non-ASCII and a trailing `==`. A URL with `&` is quoted and still reads exactly in bash and dotenv. The format table now covers the new characters, a leading `=`, `~`, `#`, `&`, `( )`, a no-break space and a zero-width space.
+
+## [0.10.165] - 2026-11-04
+
+`.env` can be loaded with `. .env` again: AlphaClaw quotes every value that needs it, and every reader of the file reads the quoted and the old bare forms the same (ALPH-62, GST-1356). Found by ALPH-61 on a box where one unquoted `ALPHACLAW_GIT_WRITER_COMMAND=… -- <paths>` line cut off every later variable for the scripts that source the file.
+
+### Fixed
+- **`writeEnvFile` writes values shell-safe** (`lib/server/utils/env-file-format.js`). A value made only of `[A-Za-z0-9_./:@%+=,-]` stays bare, so most lines are unchanged and an older AlphaClaw still reads them after a rollback. Anything else is single-quoted, or double-quoted when it holds a single quote and no double quote, `$`, backtick or backslash. `set -a; . .env`, OpenClaw's dotenv (the package OpenClaw resolves, 18.0.5), the git shim, the hourly sync and AlphaClaw's parsers read every such value byte for byte.
+- **Every AlphaClaw reader uses one line parser:** the server (`readEnvFile`, reload, the watcher signature), the boot loader in `bin/alphaclaw.js`, the diagnose bundle's secret scrubber (a quoted secret used to be matched with its quotes and missed) and a sidecar `envFile`. A single-quoted value decodes as bash decodes it (including the `'\''` escape), a double-quoted one loses its outer pair, and a bare one reads exactly as before.
+- **The git shim and the hourly sync script** decode `'\''` inside single quotes, with parameter expansion only; nothing is sourced, expanded or executed.
+
+### Changed
+- **Envars and `PATCH`/`PUT /api/env` refuse a new value `.env` cannot store**, with a 400, the key, a fix and a code: `env_value_line_break` (CR, LF, U+2028, U+2029 or NUL; these were silently stripped before) or `env_value_unrepresentable` (a single quote mixed with a double quote, `$`, backtick or backslash, which bash and dotenv cannot agree on). The check runs before the channel sync or any write, and never echoes the value. A legacy value already in the file that no form can carry is resubmitted unchanged without error, and kept in bash's `'\''` form with one key-name-only warning per process (OpenClaw's dotenv misreads that form; change the value).
+
+### Behavior changes
+- A hand-quoted line such as `KEY='x'` now reads as `x`, as bash, dotenv and both shell parsers already read it; AlphaClaw used to keep the quotes. A value that really starts and ends with a quote is written in the other kind of quote and reads back exactly.
+- Trailing whitespace is dropped from a value before it is written. The line trim on read always dropped it from a bare value; inside quotes it would now survive.
+- A leading `export ` before a key is accepted (the key used to be read as `export KEY`).
+- A comment after a quoted value (`KEY='a b' # note`) is ignored, as in bash, by the JS readers; the shell parsers do not support it, and AlphaClaw never writes one.
+- The file ends with a newline, so a line appended with `>>` never joins the last one.
+- NUL is stripped from values and keys along with line breaks.
+- Values are rewritten in the new form on the next save; nothing rewrites the file at boot.
+
+### Tests
+- `tests/server/env-file-format.test.js`: the format and parse table; legacy bare lines; hand-quoted lines and the literal-quote edge case; a real bash `set -a; .` round trip, OpenClaw's dotenv, `readEnvFile`, the shared parser and the sidecar parser over spaces, `$`, backticks, `$(…)`, both quotes, `#`, ` #`, `=`, backslashes, shell operators, `~`, leading spaces and unicode; the Wintermute shape (later keys lost before, loaded after one no-op save); trailing whitespace; a legacy value no form can carry (bash exact, dotenv's misread pinned, one key-only warning); and the refusal rule.
+- `tests/server/routes-env.test.js`: both 400 codes on PATCH and PUT with the key, a fix and no value, nothing written and no channel sync; an unchanged legacy value still saves.
+- `tests/server/git-shim.test.js`, `tests/server/hourly-git-sync.test.js`: the `'\''` decode and every writer-quoted form. `tests/server/diagnose.test.js`: a quoted `.env` secret is scrubbed from the bundle. `tests/server/env.test.js`: exact-file expectations updated for the trailing newline and quoting.
 
 ## [0.10.164] - 2026-11-02
 
