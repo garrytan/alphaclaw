@@ -276,13 +276,15 @@ describe("server/providers registries", () => {
   // Tripwire: when the pinned OpenClaw starts shipping its own plugin for a
   // preset's provider, the built-in wins (ALPH-47): stop writing the block,
   // keep the key, and remove a block only while it still matches the preset.
+  // Shipping means bundled in dist/extensions or installed with the pin. A
+  // listing in the official external plugin catalog (2026.10.10 lists
+  // @openclaw/particle-provider) is only installable on request, and AlphaClaw
+  // installs no catalog plugin, so it does not trip this.
   it.each(kOwnedProviderPresets.map((preset) => [preset.id]))("the pinned OpenClaw still ships no %s plugin", (id) => {
     const dist = path.join(__dirname, "../../node_modules/openclaw/dist");
     if (!fs.existsSync(dist)) return;
     expect(fs.existsSync(path.join(dist, "extensions", id))).toBe(false);
-    const catalogs = fs.readdirSync(path.join(dist, "native-hook-relay")).filter((name) => name.startsWith("official-external-plugin-catalog"));
-    for (const name of catalogs) {
-      expect(fs.readFileSync(path.join(dist, "native-hook-relay", name), "utf8")).not.toContain(`"id": "${id}"`);
-    }
+    expect(fs.existsSync(path.join(__dirname, "../../node_modules/@openclaw", `${id}-provider`))).toBe(false);
+    expect(fs.existsSync(path.join(__dirname, "../../node_modules/openclaw/node_modules/@openclaw", `${id}-provider`))).toBe(false);
   });
 });

@@ -583,6 +583,64 @@ describe("server/model-catalog-cache", () => {
       ]),
     });
   });
+  it("never persists or serves as fresh the configured-only catalog the CLI lists without a gateway", async () => {
+    vi.useFakeTimers();
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-model-catalog-offline-"),
+    );
+    const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
+    const shellCmd = vi.fn().mockResolvedValue("{}");
+    const parseJsonFromNoisyOutput = vi
+      .fn()
+      .mockReturnValueOnce({
+        models: [{ key: "custom/only-configured", name: "Only Configured" }],
+      })
+      .mockReturnValueOnce({
+        models: [{ key: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7" }],
+      });
+    const isGatewayRunning = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const cache = createModelCatalogCache({
+      cachePath,
+      shellCmd,
+      parseJsonFromNoisyOutput,
+      normalizeOnboardingModels: normalizeModels,
+      readOpenclawVersion: vi.fn(() => "2026.10.10"),
+      isGatewayRunning,
+      setTimeoutFn: setTimeout,
+      clearTimeoutFn: clearTimeout,
+    });
+
+    await cache.getCatalogResponse();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    expect(shellCmd).toHaveBeenCalledTimes(1);
+
+    const offline = await cache.getCatalogResponse();
+    expect(offline).toMatchObject({ source: "cache", stale: true, refreshing: true });
+    expect(offline.models).toEqual(
+      mergeCatalogModels(
+        normalizeModels([{ key: "custom/only-configured", name: "Only Configured" }]),
+        kFallbackOnboardingModels,
+      ),
+    );
+    expect(fs.existsSync(cachePath)).toBe(false);
+    expect(shellCmd).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs);
+    await flushPromises();
+    expect(shellCmd).toHaveBeenCalledTimes(2);
+
+    const fresh = await cache.getCatalogResponse();
+    expect(fresh).toMatchObject({ source: "openclaw", stale: false });
+    expect(fresh.models).toEqual(
+      normalizeModels([{ key: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7" }]),
+    );
+    expect(fs.existsSync(cachePath)).toBe(true);
+  });
+
   it("forces a fresh catalog load when requested", async () => {
     const tempRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "alphaclaw-model-catalog-force-refresh-"),

@@ -154,9 +154,12 @@ const kCliContractRows = [
     kind: "json-shape",
     argv: ["models", "list", "--all", "--json"],
     site: "model-catalog-cache.js parseCatalogModelsFromOutput",
+    // The table runs with no gateway. Since 2026.10.10 the CLI then lists only
+    // its local cache (the configured models; none in this scratch state), and
+    // model-catalog-cache.js merges that over the bundled catalog.
     check: (doc) => {
       expect(Array.isArray(doc.models)).toBe(true);
-      expect(doc.models.length).toBeGreaterThan(0);
+      expect(doc.count).toBe(doc.models.length);
       for (const model of doc.models) expect(typeof model.key).toBe("string");
     },
   },
