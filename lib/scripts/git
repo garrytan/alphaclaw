@@ -148,8 +148,8 @@ map_into_worktree() {
   target_path="$1"
   worktree="$2"
   inside_worktree "$target_path" "$worktree" && return 1
-  mapped_path="$(physical_parent_path "$target_path")" || mapped_path=""
-  if [ -n "$mapped_path" ] && inside_worktree "$mapped_path" "$worktree"; then
+  mapped_path="$(physical_parent_path "$target_path")" || return 1
+  if inside_worktree "$mapped_path" "$worktree"; then
     printf '%s\n' "$mapped_path"
     return 0
   fi
@@ -223,6 +223,12 @@ map_symlinked_path_args() {
     *) return 0 ;;
   esac
 
+  for arg in "${GIT_ARGS[@]}"; do
+    case "$arg" in
+      *[[:cntrl:]]*) return 0 ;;
+    esac
+  done
+
   worktree=""
   previous_arg=""
   after_dashdash=0
@@ -242,7 +248,6 @@ map_symlinked_path_args() {
       previous_arg="$arg"
     fi
     case "$arg" in
-      *$'\n'*) continue ;;
       /*) ;;
       *) continue ;;
     esac

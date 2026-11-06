@@ -423,6 +423,20 @@ describe("server git shim scripts", () => {
       ]);
     });
 
+    it("passes argv unchanged when any argument holds a control character", () => {
+      const fx = createSymlinkFixture();
+      const linkedPath = path.join(fx.base, "workspace-link", "note.md");
+
+      fx.run(["status", "--short", "--", linkedPath, "tab\there"], fx.repoRoot);
+      expect(fx.lastCallArgs()).toEqual(["status", "--short", "--", linkedPath, "tab\there"]);
+
+      fx.run(["add", "-n", "--", "new\nline", linkedPath], fx.repoRoot);
+      expect(fx.lastCallArgs()).toEqual(["add", "-n", "--", "new", "line", linkedPath]);
+
+      fx.run(["add", "-n", "--", linkedPath], fx.repoRoot);
+      expect(fx.lastCallArgs()).toEqual(["add", "-n", "--", path.join(fx.workspaceDir, "note.md")]);
+    });
+
     it("never rewrites a newline-ending path or a bundled -m message", () => {
       const fx = createSymlinkFixture();
       const notePath = path.join(fx.workspaceDir, "note.md");
@@ -449,6 +463,18 @@ describe("server git shim scripts", () => {
       expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-f", viaNewlineDir]);
       expect(fs.existsSync(path.join(plainDir, "f"))).toBe(true);
       expect(fx.staged()).toMatch(/\tsub\/f$/m);
+
+      const otherDir = path.join(fx.repoRoot, "other");
+      fs.mkdirSync(otherDir);
+      fs.writeFileSync(path.join(otherDir, "keep.txt"), "keep\n");
+      fs.symlinkSync("../other", path.join(newlineDir, "L"));
+      execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", "--", "other/keep.txt", "sub\n/L"], { stdio: "pipe" });
+      const dirLinkInNewlineDir = path.join(fx.base, "newline-dir-link", "L");
+      const rmDirLink = fx.run(["rm", "-q", "-r", "-f", dirLinkInNewlineDir], fx.repoRoot);
+      expect(rmDirLink.status).not.toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-r", "-f", dirLinkInNewlineDir]);
+      expect(fs.existsSync(path.join(otherDir, "keep.txt"))).toBe(true);
+      expect(fx.staged()).toMatch(/\tother\/keep\.txt$/m);
 
       const linkedPath = path.join(fx.base, "workspace-link", "note.md");
       const commit = fx.run(
