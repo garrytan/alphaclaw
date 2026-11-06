@@ -25,5 +25,48 @@
       ],
       "inventory": "git ls-files -- 'tests/server/guards/*.test.js'"
     }
-  }
+  },
+  "allowlist": [
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/server/relay/bridge-store.js"
+      ],
+      "pattern": "row\\.session_key,?\\s*$",
+      "reason": "field mapping: a relay row's OpenClaw session key name (agent:<id>:relay-<sender>), not a credential"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/server/relay/bridge.js",
+        "lib/server/routes/relay.js"
+      ],
+      "pattern": "row\\.sessionKey,?\\s*$",
+      "reason": "field mapping: a relay row's OpenClaw session key name (agent:<id>:relay-<sender>), not a credential"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/live/*.e2e.test.js"
+      ],
+      "pattern": "local-model-fixture\",?\\s*$",
+      "reason": "the live tier's mock-model provider key, a fixed dummy string every live test uses"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/server/gateway.test.js"
+      ],
+      "pattern": "sk-sure-secret-token\",?\\s*$",
+      "reason": "the REMOTE_MCP test fixture token gateway.test.js asserts never reaches openclaw.json"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/server/relay/oauth-provider.js"
+      ],
+      "pattern": "(?:accessToken|refreshToken),?\\s*$",
+      "reason": "RFC 6749 token response field names (access_token, refresh_token) mapped from local variables; the values are minted at runtime, never literals"
+    }
+  ]
 }

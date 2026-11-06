@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.169] - 2026-11-06
+## [0.10.170] - 2026-11-06
 
 AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other agents (Capy threads, other boxes) can message your OpenClaw agent and get answers, with every message logged and auditable on a new **Relay** page (ALPH-63, GST-1591). This is the box side; the remote OAuth endpoint for Capy comes in the next release.
 
@@ -30,6 +30,11 @@ AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other
 - Live (`tests/live/relay-bridge.e2e.test.js`): the real pinned gateway and the real downloaded engine: a DM answered in the sender's own session, and a gateway SIGKILL mid-run resumed by OpenClaw and answered with exactly one reply and one send.
 - Container (`tests/container/relay-engine-binary.e2e.test.js`, node:24-slim): download, re-verify, tamper recovery, `/health`, public create refused, internal create 201.
 - Browser: `tests/browser/relay-page-smoke.mjs` renders the Relay page in Chromium at desktop and mobile widths.
+
+## [0.10.169] - 2026-11-06
+
+### Changed
+- `.gstack/pregate.json` gains an `allowlist` for five secret-scan false positives the Agent Relay PRs add (ALPH-63, GST-1591): a relay row's `sessionKey` field mapping in `bridge-store.js`, `bridge.js` and `routes/relay.js`, the live tier's `local-model-fixture` mock-model key, `gateway.test.js`'s `sk-sure-secret-token` REMOTE_MCP fixture, and the RFC 6749 `access_token` / `refresh_token` response fields in `oauth-provider.js`. Each entry is scoped to its paths and a pattern anchored at both ends of the flagged value, so a second value later on the same line is still caught, with its reason; nothing that looks like a real credential is allowlisted.
 
 ## [0.10.168] - 2026-11-06
 
