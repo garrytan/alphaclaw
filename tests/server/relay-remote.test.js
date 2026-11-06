@@ -124,7 +124,7 @@ const register = (app, body = {}) =>
 const allowConnection = (ctx) => request(ctx.app).post("/api/relay/remote/consent-window");
 
 const connect = async (ctx) => {
-  await allowConnection(ctx);
+  const allowed = await allowConnection(ctx);
   const client = (await register(ctx.app)).body;
   const { verifier, challenge } = pkce();
   const authorize = await request(ctx.app)
@@ -138,7 +138,7 @@ const connect = async (ctx) => {
     .post("/relay/oauth/consent")
     .set("Origin", kPublic)
     .type("form")
-    .send({ request: requestId, csrf, decision: "approve" });
+    .send({ request: requestId, csrf, decision: "approve", consent_code: allowed.body.code });
   const code = new URL(approved.headers.location).searchParams.get("code");
   const token = await request(ctx.app)
     .post("/relay/oauth/token")
@@ -437,13 +437,13 @@ describe("relay remote: ship review fixes (ALPH-63)", () => {
 
   it("accepts a real browser's consent post (Origin: null, Sec-Fetch-Site: same-origin) and still refuses a cross-site one", async () => {
     ctx = setup();
-    await allowConnection(ctx);
+    const allowed = await allowConnection(ctx);
     const first = await startConsent();
     expect(first.page.headers["referrer-policy"]).toBe("same-origin");
     expect(first.page.text).toContain("Approve only if you pressed Connect");
     const crossSite = await request(ctx.app).post("/relay/oauth/consent").set("Origin", "null").set("Sec-Fetch-Site", "cross-site").type("form").send({ request: first.request, csrf: first.csrf, decision: "approve" });
     expect(crossSite.status).toBe(403);
-    const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", "null").set("Sec-Fetch-Site", "same-origin").type("form").send({ request: first.request, csrf: first.csrf, decision: "approve" });
+    const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", "null").set("Sec-Fetch-Site", "same-origin").type("form").send({ request: first.request, csrf: first.csrf, decision: "approve", consent_code: allowed.body.code });
     expect(approved.status).toBe(303);
     expect(new URL(approved.headers.location).searchParams.get("code")).toBeTruthy();
   });
@@ -682,7 +682,7 @@ describe("relay remote: ship round 2 fixes (ALPH-63)", () => {
 
   it("consent approved after its client was revoked denies, and issues no code", async () => {
     ctx = setup();
-    await allowConnection(ctx);
+    const allowed = await allowConnection(ctx);
     const client = (await register(ctx.app)).body;
     const { challenge } = pkce();
     const authorize = await request(ctx.app)
@@ -692,7 +692,7 @@ describe("relay remote: ship round 2 fixes (ALPH-63)", () => {
     const page = await request(ctx.app).get(consentUrl.pathname + consentUrl.search);
     const csrf = /name="csrf" value="([^"]+)"/.exec(page.text)[1];
     expect((await request(ctx.app).post("/api/relay/remote/clients/" + client.client_id + "/revoke")).body.ok).toBe(true);
-    const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve" });
+    const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve", consent_code: allowed.body.code });
     const location = new URL(approved.headers.location);
     expect(location.searchParams.get("code")).toBeNull();
     expect(location.searchParams.get("error")).toBe("access_denied");
@@ -713,10 +713,10 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     const page = await request(ctx.app).get(url.pathname + url.search);
     return { page, request: url.searchParams.get("request"), csrf: /name="csrf" value="([^"]+)"/.exec(page.text)[1] };
   };
-  const approve = (first) =>
-    request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: first.request, csrf: first.csrf, decision: "approve" });
+  const approve = (first, code) =>
+    request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: first.request, csrf: first.csrf, decision: "approve", consent_code: code });
 
-  it("a forwarded consent link cannot be approved, before or after the admin allows a new connection; one window admits one approval of a request started inside it", async () => {
+  it("a consent request started before Allow cannot be approved, even with the code; one window admits one approval of a request started inside it", async () => {
     ctx = setup();
     const forwarded = await startConsent();
     expect(forwarded.page.text).toContain("This request cannot be approved");
@@ -735,16 +735,46 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     expect(ctx.relayRemote.getStatus().consentWindowUntil).toBe(opened.body.until);
     const stillForwarded = await request(ctx.app).get("/relay/oauth/consent?request=" + encodeURIComponent(forwarded.request));
     expect(stillForwarded.text).not.toContain('value="approve"');
-    expect((await approve(forwarded)).status).toBe(403);
+    expect((await approve(forwarded, opened.body.code)).status).toBe(403);
     expect(ctx.relayRemote.getStatus().consentWindowUntil).toBe(opened.body.until);
     const own = await startConsent();
     expect(own.page.text).toContain('value="approve"');
-    const approved = await approve(own);
+    const approved = await approve(own, opened.body.code);
     expect(approved.status).toBe(303);
     expect(new URL(approved.headers.location).searchParams.get("code")).toBeTruthy();
     expect(ctx.relayRemote.getStatus().consentWindowUntil).toBeNull();
     const second = await startConsent();
-    expect((await approve(second)).status).toBe(403);
+    expect((await approve(second, opened.body.code)).status).toBe(403);
+  });
+
+  it("a forwarded authorize link clicked inside an open window cannot be approved without the Relay page's one-time code, and the code works once", async () => {
+    ctx = setup();
+    const opened = await allowConnection(ctx);
+    expect(opened.headers["cache-control"]).toBe("no-store");
+    expect(opened.body.code).toMatch(/^[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/);
+    const status = await request(ctx.app).get("/api/relay/remote");
+    expect(JSON.stringify(status.body)).not.toContain(opened.body.code.replace("-", ""));
+    expect(JSON.stringify(status.body)).not.toContain(opened.body.code);
+    const attacker = await startConsent();
+    expect(attacker.page.text).toContain('value="approve"');
+    expect(attacker.page.text).toContain('name="consent_code"');
+    const noCode = await approve(attacker);
+    expect(noCode.status).toBe(403);
+    expect(noCode.headers.location).toBeUndefined();
+    expect(noCode.text).toContain("The code does not match");
+    const wrongCode = await approve(attacker, "AAAA-AAAA" === opened.body.code ? "BBBB-BBBB" : "AAAA-AAAA");
+    expect(wrongCode.status).toBe(403);
+    expect(wrongCode.headers.location).toBeUndefined();
+    expect(ctx.relayRemote.getStatus().consentWindowUntil).toBe(opened.body.until);
+    const typed = await approve(attacker, " " + opened.body.code.toLowerCase().replace("-", " ") + " ");
+    expect(typed.status).toBe(303);
+    expect(new URL(typed.headers.location).searchParams.get("code")).toBeTruthy();
+    expect(ctx.relayRemote.getStatus().consentWindowUntil).toBeNull();
+    const reopened = await allowConnection(ctx);
+    expect(reopened.body.code).not.toBe(opened.body.code);
+    const next = await startConsent();
+    expect((await approve(next, opened.body.code)).status).toBe(403);
+    expect((await approve(next, reopened.body.code)).status).toBe(303);
   });
 
   it("the consent window closes 10 minutes after it opens", () => {

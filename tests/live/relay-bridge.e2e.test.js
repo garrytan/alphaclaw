@@ -269,7 +269,8 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
         relayRemote: remote,
       });
 
-      expect((await request(app).post("/api/relay/remote/consent-window")).body.ok).toBe(true);
+      const allowed = (await request(app).post("/api/relay/remote/consent-window")).body;
+      expect(allowed.ok).toBe(true);
       const client = (await request(app).post("/relay/oauth/register").send({ client_name: "Capy", redirect_uris: [kRedirect], token_endpoint_auth_method: "none" })).body;
       const verifier = crypto.randomBytes(32).toString("base64url");
       const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
@@ -279,7 +280,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       const consentUrl = new URL(authorize.headers.location, kPublic);
       const page = await request(app).get(consentUrl.pathname + consentUrl.search);
       const csrf = /name="csrf" value="([^"]+)"/.exec(page.text)[1];
-      const approved = await request(app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve" });
+      const approved = await request(app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve", consent_code: allowed.code });
       const code = new URL(approved.headers.location).searchParams.get("code");
       const token = (await request(app).post("/relay/oauth/token").type("form").send({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: kRedirect })).body;
       expect(token.access_token).toBeTruthy();
