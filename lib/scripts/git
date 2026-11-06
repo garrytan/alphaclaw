@@ -211,11 +211,6 @@ map_symlinked_path_args() {
       value_long=" --message --file --reuse-message --reedit-message --author --date --fixup --squash --template --trailer --cleanup "
       value_short="mFCct"
       ;;
-    stash)
-      [ "${GIT_ARGS[$((GLOBAL_ARG_COUNT + 1))]:-}" = "save" ] && return 0
-      value_long=" --message "
-      value_short="m"
-      ;;
     diff|log|show)
       value_long=" --grep --author --committer --ignore-matching-lines "
       value_short="SGOIL"
@@ -223,15 +218,11 @@ map_symlinked_path_args() {
     blame|annotate)
       value_short="L"
       ;;
-    clean)
-      value_long=" --exclude "
-      value_short="e"
-      ;;
     ls-files)
       value_long=" --exclude --exclude-from --format "
       value_short="xX"
       ;;
-    add|rm|mv|restore|checkout|reset|status|check-ignore) ;;
+    add|status|check-ignore) ;;
     *) return 0 ;;
   esac
 

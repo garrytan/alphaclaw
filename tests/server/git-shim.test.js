@@ -358,13 +358,36 @@ describe("server git shim scripts", () => {
       expect(fx.lastCallArgs()).toEqual(["add", physicalPath]);
 
       const linkedResult = fx.run(
-        ["-C", linkedCwd, "rm", "-q", "--cached", path.join(fx.base, "workspace-link", "note.md")],
+        ["-C", linkedCwd, "ls-files", "--error-unmatch", path.join(fx.base, "workspace-link", "note.md")],
         fx.base,
       );
       expect(linkedResult.stderr).not.toContain("outside repository");
       expect(linkedResult.status).toBe(0);
-      expect(fx.lastCallArgs()).toEqual(["-C", linkedCwd, "rm", "-q", "--cached", physicalPath]);
-      expect(fx.staged()).toBe("");
+      expect(linkedResult.stdout).toBe("note.md\n");
+      expect(fx.lastCallArgs()).toEqual(["-C", linkedCwd, "ls-files", "--error-unmatch", physicalPath]);
+    });
+
+    it.each([
+      ["rm", "-q", "--cached"],
+      ["mv"],
+      ["clean", "-n"],
+      ["checkout", "--"],
+      ["restore", "--staged"],
+      ["reset", "-q", "--"],
+      ["stash", "push", "--"],
+    ])("leaves symlinked paths unmapped for the destructive command %s", (...command) => {
+      const fx = createSymlinkFixture();
+      const notePath = path.join(fx.workspaceDir, "note.md");
+      execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", notePath], { stdio: "pipe" });
+      const linkedPath = path.join(fx.base, "workspace-link", "note.md");
+      const args = command[0] === "mv" ? [...command, linkedPath, path.join(fx.workspaceDir, "moved.md")] : [...command, linkedPath];
+
+      const result = fx.run(args, fx.repoRoot);
+
+      expect(result.status).not.toBe(0);
+      expect(fx.lastCallArgs()).toEqual(args);
+      expect(fs.existsSync(notePath)).toBe(true);
+      expect(fx.staged()).toContain("workspace/note.md");
     });
 
     it("maps a not-yet-existing file under a symlinked dir via its nearest existing ancestor", () => {
@@ -435,11 +458,11 @@ describe("server git shim scripts", () => {
       expect(fx.lastCallArgs()).toEqual(["add", "-n", "--", fx.workspaceDir]);
 
       fs.symlinkSync(path.join(fx.repoRoot, "M"), path.join(fx.base, "outside-to-M"));
-      const rm = fx.run(["rm", "-q", "-r", "--cached", "--", path.join(fx.base, "outside-to-M")], fx.repoRoot);
-      expect(rm.status).toBe(0);
-      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-r", "--cached", "--", path.join(fx.repoRoot, "M")]);
-      expect(fx.staged()).toMatch(/\tother\/keep\.txt$/m);
-      expect(fx.staged()).not.toMatch(/\tM$/m);
+      const listed = fx.run(["ls-files", "-s", "--", path.join(fx.base, "outside-to-M")], fx.repoRoot);
+      expect(listed.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["ls-files", "-s", "--", path.join(fx.repoRoot, "M")]);
+      expect(listed.stdout).toMatch(/^120000 \S+ 0\tM$/m);
+      expect(listed.stdout).not.toContain("other/keep.txt");
     });
 
     it("passes argv unchanged when any argument holds a control character", () => {
@@ -462,9 +485,9 @@ describe("server git shim scripts", () => {
       execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", notePath], { stdio: "pipe" });
 
       const newlinePath = `${path.join(fx.base, "workspace-link", "note.md")}\n`;
-      const rm = fx.run(["rm", "-q", "-f", "--", newlinePath], fx.repoRoot);
+      const rm = fx.run(["ls-files", "--error-unmatch", "--", newlinePath], fx.repoRoot);
       expect(rm.status).not.toBe(0);
-      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-f", "--", newlinePath.trimEnd()]);
+      expect(fx.lastCallArgs()).toEqual(["ls-files", "--error-unmatch", "--", newlinePath.trimEnd()]);
       expect(fs.existsSync(notePath)).toBe(true);
       expect(fx.staged()).toContain("workspace/note.md");
 
@@ -477,9 +500,9 @@ describe("server git shim scripts", () => {
       execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", "--", "sub/f", "sub\n/f"], { stdio: "pipe" });
       fs.symlinkSync(newlineDir, path.join(fx.base, "newline-dir-link"));
       const viaNewlineDir = path.join(fx.base, "newline-dir-link", "f");
-      const rmViaDir = fx.run(["rm", "-q", "-f", viaNewlineDir], fx.repoRoot);
+      const rmViaDir = fx.run(["ls-files", "--error-unmatch", "--", viaNewlineDir], fx.repoRoot);
       expect(rmViaDir.status).not.toBe(0);
-      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-f", viaNewlineDir]);
+      expect(fx.lastCallArgs()).toEqual(["ls-files", "--error-unmatch", "--", viaNewlineDir]);
       expect(fs.existsSync(path.join(plainDir, "f"))).toBe(true);
       expect(fx.staged()).toMatch(/\tsub\/f$/m);
 
@@ -489,9 +512,9 @@ describe("server git shim scripts", () => {
       fs.symlinkSync("../other", path.join(newlineDir, "L"));
       execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", "--", "other/keep.txt", "sub\n/L"], { stdio: "pipe" });
       const dirLinkInNewlineDir = path.join(fx.base, "newline-dir-link", "L");
-      const rmDirLink = fx.run(["rm", "-q", "-r", "-f", dirLinkInNewlineDir], fx.repoRoot);
+      const rmDirLink = fx.run(["ls-files", "--error-unmatch", "--", dirLinkInNewlineDir], fx.repoRoot);
       expect(rmDirLink.status).not.toBe(0);
-      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-r", "-f", dirLinkInNewlineDir]);
+      expect(fx.lastCallArgs()).toEqual(["ls-files", "--error-unmatch", "--", dirLinkInNewlineDir]);
       expect(fs.existsSync(path.join(otherDir, "keep.txt"))).toBe(true);
       expect(fx.staged()).toMatch(/\tother\/keep\.txt$/m);
 
