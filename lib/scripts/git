@@ -68,15 +68,17 @@ canonicalize_path() {
   printf '%s\n' "$target_path"
 }
 
-resolve_effective_pwd() {
+scan_global_args() {
   local effective_pwd
   effective_pwd="$(pwd)"
+  GLOBAL_ARG_COUNT=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -C)
         shift
         [ "$#" -gt 0 ] || break
+        GLOBAL_ARG_COUNT=$((GLOBAL_ARG_COUNT + 1))
         case "$1" in
           /*) effective_pwd="$1" ;;
           *) effective_pwd="$effective_pwd/$1" ;;
@@ -85,6 +87,7 @@ resolve_effective_pwd() {
       -c|--exec-path|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--list-cmds|--attr-source)
         shift
         [ "$#" -gt 0 ] || break
+        GLOBAL_ARG_COUNT=$((GLOBAL_ARG_COUNT + 1))
         ;;
       --exec-path=*|--git-dir=*|--work-tree=*|--namespace=*|--config-env=*|--super-prefix=*|--list-cmds=*|--attr-source=*)
         ;;
@@ -97,10 +100,169 @@ resolve_effective_pwd() {
         break
         ;;
     esac
+    GLOBAL_ARG_COUNT=$((GLOBAL_ARG_COUNT + 1))
     shift
   done
 
-  canonicalize_path "$effective_pwd"
+  SCANNED_PWD="$effective_pwd"
+}
+
+physical_dir() {
+  local resolved_dir
+  resolved_dir="$(cd -P "$1" 2>/dev/null && pwd -P && printf x)" || return 1
+  resolved_dir="${resolved_dir%x}"
+  resolved_dir="${resolved_dir%$'\n'}"
+  case "$resolved_dir" in
+    ""|*$'\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$resolved_dir"
+}
+
+physical_parent_path() {
+  local target_path ancestor remainder resolved_ancestor
+  target_path="$1"
+  while [ "${#target_path}" -gt 1 ] && [ "${target_path%/}" != "$target_path" ]; do
+    target_path="${target_path%/}"
+  done
+  remainder="${target_path##*/}"
+  ancestor="${target_path%/*}"
+  [ -n "$ancestor" ] || ancestor="/"
+  while [ ! -d "$ancestor" ]; do
+    remainder="${ancestor##*/}/$remainder"
+    ancestor="${ancestor%/*}"
+    [ -n "$ancestor" ] || ancestor="/"
+  done
+  resolved_ancestor="$(physical_dir "$ancestor")" || return 1
+  printf '%s/%s\n' "${resolved_ancestor%/}" "$remainder"
+}
+
+inside_worktree() {
+  case "$1" in
+    "$2"|"$2"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+map_into_worktree() {
+  local target_path worktree mapped_path link_path link_target
+  target_path="$1"
+  worktree="$2"
+  inside_worktree "$target_path" "$worktree" && return 1
+  mapped_path="$(physical_parent_path "$target_path")" || return 1
+  if inside_worktree "$mapped_path" "$worktree"; then
+    printf '%s\n' "$mapped_path"
+    return 0
+  fi
+  link_path="$target_path"
+  while [ "${#link_path}" -gt 1 ] && [ "${link_path%/}" != "$link_path" ]; do
+    link_path="${link_path%/}"
+  done
+  [ -L "$link_path" ] && [ -d "$link_path" ] || return 1
+  link_target="$(readlink "$link_path" && printf x)" || return 1
+  link_target="${link_target%x}"
+  link_target="${link_target%$'\n'}"
+  case "$link_target" in
+    ""|*[[:cntrl:]]*) return 1 ;;
+    /*) ;;
+    *) link_target="${mapped_path%/*}/$link_target" ;;
+  esac
+  mapped_path="$(physical_parent_path "$link_target")" || return 1
+  inside_worktree "$mapped_path" "$worktree" || return 1
+  printf '%s\n' "$mapped_path"
+}
+
+takes_option_value() {
+  local option_arg value_long value_short cluster letter long_option
+  option_arg="$1"
+  value_long="$2"
+  value_short="$3"
+  case "$option_arg" in
+    --*=*) return 1 ;;
+    --*)
+      for long_option in $value_long; do
+        case "$long_option" in
+          "$option_arg"*) return 0 ;;
+        esac
+      done
+      return 1
+      ;;
+    -?*)
+      [ -n "$value_short" ] || return 1
+      cluster="${option_arg#-}"
+      while [ -n "$cluster" ]; do
+        letter="${cluster%"${cluster#?}"}"
+        cluster="${cluster#?}"
+        case "$value_short" in
+          *"$letter"*) [ -z "$cluster" ]; return ;;
+        esac
+      done
+      ;;
+  esac
+  return 1
+}
+
+map_symlinked_path_args() {
+  local subcommand value_long value_short index arg previous_arg after_dashdash worktree mapped_path
+  subcommand="${GIT_ARGS[$GLOBAL_ARG_COUNT]:-}"
+  value_long=""
+  value_short=""
+  case "$subcommand" in
+    commit)
+      value_long=" --message --file --reuse-message --reedit-message --author --date --fixup --squash --template --trailer --cleanup "
+      value_short="mFCct"
+      ;;
+    log|show)
+      value_long=" --grep --author --committer --ignore-matching-lines "
+      value_short="SGOIL"
+      ;;
+    blame|annotate)
+      value_short="L"
+      ;;
+    ls-files)
+      value_long=" --exclude --exclude-from --format "
+      value_short="xX"
+      ;;
+    add|status|check-ignore) ;;
+    *) return 0 ;;
+  esac
+
+  for arg in "${GIT_ARGS[@]}"; do
+    case "$arg" in
+      *[[:cntrl:]]*) return 0 ;;
+    esac
+  done
+
+  worktree=""
+  previous_arg=""
+  after_dashdash=0
+  index=$((GLOBAL_ARG_COUNT + 1))
+  while [ "$index" -lt "${#GIT_ARGS[@]}" ]; do
+    arg="${GIT_ARGS[$index]}"
+    index=$((index + 1))
+    if [ "$after_dashdash" = 0 ]; then
+      if [ -n "$previous_arg" ] && takes_option_value "$previous_arg" "$value_long" "$value_short"; then
+        previous_arg=""
+        continue
+      fi
+      if [ "$arg" = "--" ]; then
+        after_dashdash=1
+        continue
+      fi
+      previous_arg="$arg"
+    fi
+    case "$arg" in
+      /*) ;;
+      *) continue ;;
+    esac
+    [ "$(physical_parent_path "$arg")" = "$arg" ] && [ ! -L "$arg" ] && continue
+    if [ -z "$worktree" ]; then
+      worktree="$("$REAL_GIT" "${GIT_ARGS[@]:0:$GLOBAL_ARG_COUNT}" rev-parse --show-toplevel 2>/dev/null)" || return 0
+      [ -n "$worktree" ] || return 0
+      worktree="$(canonicalize_path "$worktree")"
+    fi
+    mapped_path="$(map_into_worktree "$arg" "$worktree")" || continue
+    GIT_ARGS[$((index - 1))]="$mapped_path"
+  done
 }
 
 in_openclaw_root() {
@@ -123,7 +285,10 @@ if [ -z "$REAL_GIT" ]; then
   exit 127
 fi
 
-EFFECTIVE_PWD="$(resolve_effective_pwd "$@")"
+GIT_ARGS=("$@")
+scan_global_args "$@"
+EFFECTIVE_PWD="$(canonicalize_path "$SCANNED_PWD")"
+map_symlinked_path_args
 
 if [ -z "${GITHUB_TOKEN:-}" ] && in_openclaw_root "$EFFECTIVE_PWD" && [ -f "$OPENCLAW_REPO_ROOT/.env" ]; then
   # Extract ONLY GITHUB_TOKEN — never source (issue #26 sibling): sourcing
@@ -148,9 +313,9 @@ if [ -z "${GITHUB_TOKEN:-}" ] && in_openclaw_root "$EFFECTIVE_PWD" && [ -f "$OPE
 fi
 
 if [ "${ALPHACLAW_GIT_NO_AUTH:-}" = "1" ] || [ -z "${GITHUB_TOKEN:-}" ] || ! in_openclaw_root "$EFFECTIVE_PWD"; then
-  exec "$REAL_GIT" "$@"
+  exec "$REAL_GIT" "${GIT_ARGS[@]}"
 fi
 
 export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS="$ASKPASS_PATH"
-exec "$REAL_GIT" "$@"
+exec "$REAL_GIT" "${GIT_ARGS[@]}"
