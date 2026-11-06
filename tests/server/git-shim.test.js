@@ -422,6 +422,7 @@ describe("server git shim scripts", () => {
         linkedPath,
       ]);
     });
+
     it("never rewrites a newline-ending path or a bundled -m message", () => {
       const fx = createSymlinkFixture();
       const notePath = path.join(fx.workspaceDir, "note.md");
