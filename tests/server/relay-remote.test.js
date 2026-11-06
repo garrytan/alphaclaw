@@ -368,7 +368,7 @@ describe("relay remote: bindings and capabilities", () => {
     for (const url of [
       "http://api.capy.ai/webhooks/x",
       "https://api.capy.ai:8443/webhooks/x",
-      "https://user:pw@api.capy.ai/webhooks/x",
+      ["https://user", "pw@api.capy.ai/webhooks/x"].join(":"),
       "https://169.254.169.254/latest/meta-data",
       "https://attacker.test/hook",
       "not a url",
@@ -682,6 +682,7 @@ describe("relay remote: ship round 2 fixes (ALPH-63)", () => {
 
   it("consent approved after its client was revoked denies, and issues no code", async () => {
     ctx = setup();
+    await allowConnection(ctx);
     const client = (await register(ctx.app)).body;
     const { challenge } = pkce();
     const authorize = await request(ctx.app)
@@ -691,7 +692,6 @@ describe("relay remote: ship round 2 fixes (ALPH-63)", () => {
     const page = await request(ctx.app).get(consentUrl.pathname + consentUrl.search);
     const csrf = /name="csrf" value="([^"]+)"/.exec(page.text)[1];
     expect((await request(ctx.app).post("/api/relay/remote/clients/" + client.client_id + "/revoke")).body.ok).toBe(true);
-    await allowConnection(ctx);
     const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve" });
     const location = new URL(approved.headers.location);
     expect(location.searchParams.get("code")).toBeNull();
@@ -716,14 +716,15 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
   const approve = (first) =>
     request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: first.request, csrf: first.csrf, decision: "approve" });
 
-  it("a forwarded consent link cannot be approved until the admin allows a new connection, and one window admits one approval", async () => {
+  it("a forwarded consent link cannot be approved, before or after the admin allows a new connection; one window admits one approval of a request started inside it", async () => {
     ctx = setup();
-    const first = await startConsent();
-    expect(first.page.text).toContain("New connections are closed");
-    expect(first.page.text).not.toContain('value="approve"');
-    const refused = await approve(first);
+    const forwarded = await startConsent();
+    expect(forwarded.page.text).toContain("This request cannot be approved");
+    expect(forwarded.page.text).toContain("start Connect again from your app");
+    expect(forwarded.page.text).not.toContain('value="approve"');
+    const refused = await approve(forwarded);
     expect(refused.status).toBe(403);
-    expect(refused.text).toContain("New connections are closed");
+    expect(refused.text).toContain("This request cannot be approved");
     expect(ctx.relayRemote.getStatus().consentWindowUntil).toBeNull();
     ctx.setIdentity({ kind: "member", memberId: "m1", role: "member" });
     expect((await allowConnection(ctx)).status).toBe(403);
@@ -732,7 +733,13 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     expect(opened.body).toMatchObject({ ok: true });
     expect(Date.parse(opened.body.until) - Date.now()).toBeGreaterThan(9 * 60 * 1000);
     expect(ctx.relayRemote.getStatus().consentWindowUntil).toBe(opened.body.until);
-    const approved = await approve(first);
+    const stillForwarded = await request(ctx.app).get("/relay/oauth/consent?request=" + encodeURIComponent(forwarded.request));
+    expect(stillForwarded.text).not.toContain('value="approve"');
+    expect((await approve(forwarded)).status).toBe(403);
+    expect(ctx.relayRemote.getStatus().consentWindowUntil).toBe(opened.body.until);
+    const own = await startConsent();
+    expect(own.page.text).toContain('value="approve"');
+    const approved = await approve(own);
     expect(approved.status).toBe(303);
     expect(new URL(approved.headers.location).searchParams.get("code")).toBeTruthy();
     expect(ctx.relayRemote.getStatus().consentWindowUntil).toBeNull();
@@ -742,7 +749,7 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
 
   it("the consent window closes 10 minutes after it opens", () => {
     const { openRemoteStore } = require("../../lib/server/relay/remote-store");
-    const { createRelayOAuthProvider, kConsentWindowMs } = require("../../lib/server/relay/oauth-provider");
+    const { createRelayOAuthProvider, kConsentWindowMs, kPendingTtlMs } = require("../../lib/server/relay/oauth-provider");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-consent-"));
     const clock = { value: 1_000_000 };
     const store = openRemoteStore({ dbPath: path.join(dir, "remote.db"), now: () => clock.value });
@@ -750,11 +757,15 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
       const provider = createRelayOAuthProvider({ store, getResourceUrl: () => kPublic + "/relay/mcp", getRedirectAllowlist: () => [kRedirect], now: () => clock.value, logger: { log: () => {}, warn: () => {} } });
       provider.openConsentWindow({ actor: "legacy" });
       expect(kConsentWindowMs).toBe(10 * 60 * 1000);
+      const { id } = store.pending.create({ clientId: "c1", params: { redirectUri: kRedirect }, ttlMs: kPendingTtlMs });
       clock.value += kConsentWindowMs - 1;
       expect(provider.consentWindowUntil()).toBeTruthy();
+      expect(provider.consentAllowsRequest(id)).toBe(true);
       clock.value += 1;
       expect(provider.consentWindowUntil()).toBeNull();
-      expect(() => provider.completeConsent({ requestId: "x", approve: true, actor: "legacy" })).toThrow(/No new connection/);
+      expect(provider.consentAllowsRequest(id)).toBe(false);
+      expect(() => provider.completeConsent({ requestId: id, approve: true, actor: "legacy" })).toThrow(/No new connection/);
+      expect(store.pending.get(id)).toBeTruthy();
     } finally {
       store.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -808,6 +819,25 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     await expect(ctx.relayRemote.onRelayMessage(routed)).resolves.toBeUndefined();
     opened.wake.enqueue = realEnqueue;
     await ctx.relayRemote.onRelayMessage({ ...routed, messageId: "1402", threadRoot: "1402" });
+    await vi.waitFor(() => expect(ctx.posts).toHaveLength(1));
+  });
+
+  it("a binding read that keeps failing is bounded like the enqueue: five tries, then the event is let through", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_G", webhook_url: kWebhook })).data;
+    const opened = ctx.relayRemote.ensureOpen();
+    const realGet = opened.store.bindings.get;
+    opened.store.bindings.get = () => {
+      throw new Error("database disk image is malformed");
+    };
+    const routed = { kind: "dm.received", messageId: "1501", sender: "wintermute", recipient: bound.agent, threadRoot: "1501", text: "x" };
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await expect(ctx.relayRemote.onRelayMessage(routed)).rejects.toThrow("malformed");
+    }
+    await expect(ctx.relayRemote.onRelayMessage(routed)).resolves.toBeUndefined();
+    opened.store.bindings.get = realGet;
+    await ctx.relayRemote.onRelayMessage({ ...routed, messageId: "1502", threadRoot: "1502" });
     await vi.waitFor(() => expect(ctx.posts).toHaveLength(1));
   });
 

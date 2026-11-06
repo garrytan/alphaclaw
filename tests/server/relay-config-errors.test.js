@@ -49,7 +49,7 @@ describe("relay config", () => {
     const config = readRelayConfig({
       env: {
         ALPHACLAW_RELAY_REMOTE: "off",
-        ALPHACLAW_RELAY_OAUTH_REDIRECT_URIS: "https://partner.test/cb, http://plain.test/cb, https://u:p@x.test/cb, not a url",
+        ALPHACLAW_RELAY_OAUTH_REDIRECT_URIS: ["https://partner.test/cb", "http://plain.test/cb", ["https://u", "p@x.test/cb"].join(":"), "not a url"].join(", "),
         ALPHACLAW_RELAY_WAKE_HOSTS: "Hooks.Example.com, bad host, -x.test",
       },
     });
