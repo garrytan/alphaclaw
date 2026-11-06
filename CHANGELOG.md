@@ -5,6 +5,11 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.169] - 2026-11-06
+
+### Changed
+- `.gstack/pregate.json` gains an `allowlist` for four secret-scan false positives the Agent Relay PRs add (ALPH-63, GST-1591): a relay row's `sessionKey` field mapping in `bridge-store.js`, `bridge.js` and `routes/relay.js`, the live tier's `local-model-fixture` mock-model key, and `gateway.test.js`'s `sk-sure-secret-token` REMOTE_MCP fixture. Each entry is scoped to its paths and a pattern anchored at the value, with its reason; nothing that looks like a real credential is allowlisted.
+
 ## [0.10.168] - 2026-11-06
 
 The git shim maps an absolute path that runs through a symlinked directory onto the repository it points into, so git stops refusing it as "outside repository" (GST-1654, from ALPH-64). Wintermute hit this 8 times since 10-20 with `/data/brain` and `/data/.openclaw/workspace`, which are symlinks into `/data/stronghold-wm/wintermute`. Git accepts such a path only when a symlink points at the work tree root itself, not into a directory below it.
