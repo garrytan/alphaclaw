@@ -83,3 +83,43 @@ describe("relay tools", () => {
     expect(typeof server.connect).toBe("function");
   });
 });
+
+
+describe("relay tools: hop propagation (ALPH-63)", () => {
+  it("a message sent during a relay run carries that run's hop + 1, and a reply at least its parent's hop + 1", async () => {
+    const engine = createEngine();
+    engine.getMessage = vi.fn(async () => ({ id: "30", metadata: { relay_hop: 2 } }));
+    let next = 3;
+    const tools = createRelayTools({ engine, getAuth: auth, nextHop: () => next });
+    await tools.call("relay_send", { to: "capy-1", text: "forwarding" });
+    expect(engine.sendDm).toHaveBeenLastCalledWith("at_live_x", "capy-1", "forwarding", { relay_hop: 3 });
+    next = 0;
+    await tools.call("relay_reply", { message_id: "30", text: "answer" });
+    expect(engine.reply).toHaveBeenLastCalledWith("at_live_x", "30", "answer", { relay_hop: 3 });
+    next = 5;
+    await tools.call("relay_reply", { message_id: "30", text: "answer" });
+    expect(engine.reply).toHaveBeenLastCalledWith("at_live_x", "30", "answer", { relay_hop: 5 });
+  });
+
+  it("the box agent's server reads the next hop from the relay runs in flight", () => {
+    const fs = require("fs");
+    const os = require("os");
+    const path = require("path");
+    const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
+    const { readNextHop } = require("../../lib/server/relay/mcp-stdio");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-hop-"));
+    try {
+      const dbPath = path.join(dir, "bridge.db");
+      expect(readNextHop(dbPath)).toBe(0);
+      const store = openBridgeStore({ dbPath });
+      store.insert({ messageId: "1", sender: "a", conversationId: "dm", threadRoot: "1", sessionKey: "agent:main:relay-a", hop: 1, state: "answered" });
+      expect(readNextHop(dbPath)).toBe(0);
+      store.insert({ messageId: "2", sender: "b", conversationId: "dm", threadRoot: "2", sessionKey: "agent:main:relay-b", hop: 2, state: "dispatched" });
+      expect(readNextHop(dbPath)).toBe(3);
+      store.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

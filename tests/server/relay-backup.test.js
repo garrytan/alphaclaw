@@ -84,3 +84,29 @@ describe("relay backup", () => {
     expect(verdicts[path.basename(lookAlike)]).toBe("not_managed");
   });
 });
+
+
+describe("relay backup: stale partial copies", () => {
+  it("removes a crashed backup's .partial directory (it holds key copies) before writing the next one", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-backup-partial-"));
+    try {
+      const paths = relayPaths(root);
+      const backupsDir = path.join(root, "backups", "openclaw");
+      fs.mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(backupsDir, { recursive: true });
+      fs.writeFileSync(paths.secretsFile, JSON.stringify({ version: 1, state: "ready", workspaceKey: "rk_live_x" }), { mode: 0o600 });
+      const stale = path.join(backupsDir, "2026-11-01T10-00-00.000Z-relay-backup.partial");
+      fs.mkdirSync(stale, { recursive: true });
+      fs.writeFileSync(path.join(stale, "secrets.json"), "{}");
+      const unrelated = path.join(backupsDir, "something-else.partial");
+      fs.mkdirSync(unrelated);
+      const result = backupRelay({ paths, backupsDir, archivePath: path.join(backupsDir, "2026-11-06T10-00-00.000Z-openclaw-backup.tar.gz") });
+      expect(result.ok).toBe(true);
+      expect(fs.existsSync(stale)).toBe(false);
+      expect(fs.existsSync(unrelated)).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+

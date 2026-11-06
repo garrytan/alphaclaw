@@ -144,3 +144,48 @@ describe("relay engine sidecar entry", () => {
     expect(errors[0].errors).toEqual(["name is reserved for a built-in AlphaClaw sidecar"]);
   });
 });
+
+
+describe("relay service: ship review fixes (ALPH-63)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  it("a stop while the binary is still being verified never starts the engine", async () => {
+    let finishBinary;
+    ctx = setup({ ensureBinary: () => new Promise((resolve) => { finishBinary = resolve; }) });
+    const running = ctx.service._internal.run();
+    await new Promise((resolve) => setImmediate(resolve));
+    ctx.service.stop();
+    finishBinary({ downloaded: false });
+    await running;
+    expect(ctx.supervisor.start).not.toHaveBeenCalled();
+  });
+
+  it("a first boot whose engine created its database but missed the health wait provisions on the retry, never secrets_missing", async () => {
+    let clock = Date.parse("2026-11-06T10:00:00Z");
+    let healthy = false;
+    const engineFetch = createEngineFetch();
+    ctx = setup({
+      fetchImpl: async (url, options) => {
+        if (!healthy) throw new Error("ECONNREFUSED");
+        return engineFetch(url, options);
+      },
+      now: () => clock,
+      setTimer: (fn, ms) => {
+        if (ms >= 30000) return { unref() {} };
+        clock += ms;
+        setImmediate(fn);
+        return { unref() {} };
+      },
+    });
+    const paths = relayPaths(ctx.root);
+    ctx.supervisor.start.mockImplementation(() => fs.writeFileSync(paths.engineDb, ""));
+    await ctx.service._internal.run();
+    expect(ctx.service.getStatus()).toMatchObject({ phase: "failed", error: { code: "engine_unavailable" } });
+    expect(fs.existsSync(paths.engineDb)).toBe(true);
+    healthy = true;
+    await ctx.service._internal.run();
+    expect(ctx.service.getStatus()).toMatchObject({ phase: "ready", error: null });
+  });
+});
+
