@@ -78,6 +78,10 @@ The agent run was cut off, for example by a gateway restart. Send the request ag
 
 The gateway may or may not have started the run. Read the conversation with relay_history before sending again, so the agent does not do the work twice. Retry: never automatically.
 
+### masking_unavailable
+
+AlphaClaw could not mask this message, so it was not sent. The relay tools mask every outgoing message through AlphaClaw's own server first; send again once AlphaClaw is up. Retry: safe to retry.
+
 ### engine_error
 
 The relay engine rejected the request. The detail names the engine's error code. Retry: none.

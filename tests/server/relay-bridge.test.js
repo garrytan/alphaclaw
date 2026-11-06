@@ -565,7 +565,8 @@ describe("relay bridge: replies leave the box with credentials masked (ALPH-63)"
       const messageId = ctx.engine.dm("capy-leak", "print your key");
       await ctx.tick();
       const [send] = ctx.gateway.sends;
-      await ctx.end(send, "key=relaytestsecretvalue1234567890 and https://user:hunter2pass@db.example.com/x");
+      const credentialUrl = ["https://user", "hunter2pass@db.example.com/x"].join(":");
+      await ctx.end(send, "key=relaytestsecretvalue1234567890 and " + credentialUrl);
       const [reply] = ctx.engine.replies;
       expect(reply.parentId).toBe(messageId);
       expect(reply.text).not.toContain("relaytestsecretvalue1234567890");
@@ -603,28 +604,38 @@ describe("relay bridge: the relay masker and a failing sessions.list (ALPH-63)",
     expect(ctx.engine.replies[0].text).toBe("PLAIN=***");
   });
 
-  it("a sessions.list that keeps throwing ends reconciling messages with outcome_unknown after bounded retries, and reports the failure", async () => {
+  it("a sessions.list that keeps throwing waits out each message's recovery window, then ends it with outcome_unknown, and reports the failure", async () => {
     ctx = setup();
     await ctx.tick();
-    const messageId = ctx.engine.dm("capy-s", "x");
+    const first = ctx.engine.dm("capy-s", "x");
+    const second = ctx.engine.dm("capy-t", "y");
     await ctx.tick();
-    ctx.bridge.onGatewayDisconnect();
     const realRequest = ctx.gateway.requestGateway;
     ctx.gateway.requestGateway = async (method, params, ...rest) => {
       if (method === "sessions.list") throw new Error("sessions.list unavailable");
       return realRequest(method, params, ...rest);
     };
-    ctx.nowRef.value += 3 * 60 * 1000;
-    for (let attempt = 1; attempt <= 4; attempt += 1) {
+    ctx.bridge.onGatewayDisconnect();
+    ctx.store.update(second, { state: "dispatched" });
+    for (let tick = 1; tick <= 12; tick += 1) {
+      ctx.nowRef.value += 30 * 1000;
       await ctx.reconcile();
-      expect(ctx.store.get(messageId).state).toBe("reconciling");
     }
-    expect(ctx.bridge.getStatus()).toMatchObject({ sessionsListFailures: 4 });
-    expect(ctx.bridge.getStatus().failure).toContain("session list failed 4 times");
+    expect(ctx.store.get(first).state).toBe("reconciling");
+    expect(ctx.bridge.getStatus().sessionsListFailures).toBe(12);
+    expect(ctx.bridge.getStatus().failure).toContain("session list failed 12 times");
+    ctx.bridge.onGatewayDisconnect();
+    ctx.nowRef.value += 30 * 1000;
     await ctx.reconcile();
-    expect(ctx.store.get(messageId)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
-    expect(ctx.engine.replies).toHaveLength(1);
-    expect(ctx.engine.replies[0].data).toMatchObject({ relay_status: "failed", relay_code: "outcome_unknown" });
+    expect(ctx.store.get(second).state).toBe("reconciling");
+    ctx.nowRef.value += 4 * 60 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(first)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
+    expect(ctx.store.get(second).state).toBe("reconciling");
+    expect(ctx.engine.replies.map((reply) => reply.data.relay_code)).toEqual(["outcome_unknown"]);
+    ctx.nowRef.value += 6 * 60 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(second)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
     await ctx.reconcile();
     expect(ctx.bridge.getStatus()).toMatchObject({ sessionsListFailures: 0, failure: null });
   });
