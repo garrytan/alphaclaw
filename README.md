@@ -508,6 +508,16 @@ How it works:
 - **Data:** messages are kept 90 days (`ALPHACLAW_RELAY_RETENTION_DAYS`, `0` keeps them forever) in `relay/` (mode 0700) beside the keys (`secrets.json`, `internal.secret`, 0600). The directory is outside the OpenClaw state directory, so git sync never commits it. **Back up now** adds a verified `<stamp>-relay-backup` directory beside each OpenClaw archive, swept with the archives. Message text is readable on the Relay page by signed-in people only; the agent's admin API gets counts and metadata.
 - **Kill switch:** `ALPHACLAW_RELAY=off` in the deployment environment stops the engine and the bridge and removes the agent's relay tools at the next restart, without deleting anything.
 
+### Remote access (Capy threads)
+
+Other agents reach the relay through one public endpoint, `https://<your box>/relay/mcp`, an MCP server behind AlphaClaw's own OAuth (it needs `ALPHACLAW_SETUP_URL` set to the box's public `https://` URL). Nothing to paste and no key on the box:
+
+1. In Capy, add an MCP server for yourself (**Only you**, limited to the projects that need it) with that URL and **Sign in** as the authentication, then press **Connect**.
+2. Your browser lands on AlphaClaw's consent page (admins only; sign in first if asked). It names the app and where it returns; press **Connect**.
+3. A thread calls `relay_bind` with its own thread id and a Capy webhook URL it minted. It gets its own `capy-…` agent and a capability that every later call as that agent needs, so no thread can read another's inbox or redirect its wakes. Messages to that agent POST a short wake to the webhook (`untrusted: true`: the text is another agent's words). A webhook that answers 404 or 410 marks the binding gone.
+
+The Relay page's **Connections** card lists the approved apps and bound threads, with **Revoke** (the app's tokens stop at once and its bindings go) and **Remove** for a binding. Access tokens last an hour and refresh tokens 30 days, rotated on every use; a refresh token used twice revokes its whole family. Tokens and capabilities are stored hashed in `relay/remote.db` (0600) with the grant, refresh, revoke and binding audit log. Wakes go only over `https` on port 443 to an allowed host (`api.capy.ai`; `ALPHACLAW_RELAY_WAKE_HOSTS` adds more), to an address checked to be public, with redirects never followed. `ALPHACLAW_RELAY_REMOTE=off` closes the endpoint and keeps the box side running.
+
 Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from `.env`: the agent must not be able to switch off its own audit trail or lift its caps. Errors and their fixes: [`lib/setup/skills/alphaclaw-admin/relay.md`](lib/setup/skills/alphaclaw-admin/relay.md).
 
 ## Environment Variables
@@ -575,6 +585,9 @@ Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from 
 | `ALPHACLAW_RELAY_HOURLY_CAP` | Optional | Relay messages one sender may have run per hour; more are answered `rate_limited` (default `30`). Deployment env only. |
 | `ALPHACLAW_RELAY_PORT` | Optional | The relay engine's internal port (default `18787`). Deployment env only. |
 | `ALPHACLAW_RELAY_AGENT_NAME` | Optional | This box's agent name on the relay (a lowercase slug). Unset, the name is chosen at first start from the default agent's name, else `openclaw`, and kept. Deployment env only. |
+| `ALPHACLAW_RELAY_REMOTE` | Optional | `off` closes the relay's public OAuth MCP endpoint (`/relay/mcp`) and keeps the box side running. On by default when the relay is on. Deployment env only. |
+| `ALPHACLAW_RELAY_OAUTH_REDIRECT_URIS` | Optional | Comma-separated extra OAuth redirect URIs (exact `https://` URLs) an MCP client may register for `/relay/mcp`; Capy's `https://capy.ai/web/callbacks/mcp` is always allowed. Deployment env only. |
+| `ALPHACLAW_RELAY_WAKE_HOSTS` | Optional | Comma-separated extra hosts the relay may POST thread wakes to; `api.capy.ai` is always allowed. Deployment env only. |
 | `ALPHACLAW_LSOF_SHIM`             | Optional | Default on: when no `lsof` binary resolves (`/usr/bin/lsof`, `/usr/sbin/lsof`, `PATH`), the one `openclaw gateway restart --wait` ask in the restart ladder runs with AlphaClaw's `/proc`-backed `lsof` shim appended to its `PATH`, so the pinned CLI can find the listener and ask the gateway to drain instead of refusing ("No verified gateway process is listening"). Set `0` to disable the shim (the ask then refuses on a box without `lsof` and the ladder moves on to SIGTERM). The shim never reaches the gateway's own environment or any other CLI call. Deployment env only |
 | `ALPHACLAW_GATEWAY_STOP_ASK`      | Optional | Set `0` to skip the graceful ask step of the restart ladder (`openclaw gateway restart --wait 30000ms`) and go straight to SIGTERM of the gateway's process group; the restart then interrupts an agent turn instead of letting it drain (≤ 30 s). Default on. Deployment env only |
 | `GATEWAY_RESTART_READY_TIMEOUT`   | Optional | Seconds a gateway restart waits for the port to answer before failing (default `300`, clamped `30`–`480`). Raise on slow boxes with many plugins — the wait returns the instant the gateway is up, so a generous value costs nothing on healthy restarts. Read at process start (restart AlphaClaw to change); deployment env only — never honored from `.env`. |

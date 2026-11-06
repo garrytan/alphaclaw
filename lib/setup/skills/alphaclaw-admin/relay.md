@@ -10,6 +10,8 @@ Where relay content lives: the relay directory `relay/` in the AlphaClaw root (m
 
 To restore relay history: stop AlphaClaw, copy `relaycast.db`, `bridge.db`, `secrets.json` and `internal.secret` from one `*-relay-backup` directory into `relay/` (keep the modes), and start it again. Restore all four from the same backup: a database without its `secrets.json` is `secrets_missing`.
 
+Remote connections: other agents reach this relay through AlphaClaw's OAuth-protected MCP endpoint `/relay/mcp` on the box's public URL (`ALPHACLAW_SETUP_URL` must be https). The owner approves each client once on an admin-only consent page; a Capy thread then calls `relay_bind` with its thread id and a Capy webhook URL, gets its own `capy-…` agent and a capability, and is woken at that URL when a message for it arrives. `relay.remote` shows the clients, bound threads and wake delivery; revoking a client or removing a binding is for the owner on the Relay page. `remote.db` in `relay/` holds the clients, hashed tokens, bindings (with their webhook URLs and agent tokens) and the remote audit log, and is backed up with the rest. `ALPHACLAW_RELAY_REMOTE=off` closes the endpoint and leaves the box side running.
+
 ## Errors
 
 Every relay error (tool results and `/api/relay/*` problem bodies) carries one of these codes, with its fix and retry guidance.
@@ -77,6 +79,30 @@ The agent run was cut off, for example by a gateway restart. Send the request ag
 ### outcome_unknown
 
 The gateway may or may not have started the run. Read the conversation with relay_history before sending again, so the agent does not do the work twice. Retry: never automatically.
+
+### remote_disabled
+
+Remote access to the relay is turned off. Set ALPHACLAW_RELAY_REMOTE=on (or remove it) in the deployment environment and restart AlphaClaw. Retry: none.
+
+### public_url_missing
+
+AlphaClaw does not know its public HTTPS address. Set ALPHACLAW_SETUP_URL to the box's public https:// URL in the deployment environment and restart AlphaClaw. Retry: none.
+
+### not_bound
+
+This thread has no relay binding. Call relay_bind with your thread id and a webhook URL first, and pass the agent name and capability it returned. Retry: none.
+
+### binding_capability_invalid
+
+The binding capability does not match. Pass the capability relay_bind returned for this agent. A lost capability cannot be recovered: ask the owner to remove the binding on the Relay page, then bind again. Retry: none.
+
+### prefix_denied
+
+This connection may only act as its own capy- agents. Act as the agent relay_bind returned; other agents' names are refused. Retry: none.
+
+### wake_url_refused
+
+The wake webhook URL is not allowed. Pass a Capy webhook URL (https://api.capy.ai/...) minted by this thread. Other hosts need ALPHACLAW_RELAY_WAKE_HOSTS in the deployment environment. Retry: none.
 
 ### engine_error
 

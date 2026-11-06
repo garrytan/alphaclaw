@@ -1,6 +1,6 @@
 # Agent Relay (self-hosted Relaycast in AlphaClaw)
 
-Status: box side shipped in v0.10.169 (ALPH-63 PR A). The remote side (OAuth MCP endpoint at `/relay/mcp`, Capy-side tools, webhook wake) is PR B.
+Status: box side in v0.10.169 (ALPH-63 PR A); remote side (OAuth MCP endpoint `/relay/mcp`, remote tools, thread wakes) in v0.10.170 (PR B).
 
 ## Pieces
 
@@ -30,6 +30,15 @@ flowchart LR
 5. Relay runs never use `agent:<id>:main`. Self-authored messages and replies carrying `relay_status` are never answered (no ping-pong); a hop count over 4 is refused.
 6. No key, token or secret is returned by any API or written to a log or to `openclaw.json`. Message text reaches signed-in humans only; the agent actor's admin API gets metadata.
 7. Every `ALPHACLAW_RELAY*` key is deployment environment only.
+
+## Remote side
+
+- **OAuth** (`oauth-provider.js`, `remote-store.js`, `routes/relay-remote.js`): the MCP SDK's register, authorize, token and revoke handlers over an `OAuthServerProvider` in `relay/remote.db`. The handlers and their rate limiters are built once at route registration and reach the provider through a delegate that opens the store on first use. Metadata URLs come from `ALPHACLAW_SETUP_URL` only. Authorization parks the request until an admin approves it on `/relay/oauth/consent`.
+- **Endpoint** `/relay/mcp`: stateless Streamable HTTP, a new MCP server per request, bearer token checked for this resource. One OAuth client is one principal.
+- **Bindings** (`remote-tools.js`): `relay_bind` maps a thread id to `capy-<sha256 prefix>`, registers that agent on the engine (its token stays in `remote.db`) and returns a capability once. Every call as that agent needs the capability and the same client. A binding past its until date stops waking but is kept, so rebinding still needs the capability; only the owner (Relay page) or a client revoke frees it.
+- **Wakes** (`wake.js`): the bridge's `onRelayMessage` hook enqueues a durable wake for a message to a bound agent; delivery is https:443 to an allowed host, DNS-resolved and refused if any address is not public, then pinned to that address (SNI and certificate check still use the host name), no redirects, backoff retries, 404/410 marks the binding dead.
+
+Remote invariants: no token, capability, webhook URL or agent token is returned by any route or written to a log; tokens and capabilities are stored hashed; revoking a client and removing a binding are outside the agent's manifest.
 
 ## Known limits
 

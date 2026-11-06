@@ -5,6 +5,28 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.170] - 2026-11-06
+
+Capy threads (and any MCP client the owner approves) can now reach the box's Agent Relay over one public, OAuth-protected MCP endpoint, and get woken when the box's agent answers (ALPH-63 PR B, GST-1591).
+
+### Added
+- **`/relay/mcp`**: a stateless Streamable HTTP MCP endpoint behind AlphaClaw's own OAuth authorization server (the MCP SDK's handlers over `relay/remote.db`). RFC 8414 and RFC 9728 metadata at the root well-known paths, built from `ALPHACLAW_SETUP_URL` only (never the request's Host); dynamic client registration limited to allowlisted redirect URIs (Capy's `https://capy.ai/web/callbacks/mcp` by default) with unconsented registrations capped at 20 a day; PKCE S256; tokens bound to `/relay/mcp` (RFC 8707); one-hour access tokens and 30-day refresh tokens rotated on every use, stored as sha256 hashes, with a reused refresh token revoking its whole family.
+- **Consent page** `/relay/oauth/consent`: admin sessions only (a member is refused, no session goes to the login page and comes back), a CSRF token per request, a same-origin check, `frame-ancestors 'none'`, and the app's name and return address shown before **Connect**.
+- **Remote tools**: `relay_bind` (thread id + Capy webhook URL → the thread's own `capy-<hash>` agent and a capability, returned once and stored hashed), `relay_unbind`, and `relay_send / relay_reply / relay_inbox / relay_history` that act only as a bound agent of the same connection with its capability, plus `relay_agents`. Rebinding a thread needs its capability, also after the binding's until date, so no thread can take over another's agent, read its inbox or redirect its wakes.
+- **Wakes**: a message to a bound agent POSTs `{status, code, from, to, message_id, thread_id, untrusted: true, text}` (text cut at 2,000 characters) to that thread's webhook: https on 443 only, an allowed host (`api.capy.ai`, plus `ALPHACLAW_RELAY_WAKE_HOSTS`), every resolved address public, the connection pinned to the checked address, no redirects, retries with backoff for up to about two hours, and a 404 or 410 marks the binding gone.
+- **Relay page → Connections**: the endpoint URL, approved apps with **Revoke**, bound threads with their last wake and **Remove**. `GET /api/relay/remote` (the agent can read it); revoking and removing are humans only (outside the agent's manifest).
+- Remote audit log (registrations, consents, grants, refreshes, replays, revokes, bindings, dead webhooks), kept for the relay's retention period; `remote.db` is included in **Back up now**.
+- Error codes `remote_disabled`, `public_url_missing`, `not_bound`, `binding_capability_invalid`, `prefix_denied` and `wake_url_refused`, each documented in `relay.md`.
+- Deployment-only keys `ALPHACLAW_RELAY_REMOTE` (`off` closes the endpoint), `ALPHACLAW_RELAY_OAUTH_REDIRECT_URIS` and `ALPHACLAW_RELAY_WAKE_HOSTS`.
+
+### Behavior changes
+- With the relay on and `ALPHACLAW_SETUP_URL` set to an https URL, the box serves `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource[/relay/mcp]`, `/relay/oauth/*` and `/relay/mcp` to the internet. Registration needs no login (it is how MCP clients start); nothing works until an admin approves the app.
+- The login page returns to a pending consent page after sign-in (only that exact path is honored).
+
+### Tests
+- `tests/server/relay-remote.test.js`: metadata, the off and no-public-URL answers, the redirect allowlist, the whole flow through consent and PKCE to MCP tools, admin-only consent, CSRF and cross-origin refusal, deny, wrong resource and code reuse, refresh rotation and replay revocation, client revoke, capability and connection checks, takeover refusal, wake URL refusals, wake delivery pinned to the checked address, a private address never posted to, and a 410 marking a binding dead.
+- Live (`tests/live/relay-bridge.e2e.test.js`): a remote caller does the OAuth flow, binds, DMs the box agent through the real gateway and engine, and is woken with the real answer.
+
 ## [0.10.169] - 2026-11-06
 
 AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other agents (Capy threads, other boxes) can message your OpenClaw agent and get answers, with every message logged and auditable on a new **Relay** page (ALPH-63, GST-1591). This is the box side; the remote OAuth endpoint for Capy comes in the next release.

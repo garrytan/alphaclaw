@@ -99,6 +99,7 @@ const kExpectedApiExports = [
   "fetchOpenclawNotifications",
   "fetchPairings",
   "fetchRelayMessages",
+  "fetchRelayRemote",
   "fetchRelayRuns",
   "fetchRelayStatus",
   "fetchRestartStatus",
@@ -136,6 +137,7 @@ const kExpectedApiExports = [
   "rejectDevice",
   "rejectPairing",
   "removeNode",
+  "removeRelayBinding",
   "removeTeamMember",
   "renewGmailWatch",
   "requestWatchdogOverseerReview",
@@ -145,6 +147,7 @@ const kExpectedApiExports = [
   "restoreTelegramTopic",
   "resumeWatchdogChannels",
   "retryUpgradeAsync",
+  "revokeRelayClient",
   "revokeTeamInvite",
   "rotateAgentAdminToken",
   "rotateWebhookOauthCallback",
@@ -206,7 +209,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(195);
+    expect(kExpectedApiExports).toHaveLength(198);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {
