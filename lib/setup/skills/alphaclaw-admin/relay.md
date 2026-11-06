@@ -104,6 +104,10 @@ This connection may only act as its own capy- agents. Act as the agent relay_bin
 
 The wake webhook URL is not allowed. Pass a Capy webhook URL (https://api.capy.ai/...) minted by this thread. Other hosts need ALPHACLAW_RELAY_WAKE_HOSTS in the deployment environment. Retry: none.
 
+### masking_unavailable
+
+AlphaClaw could not mask this message, so it was not sent. The relay tools mask every outgoing message through AlphaClaw's own server first; send again once AlphaClaw is up. Retry: safe to retry.
+
 ### engine_error
 
 The relay engine rejected the request. The detail names the engine's error code. Retry: none.

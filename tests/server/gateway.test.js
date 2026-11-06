@@ -1014,7 +1014,7 @@ describe("server/gateway restart behavior", () => {
             expect(servers.relay._alphaclawManaged).toBe("relay");
             expect(servers.relay.command).toBe(process.execPath);
             expect(servers.relay.args[0]).toMatch(/lib[\\/]server[\\/]relay[\\/]mcp-stdio\.js$/);
-            expect(servers.relay.args.slice(1)).toEqual(["--relay-dir", expect.stringMatching(/[\\/]relay$/), "--port", "18787"]);
+            expect(servers.relay.args.slice(1)).toEqual(["--relay-dir", expect.stringMatching(/[\\/]relay$/), "--port", "18787", "--app-port", expect.stringMatching(/^[0-9]+$/)]);
             expect(Object.keys(servers.relay).sort()).toEqual(["_alphaclawManaged", "args", "command"]);
             expect(JSON.stringify(servers.relay)).not.toMatch(/rk_live|at_live|token|secret|Bearer|headers|env/i);
             expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(false);
