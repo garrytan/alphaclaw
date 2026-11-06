@@ -111,7 +111,7 @@ const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now()
     engine,
     getAuth: () => ({ workspaceKey: "rk", agentToken: "at", agentName: "wintermute" }),
     store,
-    requestGateway: gateway.requestGateway,
+    requestGateway: (...args) => gateway.requestGateway(...args),
     resolveAgentId: () => "main",
     config: { maxConcurrent, hourlyCap },
     now: () => nowRef.value,
@@ -288,6 +288,7 @@ describe("relay bridge", () => {
     ctx.gateway.failNextSend(Object.assign(new Error("OpenClaw chat.send request timed out"), { written: true }));
     await ctx.tick();
     expect(ctx.store.get(messageId)).toMatchObject({ state: "reconciling", code: "outcome_unknown" });
+    ctx.nowRef.value += 3 * 60 * 1000;
     await ctx.reconcile();
     await flush(20);
     expect(ctx.store.get(messageId)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
@@ -306,6 +307,7 @@ describe("relay bridge", () => {
     expect(ctx.store.get(done).state).toBe("reconciling");
     ctx.gateway.answer(sendDone, "finished anyway");
     ctx.gateway.active.delete(sendCut.sessionKey);
+    ctx.nowRef.value += 3 * 60 * 1000;
     await ctx.reconcile();
     await flush(20);
     expect(ctx.store.get(done).state).toBe("answered");
@@ -383,3 +385,170 @@ describe("relay bridge helpers", () => {
     expect(findAnswerInHistory({ messages: history.messages.slice(0, 2) }, "7")).toBeNull();
   });
 });
+
+
+describe("relay bridge: ship review fixes (ALPH-63)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  it("a reply the engine did not take parks the row as replying, and reconcile posts it later", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-r", "status?");
+    await ctx.tick();
+    const realReply = ctx.engine.reply;
+    ctx.engine.reply = async () => {
+      throw new Error("engine restarting");
+    };
+    await ctx.end(ctx.gateway.sends[0], "all good");
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "replying", replyMessageId: null });
+    expect(ctx.engine.replies).toEqual([]);
+    ctx.engine.reply = realReply;
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "answered", pendingReply: null });
+    expect(ctx.store.get(messageId).replyMessageId).toBeTruthy();
+    expect(ctx.engine.replies).toHaveLength(1);
+    expect(ctx.engine.replies[0]).toMatchObject({ text: "all good", data: { relay_status: "answered" } });
+  });
+
+  it("fails closed when a message's metadata cannot be read: the event is read again, then dropped unrun", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("other-box", "Relay: answered", { relay_status: "answered", relay_hop: 4 });
+    const realGet = ctx.engine.getMessage;
+    let reads = 0;
+    ctx.engine.getMessage = async () => {
+      reads += 1;
+      throw new Error("engine busy");
+    };
+    const cursorBefore = ctx.store.getCursor();
+    await expect(ctx.bridge._internal.pollOnce()).rejects.toThrow("engine busy");
+    expect(ctx.store.getCursor()).toBe(cursorBefore);
+    expect(ctx.store.get(messageId)).toBeNull();
+    ctx.engine.getMessage = realGet;
+    await ctx.tick();
+    expect(ctx.store.get(messageId)).toBeNull();
+    expect(ctx.gateway.sends).toEqual([]);
+    const second = ctx.engine.dm("capy-z", "hello");
+    ctx.engine.getMessage = async () => {
+      throw new Error("gone");
+    };
+    for (let attempt = 1; attempt < 5; attempt += 1) await expect(ctx.bridge._internal.pollOnce()).rejects.toThrow("gone");
+    await ctx.bridge._internal.pollOnce();
+    expect(ctx.store.get(second)).toBeNull();
+    expect(ctx.gateway.sends).toEqual([]);
+    expect(reads).toBe(1);
+  });
+
+  it("a sender whose oldest message is backing off keeps its later messages waiting (per-sender order)", async () => {
+    ctx = setup({ maxConcurrent: 2 });
+    await ctx.tick();
+    const first = ctx.engine.dm("capy-o", "first");
+    ctx.gateway.failNextSend(Object.assign(new Error("gateway busy"), { gatewayResponded: true, gatewayRetryable: true }));
+    await ctx.tick();
+    expect(ctx.store.get(first)).toMatchObject({ state: "queued", attempts: 1 });
+    const second = ctx.engine.dm("capy-o", "second");
+    await ctx.tick();
+    expect(ctx.store.get(second).state).toBe("queued");
+    expect(ctx.gateway.sends).toEqual([]);
+    ctx.nowRef.value += 10 * 60 * 1000;
+    await ctx.tick();
+    expect(ctx.gateway.sends.map((send) => send.idempotencyKey)).toEqual(["relay-" + first]);
+  });
+
+  it("a dispatch whose message body cannot be read gives up with run_failed instead of retrying forever", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-b", "body purged");
+    await ctx.tick();
+    ctx.store.update(messageId, { state: "queued", runId: null, dispatchedAt: null });
+    ctx.gateway.sends.length = 0;
+    ctx.engine.getMessage = async () => {
+      throw new Error("not found");
+    };
+    for (let round = 0; round < 10; round += 1) {
+      ctx.nowRef.value += 2 * 60 * 1000;
+      await ctx.bridge._internal.pump();
+      await flush();
+    }
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "failed", code: "run_failed" });
+    expect(ctx.gateway.sends).toEqual([]);
+  });
+
+  it("finds the answer of a tool-heavy run whose relay message fell out of the default history window", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-t", "check everything");
+    await ctx.tick();
+    const [send] = ctx.gateway.sends;
+    const rows = ctx.gateway.history.get(send.sessionKey);
+    for (let index = 0; index < 80; index += 1) rows.push({ role: "assistant", content: [{ type: "text", text: "step " + index }] });
+    const realRequest = ctx.gateway.requestGateway;
+    const limits = [];
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      if (method === "chat.history") {
+        limits.push(params.limit);
+        const all = ctx.gateway.history.get(params.sessionKey) || [];
+        return { messages: all.slice(-params.limit) };
+      }
+      return realRequest(method, params, ...rest);
+    };
+    ctx.bridge.onGatewayDisconnect();
+    ctx.gateway.answer(send, "the real final answer");
+    ctx.nowRef.value += 3 * 60 * 1000;
+    await ctx.reconcile();
+    expect(limits).toEqual([60, 1000]);
+    expect(ctx.store.get(messageId).state).toBe("answered");
+    expect(ctx.engine.replies[0].text).toBe("the real final answer");
+  });
+
+  it("after a restart it waits for OpenClaw's recovery before settling, and a missing marker is outcome_unknown, never interrupted", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const resumed = ctx.engine.dm("capy-w", "resume me");
+    const lost = ctx.engine.dm("capy-x", "history lost");
+    await ctx.tick();
+    const [sendResumed, sendLost] = ctx.gateway.sends;
+    ctx.bridge.onGatewayDisconnect();
+    ctx.gateway.active.clear();
+    ctx.gateway.history.get(sendResumed.sessionKey).push({ role: "assistant", content: [{ type: "text", text: "Let me check the logs first." }] });
+    ctx.gateway.history.set(sendLost.sessionKey, []);
+    await ctx.reconcile();
+    expect(ctx.store.get(resumed).state).toBe("reconciling");
+    const realRequest = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) =>
+      method === "sessions.list"
+        ? { sessions: [{ key: sendResumed.sessionKey, hasActiveRun: false, abortedLastRun: true }] }
+        : realRequest(method, params, ...rest);
+    ctx.nowRef.value += 3 * 60 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(resumed).state).toBe("reconciling");
+    expect(ctx.store.get(lost)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
+    ctx.gateway.requestGateway = realRequest;
+    ctx.gateway.history.get(sendResumed.sessionKey).push({ role: "assistant", content: [{ type: "text", text: "Logs are clean." }] });
+    await ctx.reconcile();
+    expect(ctx.store.get(resumed).state).toBe("answered");
+    expect(ctx.engine.replies.find((reply) => reply.parentId === resumed).text).toBe("Logs are clean.");
+  });
+
+  it("a reconciling row whose history read keeps failing gives up with outcome_unknown and frees its slot", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-h", "x");
+    await ctx.tick();
+    ctx.bridge.onGatewayDisconnect();
+    ctx.gateway.active.clear();
+    const realRequest = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      if (method === "chat.history") throw new Error("history unavailable");
+      return realRequest(method, params, ...rest);
+    };
+    ctx.nowRef.value += 3 * 60 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    ctx.nowRef.value += 61 * 60 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
+  });
+});
+
