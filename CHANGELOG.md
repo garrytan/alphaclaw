@@ -5,6 +5,30 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.169] - 2026-11-06
+
+AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other agents (Capy threads, other boxes) can message your OpenClaw agent and get answers, with every message logged and auditable on a new **Relay** page (ALPH-63, GST-1591). This is the box side; the remote OAuth endpoint for Capy comes in the next release.
+
+### Added
+- **Relay engine sidecar** (`lib/server/relay/`): upstream's standalone Relaycast engine v12.8.0, downloaded once and checked against a pinned sha256 for each of the six release targets before it runs and again at every boot, supervised as the built-in sidecar `relay-engine` with a minimal environment (no AlphaClaw secret, provider key or gateway token). Anonymous workspace creation is off; AlphaClaw creates the one workspace with the engine's internal secret and registers this box's agent (the default agent's name, else `openclaw`, or `ALPHACLAW_RELAY_AGENT_NAME`). Keys live in `relay/` (0700) as 0600 files outside the OpenClaw state directory, so git sync never commits them.
+- **Bridge**: a relay DM or thread reply addressed to the box agent becomes an agent run in `agent:<id>:relay-<sender>` (never the main session) over the bridge's own gateway socket, and ends in exactly one reply in the same thread: the answer, or a coded failure (`run_failed`, `run_interrupted`, `outcome_unknown`, `rate_limited`, `hop_limit`). Events are matched by run id only and buffered until `chat.send` returns; after a gateway restart, runs are settled from `sessions.list` and `chat.history`, never sent again, and an answer OpenClaw's restart recovery resumes is posted. Caps: 2 runs at once, 30 per sender per hour, one sender in order, a message relayed more than 4 times refused, its own and other bridges' terminal replies ignored.
+- **Agent tools** `relay_send`, `relay_reply`, `relay_inbox`, `relay_history` and `relay_agents` through a stdio MCP server registered as `mcp.servers.relay` (command and arguments only, no secret). Messaging only.
+- **Relay page** (sidebar, after Watchdog): health, a warning while the engine also answers on a non-loopback address, approvals the agent asked the owner for, failed or open runs, agents, and the message log (text for signed-in people only). `GET /api/relay/status|messages|runs`; the agent's admin API gets metadata without message text.
+- **Back up now** writes a verified `<stamp>-relay-backup` (SQLite `VACUUM INTO` plus `integrity_check`) beside each OpenClaw archive, swept with the archives. Messages are kept 90 days.
+- **Doctor** reports a relay that is not running as `det:relay-<code>` with the fix. Every relay error has a code, an RFC 9457 body and a section in the `alphaclaw-admin` skill's `relay.md`.
+- Six deployment-only keys: `ALPHACLAW_RELAY` (`off` is the kill switch), `_RETENTION_DAYS`, `_MAX_CONCURRENT`, `_HOURLY_CAP`, `_PORT`, `_AGENT_NAME`.
+
+### Behavior changes
+- The relay is on by default: a box downloads the engine (about 70 MB resident when running, measured in node:24-slim) at its first start after this update and starts one more supervised process. `ALPHACLAW_RELAY=off` turns it off without deleting anything.
+- The engine has no host flag yet, so it also listens on the box's other addresses at its internal port (default 18787, never the app port). Every route but `/health` needs a key. Keep that port closed to the internet; the Relay page warns while it is reachable.
+- `openclaw.json` gains the AlphaClaw-managed `mcp.servers.relay` entry while the relay is on, and loses it when it is off.
+
+### Tests
+- Hermetic: bridge, store, service, provisioning, engine binary verification, MCP tools, routes, doctor card, backup, config and error table (one test per code), the Relay page model, and `mcp.servers.relay` coexistence in `gateway.test.js`.
+- Live (`tests/live/relay-bridge.e2e.test.js`): the real pinned gateway and the real downloaded engine: a DM answered in the sender's own session, and a gateway SIGKILL mid-run resumed by OpenClaw and answered with exactly one reply and one send.
+- Container (`tests/container/relay-engine-binary.e2e.test.js`, node:24-slim): download, re-verify, tamper recovery, `/health`, public create refused, internal create 201.
+- Browser: `tests/browser/relay-page-smoke.mjs` renders the Relay page in Chromium at desktop and mobile widths.
+
 ## [0.10.167] - 2026-11-05
 
 The test inventory guard now fails a PR that loses coverage without declaring it (GST-95, closing out ALPH-52's plan).

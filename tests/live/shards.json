@@ -14,6 +14,7 @@
         "tests/live/openclaw-live-cli-contract.e2e.test.js",
         "tests/live/openclaw-live-gateway.e2e.test.js",
         "tests/live/openclaw-restart-drain-contract.e2e.test.js",
+        "tests/live/relay-bridge.e2e.test.js",
         "tests/live/restart-exec-turn.e2e.test.js",
         "tests/live/restart-heapsnapshot-signal.e2e.test.js",
         "tests/live/workspace-alias-move.e2e.test.js"
