@@ -214,7 +214,8 @@
           });
           const data = await res.json();
           if (data.ok) {
-            window.location.href = "/";
+            const next = new URLSearchParams(window.location.search).get("next") || "";
+            window.location.href = /^\/relay\/oauth\/consent\?request=[A-Za-z0-9_-]{20,100}$/.test(next) ? next : "/";
           } else if (res.status === 429) {
             const retryAfterFromHeader = Number.parseInt(
               res.headers.get("retry-after") || "0",

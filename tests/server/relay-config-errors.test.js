@@ -40,6 +40,24 @@ describe("relay config", () => {
     expect(rejected).toMatchObject({ agentName: "openclaw", agentNameRejected: true });
   });
 
+  it("remote access is on by default; its allowlists keep Capy's entries and add only well-formed values", () => {
+    expect(readRelayConfig({ env: {} })).toMatchObject({
+      remoteEnabled: true,
+      oauthRedirectUris: ["https://capy.ai/web/callbacks/mcp"],
+      wakeHosts: ["api.capy.ai"],
+    });
+    const config = readRelayConfig({
+      env: {
+        ALPHACLAW_RELAY_REMOTE: "off",
+        ALPHACLAW_RELAY_OAUTH_REDIRECT_URIS: ["https://partner.test/cb", "http://plain.test/cb", ["https://u", "p@x.test/cb"].join(":"), "not a url"].join(", "),
+        ALPHACLAW_RELAY_WAKE_HOSTS: "Hooks.Example.com, bad host, -x.test",
+      },
+    });
+    expect(config.remoteEnabled).toBe(false);
+    expect(config.oauthRedirectUris).toEqual(["https://capy.ai/web/callbacks/mcp", "https://partner.test/cb"]);
+    expect(config.wakeHosts).toEqual(["api.capy.ai", "hooks.example.com"]);
+  });
+
   it("every relay env key is deployment-environment only", () => {
     for (const key of Object.values(kRelayEnvKeys)) expect(kDeploymentOnlyEnvKeys).toContain(key);
   });

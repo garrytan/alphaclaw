@@ -101,7 +101,7 @@ const flush = async (times = 5) => {
   for (let index = 0; index < times; index += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
-const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now() }, maskText } = {}) => {
+const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now() }, onRelayMessage, maskText } = {}) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-bridge-"));
   const store = openBridgeStore({ dbPath: path.join(dir, "bridge.db"), now: () => nowRef.value });
   const engine = createFakeEngine();
@@ -114,6 +114,7 @@ const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now()
     requestGateway: (...args) => gateway.requestGateway(...args),
     resolveAgentId: () => "main",
     config: { maxConcurrent, hourlyCap },
+    ...(onRelayMessage ? { onRelayMessage } : {}),
     ...(maskText ? { maskText } : {}),
     now: () => nowRef.value,
     setTimer: () => null,
@@ -388,6 +389,26 @@ describe("relay bridge helpers", () => {
 });
 
 
+describe("relay bridge: wake hook ordering (ALPH-63)", () => {
+  it("does not move its event cursor past a message until the wake hook has finished with it", async () => {
+    let finishHook;
+    const ctx = setup({ onRelayMessage: () => new Promise((resolve) => { finishHook = resolve; }) });
+    try {
+      await ctx.tick();
+      const before = ctx.store.getCursor();
+      ctx.engine.dm("capy-q", "for a bound thread");
+      const polling = ctx.bridge._internal.pollOnce();
+      await vi.waitFor(() => expect(finishHook).toBeTypeOf("function"));
+      expect(ctx.store.getCursor()).toBe(before);
+      finishHook();
+      await polling;
+      expect(ctx.store.getCursor()).toBeGreaterThan(before);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
+
 describe("relay bridge: ship review fixes (ALPH-63)", () => {
   let ctx;
   afterEach(() => ctx?.cleanup());
@@ -554,6 +575,27 @@ describe("relay bridge: ship review fixes (ALPH-63)", () => {
 });
 
 
+
+describe("relay bridge: a failing wake hook (ALPH-63)", () => {
+  it("keeps its event cursor when the wake hook throws, and moves on once it succeeds", async () => {
+    let fail = true;
+    const ctx = setup({ onRelayMessage: async () => {
+      if (fail) throw new Error("database is locked");
+    } });
+    try {
+      await ctx.tick();
+      const before = ctx.store.getCursor();
+      ctx.engine.dm("capy-q", "for a bound thread");
+      await expect(ctx.bridge._internal.pollOnce()).rejects.toThrow("database is locked");
+      expect(ctx.store.getCursor()).toBe(before);
+      fail = false;
+      await ctx.bridge._internal.pollOnce();
+      expect(ctx.store.getCursor()).toBeGreaterThan(before);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
 
 describe("relay bridge: replies leave the box with credentials masked (ALPH-63)", () => {
   it("masks a secret-named env value and token shapes in the answer before posting it", async () => {

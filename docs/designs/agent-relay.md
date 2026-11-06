@@ -1,6 +1,6 @@
 # Agent Relay (self-hosted Relaycast in AlphaClaw)
 
-Status: box side shipped in v0.10.169 (ALPH-63 PR A). The remote side (OAuth MCP endpoint at `/relay/mcp`, Capy-side tools, webhook wake) is PR B.
+Status: box side in v0.10.170 (ALPH-63 PR A); remote side (OAuth MCP endpoint `/relay/mcp`, remote tools, thread wakes) in v0.10.171 (PR B).
 
 ## Pieces
 
@@ -30,6 +30,15 @@ flowchart LR
 5. Relay runs never use `agent:<id>:main`. Self-authored messages and replies carrying `relay_status` are never answered (no ping-pong); a hop count over 4 is refused. The box agent's own `relay_send` and `relay_reply` stamp the hop: one past the highest hop of the relay runs in flight (read from `bridge.db`), and a reply at least its parent's hop + 1, so two agents answering each other reach the limit.
 6. No key, token or secret is returned by any API or written to a log or to `openclaw.json`. Message text reaches signed-in humans only; the agent actor's admin API gets metadata.
 7. Every `ALPHACLAW_RELAY*` key is deployment environment only.
+
+## Remote side
+
+- **OAuth** (`oauth-provider.js`, `remote-store.js`, `routes/relay-remote.js`): the MCP SDK's register, authorize, token and revoke handlers over an `OAuthServerProvider` in `relay/remote.db`. The handlers and their rate limiters are built once at route registration and reach the provider through a delegate that opens the store on first use. Metadata URLs come from `ALPHACLAW_SETUP_URL` only. Authorization parks the request until an admin approves it on `/relay/oauth/consent`. Approval needs a consent window the admin opened with **Allow a new connection** in the last 10 minutes, for a request started after it opened, and the one-time code that press returned to the Relay page (one approval per window and per code, humans only, compared with timingSafeStringEqual, kept in memory only and never in the status the agent reads), because the shared Capy callback makes an attacker's registration look exactly like the owner's and the authorize endpoint is public: an attacker's authorize link clicked inside an open window creates a fresh request, and only the code tells it apart (the /ship outside voice found that bypass in the request-time check alone). The consent post is same-origin when `Origin` is the public origin, or absent or `null` with `Sec-Fetch-Site: same-origin` (a real browser sends `null` under a strict referrer policy; the /ship review caught the first version refusing every real consent), plus the CSRF token. Registration is anonymous, so at most 20 registrations wait for consent and a new one evicts the oldest waiting one.
+- **Endpoint** `/relay/mcp`: stateless Streamable HTTP, a new MCP server per request, bearer token checked for this resource. One OAuth client is one principal.
+- **Bindings** (`remote-tools.js`): `relay_bind` gives a (client, thread id) pair a new random `capy-<12 hex>` agent, registers it on the engine (its token stays in `remote.db`) and returns a capability once. Every call as that agent needs the capability and the same client. A binding past its until date stops waking but is kept, so rebinding still needs the capability. Names are never derived from the thread id or reused: after `relay_unbind`, the owner's Remove or a client revoke, the next bind gets a new agent and a new box session, so no one inherits an earlier conversation, and another connection binding the same thread id gets its own agent. Binds of one (client, thread) run one at a time, and a bind that finishes after its client was revoked or its binding removed is discarded.
+- **Wakes** (`wake.js`): the bridge's `onRelayMessage` hook enqueues a durable wake for a message to a bound agent; delivery is https:443 to an allowed host, DNS-resolved and refused if any address is not public, then pinned to that address (SNI and certificate check still use the host name), no redirects, backoff retries (10 s to 1 h, a DNS outage included; only a policy refusal is final), the whole request bounded by a 10 s deadline, 404/410 marks the binding dead. Delivery drops a wake whose binding expired or whose client was revoked. At most one wake per binding is pending; a message that arrives meanwhile is read with `relay_inbox`. The bridge awaits the hook before its event cursor moves past the message, and the remote side opens (and drains the queue) as soon as the relay is ready.
+
+Remote invariants: no token, capability, webhook URL or agent token is returned by any route or written to a log; tokens and capabilities are stored hashed; revoking a client and removing a binding are outside the agent's manifest, and the agent's view of `/api/relay/remote` drops thread ids, client ids, agent names and audit details.
 
 ## Known limits
 

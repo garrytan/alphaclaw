@@ -38,6 +38,8 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   let modelRequests = 0;
   let gatewaySends = 0;
   let secrets;
+  let remote;
+  const wakePosts = [];
 
   const relayUrl = (p) => `http://127.0.0.1:${relayPort}${p}`;
   const relayCall = async (method, p, token, body) => {
@@ -120,6 +122,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       rootDir: kRootDir,
       getSupervisor: () => sidecars.find("relay-engine"),
       resolveAgentId: () => "main",
+      onRelayMessage: (routed) => remote?.onRelayMessage(routed),
       createGatewayClient: ({ onEvent, onDisconnect }) => {
         const client = require("../../lib/server/chat/gateway-client").createGatewayClient({
           fs,
@@ -147,6 +150,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
 
   afterAll(async () => {
     try {
+      remote?.stop();
       relay?.stop();
     } catch {}
     try {
@@ -218,6 +222,96 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       expect(counts.answered).toBe(2);
       expect(counts.dispatched || 0).toBe(0);
       expect(counts.reconciling || 0).toBe(0);
+    },
+    kTestTimeoutMs,
+  );
+  it(
+    "a remote caller over the OAuth MCP endpoint binds a thread, DMs the box agent, and is woken with the real answer",
+    async () => {
+      expect(relay.isReady()).toBe(true);
+      const crypto = require("crypto");
+      const express = require("express");
+      const request = require("supertest");
+      const { EventEmitter } = require("events");
+      const { createRelayRemote } = require("../../lib/server/relay/remote");
+      const { registerRelayRemoteRoutes } = require("../../lib/server/routes/relay-remote");
+      const kPublic = "https://box.relay-live.test";
+      const kRedirect = "https://capy.ai/web/callbacks/mcp";
+      remote = createRelayRemote({
+        relayService: relay,
+        getPublicUrl: () => kPublic,
+        wakeOptions: {
+          lookup: async () => [{ address: "34.120.1.1", family: 4 }],
+          requestImpl: (options, onResponse) => {
+            const req = new EventEmitter();
+            req.destroy = () => {};
+            req.end = (body) => {
+              wakePosts.push({ options, body: JSON.parse(body) });
+              const res = new EventEmitter();
+              res.statusCode = 202;
+              res.resume = () => {};
+              setImmediate(() => {
+                onResponse(res);
+                res.emit("end");
+              });
+            };
+            return req;
+          },
+        },
+      });
+      const app = express();
+      app.use(express.json());
+      registerRelayRemoteRoutes({
+        app,
+        requireAuth: (req, res, next) => next(),
+        requireAdmin: (req, res, next) => next(),
+        resolveRequestIdentity: () => ({ kind: "legacy", role: "admin" }),
+        relayRemote: remote,
+      });
+
+      const allowed = (await request(app).post("/api/relay/remote/consent-window")).body;
+      expect(allowed.ok).toBe(true);
+      const client = (await request(app).post("/relay/oauth/register").send({ client_name: "Capy", redirect_uris: [kRedirect], token_endpoint_auth_method: "none" })).body;
+      const verifier = crypto.randomBytes(32).toString("base64url");
+      const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+      const authorize = await request(app)
+        .get("/relay/oauth/authorize")
+        .query({ client_id: client.client_id, redirect_uri: kRedirect, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", resource: kPublic + "/relay/mcp" });
+      const consentUrl = new URL(authorize.headers.location, kPublic);
+      const page = await request(app).get(consentUrl.pathname + consentUrl.search);
+      const csrf = /name="csrf" value="([^"]+)"/.exec(page.text)[1];
+      const approved = await request(app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve", consent_code: allowed.code });
+      const code = new URL(approved.headers.location).searchParams.get("code");
+      const token = (await request(app).post("/relay/oauth/token").type("form").send({ grant_type: "authorization_code", client_id: client.client_id, code, code_verifier: verifier, redirect_uri: kRedirect })).body;
+      expect(token.access_token).toBeTruthy();
+
+      let rpc = 1;
+      const tool = async (name, args) => {
+        const res = await request(app)
+          .post("/relay/mcp")
+          .set("Authorization", "Bearer " + token.access_token)
+          .set("Accept", "application/json, text/event-stream")
+          .send({ jsonrpc: "2.0", id: rpc++, method: "tools/call", params: { name, arguments: args } });
+        expect(res.status).toBe(200);
+        return { isError: res.body.result.isError === true, data: JSON.parse(res.body.result.content[0].text) };
+      };
+      const bound = await tool("relay_bind", { thread_id: "jam_live_relay", webhook_url: "https://api.capy.ai/webhooks/automations/live-test-token" });
+      expect(bound.isError).toBe(false);
+      const roster = await tool("relay_agents", {});
+      expect(roster.data.agents.map((agent) => agent.name)).toEqual(expect.arrayContaining(["wintermute", bound.data.agent]));
+      const sent = await tool("relay_send", { as: bound.data.agent, capability: bound.data.capability, to: "wintermute", text: "ping-77 from a remote thread" });
+      expect(sent.isError).toBe(false);
+
+      await waitFor(async () => wakePosts.some((post) => post.body.status === "answered"), 180_000, "wake for the box agent's answer");
+      const wake = wakePosts.find((post) => post.body.status === "answered");
+      expect(wake.options).toMatchObject({ hostname: "api.capy.ai", port: 443, path: "/webhooks/automations/live-test-token" });
+      expect(wake.body).toMatchObject({ from: "wintermute", to: bound.data.agent, untrusted: true });
+      expect(wake.body.text).toContain("pong-77 from the box");
+      const history = await tool("relay_history", { as: bound.data.agent, capability: bound.data.capability, with: "wintermute" });
+      expect(history.data.messages.map((message) => message.text).join("\n")).toContain("pong-77 from the box");
+      const status = remote.getStatus();
+      expect(status.bindings[0]).toMatchObject({ agent: bound.data.agent, lastWakeStatus: "delivered" });
+      expect(JSON.stringify(status)).not.toContain(bound.data.capability);
     },
     kTestTimeoutMs,
   );
