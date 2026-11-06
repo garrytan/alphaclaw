@@ -435,6 +435,21 @@ describe("server git shim scripts", () => {
       expect(fs.existsSync(notePath)).toBe(true);
       expect(fx.staged()).toContain("workspace/note.md");
 
+      const plainDir = path.join(fx.repoRoot, "sub");
+      const newlineDir = `${plainDir}\n`;
+      fs.mkdirSync(plainDir);
+      fs.mkdirSync(newlineDir);
+      fs.writeFileSync(path.join(plainDir, "f"), "plain\n");
+      fs.writeFileSync(path.join(newlineDir, "f"), "newline\n");
+      execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", "--", "sub/f", "sub\n/f"], { stdio: "pipe" });
+      fs.symlinkSync(newlineDir, path.join(fx.base, "newline-dir-link"));
+      const viaNewlineDir = path.join(fx.base, "newline-dir-link", "f");
+      const rmViaDir = fx.run(["rm", "-q", "-f", viaNewlineDir], fx.repoRoot);
+      expect(rmViaDir.status).not.toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-f", viaNewlineDir]);
+      expect(fs.existsSync(path.join(plainDir, "f"))).toBe(true);
+      expect(fx.staged()).toMatch(/\tsub\/f$/m);
+
       const linkedPath = path.join(fx.base, "workspace-link", "note.md");
       const commit = fx.run(
         ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", linkedPath],
@@ -442,6 +457,13 @@ describe("server git shim scripts", () => {
       );
       expect(commit.status).toBe(0);
       expect(fx.lastCallArgs().slice(-2)).toEqual(["-qam", linkedPath]);
+
+      const amend = fx.run(
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--amend", "--mess", linkedPath],
+        fx.repoRoot,
+      );
+      expect(amend.status).toBe(0);
+      expect(fx.lastCallArgs().slice(-2)).toEqual(["--mess", linkedPath]);
     });
   });
 

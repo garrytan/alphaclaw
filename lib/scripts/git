@@ -107,6 +107,17 @@ scan_global_args() {
   SCANNED_PWD="$effective_pwd"
 }
 
+physical_dir() {
+  local resolved_dir
+  resolved_dir="$(cd -P "$1" 2>/dev/null && pwd -P && printf x)" || return 1
+  resolved_dir="${resolved_dir%x}"
+  resolved_dir="${resolved_dir%$'\n'}"
+  case "$resolved_dir" in
+    ""|*$'\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$resolved_dir"
+}
+
 physical_parent_path() {
   local target_path ancestor remainder resolved_ancestor
   target_path="$1"
@@ -121,7 +132,7 @@ physical_parent_path() {
     ancestor="${ancestor%/*}"
     [ -n "$ancestor" ] || ancestor="/"
   done
-  resolved_ancestor="$(cd -P "$ancestor" 2>/dev/null && pwd -P)" || return 1
+  resolved_ancestor="$(physical_dir "$ancestor")" || return 1
   printf '%s/%s\n' "${resolved_ancestor%/}" "$remainder"
 }
 
@@ -143,21 +154,24 @@ map_into_worktree() {
     return 0
   fi
   [ -d "$target_path" ] || return 1
-  mapped_path="$(cd -P "$target_path" 2>/dev/null && pwd -P)" || return 1
+  mapped_path="$(physical_dir "$target_path")" || return 1
   inside_worktree "$mapped_path" "$worktree" || return 1
   printf '%s\n' "$mapped_path"
 }
 
 takes_option_value() {
-  local option_arg value_long value_short cluster letter
+  local option_arg value_long value_short cluster letter long_option
   option_arg="$1"
   value_long="$2"
   value_short="$3"
   case "$option_arg" in
+    --*=*) return 1 ;;
     --*)
-      case "$value_long" in
-        *" $option_arg "*) return 0 ;;
-      esac
+      for long_option in $value_long; do
+        case "$long_option" in
+          "$option_arg"*) return 0 ;;
+        esac
+      done
       return 1
       ;;
     -?*)
@@ -192,7 +206,10 @@ map_symlinked_path_args() {
       ;;
     diff|log|show)
       value_long=" --grep --author --committer --ignore-matching-lines "
-      value_short="SGOI"
+      value_short="SGOIL"
+      ;;
+    blame|annotate)
+      value_short="L"
       ;;
     clean)
       value_long=" --exclude "
@@ -202,7 +219,7 @@ map_symlinked_path_args() {
       value_long=" --exclude --exclude-from --format "
       value_short="xX"
       ;;
-    add|rm|mv|restore|checkout|reset|blame|annotate|status|check-ignore) ;;
+    add|rm|mv|restore|checkout|reset|status|check-ignore) ;;
     *) return 0 ;;
   esac
 
