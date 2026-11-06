@@ -367,6 +367,19 @@ describe("server git shim scripts", () => {
       expect(fx.lastCallArgs()).toEqual(["-C", linkedCwd, "ls-files", "--error-unmatch", physicalPath]);
     });
 
+    it("leaves a two-file diff through a symlinked dir to git's own --no-index handling", () => {
+      const fx = createSymlinkFixture();
+      fs.writeFileSync(path.join(fx.workspaceDir, "other.md"), "other\n");
+      const left = path.join(fx.base, "workspace-link", "note.md");
+      const right = path.join(fx.base, "workspace-link", "other.md");
+
+      const result = fx.run(["diff", "--stat", left, right], fx.repoRoot);
+
+      expect(fx.lastCallArgs()).toEqual(["diff", "--stat", left, right]);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("1 file changed");
+    });
+
     it.each([
       ["rm", "-q", "--cached"],
       ["mv"],

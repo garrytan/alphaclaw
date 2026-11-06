@@ -211,7 +211,7 @@ map_symlinked_path_args() {
       value_long=" --message --file --reuse-message --reedit-message --author --date --fixup --squash --template --trailer --cleanup "
       value_short="mFCct"
       ;;
-    diff|log|show)
+    log|show)
       value_long=" --grep --author --committer --ignore-matching-lines "
       value_short="SGOIL"
       ;;
