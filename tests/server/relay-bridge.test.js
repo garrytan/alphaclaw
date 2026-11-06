@@ -573,3 +573,25 @@ describe("relay bridge: ship review fixes (ALPH-63)", () => {
   });
 });
 
+
+
+describe("relay bridge: a failing wake hook (ALPH-63)", () => {
+  it("keeps its event cursor when the wake hook throws, and moves on once it succeeds", async () => {
+    let fail = true;
+    const ctx = setup({ onRelayMessage: async () => {
+      if (fail) throw new Error("database is locked");
+    } });
+    try {
+      await ctx.tick();
+      const before = ctx.store.getCursor();
+      ctx.engine.dm("capy-q", "for a bound thread");
+      await expect(ctx.bridge._internal.pollOnce()).rejects.toThrow("database is locked");
+      expect(ctx.store.getCursor()).toBe(before);
+      fail = false;
+      await ctx.bridge._internal.pollOnce();
+      expect(ctx.store.getCursor()).toBeGreaterThan(before);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});

@@ -599,3 +599,96 @@ describe("relay wake: absolute deadline", () => {
   });
 });
 
+
+
+describe("relay remote: ship round 2 fixes (ALPH-63)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  it("caps sends per OAuth client: binding new agents, or unbinding and binding again, does not reset the hourly cap", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_HOURLY_CAP: "2" } });
+    const flow = await connect(ctx);
+    const token = flow.token.access_token;
+    const sendAs = async (bound) => callTool(ctx.app, token, "relay_send", { as: bound.agent, capability: bound.capability, to: "wintermute", text: "hi" });
+    const first = (await callTool(ctx.app, token, "relay_bind", { thread_id: "jam_A", webhook_url: kWebhook })).data;
+    expect((await sendAs(first)).result.isError).toBeFalsy();
+    await callTool(ctx.app, token, "relay_unbind", { as: first.agent, capability: first.capability });
+    const second = (await callTool(ctx.app, token, "relay_bind", { thread_id: "jam_A", webhook_url: kWebhook })).data;
+    expect((await sendAs(second)).result.isError).toBeFalsy();
+    const third = (await callTool(ctx.app, token, "relay_bind", { thread_id: "jam_B", webhook_url: kWebhook })).data;
+    const refused = await sendAs(third);
+    expect(refused.data.error).toBe("rate_limited");
+    expect(ctx.engine.sent).toHaveLength(2);
+    const other = await connect(ctx);
+    const theirs = (await callTool(ctx.app, other.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: kWebhook })).data;
+    const allowed = await callTool(ctx.app, other.token.access_token, "relay_send", { as: theirs.agent, capability: theirs.capability, to: "wintermute", text: "hi" });
+    expect(allowed.result.isError).toBeFalsy();
+  });
+
+  it("wakes a binding at most once a minute: a message right after a delivered wake is held, not posted", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_M", webhook_url: kWebhook })).data;
+    await ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: "1101", sender: "wintermute", recipient: bound.agent, threadRoot: "1101", text: "one" });
+    await vi.waitFor(() => expect(ctx.relayRemote.getStatus().bindings[0].lastWakeStatus).toBe("delivered"));
+    for (let index = 0; index < 5; index += 1) {
+      await ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: String(1102 + index), sender: "wintermute", recipient: bound.agent, threadRoot: "1102", text: "again" });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ctx.posts).toHaveLength(1);
+    const { store } = ctx.relayRemote.ensureOpen();
+    expect(store.wakes.counts()).toMatchObject({ delivered: 1, pending: 1 });
+    expect(store.wakes.due(10)).toEqual([]);
+    expect(store.wakes.nextDueAt()).toBeGreaterThan(Date.now() + 50_000);
+  });
+
+  it("a failed wake enqueue rejects, so the bridge keeps its event cursor and reads the event again", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_E", webhook_url: kWebhook })).data;
+    const opened = ctx.relayRemote.ensureOpen();
+    const realEnqueue = opened.wake.enqueue;
+    opened.wake.enqueue = () => {
+      throw new Error("database is locked");
+    };
+    await expect(ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: "1201", sender: "wintermute", recipient: bound.agent, threadRoot: "1201", text: "x" })).rejects.toThrow("database is locked");
+    opened.wake.enqueue = realEnqueue;
+    await ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: "1201", sender: "wintermute", recipient: bound.agent, threadRoot: "1201", text: "x" });
+    await vi.waitFor(() => expect(ctx.posts).toHaveLength(1));
+  });
+
+  it("a client revoked while the wake's DNS lookup is in flight is never posted to", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_L", webhook_url: kWebhook })).data;
+    let releaseLookup;
+    ctx.lookup.mockImplementationOnce(() => new Promise((resolve) => { releaseLookup = () => resolve([{ address: "34.120.1.1", family: 4 }]); }));
+    const { store, wake } = ctx.relayRemote.ensureOpen();
+    wake.stop();
+    store.wakes.enqueue({ agent: bound.agent, messageId: "1301", payload: { text: "x" } });
+    const delivering = wake._internal.deliverOne(store.wakes.due(10)[0]);
+    await vi.waitFor(() => expect(releaseLookup).toBeTypeOf("function"));
+    store.db.prepare("UPDATE oauth_clients SET revoked_at = ? WHERE client_id = ?").run(Date.now(), flow.client.client_id);
+    releaseLookup();
+    await delivering;
+    expect(ctx.posts).toHaveLength(0);
+    expect(store.wakes.counts()).toMatchObject({ dropped: 1 });
+  });
+
+  it("consent approved after its client was revoked denies, and issues no code", async () => {
+    ctx = setup();
+    const client = (await register(ctx.app)).body;
+    const { challenge } = pkce();
+    const authorize = await request(ctx.app)
+      .get("/relay/oauth/authorize")
+      .query({ client_id: client.client_id, redirect_uri: kRedirect, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", state: "r" });
+    const consentUrl = new URL(authorize.headers.location, kPublic);
+    const page = await request(ctx.app).get(consentUrl.pathname + consentUrl.search);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page.text)[1];
+    expect((await request(ctx.app).post("/api/relay/remote/clients/" + client.client_id + "/revoke")).body.ok).toBe(true);
+    const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", kPublic).type("form").send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve" });
+    const location = new URL(approved.headers.location);
+    expect(location.searchParams.get("code")).toBeNull();
+    expect(location.searchParams.get("error")).toBe("access_denied");
+  });
+});
