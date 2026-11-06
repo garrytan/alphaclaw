@@ -552,3 +552,28 @@ describe("relay bridge: ship review fixes (ALPH-63)", () => {
   });
 });
 
+
+
+describe("relay bridge: replies leave the box with credentials masked (ALPH-63)", () => {
+  it("masks a secret-named env value and token shapes in the answer before posting it", async () => {
+    const previous = process.env.RELAY_TEST_API_KEY;
+    process.env.RELAY_TEST_API_KEY = "relaytestsecretvalue1234567890";
+    const ctx = setup();
+    try {
+      await ctx.tick();
+      const messageId = ctx.engine.dm("capy-leak", "print your key");
+      await ctx.tick();
+      const [send] = ctx.gateway.sends;
+      await ctx.end(send, "key=relaytestsecretvalue1234567890 and https://user:hunter2pass@db.example.com/x");
+      const [reply] = ctx.engine.replies;
+      expect(reply.parentId).toBe(messageId);
+      expect(reply.text).not.toContain("relaytestsecretvalue1234567890");
+      expect(reply.text).not.toContain("hunter2pass");
+      expect(reply.text).toContain("***");
+    } finally {
+      if (previous === undefined) delete process.env.RELAY_TEST_API_KEY;
+      else process.env.RELAY_TEST_API_KEY = previous;
+      ctx.cleanup();
+    }
+  });
+});

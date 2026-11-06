@@ -189,3 +189,17 @@ describe("relay service: ship review fixes (ALPH-63)", () => {
   });
 });
 
+
+
+describe("relay builtin sidecars (ALPH-63 /ship round 2)", () => {
+  it("registers no engine sidecar on a platform with no pinned engine build (native Windows), so startup cannot throw", () => {
+    const { buildRelayBuiltinSidecars } = require("../../lib/server/relay");
+    const winPaths = relayPaths("C:\\Users\\owner\\.alphaclaw");
+    const config = readRelayConfig({ env: {} });
+    expect(buildRelayBuiltinSidecars({ config, paths: winPaths, target: null })).toEqual([]);
+    const linux = buildRelayBuiltinSidecars({ config, paths: relayPaths("/data"), target: "linux-x64" });
+    expect(linux).toHaveLength(1);
+    expect(() => normalizeBuiltinSidecarEntry(linux[0])).not.toThrow();
+    expect(buildRelayBuiltinSidecars({ config: readRelayConfig({ env: { ALPHACLAW_RELAY: "off" } }), paths: relayPaths("/data"), target: "linux-x64" })).toEqual([]);
+  });
+});
