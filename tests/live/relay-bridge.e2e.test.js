@@ -269,6 +269,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
         relayRemote: remote,
       });
 
+      expect((await request(app).post("/api/relay/remote/consent-window")).body.ok).toBe(true);
       const client = (await request(app).post("/relay/oauth/register").send({ client_name: "Capy", redirect_uris: [kRedirect], token_endpoint_auth_method: "none" })).body;
       const verifier = crypto.randomBytes(32).toString("base64url");
       const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
