@@ -1,7 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 
 // Hosts that drive git through their own credential helper (e.g. Conductor
 // exports GIT_ASKPASS/ASKPASS_*) leak those vars into every child env. These
@@ -273,6 +273,155 @@ describe("server git shim scripts", () => {
     expect(log).toContain(`PWD=${fs.realpathSync(outsideDir)}`);
     expect(log).toContain("GIT_ASKPASS=");
     expect(log).not.toContain("ASKPASS_USER=");
+  });
+
+  describe("absolute paths through symlinked directories (GST-1654)", () => {
+    const kSystemGit = String(execFileSync("sh", ["-c", "command -v git"])).trim();
+
+    const createSymlinkFixture = () => {
+      const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-git-symlink-")));
+      const repoRoot = path.join(base, "stronghold", "repo");
+      const workspaceDir = path.join(repoRoot, "workspace");
+      const outsideDir = path.join(base, "outside");
+      fs.mkdirSync(workspaceDir, { recursive: true });
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(path.join(workspaceDir, "note.md"), "note\n");
+      fs.writeFileSync(path.join(outsideDir, "stray.md"), "stray\n");
+      fs.symlinkSync(workspaceDir, path.join(base, "workspace-link"));
+      fs.symlinkSync(repoRoot, path.join(base, "repo-link"));
+      fs.symlinkSync(outsideDir, path.join(base, "outside-link"));
+      fs.symlinkSync("workspace/note.md", path.join(repoRoot, "note-link"));
+      execFileSync(kSystemGit, ["init", "-q", repoRoot], { env: spawnEnv(), stdio: "pipe" });
+
+      const logPath = path.join(base, "git.log");
+      const loggingGitPath = path.join(base, "git.real");
+      fs.writeFileSync(
+        loggingGitPath,
+        [
+          "#!/bin/sh",
+          `printf 'CALL\\n' >> ${shellQuote(logPath)}`,
+          `for arg in "$@"; do printf 'ARG=%s\\n' "$arg" >> ${shellQuote(logPath)}; done`,
+          `exec ${shellQuote(kSystemGit)} "$@"`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const shimPath = path.join(base, "git");
+      fs.writeFileSync(
+        shimPath,
+        fs
+          .readFileSync(kGitShimPath, "utf8")
+          .replace('REAL_GIT_HINT="@@REAL_GIT@@"', `REAL_GIT_HINT="${loggingGitPath}"`)
+          .replace('OPENCLAW_REPO_ROOT="@@OPENCLAW_REPO_ROOT@@"', `OPENCLAW_REPO_ROOT="${repoRoot}"`)
+          .replace('ASKPASS_PATH="@@ASKPASS_PATH@@"', `ASKPASS_PATH="${kGitAskPassPath}"`),
+        { mode: 0o755 },
+      );
+
+      const env = spawnEnv({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
+      delete env.GITHUB_TOKEN;
+      delete env.ALPHACLAW_REAL_GIT;
+      const run = (args, cwd) => spawnSync(shimPath, args, { cwd, env, encoding: "utf8" });
+      const lastCallArgs = () =>
+        fs
+          .readFileSync(logPath, "utf8")
+          .split("CALL\n")
+          .pop()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => line.replace(/^ARG=/, ""));
+      const staged = () =>
+        String(
+          execFileSync(kSystemGit, ["-C", repoRoot, "ls-files", "-s"], { env, stdio: "pipe" }),
+        );
+      return { base, repoRoot, workspaceDir, outsideDir, run, lastCallArgs, staged };
+    };
+
+    it("maps a path through a symlinked dir onto the physical repo it points into", () => {
+      const fx = createSymlinkFixture();
+      const linkedPath = path.join(fx.base, "workspace-link", "note.md");
+
+      const result = fx.run(["add", linkedPath], fx.repoRoot);
+
+      expect(result.stderr).not.toContain("outside repository");
+      expect(result.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["add", path.join(fx.workspaceDir, "note.md")]);
+      expect(fx.staged()).toContain("workspace/note.md");
+    });
+
+    it("accepts paths when the repo itself is reached through a symlink", () => {
+      const fx = createSymlinkFixture();
+      const linkedCwd = path.join(fx.base, "repo-link", "workspace");
+      const physicalPath = path.join(fx.workspaceDir, "note.md");
+
+      const physicalResult = fx.run(["add", physicalPath], linkedCwd);
+      expect(physicalResult.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["add", physicalPath]);
+
+      const linkedResult = fx.run(
+        ["-C", linkedCwd, "rm", "-q", "--cached", path.join(fx.base, "workspace-link", "note.md")],
+        fx.base,
+      );
+      expect(linkedResult.stderr).not.toContain("outside repository");
+      expect(linkedResult.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["-C", linkedCwd, "rm", "-q", "--cached", physicalPath]);
+      expect(fx.staged()).toBe("");
+    });
+
+    it("maps a not-yet-existing file under a symlinked dir via its nearest existing ancestor", () => {
+      const fx = createSymlinkFixture();
+      const newPath = path.join(fx.base, "workspace-link", "new-dir", "deeper", "new.md");
+
+      const result = fx.run(["status", "--short", "--", newPath], fx.repoRoot);
+
+      expect(result.stderr).not.toContain("outside repository");
+      expect(result.stderr).not.toContain("Invalid path");
+      expect(result.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual([
+        "status",
+        "--short",
+        "--",
+        path.join(fx.workspaceDir, "new-dir", "deeper", "new.md"),
+      ]);
+    });
+
+    it("still refuses a path that is truly outside the repo, symlinked or not", () => {
+      const fx = createSymlinkFixture();
+      for (const outsidePath of [
+        path.join(fx.outsideDir, "stray.md"),
+        path.join(fx.base, "outside-link", "stray.md"),
+      ]) {
+        const result = fx.run(["add", outsidePath], fx.repoRoot);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("outside repository");
+        expect(fx.lastCallArgs()).toEqual(["add", outsidePath]);
+      }
+      expect(fx.staged()).toBe("");
+    });
+
+    it("keeps commit messages and symlinks inside the repo as written", () => {
+      const fx = createSymlinkFixture();
+      const linkedPath = path.join(fx.base, "workspace-link", "note.md");
+      const physicalParentPath = `${fx.base}/workspace-link/../note-link`;
+      expect(fx.run(["add", physicalParentPath], fx.repoRoot).status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["add", path.join(fx.repoRoot, "note-link")]);
+      expect(fx.staged()).toMatch(/^120000 \S+ 0\tnote-link$/m);
+
+      const commit = fx.run(
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", linkedPath],
+        fx.repoRoot,
+      );
+      expect(commit.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual([
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        linkedPath,
+      ]);
+    });
   });
 
   it("contains valid shell syntax for git askpass script", () => {

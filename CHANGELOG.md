@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.168] - 2026-11-06
+
+The git shim maps an absolute path that runs through a symlinked directory onto the repository it points into, so git stops refusing it as "outside repository" (GST-1654, from ALPH-64). Wintermute hit this 8 times since 10-20 with `/data/brain` and `/data/.openclaw/workspace`, which are symlinks into `/data/stronghold-wm/wintermute`. Git accepts such a path only when a symlink points at the work tree root itself, not into a directory below it.
+
+### Fixed
+- **`lib/scripts/git` maps symlinked paths to physical ones** for the pathspec commands (`add`, `rm`, `mv`, `restore`, `checkout`, `reset`, `commit`, `diff`, `log`, `show`, `blame`, `annotate`, `status`, `ls-files`, `check-ignore`, `stash`, `clean`). An absolute argument is rewritten only when it is outside the work tree as written and its physical form is inside: the parent directory is resolved physically (through the nearest existing ancestor for a path that does not exist yet) and the last component is kept, so a symlink tracked in the repo is still added as a symlink. A path that is outside the repo stays as written and git still refuses it. Values of options such as `commit -m`, `log -S` and `clean -e` are never rewritten. The work tree comes from `git rev-parse --show-toplevel` with the same global options, and only when an argument actually crosses a symlink. Auth injection and everything else in the shim are unchanged, and it logs nothing.
+
+### Tests
+- `tests/server/git-shim.test.js` runs the shim against real git: a path through a symlinked directory into a physically reached repo, a physical path and a symlinked path when the repo is reached through a symlink (`-C` included), a new file two missing directories deep under a symlinked directory, a path outside the repo (directly and through a symlink) that still fails with "outside repository", and a commit message and an in-repo symlink kept as written. All but the outside-repo case fail on the old shim.
+
 ## [0.10.167] - 2026-11-05
 
 The test inventory guard now fails a PR that loses coverage without declaring it (GST-95, closing out ALPH-52's plan).
