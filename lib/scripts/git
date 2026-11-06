@@ -148,16 +148,61 @@ map_into_worktree() {
   printf '%s\n' "$mapped_path"
 }
 
+takes_option_value() {
+  local option_arg value_long value_short cluster letter
+  option_arg="$1"
+  value_long="$2"
+  value_short="$3"
+  case "$option_arg" in
+    --*)
+      case "$value_long" in
+        *" $option_arg "*) return 0 ;;
+      esac
+      return 1
+      ;;
+    -?*)
+      [ -n "$value_short" ] || return 1
+      cluster="${option_arg#-}"
+      while [ -n "$cluster" ]; do
+        letter="${cluster%"${cluster#?}"}"
+        cluster="${cluster#?}"
+        case "$value_short" in
+          *"$letter"*) [ -z "$cluster" ]; return ;;
+        esac
+      done
+      ;;
+  esac
+  return 1
+}
+
 map_symlinked_path_args() {
-  local subcommand value_options index arg previous_arg after_dashdash worktree mapped_path
+  local subcommand value_long value_short index arg previous_arg after_dashdash worktree mapped_path
   subcommand="${GIT_ARGS[$GLOBAL_ARG_COUNT]:-}"
+  value_long=""
+  value_short=""
   case "$subcommand" in
-    commit) value_options=" -m --message -F --file -C -c --reuse-message --reedit-message --author --date --fixup --squash -t --template --trailer --cleanup " ;;
-    stash) value_options=" -m --message " ;;
-    diff|log|show) value_options=" -S -G --grep --author --committer -O " ;;
-    clean) value_options=" -e --exclude " ;;
-    ls-files) value_options=" -x --exclude -X --exclude-from " ;;
-    add|rm|mv|restore|checkout|reset|blame|annotate|status|check-ignore) value_options="" ;;
+    commit)
+      value_long=" --message --file --reuse-message --reedit-message --author --date --fixup --squash --template --trailer --cleanup "
+      value_short="mFCct"
+      ;;
+    stash)
+      [ "${GIT_ARGS[$((GLOBAL_ARG_COUNT + 1))]:-}" = "save" ] && return 0
+      value_long=" --message "
+      value_short="m"
+      ;;
+    diff|log|show)
+      value_long=" --grep --author --committer --ignore-matching-lines "
+      value_short="SGOI"
+      ;;
+    clean)
+      value_long=" --exclude "
+      value_short="e"
+      ;;
+    ls-files)
+      value_long=" --exclude --exclude-from --format "
+      value_short="xX"
+      ;;
+    add|rm|mv|restore|checkout|reset|blame|annotate|status|check-ignore) ;;
     *) return 0 ;;
   esac
 
@@ -169,12 +214,10 @@ map_symlinked_path_args() {
     arg="${GIT_ARGS[$index]}"
     index=$((index + 1))
     if [ "$after_dashdash" = 0 ]; then
-      case "$value_options" in
-        *" $previous_arg "*)
-          previous_arg=""
-          continue
-          ;;
-      esac
+      if [ -n "$previous_arg" ] && takes_option_value "$previous_arg" "$value_long" "$value_short"; then
+        previous_arg=""
+        continue
+      fi
       if [ "$arg" = "--" ]; then
         after_dashdash=1
         continue
@@ -182,6 +225,7 @@ map_symlinked_path_args() {
       previous_arg="$arg"
     fi
     case "$arg" in
+      *$'\n'*) continue ;;
       /*) ;;
       *) continue ;;
     esac

@@ -422,6 +422,26 @@ describe("server git shim scripts", () => {
         linkedPath,
       ]);
     });
+    it("never rewrites a newline-ending path or a bundled -m message", () => {
+      const fx = createSymlinkFixture();
+      const notePath = path.join(fx.workspaceDir, "note.md");
+      execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", notePath], { stdio: "pipe" });
+
+      const newlinePath = `${path.join(fx.base, "workspace-link", "note.md")}\n`;
+      const rm = fx.run(["rm", "-q", "-f", "--", newlinePath], fx.repoRoot);
+      expect(rm.status).not.toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-f", "--", newlinePath.trimEnd()]);
+      expect(fs.existsSync(notePath)).toBe(true);
+      expect(fx.staged()).toContain("workspace/note.md");
+
+      const linkedPath = path.join(fx.base, "workspace-link", "note.md");
+      const commit = fx.run(
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", linkedPath],
+        fx.repoRoot,
+      );
+      expect(commit.status).toBe(0);
+      expect(fx.lastCallArgs().slice(-2)).toEqual(["-qam", linkedPath]);
+    });
   });
 
   it("contains valid shell syntax for git askpass script", () => {
