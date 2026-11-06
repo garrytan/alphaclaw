@@ -13,6 +13,7 @@ Setup UI: `{{SETUP_UI_URL}}`
 | Usage    | `{{SETUP_UI_URL}}#usage`    | Token and cost reporting — daily summary plus per-session and per-agent breakdowns and time series |
 | Doctor   | `{{SETUP_UI_URL}}#doctor`   | Drift Doctor workspace health scans — finding cards, deterministic environment and model-drift checks, context-injection budget meter, scheduled scans, fixes dispatched to the agent |
 | Watchdog | `{{SETUP_UI_URL}}#watchdog` | Gateway supervision — live status narrative, incidents and optional AI overseer, auto-repair, notification channel and admin targets, memory-leak detection and resource-autotune settings, event log, log tail, terminal, Claude Code rescue session |
+| Relay    | `{{SETUP_UI_URL}}#relay`    | Agent Relay (self-hosted agent-to-agent messaging) — health, the agents on the relay, relay messages waiting on the owner or failed, the logged message history (bodies shown to signed-in people only) |
 | Models   | `{{SETUP_UI_URL}}#models`   | Available Models list with primary-model selection, and Provider Authentication — API keys / auth profiles per provider (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram and others), Codex OAuth, auth-profile ordering |
 | Envars   | `{{SETUP_UI_URL}}#envars`   | View/edit/add environment variables (saved to `{{ENV_FILE}}`), gateway restart prompt to apply changes |
 | Webhooks | `{{SETUP_UI_URL}}#webhooks` | Webhook endpoints — create flow, transform modules, request history and payload inspection, OAuth callback aliases, Gmail watch delivery |

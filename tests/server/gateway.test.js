@@ -985,6 +985,70 @@ describe("server/gateway restart behavior", () => {
       };
     };
 
+    describe("beside the relay's own entry (owner-scoped markers)", () => {
+      const withRelay = (value, fn) => {
+        const previous = process.env.ALPHACLAW_RELAY;
+        if (value === undefined) delete process.env.ALPHACLAW_RELAY;
+        else process.env.ALPHACLAW_RELAY = value;
+        try {
+          return fn();
+        } finally {
+          if (previous === undefined) delete process.env.ALPHACLAW_RELAY;
+          else process.env.ALPHACLAW_RELAY = previous;
+        }
+      };
+      const remoteEnv = {
+        REMOTE_MCP_URL: "https://sure.example.com/mcp",
+        REMOTE_MCP_API_TOKEN: "sk-sure-secret-token",
+        REMOTE_MCP_PROXY_URL: undefined,
+        REMOTE_MCP_NAME: undefined,
+      };
+
+      it("writes both entries, keeps both on a second run, and the relay entry holds no secret", () =>
+        withRelay("on", () =>
+          withEnv(remoteEnv, () => {
+            const io = setupConfigIo({ gateway: {} });
+            expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(true);
+            const servers = io.getConfig().mcp.servers;
+            expect(servers.remote._alphaclawManaged).toBe(true);
+            expect(servers.relay._alphaclawManaged).toBe("relay");
+            expect(servers.relay.command).toBe(process.execPath);
+            expect(servers.relay.args[0]).toMatch(/lib[\\/]server[\\/]relay[\\/]mcp-stdio\.js$/);
+            expect(servers.relay.args.slice(1)).toEqual(["--relay-dir", expect.stringMatching(/[\\/]relay$/), "--port", "18787", "--app-port", expect.stringMatching(/^[0-9]+$/)]);
+            expect(Object.keys(servers.relay).sort()).toEqual(["_alphaclawManaged", "args", "command"]);
+            expect(JSON.stringify(servers.relay)).not.toMatch(/rk_live|at_live|token|secret|Bearer|headers|env/i);
+            expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(false);
+            expect(Object.keys(io.getConfig().mcp.servers).sort()).toEqual(["relay", "remote"]);
+          }),
+        ));
+
+      it("ALPHACLAW_RELAY=off removes only the relay entry; unsetting REMOTE_MCP removes only the remote one", () => {
+        let io;
+        withRelay("on", () => withEnv(remoteEnv, () => {
+          io = setupConfigIo({ gateway: {} });
+          io.gateway.ensureGatewayProxyConfig(undefined);
+        }));
+        withRelay("off", () => withEnv(remoteEnv, () => {
+          expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(true);
+          expect(Object.keys(io.getConfig().mcp.servers)).toEqual(["remote"]);
+        }));
+        withRelay("on", () => withEnv({ REMOTE_MCP_URL: undefined, REMOTE_MCP_API_TOKEN: undefined, REMOTE_MCP_PROXY_URL: undefined }, () => {
+          expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(true);
+          expect(Object.keys(io.getConfig().mcp.servers)).toEqual(["relay"]);
+        }));
+      });
+
+      it("never overwrites an mcp.servers.relay entry it does not own", () =>
+        withRelay("on", () =>
+          withEnv({ REMOTE_MCP_URL: undefined, REMOTE_MCP_API_TOKEN: undefined }, () => {
+            const mine = { command: "my-relay", args: [] };
+            const io = setupConfigIo({ gateway: {}, mcp: { servers: { relay: mine } } });
+            io.gateway.ensureGatewayProxyConfig(undefined);
+            expect(io.getConfig().mcp.servers.relay).toEqual(mine);
+          }),
+        ));
+    });
+
     it("writes remote MCP server with placeholder when env vars are set", () => {
       withEnv(
         {

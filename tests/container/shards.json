@@ -14,7 +14,8 @@
     "boot-progress": {
       "files": [
         "tests/container/boot-progress.e2e.test.js",
-        "tests/container/openclaw-container-snapshot-preflight.e2e.test.js"
+        "tests/container/openclaw-container-snapshot-preflight.e2e.test.js",
+        "tests/container/relay-engine-binary.e2e.test.js"
       ]
     }
   }
