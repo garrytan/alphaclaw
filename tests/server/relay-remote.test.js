@@ -8,7 +8,6 @@ const { registerRelayRemoteRoutes } = require("../../lib/server/routes/relay-rem
 const { createRelayRemote } = require("../../lib/server/relay/remote");
 const { readRelayConfig } = require("../../lib/server/relay/config");
 const { relayPaths } = require("../../lib/server/relay/constants");
-const { remoteAgentName } = require("../../lib/server/relay/remote-tools");
 
 const kPublic = "https://box.relay.test";
 const kRedirect = "https://capy.ai/web/callbacks/mcp";
@@ -230,7 +229,7 @@ describe("relay remote: OAuth and the /relay/mcp endpoint", () => {
 
     const bound = await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_01ABC", webhook_url: kWebhook });
     expect(bound.result.isError).toBeFalsy();
-    expect(bound.data.agent).toBe(remoteAgentName("jam_01ABC"));
+    expect(bound.data.agent).toMatch(/^capy-[0-9a-f]{12}$/);
     expect(bound.data.capability).toMatch(/^arcap_/);
     const sent = await callTool(ctx.app, flow.token.access_token, "relay_send", { as: bound.data.agent, capability: bound.data.capability, to: "wintermute", text: "status?" });
     expect(sent.result.isError).toBeFalsy();
@@ -318,12 +317,12 @@ describe("relay remote: OAuth and the /relay/mcp endpoint", () => {
   it("revoking a client on the Relay page kills its tokens and removes its bindings; humans only", async () => {
     ctx = setup();
     const flow = await connect(ctx);
-    await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_X", webhook_url: kWebhook });
+    const boundX = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_X", webhook_url: kWebhook })).data;
     ctx.setIdentity({ kind: "member", memberId: "m1", role: "member" });
     expect((await request(ctx.app).post("/api/relay/remote/clients/" + flow.client.client_id + "/revoke")).status).toBe(403);
     ctx.setIdentity({ kind: "legacy", role: "admin" });
     const revoked = await request(ctx.app).post("/api/relay/remote/clients/" + flow.client.client_id + "/revoke");
-    expect(revoked.body).toMatchObject({ ok: true, bindingsRemoved: [remoteAgentName("jam_X")] });
+    expect(revoked.body).toMatchObject({ ok: true, bindingsRemoved: [boundX.agent] });
     expect((await mcp(ctx.app, flow.token.access_token, "tools/list")).status).toBe(401);
   });
 });
@@ -347,12 +346,16 @@ describe("relay remote: bindings and capabilities", () => {
     const unbound = await callTool(ctx.app, a.token.access_token, "relay_inbox", { as: "capy-aaaaaaaaaaaa", capability: "x" });
     expect(unbound.data.error).toBe("not_bound");
 
-    const takeover = await callTool(ctx.app, b.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: "https://api.capy.ai/webhooks/automations/attacker" });
+    const takeover = await callTool(ctx.app, a.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: "https://api.capy.ai/webhooks/automations/attacker" });
     expect(takeover.data.error).toBe("binding_capability_invalid");
-    const moved = await callTool(ctx.app, b.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: kWebhook, capability: bound.capability });
-    expect(moved.result.isError).toBeFalsy();
-    expect(moved.data).toMatchObject({ agent: bound.agent, capability: bound.capability });
-    expect(ctx.relayRemote.getStatus().bindings[0].clientId).toBe(b.client.client_id);
+    const otherConnection = await callTool(ctx.app, b.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: "https://api.capy.ai/webhooks/automations/other" });
+    expect(otherConnection.result.isError).toBeFalsy();
+    expect(otherConnection.data.agent).not.toBe(bound.agent);
+    const renewed = await callTool(ctx.app, a.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: kWebhook, capability: bound.capability });
+    expect(renewed.result.isError).toBeFalsy();
+    expect(renewed.data).toMatchObject({ agent: bound.agent, capability: bound.capability });
+    const mine = ctx.relayRemote.getStatus().bindings.find((row) => row.agent === bound.agent);
+    expect(mine).toMatchObject({ clientId: a.client.client_id, webhookHost: "api.capy.ai" });
   });
 
   it("refuses wake URLs that are not https:443 on an allowed host", async () => {
@@ -411,3 +414,188 @@ describe("relay remote: wake delivery", () => {
     expect(ctx.relayRemote.getStatus().audit.map((row) => row.event)).toContain("binding_dead");
   });
 });
+
+
+describe("relay remote: ship review fixes (ALPH-63)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  const startConsent = async () => {
+    const client = (await register(ctx.app)).body;
+    const { challenge } = pkce();
+    const authorize = await request(ctx.app)
+      .get("/relay/oauth/authorize")
+      .query({ client_id: client.client_id, redirect_uri: kRedirect, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", state: "n" });
+    const url = new URL(authorize.headers.location, kPublic);
+    const page = await request(ctx.app).get(url.pathname + url.search);
+    return { page, request: url.searchParams.get("request"), csrf: /name="csrf" value="([^"]+)"/.exec(page.text)[1] };
+  };
+
+  it("accepts a real browser's consent post (Origin: null, Sec-Fetch-Site: same-origin) and still refuses a cross-site one", async () => {
+    ctx = setup();
+    const first = await startConsent();
+    expect(first.page.headers["referrer-policy"]).toBe("same-origin");
+    expect(first.page.text).toContain("Approve only if you pressed Connect");
+    const crossSite = await request(ctx.app).post("/relay/oauth/consent").set("Origin", "null").set("Sec-Fetch-Site", "cross-site").type("form").send({ request: first.request, csrf: first.csrf, decision: "approve" });
+    expect(crossSite.status).toBe(403);
+    const approved = await request(ctx.app).post("/relay/oauth/consent").set("Origin", "null").set("Sec-Fetch-Site", "same-origin").type("form").send({ request: first.request, csrf: first.csrf, decision: "approve" });
+    expect(approved.status).toBe(303);
+    expect(new URL(approved.headers.location).searchParams.get("code")).toBeTruthy();
+  });
+
+  it("a burst of anonymous registrations never locks out a new one: the oldest waiting registration makes room", async () => {
+    ctx = setup();
+    const ids = [];
+    for (let index = 0; index < 22; index += 1) {
+      const res = await register(ctx.app, { client_name: "spam " + index }).set("X-Forwarded-For", "203.0.113." + (index + 1));
+      expect(res.status).toBe(201);
+      ids.push(res.body.client_id);
+    }
+    const owner = await register(ctx.app, { client_name: "Capy" }).set("X-Forwarded-For", "198.51.100.7");
+    expect(owner.status).toBe(201);
+    const store = ctx.relayRemote.ensureOpen().store;
+    expect(store.clients.get(ids[0])).toBeNull();
+    expect(store.clients.get(owner.body.client_id)).not.toBeNull();
+    expect(ctx.relayRemote.getStatus().audit.map((row) => row.event)).toContain("client_evicted");
+  });
+
+  it("never reuses an agent: after an unbind the next bind of the same thread gets a new agent", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const first = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_R", webhook_url: kWebhook })).data;
+    const unbound = await callTool(ctx.app, flow.token.access_token, "relay_unbind", { as: first.agent, capability: first.capability });
+    expect(unbound.data).toMatchObject({ unbound: true });
+    const second = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_R", webhook_url: kWebhook })).data;
+    expect(second.agent).toMatch(/^capy-[0-9a-f]{12}$/);
+    expect(second.agent).not.toBe(first.agent);
+    const asOld = await callTool(ctx.app, flow.token.access_token, "relay_inbox", { as: first.agent, capability: first.capability });
+    expect(asOld.data.error).toBe("not_bound");
+  });
+
+  it("two concurrent first binds of one thread: one wins, the other must present the winner's capability", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const [one, two] = await Promise.all([
+      callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_C", webhook_url: kWebhook }),
+      callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_C", webhook_url: "https://api.capy.ai/webhooks/automations/second" }),
+    ]);
+    const outcomes = [one, two].map((call) => call.data.error || "ok").sort();
+    expect(outcomes).toEqual(["binding_capability_invalid", "ok"]);
+    const winner = [one, two].find((call) => !call.data.error).data;
+    const inbox = await callTool(ctx.app, flow.token.access_token, "relay_inbox", { as: winner.agent, capability: winner.capability });
+    expect(inbox.result.isError).toBeFalsy();
+    expect(ctx.relayRemote.getStatus().bindings).toHaveLength(1);
+  });
+
+  it("a bind still registering when its client is revoked creates no binding", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    let release;
+    const realRegister = ctx.engine.registerAgent;
+    ctx.engine.registerAgent = async (...args) => {
+      await new Promise((resolve) => { release = resolve; });
+      return realRegister(...args);
+    };
+    const pendingBind = callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_V", webhook_url: kWebhook });
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const revoked = await request(ctx.app).post("/api/relay/remote/clients/" + flow.client.client_id + "/revoke");
+    expect(revoked.body.ok).toBe(true);
+    release();
+    const result = await pendingBind;
+    expect(result.data.error).toBe("not_bound");
+    expect(ctx.relayRemote.getStatus().bindings).toEqual([]);
+  });
+
+  it("waits out a DNS outage instead of refusing the wake, and never wakes a binding past its until date", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_D", webhook_url: kWebhook })).data;
+    ctx.lookup.mockRejectedValueOnce(Object.assign(new Error("getaddrinfo EAI_AGAIN api.capy.ai"), { code: "EAI_AGAIN" }));
+    await ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: "701", sender: "wintermute", recipient: bound.agent, threadRoot: "701", text: "x" });
+    await vi.waitFor(() => expect(ctx.relayRemote.getStatus().bindings[0].lastWakeStatus).toBe("retrying"));
+    expect(ctx.posts).toHaveLength(0);
+    const { store, wake } = ctx.relayRemote.ensureOpen();
+    const binding = store.bindings.get(bound.agent);
+    store.bindings.upsert({ ...binding, until: Date.now() - 1000 });
+    const queued = store.wakes.due(10).find((row) => row.messageId === "701") || { id: 1, agent: bound.agent, messageId: "701", payload: {}, attempts: 1 };
+    await wake._internal.deliverOne(queued);
+    expect(ctx.posts).toHaveLength(0);
+    expect(store.wakes.counts()).toMatchObject({ dropped: 1 });
+  });
+
+  it("coalesces wakes: while one is pending for a binding, another message does not queue a second", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_F", webhook_url: kWebhook })).data;
+    let releaseLookup;
+    ctx.lookup.mockImplementationOnce(() => new Promise((resolve) => { releaseLookup = () => resolve([{ address: "34.120.1.1", family: 4 }]); }));
+    await ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: "801", sender: "wintermute", recipient: bound.agent, threadRoot: "801", text: "one" });
+    await vi.waitFor(() => expect(releaseLookup).toBeTypeOf("function"));
+    for (let index = 0; index < 5; index += 1) {
+      await ctx.relayRemote.onRelayMessage({ kind: "dm.received", messageId: String(802 + index), sender: "wintermute", recipient: bound.agent, threadRoot: "802", text: "flood" });
+    }
+    releaseLookup();
+    await vi.waitFor(() => expect(ctx.posts).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ctx.posts).toHaveLength(1);
+  });
+
+  it("uses every backoff step before giving up on a failing webhook", async () => {
+    ctx = setup();
+    const flow = await connect(ctx);
+    const bound = (await callTool(ctx.app, flow.token.access_token, "relay_bind", { thread_id: "jam_B", webhook_url: kWebhook })).data;
+    const { store, wake } = ctx.relayRemote.ensureOpen();
+    ctx.posts.statusFor = () => 503;
+    store.wakes.enqueue({ agent: bound.agent, messageId: "901", payload: { text: "x" } });
+    const row = store.wakes.due(10)[0];
+    await wake._internal.deliverOne({ ...row, attempts: 5 });
+    expect(store.wakes.counts()).toMatchObject({ pending: 1 });
+    await wake._internal.deliverOne({ ...row, attempts: 6 });
+    expect(store.wakes.counts()).toMatchObject({ failed: 1 });
+  });
+
+  it("opens the remote side (and its wake queue) as soon as the relay is ready", () => {
+    ctx = setup();
+    expect(ctx.relayRemote.getStatus).toBeTypeOf("function");
+    ctx.relayRemote.onRelayReady();
+    expect(fs.existsSync(path.join(ctx.rootDir, "relay", "remote.db"))).toBe(true);
+  });
+
+  it("the agent actor's view of remote connections carries no thread ids, client ids, agent names or audit details", () => {
+    const domain = require("../../lib/server/admin-manifest/domains/relay");
+    const op = domain.ops.find((entry) => entry.id === "relay.remote");
+    const redacted = op.redactResponse({
+      ok: true,
+      clients: [{ clientId: "c1", name: "Capy", consentedAt: 1 }],
+      bindings: [{ agent: "capy-aaaaaaaaaaaa", threadId: "jam_secret", clientId: "c1", webhookHost: "api.capy.ai", expired: false }],
+      audit: [{ at: 1, event: "binding_created", clientId: "c1", agent: "capy-aaaaaaaaaaaa", detail: { by: "m1" } }],
+    });
+    expect(JSON.stringify(redacted)).not.toMatch(/jam_secret|c1|capy-aaaa|m1/);
+    expect(redacted.bindings[0]).toMatchObject({ webhookHost: "api.capy.ai" });
+    expect(redacted.audit[0]).toEqual({ at: 1, event: "binding_created" });
+  });
+});
+
+describe("relay wake: absolute deadline", () => {
+  it("a webhook that trickles its response forever is cut off at the deadline", async () => {
+    const { EventEmitter } = require("events");
+    const { postPinned } = require("../../lib/server/relay/wake");
+    let destroyed = false;
+    const requestImpl = (options, onResponse) => {
+      const req = new EventEmitter();
+      req.destroy = () => { destroyed = true; };
+      req.end = () => {
+        const res = new EventEmitter();
+        res.statusCode = 200;
+        res.resume = () => {};
+        setImmediate(() => onResponse(res));
+      };
+      return req;
+    };
+    const result = await postPinned({ url: new URL(kWebhook), body: "{}", pinned: { address: "34.120.1.1", family: 4 }, timeoutMs: 50, requestImpl });
+    expect(result).toMatchObject({ status: 0 });
+    expect(result.error).toMatch(/timed out/);
+    expect(destroyed).toBe(true);
+  });
+});
+

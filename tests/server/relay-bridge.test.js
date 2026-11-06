@@ -101,7 +101,7 @@ const flush = async (times = 5) => {
   for (let index = 0; index < times; index += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
-const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now() } } = {}) => {
+const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now() }, onRelayMessage } = {}) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-bridge-"));
   const store = openBridgeStore({ dbPath: path.join(dir, "bridge.db"), now: () => nowRef.value });
   const engine = createFakeEngine();
@@ -114,6 +114,7 @@ const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now()
     requestGateway: gateway.requestGateway,
     resolveAgentId: () => "main",
     config: { maxConcurrent, hourlyCap },
+    ...(onRelayMessage ? { onRelayMessage } : {}),
     now: () => nowRef.value,
     setTimer: () => null,
     clearTimer: () => {},
@@ -383,3 +384,25 @@ describe("relay bridge helpers", () => {
     expect(findAnswerInHistory({ messages: history.messages.slice(0, 2) }, "7")).toBeNull();
   });
 });
+
+
+describe("relay bridge: wake hook ordering (ALPH-63)", () => {
+  it("does not move its event cursor past a message until the wake hook has finished with it", async () => {
+    let finishHook;
+    const ctx = setup({ onRelayMessage: () => new Promise((resolve) => { finishHook = resolve; }) });
+    try {
+      await ctx.tick();
+      const before = ctx.store.getCursor();
+      ctx.engine.dm("capy-q", "for a bound thread");
+      const polling = ctx.bridge._internal.pollOnce();
+      await vi.waitFor(() => expect(finishHook).toBeTypeOf("function"));
+      expect(ctx.store.getCursor()).toBe(before);
+      finishHook();
+      await polling;
+      expect(ctx.store.getCursor()).toBeGreaterThan(before);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
+
