@@ -101,7 +101,7 @@ const flush = async (times = 5) => {
   for (let index = 0; index < times; index += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
-const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now() } } = {}) => {
+const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now() }, maskText } = {}) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-bridge-"));
   const store = openBridgeStore({ dbPath: path.join(dir, "bridge.db"), now: () => nowRef.value });
   const engine = createFakeEngine();
@@ -114,6 +114,7 @@ const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now()
     requestGateway: (...args) => gateway.requestGateway(...args),
     resolveAgentId: () => "main",
     config: { maxConcurrent, hourlyCap },
+    ...(maskText ? { maskText } : {}),
     now: () => nowRef.value,
     setTimer: () => null,
     clearTimer: () => {},
@@ -575,5 +576,56 @@ describe("relay bridge: replies leave the box with credentials masked (ALPH-63)"
       else process.env.RELAY_TEST_API_KEY = previous;
       ctx.cleanup();
     }
+  });
+});
+
+describe("relay bridge: the relay masker and a failing sessions.list (ALPH-63)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  it("masks with the service's masker before posting and before parking the reply in bridge.db", async () => {
+    ctx = setup({ maskText: (text) => String(text).split("dotenv-only-secret-42").join("***") });
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-p", "what is in .env?");
+    await ctx.tick();
+    const realReply = ctx.engine.reply;
+    ctx.engine.reply = async () => {
+      throw new Error("engine restarting");
+    };
+    await ctx.end(ctx.gateway.sends[0], "PLAIN=dotenv-only-secret-42");
+    const parked = ctx.store.get(messageId);
+    expect(parked.state).toBe("replying");
+    expect(parked.pendingReply).not.toContain("dotenv-only-secret-42");
+    expect(JSON.parse(parked.pendingReply).text).toBe("PLAIN=***");
+    ctx.engine.reply = realReply;
+    await ctx.reconcile();
+    expect(ctx.engine.replies).toHaveLength(1);
+    expect(ctx.engine.replies[0].text).toBe("PLAIN=***");
+  });
+
+  it("a sessions.list that keeps throwing ends reconciling messages with outcome_unknown after bounded retries, and reports the failure", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-s", "x");
+    await ctx.tick();
+    ctx.bridge.onGatewayDisconnect();
+    const realRequest = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      if (method === "sessions.list") throw new Error("sessions.list unavailable");
+      return realRequest(method, params, ...rest);
+    };
+    ctx.nowRef.value += 3 * 60 * 1000;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await ctx.reconcile();
+      expect(ctx.store.get(messageId).state).toBe("reconciling");
+    }
+    expect(ctx.bridge.getStatus()).toMatchObject({ sessionsListFailures: 4 });
+    expect(ctx.bridge.getStatus().failure).toContain("session list failed 4 times");
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "unknown", code: "outcome_unknown" });
+    expect(ctx.engine.replies).toHaveLength(1);
+    expect(ctx.engine.replies[0].data).toMatchObject({ relay_status: "failed", relay_code: "outcome_unknown" });
+    await ctx.reconcile();
+    expect(ctx.bridge.getStatus()).toMatchObject({ sessionsListFailures: 0, failure: null });
   });
 });

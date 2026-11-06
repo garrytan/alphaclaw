@@ -36,4 +36,11 @@ describe("Relay page model", () => {
     expect(exposed.exposureWarning).toContain("10.0.0.5 port 18787");
     expect(buildRelayPageModel({ status: { enabled: false } }).phase).toBe("off");
   });
+
+  it("a ready relay whose bridge is failing shows the failure, not Ready (ALPH-63)", () => {
+    const failure = "The gateway's session list failed 3 times in a row, so running relay messages cannot be checked.";
+    const model = buildRelayPageModel({ status: { enabled: true, phase: "ready", bridge: { failure } } });
+    expect(model).toMatchObject({ phaseLabel: "Not answering", phaseTone: "danger", phaseText: failure, bridgeFailure: failure });
+    expect(buildRelayPageModel({ status: { enabled: true, phase: "ready", bridge: { failure: null } } }).phaseLabel).toBe("Ready");
+  });
 });
