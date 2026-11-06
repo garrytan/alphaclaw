@@ -144,7 +144,7 @@ inside_worktree() {
 }
 
 map_into_worktree() {
-  local target_path worktree mapped_path
+  local target_path worktree mapped_path link_path link_target
   target_path="$1"
   worktree="$2"
   inside_worktree "$target_path" "$worktree" && return 1
@@ -153,8 +153,20 @@ map_into_worktree() {
     printf '%s\n' "$mapped_path"
     return 0
   fi
-  [ -d "$target_path" ] || return 1
-  mapped_path="$(physical_dir "$target_path")" || return 1
+  link_path="$target_path"
+  while [ "${#link_path}" -gt 1 ] && [ "${link_path%/}" != "$link_path" ]; do
+    link_path="${link_path%/}"
+  done
+  [ -L "$link_path" ] && [ -d "$link_path" ] || return 1
+  link_target="$(readlink "$link_path" && printf x)" || return 1
+  link_target="${link_target%x}"
+  link_target="${link_target%$'\n'}"
+  case "$link_target" in
+    ""|*[[:cntrl:]]*) return 1 ;;
+    /*) ;;
+    *) link_target="${mapped_path%/*}/$link_target" ;;
+  esac
+  mapped_path="$(physical_parent_path "$link_target")" || return 1
   inside_worktree "$mapped_path" "$worktree" || return 1
   printf '%s\n' "$mapped_path"
 }

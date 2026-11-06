@@ -423,6 +423,25 @@ describe("server git shim scripts", () => {
       ]);
     });
 
+    it("maps a symlinked dir argument one hop, never through a symlink tracked in the repo", () => {
+      const fx = createSymlinkFixture();
+      const otherDir = path.join(fx.repoRoot, "other");
+      fs.mkdirSync(otherDir);
+      fs.writeFileSync(path.join(otherDir, "keep.txt"), "keep\n");
+      fs.symlinkSync("other", path.join(fx.repoRoot, "M"));
+      execFileSync(kSystemGit, ["-C", fx.repoRoot, "add", "--", "other/keep.txt", "M"], { stdio: "pipe" });
+
+      fx.run(["add", "-n", "--", `${fx.base}/workspace-link/`], fx.repoRoot);
+      expect(fx.lastCallArgs()).toEqual(["add", "-n", "--", fx.workspaceDir]);
+
+      fs.symlinkSync(path.join(fx.repoRoot, "M"), path.join(fx.base, "outside-to-M"));
+      const rm = fx.run(["rm", "-q", "-r", "--cached", "--", path.join(fx.base, "outside-to-M")], fx.repoRoot);
+      expect(rm.status).toBe(0);
+      expect(fx.lastCallArgs()).toEqual(["rm", "-q", "-r", "--cached", "--", path.join(fx.repoRoot, "M")]);
+      expect(fx.staged()).toMatch(/\tother\/keep\.txt$/m);
+      expect(fx.staged()).not.toMatch(/\tM$/m);
+    });
+
     it("passes argv unchanged when any argument holds a control character", () => {
       const fx = createSymlinkFixture();
       const linkedPath = path.join(fx.base, "workspace-link", "note.md");
