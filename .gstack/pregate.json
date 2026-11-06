@@ -59,6 +59,14 @@
       ],
       "pattern": "sk-sure-secret-token",
       "reason": "the REMOTE_MCP test fixture token gateway.test.js asserts never reaches openclaw.json"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/server/relay/oauth-provider.js"
+      ],
+      "pattern": "(?:accessToken|refreshToken)",
+      "reason": "RFC 6749 token response field names (access_token, refresh_token) mapped from local variables; the values are minted at runtime, never literals"
     }
   ]
 }
