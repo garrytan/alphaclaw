@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.170] - 2026-11-06
+## [0.10.171] - 2026-11-06
 
 Capy threads (and any MCP client the owner approves) can now reach the box's Agent Relay over one public, OAuth-protected MCP endpoint, and get woken when the box's agent answers (ALPH-63 PR B, GST-1591).
 
@@ -29,7 +29,7 @@ Capy threads (and any MCP client the owner approves) can now reach the box's Age
 - `tests/server/relay-remote.test.js`: metadata, the off and no-public-URL answers, the redirect allowlist, the whole flow through consent and PKCE to MCP tools, admin-only consent, CSRF and cross-origin refusal, deny, wrong resource and code reuse, refresh rotation and replay revocation, client revoke, capability and connection checks, takeover refusal, wake URL refusals, wake delivery pinned to the checked address, a private address never posted to, and a 410 marking a binding dead.
 - Live (`tests/live/relay-bridge.e2e.test.js`): a remote caller does the OAuth flow, binds, DMs the box agent through the real gateway and engine, and is woken with the real answer.
 
-## [0.10.169] - 2026-11-06
+## [0.10.170] - 2026-11-06
 
 AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other agents (Capy threads, other boxes) can message your OpenClaw agent and get answers, with every message logged and auditable on a new **Relay** page (ALPH-63, GST-1591). This is the box side; the remote OAuth endpoint for Capy comes in the next release.
 
@@ -38,14 +38,14 @@ AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other
 - **Bridge**: a relay DM or thread reply addressed to the box agent becomes an agent run in `agent:<id>:relay-<sender>` (never the main session) over the bridge's own gateway socket, and ends in exactly one reply in the same thread: the answer, or a coded failure (`run_failed`, `run_interrupted`, `outcome_unknown`, `rate_limited`, `hop_limit`). Events are matched by run id only and buffered until `chat.send` returns; after a gateway restart, runs are settled from `sessions.list` and `chat.history`, never sent again, and an answer OpenClaw's restart recovery resumes is posted. Caps: 2 runs at once, 30 per sender per hour, one sender in order, a message relayed more than 4 times refused, its own and other bridges' terminal replies ignored. Every reply is posted with credentials masked (the values of secret-named env keys and well-known token shapes), with a log line when something was masked. On a platform with no pinned engine build (native Windows) no engine sidecar is registered, so startup cannot fail on it; the Relay page reports `platform_unsupported`.
 - **Agent tools** `relay_send`, `relay_reply`, `relay_inbox`, `relay_history` and `relay_agents` through a stdio MCP server registered as `mcp.servers.relay` (command and arguments only, no secret). Messaging only.
 - **Credential masking** (`lib/server/relay/mask.js`): every text that leaves the box over the relay, the bridge's replies and the agent's own `relay_send` and `relay_reply`, is masked first against secret-named env values, every `.env` value, the credentials in `openclaw.json`, the relay's own workspace key, agent tokens and internal secret, and token shapes. A reply parked for retry is stored masked, so it never reaches `bridge.db` or its backups unmasked. OpenClaw starts the agent's relay tools with only a default env, so they mask through AlphaClaw's own server (`POST /relay/internal/mask`: loopback only, no proxy headers, the relay's 0600 internal secret as the bearer) and fail closed: if AlphaClaw does not answer, nothing is sent and the tool returns `masking_unavailable`. `mcp.servers.relay` gains a third plain argument, `--app-port`.
-- **Bridge failure state**: a ready relay whose bridge cannot read the engine's event feed or the gateway's session list shows **Not answering** with the reason on the Relay page. A `sessions.list` that keeps failing no longer holds messages forever. Each one waits out the same 10-minute restart-recovery window (or its give-up time), then gets `outcome_unknown`.
+- **Bridge failure state**: a ready relay whose bridge cannot read the engine's event feed or the gateway's session list shows **Not answering** with the reason on the Relay page. A `sessions.list` that keeps failing no longer holds messages forever. Each one waits out the same 10-minute restart-recovery window, counted from when it began reconciling or from when the failures began, whichever is later (or until its give-up time), then gets `outcome_unknown`. Before its give-up time, one failed check never ends a run that is still going.
 - **Relay page** (sidebar, after Watchdog): health, a warning while the engine also answers on a non-loopback address, approvals the agent asked the owner for, failed or open runs, agents, and the message log (text for signed-in people only). `GET /api/relay/status|messages|runs`; the agent's admin API gets metadata without message text.
 - **Back up now** writes a verified `<stamp>-relay-backup` (SQLite `VACUUM INTO` plus `integrity_check`) beside each OpenClaw archive, swept with the archives. Messages are kept 90 days.
 - **Doctor** reports a relay that is not running as `det:relay-<code>` with the fix. Every relay error has a code, an RFC 9457 body and a section in the `alphaclaw-admin` skill's `relay.md`.
 - Six deployment-only keys: `ALPHACLAW_RELAY` (`off` is the kill switch), `_RETENTION_DAYS`, `_MAX_CONCURRENT`, `_HOURLY_CAP`, `_PORT`, `_AGENT_NAME`.
 
 ### Behavior changes
-- The relay is on by default: a box downloads the engine (about 70 MB resident when running, measured in node:24-slim) at its first start after this update and starts one more supervised process. `ALPHACLAW_RELAY=off` turns it off without deleting anything.
+- The relay is on by default, so a box downloads the engine (about 70 MB resident when running, measured in node:24-slim) at its first start after this update and starts one more supervised process. `ALPHACLAW_RELAY=off` turns it off without deleting anything.
 - The engine has no host flag yet, so it also listens on the box's other addresses at its internal port (default 18787, never the app port). Every route but `/health` needs a key. Keep that port closed to the internet; the Relay page warns while it is reachable.
 - `openclaw.json` gains the AlphaClaw-managed `mcp.servers.relay` entry while the relay is on, and loses it when it is off.
 
@@ -54,6 +54,11 @@ AlphaClaw now runs a self-hosted Agent Relay on the box, on by default, so other
 - Live (`tests/live/relay-bridge.e2e.test.js`): the real pinned gateway and the real downloaded engine: a DM answered in the sender's own session, and a gateway SIGKILL mid-run resumed by OpenClaw and answered with exactly one reply and one send.
 - Container (`tests/container/relay-engine-binary.e2e.test.js`, node:24-slim): download, re-verify, tamper recovery, `/health`, public create refused, internal create 201.
 - Browser: `tests/browser/relay-page-smoke.mjs` renders the Relay page in Chromium at desktop and mobile widths.
+
+## [0.10.169] - 2026-11-06
+
+### Changed
+- `.gstack/pregate.json` gains an `allowlist` for five secret-scan false positives the Agent Relay PRs add (ALPH-63, GST-1591): a relay row's `sessionKey` field mapping in `bridge-store.js`, `bridge.js` and `routes/relay.js`, the live tier's `local-model-fixture` mock-model key, `gateway.test.js`'s `sk-sure-secret-token` REMOTE_MCP fixture, and the RFC 6749 `access_token` / `refresh_token` response fields in `oauth-provider.js`. Each entry is scoped to its paths and a pattern anchored at both ends of the flagged value, so a second value later on the same line is still caught, with its reason; nothing that looks like a real credential is allowlisted.
 
 ## [0.10.168] - 2026-11-06
 

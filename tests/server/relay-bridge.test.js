@@ -681,4 +681,31 @@ describe("relay bridge: the relay masker and a failing sessions.list (ALPH-63)",
     await ctx.reconcile();
     expect(ctx.bridge.getStatus()).toMatchObject({ sessionsListFailures: 0, failure: null });
   });
+
+  it("one sessions.list failure does not end a run that has been reconciling, and running, past the recovery window", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-long", "x");
+    await ctx.tick();
+    ctx.bridge.onGatewayDisconnect();
+    for (let tick = 1; tick <= 22; tick += 1) {
+      ctx.nowRef.value += 30 * 1000;
+      await ctx.reconcile();
+    }
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    const realRequest = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      if (method === "sessions.list") throw new Error("sessions.list unavailable");
+      return realRequest(method, params, ...rest);
+    };
+    ctx.nowRef.value += 30 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    expect(ctx.engine.replies).toHaveLength(0);
+    ctx.gateway.requestGateway = realRequest;
+    ctx.nowRef.value += 30 * 1000;
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    expect(ctx.bridge.getStatus().sessionsListFailures).toBe(0);
+  });
 });
