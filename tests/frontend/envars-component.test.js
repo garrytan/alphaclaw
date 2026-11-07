@@ -317,4 +317,27 @@ describe("frontend/envars component", () => {
     expect(cachedRow.value).toBe("1");
     expect(cached.vars[0]).toBe(cachedRow);
   });
+  it("names a deployment-only key and where to set it when it is typed into Add (ALPH-73)", () => {
+    const payload = { vars: [], reservedKeys: ["NPM_TOKEN", "PORT"], deploymentOnlyKeys: ["NPM_TOKEN"] };
+    useCachedFetch.mockReturnValue({ data: payload, error: null, loading: false, refresh: vi.fn(async () => payload) });
+    renderEnvars();
+    for (const effect of [...harness.effects]) {
+      try {
+        effect?.();
+      } catch {}
+    }
+    const add = (key) => {
+      let tree = renderEnvars();
+      const keyInput = collectNodes(tree).find((vnode) => vnode.type === "input" && vnode.props.placeholder === "KEY");
+      (keyInput.props.oninput || keyInput.props.onInput)({ target: { value: key } });
+      tree = renderEnvars();
+      collectNodes(tree)
+        .find((vnode) => vnode.type === "button" && JSON.stringify(vnode.props.children || "").includes("+ Add"))
+        .props.onclick();
+    };
+    add("NPM_TOKEN");
+    expect(showToast).toHaveBeenLastCalledWith("NPM_TOKEN is deployment-only: set it in the deployment environment, not here", "error");
+    add("PORT");
+    expect(showToast).toHaveBeenLastCalledWith("Reserved var can't be added: PORT", "error");
+  });
 });

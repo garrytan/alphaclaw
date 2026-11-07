@@ -253,3 +253,53 @@ describe("relay masker: disguised copies and the remote side's values (ALPH-71 H
   });
 });
 
+
+describe("relay masker: deployment secrets (ALPH-73)", () => {
+  const sharedPath = require.resolve("../../lib/server/deployment-only-env");
+  const maskPath = require.resolve("../../lib/server/relay/mask");
+  const kDeploymentSecretEnvKeys = [
+    "SETUP_PASSWORD",
+    "GOG_KEYRING_PASSWORD",
+    "ALPHACLAW_MANAGED_UPDATE_TOKEN",
+    "RAILWAY_TOKEN",
+    "RAILWAY_API_TOKEN",
+    "VERCEL_TOKEN",
+    "NPM_TOKEN",
+  ];
+  const word = (side, key) => `${side}word-${key.toLowerCase().replace(/_/g, "-")}`;
+  let rootDir;
+  beforeEach(() => {
+    rootDir = makeRoot();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    delete require.cache[sharedPath];
+    delete require.cache[maskPath];
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  it("masks each deployment secret in process.env even when the caller passes another env", () => {
+    for (const key of kDeploymentSecretEnvKeys) vi.stubEnv(key, word("process", key));
+    const mask = createRelayMasker({ rootDir, env: {} });
+    for (const key of kDeploymentSecretEnvKeys) {
+      expect(mask(`value ${word("process", key)} here`)).toBe("value *** here");
+    }
+  });
+
+  it("masks each deployment secret recorded in the deployment environment at boot, after process.env moved on", () => {
+    for (const key of kDeploymentSecretEnvKeys) vi.stubEnv(key, "");
+    delete require.cache[sharedPath];
+    delete require.cache[maskPath];
+    require(sharedPath).recordDeploymentEnvBaseline(Object.fromEntries(kDeploymentSecretEnvKeys.map((key) => [key, word("baseline", key)])));
+    const mask = require(maskPath).createRelayMasker({ rootDir, env: {} });
+    for (const key of kDeploymentSecretEnvKeys) {
+      expect(mask(`value ${word("baseline", key)} here`)).toBe("value *** here");
+    }
+    expect(mask("nothing secret here")).toBe("nothing secret here");
+  });
+
+  it("still leaves the keyring password's published default alone when it comes from process.env", () => {
+    vi.stubEnv("GOG_KEYRING_PASSWORD", "alphaclaw");
+    expect(createRelayMasker({ rootDir, env: {} })("the alphaclaw CLI")).toBe("the alphaclaw CLI");
+  });
+});

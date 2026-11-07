@@ -297,12 +297,18 @@ describe("server/routes/system", () => {
     "URL",
     "RAILWAY_PUBLIC_DOMAIN",
     "RAILWAY_STATIC_URL",
+    "ALPHACLAW_MANAGED_UPDATE_TOKEN",
+    "RAILWAY_TOKEN",
+    "RAILWAY_API_TOKEN",
+    "VERCEL_TOKEN",
+    "NPM_TOKEN",
   ])("hides %s, refuses its normalized edit visibly, and preserves unrelated saves", async (key) => {
     const deps = createSystemDeps();
     deps.readEnvFile.mockReturnValue([{ key, value: "old-file-value" }]);
     const app = createApp(deps);
     const listed = await request(app).get("/api/env");
     expect(listed.body.reservedKeys).toContain(key);
+    expect(listed.body.deploymentOnlyKeys).toContain(key);
     expect(listed.body.vars.some((entry) => entry.key === key)).toBe(false);
     for (const inputKey of [key, ` ${key} `]) {
       const skipped = await request(app).put("/api/env").send({ vars: [{ key: inputKey, value: "untrusted-value" }] });
