@@ -16,6 +16,17 @@ process.on("uncaughtException", (error) => {
   process.exit(1);
 });
 
+// Deployment-only secrets leave the environment block before anything else
+// runs or spawns: a handoff from a previous image is consumed, and a process
+// started with any of them re-execs itself (same pid) without them, so no
+// /proc/<pid>/environ of AlphaClaw or its children holds them (CSO ALPH-71
+// M-1; lib/server/deployment-secrets.js).
+{
+  const deploymentSecrets = require("../lib/server/deployment-secrets");
+  deploymentSecrets.consumeDeploymentSecretsHandoff(process.env);
+  deploymentSecrets.reexecWithoutDeploymentSecrets();
+}
+
 // The deployment environment as received, before anything below changes
 // process.env: a runtime .env reload falls back to it (lib/server/env.js) and
 // a self-update respawn starts from it (lib/server/alphaclaw-version.js).
@@ -559,6 +570,10 @@ if (fs.existsSync(envFilePath)) {
   // The rule the runtime reload shares (resolveEnvFileOverlay): entries in
   // file order, and an empty value contributes nothing.
   for (const [key, value] of resolveEnvFileOverlay(entries)) process.env[key] = value;
+  // A deployment secret set in .env (SETUP_PASSWORD on a host install) wins
+  // as before, but lives in the deployment-secrets module, not process.env,
+  // so the children spawned below never inherit it.
+  require("../lib/server/deployment-secrets").captureDeploymentSecrets(process.env);
   console.log("[alphaclaw] Loaded .env");
 }
 
@@ -936,7 +951,7 @@ if (command === "admin") {
 // (The reserved-port 18789 guard moved to 1a above — it must run before the
 // placeholder binds kPort.)
 
-const kSetupPassword = String(process.env.SETUP_PASSWORD || "").trim();
+const kSetupPassword = require("../lib/server/deployment-secrets").getDeploymentSecret("SETUP_PASSWORD").trim();
 if (!kSetupPassword) {
   console.error(
     [
@@ -961,8 +976,6 @@ process.env.OPENCLAW_HOME = rootDir;
 process.env.HOME = rootDir;
 process.env.OPENCLAW_CONFIG_PATH = resolveOpenclawChildConfigPath(openclawDir);
 process.env.OPENCLAW_STATE_DIR = openclawDir;
-process.env.GOG_KEYRING_PASSWORD =
-  process.env.GOG_KEYRING_PASSWORD || "alphaclaw";
 
 // Non-root: the binaries AlphaClaw provides live in <rootDir>/bin, first on
 // PATH for this process and everything it spawns (gateway, Doctor, CLIs).

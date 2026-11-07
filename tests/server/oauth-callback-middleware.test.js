@@ -269,3 +269,65 @@ describe("server/oauth-callback-middleware", () => {
     });
   });
 });
+
+describe("server/oauth-callback-middleware mapping selection and rate budget", () => {
+  const withApp = async (run) => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createApp({
+      gatewayUrl,
+      getOauthCallbackById: (id) =>
+        id === "abc123" ? { callbackId: "abc123", hookName: "provider-oauth" } : null,
+    });
+    app.set("trust proxy", true);
+    try {
+      await run({ app, calls });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  };
+
+  it("never forwards source, which OpenClaw's hook mappings match on", async () => {
+    await withApp(async ({ app, calls }) => {
+      const fromQuery = await request(app).get("/oauth/abc123?code=AUTH&source=gmail");
+      expect(fromQuery.status).toBe(200);
+      const fromBody = await request(app).post("/oauth/abc123").send({ code: "AUTH2", source: "gmail" });
+      expect(fromBody.status).toBe(200);
+      const fromForm = await request(app).post("/oauth/abc123").type("form").send("code=AUTH3&source=gmail");
+      expect(fromForm.status).toBe(200);
+      expect(calls.map((call) => JSON.parse(call.bodyText))).toEqual([
+        { code: "AUTH" },
+        { code: "AUTH2" },
+        { code: "AUTH3" },
+      ]);
+    });
+  });
+
+  it("one caller spending its budget does not lock out another caller on the same id", async () => {
+    await withApp(async ({ app, calls }) => {
+      for (let index = 0; index < 10; index += 1) {
+        const res = await request(app).get(`/oauth/abc123?code=A${index}`).set("X-Forwarded-For", "203.0.113.7");
+        expect(res.status).toBe(200);
+      }
+      const limited = await request(app).get("/oauth/abc123?code=A10").set("X-Forwarded-For", "203.0.113.7");
+      expect(limited.status).toBe(429);
+      const provider = await request(app).get("/oauth/abc123?code=REAL").set("X-Forwarded-For", "198.51.100.20");
+      expect(provider.status).toBe(200);
+      expect(calls).toHaveLength(11);
+    });
+  });
+
+  it("still caps an id across many callers", async () => {
+    await withApp(async ({ app, calls }) => {
+      const statuses = [];
+      for (let index = 0; index < 70; index += 1) {
+        const res = await request(app)
+          .get(`/oauth/abc123?code=S${index}`)
+          .set("X-Forwarded-For", `203.0.113.${index}`);
+        statuses.push(res.status);
+      }
+      expect(statuses.filter((status) => status === 200)).toHaveLength(60);
+      expect(statuses.slice(60).every((status) => status === 429)).toBe(true);
+      expect(calls).toHaveLength(60);
+    });
+  });
+});

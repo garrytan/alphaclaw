@@ -12,7 +12,7 @@
 #   RUN npm install --omit=dev alphaclaw
 #
 # in place of the COPY + tarball install below. Everything else is identical
-# to what production runs: tini as PID 1, ALPHACLAW_ROOT_DIR on the /data
+# to what production runs: tini as PID 1 (exec'd by bin/container-entrypoint.js), ALPHACLAW_ROOT_DIR on the /data
 # volume, port 3000, and `alphaclaw start` (restartProcess() exits the
 # process inside a container and relies on the orchestrator restart policy).
 FROM node:24-slim
@@ -40,5 +40,8 @@ RUN node -e "require('/app/node_modules/alphaclaw/lib/node-runtime').assertSuppo
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
 EXPOSE 3000
-ENTRYPOINT ["/usr/bin/tini","--"]
+# The entrypoint moves the deployment secrets (SETUP_PASSWORD, platform
+# tokens) into a 0600 handoff file before tini starts, so neither PID 1's nor
+# AlphaClaw's /proc environ holds them (bin/container-entrypoint.js).
+ENTRYPOINT ["node","/app/node_modules/alphaclaw/bin/container-entrypoint.js","/usr/bin/tini","--"]
 CMD ["alphaclaw","start"]

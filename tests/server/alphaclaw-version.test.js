@@ -1058,8 +1058,13 @@ describe("server/alphaclaw-version", () => {
       const { service } = createService({ env: {}, fsImpl: { ...fs, existsSync: vi.fn(() => false) }, drain: vi.fn(async () => {}) });
       await expect(service.restartProcess()).rejects.toThrow("exit 0");
       const spawnOptions = childProcess.spawn.mock.calls[0][2];
-      expect(spawnOptions.env).toBe(getDeploymentEnvBaseline());
-      expect(spawnOptions.env).toEqual({ PATH: "/usr/bin", SETUP_PASSWORD: "from-platform" });
+      expect(getDeploymentEnvBaseline()).toEqual({ PATH: "/usr/bin", SETUP_PASSWORD: "from-platform" });
+      // The deployment secrets ride a 0600 handoff file, never the child's environ (ALPH-71 M-1).
+      const handoffPath = spawnOptions.env.ALPHACLAW_DEPLOYMENT_SECRETS_FILE;
+      expect(spawnOptions.env).toEqual({ PATH: "/usr/bin", ALPHACLAW_DEPLOYMENT_SECRETS_FILE: handoffPath });
+      expect(fs.statSync(handoffPath).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(fs.readFileSync(handoffPath, "utf8"))).toEqual({ SETUP_PASSWORD: "from-platform" });
+      fs.rmSync(path.dirname(handoffPath), { recursive: true, force: true });
     } finally {
       childProcess.spawn = originalSpawn;
       if (savedFileValue === undefined) delete process.env.ALPH50_FROM_DOTENV;

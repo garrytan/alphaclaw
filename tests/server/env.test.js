@@ -498,3 +498,51 @@ describe("server/env", { retry: 0 }, () => {
     ).toHaveLength(1);
   });
 });
+
+describe("server/env reload of system and launcher keys (ALPH-71 L-8)", { retry: 0 }, () => {
+  const kKeys = ["OPENAI_API_KEY", "CLAUDE_CODE_LOCAL_CWD", "WATCHDOG_AUTO_REPAIR", "SETUP_PASSWORD"];
+  let tmpDir;
+  let saved;
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-env-guarded-"));
+    saved = Object.fromEntries(kKeys.map((key) => [key, process.env[key]]));
+    for (const key of kKeys) delete process.env[key];
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("holds a launcher or system key written outside AlphaClaw until the next boot, and applies one AlphaClaw wrote", () => {
+    const envFile = path.join(tmpDir, ".env");
+    fs.writeFileSync(envFile, "OPENAI_API_KEY=sk-fake-a\n");
+    const env = loadEnvModule(tmpDir);
+    fs.writeFileSync(
+      envFile,
+      "OPENAI_API_KEY=sk-fake-b\nCLAUDE_CODE_LOCAL_CWD=/tmp/agent-picked\nWATCHDOG_AUTO_REPAIR=false\nSETUP_PASSWORD=fake-agent-set\n",
+    );
+    env.reloadEnv();
+    expect(process.env.OPENAI_API_KEY).toBe("sk-fake-b");
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBeUndefined();
+    expect(process.env.WATCHDOG_AUTO_REPAIR).toBeUndefined();
+    expect(process.env.SETUP_PASSWORD).toBeUndefined();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("held until the next boot (changed outside AlphaClaw) CLAUDE_CODE_LOCAL_CWD, WATCHDOG_AUTO_REPAIR"));
+
+    // Re-saving the file carries the outside values over unchanged: still held.
+    env.writeEnvFile(env.readEnvFile());
+    env.reloadEnv();
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBeUndefined();
+
+    // A value AlphaClaw's own writer sets is applied.
+    env.updateEnvFile((vars) => vars.map((entry) => (entry.key === "CLAUDE_CODE_LOCAL_CWD" ? { ...entry, value: "/srv/operator-picked" } : entry)));
+    env.reloadEnv();
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBe("/srv/operator-picked");
+    expect(process.env.SETUP_PASSWORD).toBeUndefined();
+  });
+});
+

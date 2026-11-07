@@ -275,3 +275,63 @@ describe("server/routes/webhooks", () => {
     expect(response.body?.webhooks?.[0]?.health).toBe("green");
   });
 });
+
+describe("server/routes/webhooks reserved names", () => {
+  const createReservedNameApp = (mappings = []) => {
+    const openclawDir = "/tmp/openclaw";
+    const configPath = path.join(openclawDir, "openclaw.json");
+    const fs = createMemoryFs({
+      [configPath]: JSON.stringify({
+        agents: { list: [{ id: "main", default: true }] },
+        hooks: { mappings },
+      }),
+    });
+    const createOauthCallbackCalls = [];
+    const app = createApp({
+      fs,
+      constants: { OPENCLAW_DIR: openclawDir },
+      webhooksDb: {
+        getHookSummaries: () => [],
+        getRequests: () => [],
+        getRequestById: () => null,
+        deleteRequestsByHook: () => 0,
+        createOauthCallback: ({ hookName }) => {
+          createOauthCallbackCalls.push(hookName);
+          return { callbackId: "0123456789abcdef0123456789abcdef", hookName, createdAt: null };
+        },
+        getOauthCallbackByHook: () => null,
+        rotateOauthCallback: () => null,
+        deleteOauthCallback: () => 0,
+      },
+    });
+    return { app, fs, configPath, createOauthCallbackCalls };
+  };
+
+  it.each(["wake", "agent", "Wake"])(
+    "refuses to create a webhook named %s, which OpenClaw serves itself",
+    async (name) => {
+      const { app, fs, configPath, createOauthCallbackCalls } = createReservedNameApp();
+      const response = await request(app).post("/api/webhooks").send({ name, oauthCallback: true });
+      expect(response.status).toBe(400);
+      expect(response.body.ok).toBe(false);
+      expect(createOauthCallbackCalls).toEqual([]);
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).hooks.mappings).toEqual([]);
+    },
+  );
+
+  it("still creates a webhook whose name only starts with a reserved word", async () => {
+    const { app } = createReservedNameApp();
+    const response = await request(app).post("/api/webhooks").send({ name: "wake-up" });
+    expect(response.status).toBe(201);
+    expect(response.body?.webhook?.path).toBe("/hooks/wake-up");
+  });
+
+  it("refuses an OAuth callback alias for a leftover mapping named agent", async () => {
+    const { app, createOauthCallbackCalls } = createReservedNameApp([
+      { id: "agent", match: { path: "agent" }, action: "agent" },
+    ]);
+    const response = await request(app).post("/api/webhooks/agent/oauth-callback").send({});
+    expect(response.status).toBe(400);
+    expect(createOauthCallbackCalls).toEqual([]);
+  });
+});

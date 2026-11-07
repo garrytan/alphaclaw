@@ -25,11 +25,30 @@ AlphaClaw internals are withheld from the OpenClaw child. This closes ENV
 inheritance — the agent-admin tiers are now a real boundary against the agent
 obtaining those secrets *from its environment*.
 
+Withholding a key from the child's environment is not enough on its own: the
+agent's exec runs as AlphaClaw's uid, and `/proc/<pid>/environ` needs only
+same-uid read access, so any process started with `SETUP_PASSWORD` in its
+environment (AlphaClaw itself, the boot placeholder, a container init) gave it
+away (CSO ALPH-71 M-1). Since v0.10.192 the deployment secrets
+(`lib/server/deployment-secrets.js`: `SETUP_PASSWORD`, `GOG_KEYRING_PASSWORD`,
+`ALPHACLAW_MANAGED_UPDATE_TOKEN`, `RAILWAY_TOKEN`, `RAILWAY_API_TOKEN`,
+`VERCEL_TOKEN`, `NPM_TOKEN`) leave every environment block: `bin/alphaclaw.js`
+re-execs itself (same pid) without them and keeps them in memory, a 0600
+handoff file deleted on read carries them across the re-exec and a self-update
+respawn, and the image's `bin/container-entrypoint.js` does the same before
+tini, so neither PID 1 nor any AlphaClaw child holds them.
+
 **Residual, not softened:** the child still runs as the same UID with
 `HOME=kRootDir` and exec security `full` / ask `off`, so if exec is
-unsandboxed it can read `kRootDir/.env` directly from disk. That is a
-filesystem-level concern (sandboxing / file permissions), separate from env
-inheritance, and this feature does not claim to close it. The auth layer still
+unsandboxed it can read `kRootDir/.env` directly from disk (a `SETUP_PASSWORD`
+kept there instead of in the deployment environment included). The same uid
+can also read AlphaClaw's memory where ptrace is permitted, the handoff file
+in the milliseconds before AlphaClaw consumes it, the environment of a
+container init that did not go through AlphaClaw's entrypoint (a template
+image with `ENTRYPOINT ["tini", "--"]`), and children that need a value by
+design (gog runs with `GOG_KEYRING_PASSWORD`). Those are filesystem- and
+uid-level concerns (sandboxing, a separate uid for the gateway), and this
+feature does not claim to close them. The auth layer still
 exists to (a) keep secrets out of chat transcripts, (b) attribute actions
 (`actor=agent`) for audit, (c) enable revocation, and (d) add tiered guardrails
 + structured errors. Break-glass `ALPHACLAW_GATEWAY_ENV_UNRESTRICTED=1`

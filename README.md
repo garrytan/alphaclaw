@@ -112,9 +112,11 @@ RUN node -e "require('@chrysb/alphaclaw/lib/node-runtime').assertSupportedNodeVe
 ENV PATH="/app/node_modules/.bin:$PATH"
 ENV ALPHACLAW_ROOT_DIR=/data
 EXPOSE 3000
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["node", "/app/node_modules/@chrysb/alphaclaw/bin/container-entrypoint.js", "/usr/bin/tini", "--"]
 CMD ["alphaclaw", "start"]
 ```
+
+The entrypoint moves the deployment secrets (`SETUP_PASSWORD`, `GOG_KEYRING_PASSWORD`, `ALPHACLAW_MANAGED_UPDATE_TOKEN` and the platform deploy tokens) into a 0600 handoff file before it execs tini, so PID 1's environment never holds them; AlphaClaw reads and deletes the file at boot. An image that keeps `ENTRYPOINT ["/usr/bin/tini", "--"]` still works, but its PID 1 keeps the secrets in `/proc/1/environ`, readable by anything running as the same user.
 
 The reference [`Dockerfile`](Dockerfile) is this recipe with two additions:
 it installs AlphaClaw from an `npm pack` tarball of the checkout (so
