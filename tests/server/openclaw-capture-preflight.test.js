@@ -117,9 +117,19 @@ describe("openclaw-capture-preflight: evaluateCapturePreflight on a real tree", 
     fs.mkdirSync(path.join(stateDir, "state"), { recursive: true });
     const db = path.join(stateDir, "state", "openclaw.sqlite");
     fs.writeFileSync(db, Buffer.alloc(4096));
-    const verdict = evaluateCapturePreflight({ stateDir, databaseFiles: [db] });
+    const measured = [];
+    const statfs = (target) => {
+      measured.push(target);
+      return { bavail: 2_500_000, bsize: 4096 };
+    };
+    const verdict = evaluateCapturePreflight({ stateDir, databaseFiles: [db], statfs });
     expect(fs.existsSync(verdict.captureRoot)).toBe(false);
-    expect(verdict.freeBytes).toBe(Number(fs.statfsSync(root).bavail) * Number(fs.statfsSync(root).bsize));
+    expect(verdict.freeBytes).toBe(2_500_000 * 4096);
+    expect(measured.length).toBeGreaterThan(0);
+    for (const target of measured) {
+      expect(fs.existsSync(target)).toBe(true);
+    }
+    expect(verdict.captureRoot.startsWith(`${measured[0]}${path.sep}`)).toBe(true);
     fs.rmSync(root, { recursive: true, force: true });
   });
 });

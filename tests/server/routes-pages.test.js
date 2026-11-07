@@ -133,7 +133,7 @@ describe("server/routes/pages boot progress", () => {
     expect(res.body).toMatchObject({ v: 1, source: "server", kind: "upgrading_openclaw", label: "Upgrading OpenClaw", stage: "upgrading", outcome: null, stuck: false });
     expect(res.body.bootId).toMatch(/^[0-9a-f]{12}$/);
     const text = JSON.stringify(res.body);
-    expect(text).not.toMatch(/\d+\.\d+\.\d+|2026\.10|777/);
+    expect(text).not.toMatch(/\d+\.\d+\.\d+|2026\.10|(?<![0-9a-f])777(?![0-9a-f])/);
     expect(text).not.toMatch(/\/data|openclaw\.json|Loading configuration|doctor|steps|trace|versions/i);
   });
 
