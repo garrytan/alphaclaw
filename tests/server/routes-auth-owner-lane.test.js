@@ -408,6 +408,7 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
     });
 
     it("a right, wrong or absent code gets the same answer and the same work on a policy refusal", async () => {
+      // Unknown member emails are covered by the known/unknown comparison below.
       const answers = async (h, base) => {
         const out = [];
         for (const recoveryCode of [kRecoveryCode, randomValue(32), undefined]) {
@@ -432,11 +433,6 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       expect(legacy[1]).toEqual(legacy[0]);
       expect(legacy[2]).toEqual(legacy[0]);
 
-      const unknown = await createHarness({ team: true, members: [memberA] });
-      const stranger = await answers(unknown, { email: "nobody@example.test", password: "guess" });
-      expect(stranger[0].status).toBe(401);
-      expect(stranger[1]).toEqual(stranger[0]);
-      expect(stranger[2]).toEqual(stranger[0]);
     });
 
     it("a wrong code on a member sign-in costs a decoy password check, like a right code", async () => {
@@ -483,6 +479,67 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
         ),
       );
       const res = await signIn(h, { peer: "198.51.100.94", password: kOwnerPassword, recoveryCode: kRecoveryCode });
+      expect(res.status).toBe(200);
+    });
+
+    it("a known and an unknown member email get the same answer and work when a code is sent, with and without the box-wide lock", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      let n = 0;
+      const attempt = async (email, extra) => {
+        resetPasswordChecks(h);
+        h.membersStore.burnDecoyVerification.mockClear();
+        n += 1;
+        const res = await signIn(h, { peer: "198.51.101." + n, email, ...extra });
+        return { status: res.status, body: res.body, checks: passwordChecks(h), decoys: h.membersStore.burnDecoyVerification.mock.calls.length };
+      };
+      const compare = async () => {
+        for (const extra of [
+          { password: "wrong", recoveryCode: randomValue(32) },
+          { password: "wrong", recoveryCode: kRecoveryCode },
+        ]) {
+          const known = await attempt(memberA.email, extra);
+          const unknown = await attempt("nobody@example.test", extra);
+          expect(unknown).toEqual(known);
+        }
+      };
+      await compare();
+      await lockShared(h, { email: "nobody@example.test" });
+      await compare();
+    });
+
+    it("a junk code runs no decoy hash once the box-wide bucket is locked", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      await lockShared(h, { email: "nobody@example.test" });
+      h.membersStore.burnDecoyVerification.mockClear();
+      resetPasswordChecks(h);
+      const results = await Promise.all(
+        Array.from({ length: 40 }, (_, i) =>
+          signIn(h, { peer: "2001:db8:" + (100 + i).toString(16) + "::1", ...credentialsOf(memberA), recoveryCode: randomValue(32) }),
+        ),
+      );
+      expect(results.every((r) => r.status === 401)).toBe(true);
+      expect(h.membersStore.burnDecoyVerification).not.toHaveBeenCalled();
+      expect(passwordChecks(h)).toBe(0);
+    });
+
+    it("IPv6 addresses in one /64 share a per-address bucket, and the audit line keeps the full address", async () => {
+      const warn = vi.spyOn(console, "warn");
+      const h = await createHarness();
+      for (let i = 0; i < kLoginMaxAttempts - 1; i += 1) {
+        await signIn(h, { peer: "2001:db8:aa:bb::" + (i + 1).toString(16), password: "wrong-" + i });
+      }
+      const sibling = await signIn(h, { peer: "2001:db8:aa:bb:ffff:1:2:3", password: "wrong-last" });
+      expect(sibling.status).toBe(429);
+      expect((await signIn(h, { peer: "2001:db8:aa:bb::99", password: kOwnerPassword })).status).toBe(429);
+      expect((await signIn(h, { peer: "2001:db8:aa:bc::1", password: kOwnerPassword })).status).toBe(200);
+      expect(auditLines(warn)).toContain('[auth] sign-in failed route=POST /api/auth/login ip="2001:db8:aa:bb::2" actor=owner lane=shared');
+    });
+
+    it("a valid pass takes the pass lane even when a mistyped code is also sent", async () => {
+      const h = await createHarness();
+      const pass = readPass(await signIn(h, { password: kOwnerPassword }));
+      await lockShared(h);
+      const res = await signIn(h, { password: kOwnerPassword, pass, recoveryCode: randomValue(32) });
       expect(res.status).toBe(200);
     });
 

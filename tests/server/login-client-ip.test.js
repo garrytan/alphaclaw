@@ -64,6 +64,38 @@ describe("server/login-client-ip", () => {
     expect(blank(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }))).toBe("198.51.100.7");
   });
 
+  it("keys IPv6 addresses on their /64 for the limiter and leaves IPv4 alone", () => {
+    const { loginLimiterKey } = require(kModulePath);
+    expect(loginLimiterKey("2001:db8:aa:bb::1")).toBe("2001:db8:aa:bb::/64");
+    expect(loginLimiterKey("2001:0db8:00aa:00bb:ffff:1:2:3")).toBe("2001:db8:aa:bb::/64");
+    expect(loginLimiterKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(loginLimiterKey("::1")).toBe("0:0:0:0::/64");
+    expect(loginLimiterKey("64:ff9b::192.0.2.1")).toBe("64:ff9b:0:0::/64");
+    expect(loginLimiterKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(loginLimiterKey("198.51.100.7")).toBe("198.51.100.7");
+    expect(loginLimiterKey("unknown")).toBe("unknown");
+  });
+
+  it("warns once per process when TRUST_PROXY_HOPS is unset and a public peer signs in", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnings = () => warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes("TRUST_PROXY_HOPS"));
+
+    let resolve = loadResolver();
+    resolve(fakeRequest({ peer: "10.0.0.2", ip: "203.0.113.9" }));
+    expect(warnings()).toHaveLength(0);
+    resolve(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }));
+    resolve(fakeRequest({ peer: "198.51.100.8", ip: "203.0.113.9" }));
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]).not.toMatch(/198\.51\.100|203\.0\.113/);
+
+    warn.mockClear();
+    process.env[kTrustProxyHopsEnvKey] = "1";
+    resolve = loadResolver();
+    resolve(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }));
+    expect(warnings()).toHaveLength(0);
+    warn.mockRestore();
+  });
+
   it("falls back to the peer when a proxy hop sent no forwarded address, and to unknown without a peer", () => {
     const resolveLoginClientIp = loadResolver();
     expect(resolveLoginClientIp(fakeRequest({ peer: "10.0.0.2", ip: "" }))).toBe("10.0.0.2");
