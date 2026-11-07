@@ -322,6 +322,26 @@ describe("/oauth/:id alias (ALPH-71 L-9)", () => {
     }
   });
 
+  it("refuses methods other than GET and POST with 405 and spends no budget", async () => {
+    const gateway = await createGateway();
+    const app = createApp({ gatewayUrl: gateway.gatewayUrl, getOauthCallbackById });
+    try {
+      for (const method of ["head", "options", "delete", "put", "patch"]) {
+        for (let index = 0; index < 3; index += 1) {
+          const res = await request(app)[method]("/oauth/cb-one?code=C");
+          expect(res.status).toBe(405);
+          expect(res.headers.allow).toBe("GET, POST");
+        }
+      }
+      expect(gateway.calls).toHaveLength(0);
+      const res = await request(app).get("/oauth/cb-one?code=C");
+      expect(res.status).toBe(200);
+      expect(gateway.calls).toHaveLength(1);
+    } finally {
+      await closeServer(gateway.server);
+    }
+  });
+
   it("does not spend a budget on unknown callback ids", async () => {
     const gateway = await createGateway();
     const app = createApp({ gatewayUrl: gateway.gatewayUrl, getOauthCallbackById });
