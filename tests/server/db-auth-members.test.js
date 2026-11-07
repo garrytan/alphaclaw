@@ -251,6 +251,22 @@ describe("server/db/auth members store (4.1)", () => {
     expect(store.listInvites()).toEqual([]);
   });
 
+  it("rotateInviteToken gives a pending invite a new token and kills the old one (GST-1787)", () => {
+    const invite = store.createInvite({ role: "member" });
+    const rotated = store.rotateInviteToken(invite.id);
+    expect(rotated.id).toBe(invite.id);
+    expect(rotated.expiresAt).toBe(invite.expiresAt);
+    expect(rotated.token).not.toBe(invite.token);
+    expect(store.consumeInvite({ token: invite.token })).toBe(null);
+    expect(store.consumeInvite({ token: rotated.token })?.id).toBe(invite.id);
+    expect(store.rotateInviteToken(invite.id)).toBe(null);
+
+    const expiring = store.createInvite({ role: "member", ttlMs: 60_000 });
+    now += 60_000;
+    expect(store.rotateInviteToken(expiring.id)).toBe(null);
+    expect(store.rotateInviteToken("missing")).toBe(null);
+  });
+
   it("lists open invites and deletes them", () => {
     const owner = createOwner();
     const invite = store.createInvite({

@@ -109,6 +109,13 @@ const createApp = ({ confirmService = null, rewriteInviteBody = true } = {}) => 
             url: "https://box.example.com/login?invite=" + kInv,
           }),
   );
+  app.post("/api/team/invites/:id/link", requireAdmin, (req, res) =>
+    res.json({
+      ok: true,
+      invite: { id: req.params.id, role: "member" },
+      url: "https://box.example.com/login.html?invite=" + kInv,
+    }),
+  ); // team.invites.link — humans only
   app.patch("/api/team/members/:id", requireAdmin, echo); // team.members.update
   app.delete("/api/team/members/:id", requireAdmin, echo); // team.members.remove
   // Error hygiene fixtures at manifest paths (safe + write tiers).
@@ -253,6 +260,24 @@ describe("agent-admin team authority changes need an operator confirm (CSO ALPH-
     const res = await request(app).post("/api/team/invites").set("Cookie", cookie).send({ role: "admin" });
     expect(res.status).toBe(200);
     expect(res.body.token).toBe(kInv);
+  });
+
+  it("refuses the agent a pending invite's link, so it never reads one (GST-1787)", async () => {
+    const { app, insertWatchdogEvent } = createApp({ rewriteInviteBody: false });
+    const res = await withBearer(request(app).post("/api/team/invites/inv-1/link").send({}));
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("denied");
+    expect(res.body.hint).toContain("Team page");
+    expect(JSON.stringify(res.body)).not.toContain(kInv);
+    expect(JSON.stringify(insertWatchdogEvent.mock.calls)).not.toContain(kInv);
+  });
+
+  it("a human admin gets a pending invite's new link (GST-1787)", async () => {
+    const { app } = createApp({ rewriteInviteBody: false });
+    const cookie = await loginAsHumanAdmin(app);
+    const res = await request(app).post("/api/team/invites/inv-1/link").set("Cookie", cookie).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.url).toContain(kInv);
   });
 
   it("gates a member role or disabled change, not a display-name edit", async () => {

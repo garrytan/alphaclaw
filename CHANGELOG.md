@@ -11,6 +11,23 @@ git-sync's overflow sentence is stable (GST-1820, ALPH-73).
 
 ### Fixed
 - **The overflow sentence named a size that depended on Node's last read.** When git prints more than the sync can read, the stored detail said "over N MB", where N was the length of what Node had buffered, and that can run up to one 64 KiB read past the limit. So the same overflow said "over 1.0 MB" on one run and "over 1.1 MB" on another, and the real-git test that pins the sentence failed now and then in CI. The size is now whole MB rounded down, which is the limit itself: "git status printed more output than the sync can read (over 1 MB)" under Node's 1 MiB default, "(over 256 MB)" under the sync's own limit. The size counts bytes of whichever stream overflowed, before path names are decoded, so multibyte path names or an overflowing stderr no longer print "over 0 MB". Hermetic tests cover overflows from 1 byte to just under 64 KiB past the limit, multibyte path names and stderr.
+## [0.10.198] - 2026-11-07
+
+Pending invite links for admins (GST-1787, ALPH-73). Since 0.10.195 the agent's copy of a new invite's token and URL is masked, and the Setup UI showed an invite link only in the browser that created it, so an invite the agent created could not be delivered.
+
+### Added
+- **Copy new link on each pending invite.** Only a hash of each invite token is stored, so a pending link cannot be shown again. The Team page's Invites list now has **Copy new link** per invite: it gives the invite a new token, copies the new URL to the clipboard and shows it once with the invite's expiry, and the old link stops working. The expiry does not change. Behind it is `POST /api/team/invites/:id/link` (admin only; 404 `invite_not_pending` for a used, revoked or expired invite), audit-logged as `team_invite_link_rotated` with the invite id, role, pinned email and who asked, never the token or URL.
+- **Humans only.** The admin manifest lists the route as `team.invites.link` with tier `denied`, so the agent gets 403 `denied` with a hint to ask an admin, and a member gets 403 from `requireAdmin`.
+- One Copy new link runs at a time: while it is in flight every other Copy new link and every Revoke is disabled, and a second click is ignored. A reply that a newer invite action (another copy or Create invite) superseded is dropped, and so is one that lands after the invite was revoked. When Copy new link fails, a link already shown for that invite is cleared, because the server may have replaced it before the reply was lost. Create invite is also disabled while a copy is in flight, and a dropped reply clears a link already shown for that invite, since the server has already replaced it. So a dead link is never shown or copied as usable.
+
+### Changed
+- The shown-once invite panel names the invite (its email, or "anyone with the link"), its role and its real expiry date instead of "7 days".
+
+### Docs
+- `alphaclaw-admin/team.md` and the `team.invites.create` note tell the agent to ask an admin to use Copy new link on the Team page to deliver an invite it created. README's team section describes the action and lists the endpoint.
+
+### Tests
+- `routes-team`: an admin gets a new URL, the old link is refused and the new one accepted, and a used invite is 404; the audit line holds no token or URL; a member gets 403 and the invite's link still works. `agent-admin-grant-e2e`: the agent gets 403 `denied` and never the link; a human admin gets it. `db-auth-members`: `rotateInviteToken` for pending, used, expired and unknown invites. `team-tab-presence`: the button, the shown-once panel with the expiry, and the hook's copy and refusal paths. Each new case fails on main except "a human admin gets a pending invite's new link", which guards human access.
 
 ## [0.10.197] - 2026-11-07
 
