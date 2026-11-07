@@ -39,8 +39,9 @@ const collectNodes = (node, out = []) => {
     return out;
   }
   out.push(node);
-  if (node.props) collectNodes(node.props.children, out);
-  if (node.rendered) collectNodes(node.rendered, out);
+  // A component's own output already holds the children it renders.
+  if (typeof node.type === "function") collectNodes(node.rendered, out);
+  else if (node.props) collectNodes(node.props.children, out);
   return out;
 };
 
@@ -54,8 +55,8 @@ const collectText = (node, out = []) => {
     return out;
   }
   if (node && typeof node === "object") {
-    if (node.props) collectText(node.props.children, out);
-    if (node.rendered) collectText(node.rendered, out);
+    if (typeof node.type === "function") collectText(node.rendered, out);
+    else if (node.props) collectText(node.props.children, out);
   }
   return out;
 };

@@ -74,6 +74,24 @@ describe("frontend/design tokens", () => {
     expect(kDark["--layout-gutter"]).toBe("40px");
   });
 
+  it("defines a focus ring at 3:1 or better on every surface in both themes", () => {
+    for (const vars of [kDark, kLight]) {
+      const ring = color(vars, "--focus-ring");
+      for (const [name, surface] of Object.entries(surfaces(vars))) {
+        expect(ratio(ring, surface), name).toBeGreaterThanOrEqual(3);
+      }
+    }
+    expect(readBlocks('[data-theme="light"]')["--focus-ring"]).toBeTruthy();
+  });
+
+  it("draws the focus ring on buttons, links, tabs and inputs via :focus-visible", () => {
+    const rule = /:is\(([^)]*)\):focus-visible[^{]*\{\s*outline: 2px solid var\(--focus-ring\);/.exec(css);
+    expect(rule).toBeTruthy();
+    for (const selector of ["a[href]", "button", '[role="tab"]', "input", "select", "textarea"]) {
+      expect(rule[1]).toContain(selector);
+    }
+  });
+
   it("gives the light theme its own tone colours", () => {
     for (const tone of ["ok", "warn", "bad", "accent"]) {
       expect(readBlocks('[data-theme="light"]')[`--tone-${tone}`]).toBeTruthy();

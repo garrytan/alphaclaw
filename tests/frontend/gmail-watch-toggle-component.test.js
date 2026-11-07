@@ -173,19 +173,36 @@ describe("frontend/gmail watch toggle danger state", () => {
   });
 
   it("keeps Enter and Space on the focusable info tooltip from opening the webhook row", () => {
-    const tree = render({ watchStatus: { enabled: true } });
-    const wrapper = collectNodes(tree).find((vnode) =>
-      (Array.isArray(vnode.props?.children) ? vnode.props.children : [vnode.props?.children])
-        .some((child) => child?.type === InfoTooltip),
-    );
-    expect(wrapper.props.onKeyDown).toBeTypeOf("function");
-    for (const key of ["Enter", " "]) {
-      const event = { key, stopPropagation: vi.fn() };
-      wrapper.props.onKeyDown(event);
-      expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+    // Phase 1c: the row is no longer a role=button, so no ancestor of the
+    // tooltip handles keys or clicks; the webhook opens only from its own
+    // sibling button.
+    const onOpenWebhook = vi.fn();
+    const tree = render({ watchStatus: { enabled: true }, onOpenWebhook });
+    const ancestorsOf = (node, target, path = []) => {
+      if (node == null || typeof node !== "object") return null;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = ancestorsOf(child, target, path);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (node.type === target) return path;
+      const next = [...path, node];
+      return ancestorsOf(node.props?.children, target, next) || ancestorsOf(node.rendered, target, next);
+    };
+    const ancestors = ancestorsOf(tree, InfoTooltip);
+    expect(ancestors).toBeTruthy();
+    for (const ancestor of ancestors) {
+      expect(ancestor.type).not.toBe("button");
+      expect(ancestor.props.role).not.toBe("button");
+      expect(ancestor.props.onKeyDown).toBeUndefined();
+      expect(ancestor.props.onClick).toBeUndefined();
+      expect(ancestor.props.onclick).toBeUndefined();
     }
-    const escape = { key: "Escape", stopPropagation: vi.fn() };
-    wrapper.props.onKeyDown(escape);
-    expect(escape.stopPropagation).not.toHaveBeenCalled();
+    const opener = collectNodes(tree).find((vnode) => vnode.type === "button");
+    expect(opener.props.type).toBe("button");
+    opener.props.onclick();
+    expect(onOpenWebhook).toHaveBeenCalledTimes(1);
   });
 });

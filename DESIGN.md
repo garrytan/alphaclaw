@@ -40,13 +40,14 @@ The Setup UI is an instrument panel for one box: a calm, cool control room where
 | `--bg-sidebar` | `bg-surface`* | Sidebar |
 | `--bg-content` | | Content column |
 | `--panel-bg-contrast`, `--panel-border-contrast` | `bg-surface`, `border-border` | Cards and their borders |
-| `--field-bg-contrast`, `--field-border-contrast` | `bg-field` | Inputs, selects, textareas |
+| `--field-bg-contrast`, `--field-border-contrast` | `bg-field` (border from theme.css) | Inputs, selects, textareas. Give them `border` for the width and no `border-border`, whose `!important` would replace the field border. |
 | `--text-bright` | `text-bright` | Headings and values that must stand out |
 | `--text` | `text-body` | Body text |
 | `--text-muted` | `text-fg-muted` | Secondary text, labels, metadata |
 | `--text-dim` | `text-fg-dim`, `placeholder-fg-dim` | Tertiary text and placeholders |
 | `--accent` | `text-accent`, `bg-accent`, `border-accent` | Brand cyan for links, active states and progress |
 | `--accent-dim`, `--accent-link` | `border-accent-dim`, `text-accent-link` | Accent borders and inline links |
+| `--focus-ring` | (theme.css rule) | Keyboard focus ring on buttons, links, tabs and inputs |
 
 \* `.bg-surface` is redefined in `theme.css` as the card treatment.
 
@@ -197,13 +198,20 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 | StatusStrip | planned (PR 3a) | A row of 2 to 4 status cells (label, value, tone). |
 | EmptyState | planned (PR 3b) | A title, one sentence and one action. |
 | AsyncSection | `components/async-section.js` | Loading, error and empty states for a section. |
-| ModalShell | `components/modal-shell.js` | Every modal. Gains dialog semantics and a focus trap in PR 1c. |
-| ConfirmDialog | `components/confirm-dialog.js` | Confirmations. Rebuilt on ModalShell in PR 1c with the same API. |
-| Tabs | planned (PR 1c) | Page sub-navigation with `role="tablist"`. Replaces `pill-tabs.js`. |
-| SegmentedControl | `components/segmented-control.js` | Picks one value (range, mode). Gets `aria-pressed` in PR 1c. |
+| ModalShell | `components/modal-shell.js` | Every modal. A `role="dialog"` with `aria-modal`, named by `ariaLabel`, `ariaLabelledby` or its first heading. Traps Tab, moves focus in on open (an `autofocus` control, else the panel) and back to the opener on close. Only the topmost open dialog handles Tab and Escape. |
+| ConfirmDialog | `components/confirm-dialog.js` | Confirmations, built on ModalShell. |
+| Tabs | `components/tabs.js` | Page sub-navigation with `role="tablist"`. Arrows, Home and End move and select; only the selected tab is in the Tab order. Spread `getTabPanelProps(idBase, value)` on each panel. Variants `pill` (default) and `segmented`. |
+| SegmentedControl | `components/segmented-control.js` | Picks one value (range, mode). Each option is a `type="button"` with `aria-pressed`. Use Tabs instead when the choice swaps what the page shows. |
 | ToggleSwitch | `components/toggle-switch.js` | On and off settings. |
-| InfoTooltip | `components/info-tooltip.js` | Extra explanation behind a focusable "?". |
+| InfoTooltip | `components/info-tooltip.js` | Extra explanation behind a focusable "?". Renders nothing without text. Never put it inside another control; make the row's action a sibling button. |
 | WizardShell and WizardProgress | `components/wizard-shell.js`, planned (PR 3d) | Multi-step flows share one shell and one step indicator. |
+
+## Keyboard and focus
+
+- Every control is reachable with Tab and shows the `--focus-ring` outline on `:focus-visible`. The ring is at least 3:1 against every surface in both themes. Do not remove it with `outline-none` on a control.
+- A scrolling region with no control inside (a log, an output `pre`) gets `tabindex="0"` so keyboard users can scroll it.
+- Escape closes the topmost layer only. Menus and dialogs ignore an Escape that another handler already used (`defaultPrevented`) or that an IME is composing, and a closed menu returns focus to its trigger.
+- Never nest a focusable element inside another control (`role="button"` rows included). Make the row's action a button and keep extra controls beside it.
 
 ## Copy rules
 
