@@ -12,6 +12,7 @@ Pending invite links for admins (GST-1787, ALPH-73). Since 0.10.195 the agent's 
 ### Added
 - **Copy new link on each pending invite.** Only a hash of each invite token is stored, so a pending link cannot be shown again. The Team page's Invites list now has **Copy new link** per invite: it gives the invite a new token, copies the new URL to the clipboard and shows it once with the invite's expiry, and the old link stops working. The expiry does not change. Behind it is `POST /api/team/invites/:id/link` (admin only; 404 `invite_not_pending` for a used, revoked or expired invite), audit-logged as `team_invite_link_rotated` with the invite id, role, pinned email and who asked, never the token or URL.
 - **Humans only.** The admin manifest lists the route as `team.invites.link` with tier `denied`, so the agent gets 403 `denied` with a hint to ask an admin, and a member gets 403 from `requireAdmin`.
+- Revoke is disabled on an invite while its Copy new link request is in flight, and a Copy new link response that lands after the invite was revoked is dropped, so a dead link is never shown or copied as usable.
 
 ### Changed
 - The shown-once invite panel names the invite's real expiry date instead of "7 days".

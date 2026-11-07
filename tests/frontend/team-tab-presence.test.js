@@ -86,6 +86,7 @@ import {
   fetchDevicePairings,
   fetchTeam,
   fetchTeamPresence,
+  revokeTeamInvite,
 } from "../../lib/public/js/lib/api.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
 import { useTeamTab } from "../../lib/public/js/components/team-tab/use-team-tab.js";
@@ -326,6 +327,43 @@ describe("frontend/team-tab invite links (GST-1787)", () => {
     expect(hook.freshInvite).toEqual(kLink);
     expect(hook.linkingInviteId).toBe(null);
     expect(showToast).toHaveBeenCalledWith(
+      "New invite link copied. The old link no longer works.",
+      "success",
+    );
+  });
+
+  const revokeButtonOf = (tree) =>
+    collectNodes(tree).find((node) => node.props?.idleLabel === "Revoke");
+
+  it("disables Revoke on an invite while its Copy new link request is in flight", () => {
+    expect(revokeButtonOf(renderCard({})).props.disabled).toBeFalsy();
+    expect(revokeButtonOf(renderCard({ linkingInviteId: "inv-1" })).props.disabled).toBe(true);
+  });
+
+  it("drops a Copy new link response that lands after the invite was revoked", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    fetchTeam.mockResolvedValue(makeTeam({ me: { role: "admin" } }));
+    fetchTeamPresence.mockResolvedValue({ presence: [] });
+    fetchDevicePairings.mockResolvedValue({ pending: [] });
+    revokeTeamInvite.mockResolvedValue({ ok: true });
+    let resolveCopy;
+    copyTeamInviteLink.mockReturnValue(new Promise((resolve) => { resolveCopy = resolve; }));
+
+    harness.beginRender();
+    const copying = useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    await useTeamTab().onRevokeInvite("inv-1");
+    resolveCopy(kLink);
+    await copying;
+    harness.beginRender();
+    const hook = useTeamTab();
+
+    expect(hook.freshInvite).toBe(null);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalledWith(
       "New invite link copied. The old link no longer works.",
       "success",
     );
