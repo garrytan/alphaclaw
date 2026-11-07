@@ -152,8 +152,7 @@ describe("server/oauth-callback-middleware", () => {
   describe("provider callback params", () => {
     const withCallbackApp = async (run) => {
       const { server, calls, gatewayUrl } = await createGatewaySpyServer();
-      const originalWebhookToken = process.env.WEBHOOK_TOKEN;
-      process.env.WEBHOOK_TOKEN = "test-webhook-token";
+      vi.stubEnv("WEBHOOK_TOKEN", "test-webhook-token");
       const app = createApp({
         gatewayUrl,
         getOauthCallbackById: (id) =>
@@ -162,7 +161,7 @@ describe("server/oauth-callback-middleware", () => {
       try {
         await run({ app, calls });
       } finally {
-        process.env.WEBHOOK_TOKEN = originalWebhookToken;
+        vi.unstubAllEnvs();
         await new Promise((resolve) => server.close(resolve));
       }
     };
