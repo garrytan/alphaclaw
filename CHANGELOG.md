@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.199] - 2026-11-07
+
+git-sync's overflow sentence is stable (GST-1820, ALPH-73).
+
+### Fixed
+- **The overflow sentence named a size that depended on Node's last read.** When git prints more than the sync can read, the stored detail said "over N MB", where N was the length of what Node had buffered, and that can run up to one 64 KiB read past the limit. So the same overflow said "over 1.0 MB" on one run and "over 1.1 MB" on another, and the real-git test that pins the sentence failed now and then in CI. The size is now whole MB rounded down, which is the limit itself: "git status printed more output than the sync can read (over 1 MB)" under Node's 1 MiB default, "(over 256 MB)" under the sync's own limit. A hermetic test covers overflows from 1 byte to just under 64 KiB past the limit.
+
 ## [0.10.197] - 2026-11-07
 
 Sockets end with the session (ALPH-73 follow-ups GST-1806 and GST-1800). #342 closed the terminal and chat sockets on logout; an open Control UI tunnel and the admin actions that end a member's sessions still left sockets working.
