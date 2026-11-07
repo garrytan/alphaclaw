@@ -380,4 +380,15 @@ describe("control-ui-mount: resolveGatewayBrowserOrigin (same-origin Control UI 
     ).toBeNull();
     expect(resolveGatewayBrowserOrigin()).toBeNull();
   });
+
+  it("does not vouch for a downgraded Origin on the requested host", () => {
+    expect(resolve({ origin: "http://claw.example.com:443", host: "claw.example.com" })).toBeNull();
+    expect(resolve({ origin: "https://claw.example.com:80", host: "claw.example.com" })).toBeNull();
+    expect(
+      resolve({ origin: "http://claw.example.com", host: "claw.example.com", "x-forwarded-proto": "https" }),
+    ).toBeNull();
+    expect(
+      resolve({ origin: "https://claw.example.com", host: "claw.example.com", "x-forwarded-proto": "http" }),
+    ).toBe(trustedOrigin);
+  });
 });

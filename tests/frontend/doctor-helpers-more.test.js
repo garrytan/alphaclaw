@@ -76,9 +76,28 @@ describe("frontend/doctor helpers (extended)", () => {
       "Doctor has not been run in the last week.",
     );
     expect(
-      getDoctorWarningMessage({ changeSummary: { changedFilesCount: 1 } }),
+      getDoctorWarningMessage({ changeSummary: { changedFilesCount: 1, reviewedChangedFilesCount: 1 } }),
     ).toBe(
-      "Drift Doctor has not been run in the last week and 1 file changed since the last review.",
+      "Drift Doctor last ran over a week ago. Since then, 1 of the files it reviews (prompt files, skills and README) changed. Run Drift Doctor to check them.",
+    );
+  });
+
+  it("ignores workspace churn outside the files Drift Doctor reviews", () => {
+    const churnOnly = {
+      needsInitialRun: false,
+      stale: true,
+      changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 18924, reviewedChangedFilesCount: 0 },
+    };
+    expect(shouldShowDoctorWarning(churnOnly)).toBe(false);
+    expect(getDoctorWarningMessage(churnOnly)).not.toContain("18924");
+
+    const reviewedChanged = {
+      ...churnOnly,
+      changeSummary: { ...churnOnly.changeSummary, reviewedChangedFilesCount: 12 },
+    };
+    expect(shouldShowDoctorWarning(reviewedChanged)).toBe(true);
+    expect(getDoctorWarningMessage(reviewedChanged)).toBe(
+      "Drift Doctor last ran over a week ago. Since then, 12 of the files it reviews (prompt files, skills and README) changed. Run Drift Doctor to check them.",
     );
   });
 

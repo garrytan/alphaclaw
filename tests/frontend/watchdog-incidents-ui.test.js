@@ -462,6 +462,38 @@ describe("buildIncidentCardModel", () => {
     expect(pruned.outcome).toBe("interrupted by restart in 2m 0s");
   });
 
+  it("says how an incident recovered when an AlphaClaw or container restart ended it", async () => {
+    const { buildIncidentCardModel } = await loadIncidentHelpers();
+    const cardFor = (recoveredAfterRestart) =>
+      buildIncidentCardModel(
+        {
+          id: 21,
+          incidentKey: "gateway_crash",
+          status: "resolved",
+          openedAt: new Date(kNow - 9 * 3_600_000).toISOString(),
+          eventCount: 17,
+          summary: {
+            v: 1,
+            trigger: "gateway_crash",
+            severity: "critical",
+            outcome: "recovered",
+            durationMs: 8 * 3_600_000 + 12 * 60_000,
+            actions: ["restart"],
+            recoveredAfterRestart,
+          },
+        },
+        kNow,
+      );
+    const base = cardFor(null).outcome;
+    expect(base.startsWith("recovered in ")).toBe(true);
+    expect(cardFor("shutdown").outcome).toBe(`${base}, after AlphaClaw or its container restarted`);
+    expect(cardFor("restart").outcome).toBe(`${base}, after an AlphaClaw update`);
+    expect(cardFor("unclean_exit").outcome).toBe(
+      `${base}, after an unexpected AlphaClaw or container restart`,
+    );
+    expect(cardFor("first_boot").outcome).toBe(base);
+  });
+
   it("renders corrupt rollups as readable cards, never throws", async () => {
     const { buildIncidentCardModel } = await loadIncidentHelpers();
     const model = buildIncidentCardModel(
