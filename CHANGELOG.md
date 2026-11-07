@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.999] - 2026-11-07
+## [0.10.207] - 2026-11-07
 
 The model check no longer calls a built-in provider misconfigured when its `models.providers` entry leaves out `baseUrl`. OpenClaw fills in that provider's own base URL, so a working Google setup showed as an error, and the error led someone to delete the box's Google provider block.
 
