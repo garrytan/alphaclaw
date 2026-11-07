@@ -42,7 +42,7 @@ describe("server/watchdog-terminal-ws catch-all proxy identity", () => {
       resolveProxyIdentity: () => null,
     });
     const req = {
-      url: "/some/gateway/ws",
+      url: "/",
       headers: {
         host: "localhost",
         [kIdentityUserHeader]: "attacker",
@@ -83,7 +83,7 @@ describe("server/watchdog-terminal-ws catch-all proxy identity", () => {
     });
     server.emit(
       "upgrade",
-      { url: "/ws", headers: { host: "localhost" } },
+      { url: "/node-desktop/attach", headers: { host: "localhost" } },
       createSocket(),
       Buffer.alloc(0),
     );

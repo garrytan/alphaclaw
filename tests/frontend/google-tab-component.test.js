@@ -340,9 +340,16 @@ describe("frontend/google tab component", () => {
 
   it("starts the OAuth popup for a JUST-CREATED account even though it is not in this render's list (F165)", async () => {
     api.saveGoogleAccount.mockResolvedValue({ ok: true, accountId: "new-1" });
-    const open = vi.fn(() => ({ closed: false }));
+    const open = vi.fn(() => ({ closed: false, location: { href: "" }, close: vi.fn() }));
     const previousOpen = globalThis.window.open;
     globalThis.window.open = open;
+    const previousFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, url: "https://accounts.google.com/o/oauth2/auth?state=s" }),
+    }));
+    globalThis.fetch = fetchMock;
     try {
       const r = renderGoogle();
       const setError = vi.fn();
@@ -355,9 +362,19 @@ describe("frontend/google tab component", () => {
       // Before the fix startAuth bailed on `getAccountById("new-1")` (stale closure) and
       // the operator saw a saved-but-never-signed-in account.
       expect(open).toHaveBeenCalledTimes(1);
-      expect(open.mock.calls[0][0]).toMatch(/^\/auth\/google\/start\?accountId=new-1&services=/);
+      // ALPH-71 L-10: the popup opens blank and the start is a same-origin POST.
+      expect(open.mock.calls[0][0]).toBe("");
+      expect(open.mock.calls[0][1]).toBe("google-auth-new-1");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [startUrl, startOptions] = fetchMock.mock.calls[0];
+      expect(startUrl).toBe("/auth/google/start");
+      expect(startOptions.method).toBe("POST");
+      expect(JSON.parse(startOptions.body)).toMatchObject({ accountId: "new-1" });
+      expect(JSON.parse(startOptions.body).services.length).toBeGreaterThan(0);
     } finally {
       globalThis.window.open = previousOpen;
+      globalThis.fetch = previousFetch;
     }
   });
 });

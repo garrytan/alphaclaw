@@ -51,3 +51,37 @@ describe("frontend/safe-markdown (XSS guard for external release notes)", () => 
     expect(renderMarkdownSafe("")).toBe("");
   });
 });
+
+describe("frontend/safe-markdown scheme-relative URLs (ALPH-71, safeHref)", () => {
+  it("drops //host and /\\host links and images, which leave this box", async () => {
+    const { renderMarkdownSafe } = await load();
+    for (const source of [
+      "[a](//evil.example/x)",
+      "[a](<//evil.example/x>)",
+      "[a](/\\evil.example/x)",
+      "![i](//evil.example/pixel.png)",
+      "![i](/\\evil.example/pixel.png)",
+    ]) {
+      const html = renderMarkdownSafe(source);
+      expect(html, source).not.toContain("evil.example");
+      expect(html, source).not.toMatch(/<(a|img)\b/);
+    }
+  });
+
+  it("drops a root path that only becomes //host once the browser strips a tab", async () => {
+    const { renderMarkdownSafe } = await load();
+    const html = renderMarkdownSafe("[a](</\t/evil.example>)");
+    expect(html).not.toContain("evil.example");
+    expect(html).not.toContain("<a ");
+  });
+
+  it("keeps root-relative, relative and fragment links on this box", async () => {
+    const { renderMarkdownSafe } = await load();
+    const html = renderMarkdownSafe("[a](/docs/x) [b](./y) [c](../z) [d](#frag) ![i](/img/x.png)");
+    expect(html).toContain('href="/docs/x"');
+    expect(html).toContain('href="./y"');
+    expect(html).toContain('href="../z"');
+    expect(html).toContain('href="#frag"');
+    expect(html).toContain('src="/img/x.png"');
+  });
+});
