@@ -624,7 +624,7 @@ describe("frontend/models-tab use-models", () => {
 });
 
 describe("frontend/models-tab use-models after a key save", () => {
-  it("a refresh after a key save drops that provider's auth-card draft, so Save changes cannot write the old value back", async () => {
+  it("a refresh after a key save drops that key's auth-card draft, so Save changes cannot write the old value back, and keeps the provider's token draft", async () => {
     const { saveModelsConfig } = await import("../../lib/public/js/lib/api.js");
     const hook = renderHook();
     const { catalog, config, codex } = fetchStates();
@@ -638,6 +638,8 @@ describe("frontend/models-tab use-models after a key save", () => {
     hook.render();
     hook.result().editProfile("openai:default", { type: "api_key", provider: "openai", key: "openai-draft" });
     hook.render();
+    hook.result().editProfile("anthropic:manual", { type: "token", provider: "anthropic", token: "token-draft" });
+    hook.render();
 
     const saved = configPayload();
     saved.authProfiles[0] = { ...saved.authProfiles[0], key: "key-saved-in-row" };
@@ -647,10 +649,11 @@ describe("frontend/models-tab use-models after a key save", () => {
 
     expect(hook.result().getProfileValue("anthropic:default").key).toBe("key-saved-in-row");
     expect(hook.result().getProfileValue("openai:default").key).toBe("openai-draft");
+    expect(hook.result().getProfileValue("anthropic:manual").token).toBe("token-draft");
 
     saveModelsConfig.mockResolvedValue({ ok: true });
     await hook.result().saveAll();
     const sent = saveModelsConfig.mock.calls[0][0].profiles || [];
-    expect(sent.map((profile) => profile.id)).toEqual(["openai:default"]);
+    expect(sent.map((profile) => profile.id).sort()).toEqual(["anthropic:manual", "openai:default"]);
   });
 });

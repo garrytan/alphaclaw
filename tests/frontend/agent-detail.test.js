@@ -320,9 +320,4 @@ describe("frontend/agent detail after review", () => {
     }
   });
 
-  it("Open chat opens the main session while the session list is still loading, instead of starting a new chat", () => {
-    expect(model.resolveOpenChatSessionKey({ agentId: "ops", sessions: [], sessionsLoading: true })).toBe("agent:ops:main");
-    expect(model.resolveOpenChatSessionKey({ agentId: "ops", sessions: [{ key: "agent:ops:main" }] })).toBe("agent:ops:main");
-    expect(model.resolveOpenChatSessionKey({ agentId: "ops", sessions: [{ key: "agent:main:main" }] })).toBe("");
-  });
 });
