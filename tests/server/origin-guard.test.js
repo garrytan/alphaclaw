@@ -124,6 +124,14 @@ describe("classifyBrowserOrigin (control-ui-mount.js)", () => {
     expect(classify({ host: "box.example:3000:1", origin: "http://box.example:3000" }, "")).toBe("cross");
   });
 
+  it("refuses an http setup-URL Origin when a proxy says the request came over https", () => {
+    const httpSetupUrl = "http://claw.example.com";
+    expect(classify({ host: "10.0.0.5:3000", origin: httpSetupUrl }, httpSetupUrl)).toBe("same");
+    expect(classify({ host: "10.0.0.5:3000", "x-forwarded-proto": "https", origin: httpSetupUrl }, httpSetupUrl)).toBe("cross");
+    expect(classify({ host: "10.0.0.5:3000", "cf-visitor": '{"scheme":"https"}', origin: httpSetupUrl }, httpSetupUrl)).toBe("cross");
+    expect(classify({ host: "10.0.0.5:3000", "x-forwarded-proto": "https", origin: kCanonical })).toBe("same");
+  });
+
   it("is cross for an Origin that is not http or https", () => {
     expect(classify({ host: "box.example", origin: "ftp://box.example" }, "")).toBe("cross");
     expect(classify({ host: "abcdef", origin: "chrome-extension://abcdef" }, "")).toBe("cross");
