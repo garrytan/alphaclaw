@@ -25,7 +25,7 @@ const createThrottleMock = () => ({
 
 const kAgentToken = "d".repeat(64);
 
-const createAuthApp = () => {
+const createAuthApp = ({ trustedOrigin = kCanonical } = {}) => {
   process.env.SETUP_PASSWORD = "origin-secret";
   const { registerAuthRoutes } = loadAuthRoutes();
   const app = express();
@@ -40,7 +40,7 @@ const createAuthApp = () => {
       throttle,
       onAuthEvent: vi.fn(),
     },
-    getTrustedBrowserOrigin: () => kCanonical,
+    getTrustedBrowserOrigin: () => trustedOrigin,
   });
   app.post("/api/thing", (req, res) => res.json({ ok: true }));
   app.get("/api/thing", (req, res) => res.json({ ok: true }));
@@ -163,6 +163,37 @@ describe("cookie-authenticated /api writes must come from the box's origin (L-4)
       expect(res.status, path).toBe(403);
       expect(res.body.code, path).toBe("origin_mismatch");
     }
+  });
+
+  it("refuses a cross-origin cookie logout with 403 origin_mismatch and leaves the session working", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const app = createAuthApp({ trustedOrigin: "https://box.example.com" });
+    const cookie = await loginCookie(app);
+    const res = await request(app)
+      .post("/api/auth/logout")
+      .set("Cookie", cookie)
+      .set("Host", "box.example.com")
+      .set("Origin", "https://evil.example.com")
+      .send({});
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "Cross-origin request refused", code: "origin_mismatch" });
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    const line = warn.mock.calls.map((args) => String(args[0])).find((text) => text.startsWith("[origin] refused"));
+    expect(line).toContain("http POST /api/auth/logout");
+    expect(line).toContain("code=origin_mismatch");
+    const after = await request(app).get("/api/thing").set("Cookie", cookie);
+    expect(after.status).toBe(200);
+
+    const sameOrigin = await request(app)
+      .post("/api/auth/logout")
+      .set("Cookie", cookie)
+      .set("Host", "box.example.com")
+      .set("Origin", "https://box.example.com")
+      .send({});
+    expect(sameOrigin.status).toBe(200);
+    expect(sameOrigin.body).toEqual({ ok: true });
+    const ended = await request(app).get("/api/thing").set("Cookie", cookie);
+    expect(ended.status).toBe(401);
   });
 
   it("exempts bearer requests: the agent token never rides the browser's ambient credential", async () => {
