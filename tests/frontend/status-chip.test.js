@@ -71,6 +71,18 @@ describe("deriveStatusChip", () => {
     expect(deriveStatusChip({ connectivityMode: "alphaclaw_booting" }).key).toBe("starting");
   });
 
+  it("never shows a stale snapshot as live, even one holding a restart lock", () => {
+    const stale = { statusFreshness: { mode: "stale", observedAtMs: 1, receivedAtMs: 2 } };
+    for (const payload of [frame("running", "Running"), frame("running", "Running", { operation: { kind: "restart" } })]) {
+      const chip = deriveStatusChip(shellFromFrame(payload, stale));
+      expect(chip.key).toBe("connecting");
+      expect(chip.word).toBe("Checking…");
+    }
+    expect(deriveStatusChip({ ...shellFromFrame(frame("running", "Running"), stale), restartOperation: { phase: "running" } }).key).toBe(
+      "restarting",
+    );
+  });
+
   it("names the server's label in the title", () => {
     expect(deriveStatusChip(shellFromFrame(frame("degraded", "Running with issues"))).title).toBe(
       "Gateway: Running with issues",
