@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.172] - 2026-11-07
+## [0.10.173] - 2026-11-07
 
 #/chat now lists and shows every conversation on the box: direct chats, Telegram DMs, groups and forum topics, and Agent Relay sessions, with full history and live updates (ALPH-68 PR1, GST-1696).
 
@@ -26,6 +26,27 @@ Versions follow this repository's `package.json` release counter.
 
 ### Tests
 - `tests/server/chat-session-watch.test.js` (watch fan-out, H16, list paging and caching, the read-only refusal, the history cursor, the agent's key set); session-key classifier matrix and browser parity; route tests for the gateway list and the CLI fallback; frontend label and markdown cases.
+
+## [0.10.172] - 2026-11-07
+
+Phase 0 of the Setup UI overhaul (ALPH-69, GST-1697). It fixes five small UI defects that a live audit in real Chrome found.
+
+### Fixed
+- **Relay nav highlight**: the sidebar highlighted General while the Relay page was open, because `getSelectedNavId` had no `/relay` case.
+- **Sidebar ⋮ menu reopened itself**: an outside click (for example on the Agents "+" button, which opens Add Agent) closed the sidebar's Log out menu and then toggled it straight back open. Two handlers closed it. One was the app shell's own capture listener; the other was the overflow menu's outside-click handler, which was wired to the toggle. The sidebar now passes a close action, so the menu stays shut behind the modal.
+- **Overflow menus ignore Escape**: the sidebar ⋮ menu and the other overflow menus (add channel, agent model card, Google accounts, connected nodes) stayed open on Escape. They now close on Escape.
+- **Cron "no warnings" line**: "No warnings currently need your attention" was painted in the warning colour. The line and its icon now use body text, and the warning tone appears only when a warning or error exists.
+- **Phone status bar**: the version text in the bottom status bar wrapped to two lines on a 390 px screen and overflowed its 24 px bar. It now stays on one line and truncates with an ellipsis.
+
+### Changed
+- The "?" info tooltips (for example next to the gateway status) can be reached with Tab and announce their text. Pressing Enter or Space on the one inside the Gmail watch row no longer opens the webhook page.
+
+### Tests
+- `tests/frontend/app-navigation.test.js`: `/relay` selects the relay nav item.
+- `tests/frontend/overflow-menu.test.js`: Escape closes the menu, an outside click closes it, and a click inside keeps it open.
+- `tests/frontend/sidebar-external-nav.test.js`: the sidebar menu's dismiss calls the close action, never the toggle.
+- `tests/frontend/cron-overview-attention.test.js`: the attention line uses body text with no warnings and the warning tone with one.
+
 
 ## [0.10.171] - 2026-11-06
 
