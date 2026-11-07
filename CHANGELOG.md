@@ -16,6 +16,14 @@ Design tokens from the /design-consultation (ALPH-69, GST-1697). Nine colour val
 - **Completed-step connectors** use `--accent-dim` #3f93a8 in light (1.43 to 3.15:1), so a finished step reads as a state.
 - **Light gateway dot** goes to #15803d (2.94 to 4.47:1 on the sidebar).
 - **DESIGN.md** gains the direction (cyan means act here, one solid button per page, status always carries a word, mono only for what an operator could paste into a terminal, motion limits) and records that JetBrains Mono is self-hosted and interface text stays on the system sans stack.
+## [0.10.180] - 2026-11-07
+
+Security hotfix for a stored XSS in the Setup UI's Browse file viewer (GST-1743, found by the ALPH-71 CSO audit).
+
+### Security
+- **The markdown preview in Browse goes through the safe renderer.** It rendered workspace `.md` files with raw `marked`, which keeps raw HTML, and injected the result as HTML. Anything that can write a markdown file under the browse root (the agent through exec or the browse write API, or a relay peer through the agent) could plant `<img src=x onerror=...>` and run script in an admin's session when the admin opened the preview. The preview now uses `renderMarkdownSafe`, as chat and the update modal already do: raw HTML shows as escaped text, and link and image URLs must be http(s), mailto, `#` or start with `/`, `./` or `../`. Frontmatter, GFM tables, code blocks and line breaks render as before. Links now open in a new tab. Links and images starting with `/`, `./` or `../` stay live and resolve as before (a `//host` URL reaches another host, like any https link); a bare relative link such as `[x](notes.md)` now renders as text. Neither kind ever opened the workspace file, because the Setup UI uses hash routes.
+- The Nodes tab's Chrome attach instructions, a hard-coded constant, use the same renderer, so no Setup UI component imports raw `marked` any more.
+- `tests/frontend/file-viewer-markdown-safety.test.js` renders a `.md` holding `<img onerror>`, `<script>`, `<iframe>`, `javascript:` links in plain, mixed-case, entity-encoded and autolink form, a link title that tries to break out of its attribute, and text after an inline `<kbd>`, `<code>`, `<pre>` or `<script>` tag, through the file viewer's own render path and fails on any live tag, handler or link that survives.
 
 ## [0.10.179] - 2026-11-07
 
