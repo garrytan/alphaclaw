@@ -36,6 +36,10 @@ const kHostileMarkdown = [
   "",
   "inline <img src=x onerror=alert(2)> and [x](javascript:alert(1))",
   "",
+  "[mixed](JaVaScRiPt:alert(3)) [entity](&#106;avascript:alert(4)) <javascript:alert(5)>",
+  "",
+  "![pic](javascript:alert(6))",
+  "",
 ].join("\n");
 
 describe("frontend/file-viewer markdown preview safety (GST-1743)", () => {
@@ -54,7 +58,7 @@ describe("frontend/file-viewer markdown preview safety (GST-1743)", () => {
 
     expect(html).not.toMatch(/<(img|script|iframe)\b/i);
     expect(html).not.toMatch(/<[^>]*\son[a-z]+\s*=/i);
-    expect(html).not.toContain("javascript:");
+    expect(html).not.toMatch(/(href|src)\s*=\s*["']?\s*(javascript|&#)/i);
     expect(html).not.toMatch(/<a\b/i);
 
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
@@ -62,6 +66,14 @@ describe("frontend/file-viewer markdown preview safety (GST-1743)", () => {
     expect(html).toContain("&lt;iframe");
     expect(html).toContain("<h1");
     expect(html).not.toContain("title: notes");
+  });
+
+  it("keeps a hostile link title inside its escaped attribute", async () => {
+    const renderPreview = await loadPreviewPath();
+    const html = renderPreview(`[u](https://example.com 'x" onmouseover="alert(1)')`);
+
+    expect(html).toContain('title="x&quot; onmouseover=&quot;alert(1)"');
+    expect(html).not.toContain('" onmouseover="');
   });
 
   it("keeps legitimate markdown: links, images, tables, code and line breaks", async () => {
