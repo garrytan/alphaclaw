@@ -899,7 +899,7 @@ describe("git-sync against real git (issue #140)", () => {
       const overflow = sync({ git: defaultBufferGit });
 
       expect(overflow).toMatchObject({ code: "failed", committed: false, pushed: false });
-      expect(overflow.detail).toBe("git status printed more output than the sync can read (over 1 MB)");
+      expect(overflow.detail).toBe("git status printed more output than the sync can read");
 
       const git = createRunner(live);
       const silentFailure = sync({
