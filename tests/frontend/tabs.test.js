@@ -138,10 +138,11 @@ describe("frontend/tabs keyboard model", () => {
     const onSelectTab = vi.fn();
     const tree = Tabs({ tabs: kTabs, activeTab: "overview", onSelectTab, activation: "manual" });
     const focusTargets = kTabs.map(() => ({ focus: vi.fn() }));
+    const [, target] = focusTargets;
     const event = {
       key: "ArrowRight",
       preventDefault: vi.fn(),
-      target: focusTargets[1],
+      target,
       currentTarget: { querySelectorAll: () => focusTargets },
     };
     tree.props.onKeyDown(event);

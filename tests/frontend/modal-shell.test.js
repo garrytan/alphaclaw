@@ -302,6 +302,16 @@ describe("frontend/modal-shell focus trap", () => {
     expect(getFocusableElements(panel)).toEqual([visible]);
   });
 
+  it("treats a radio group as one stop, so Shift+Tab from the checked radio wraps", () => {
+    const keep = makeElement("radio-keep", { type: "radio", name: "reset-mode", checked: false });
+    const rediscover = makeElement("radio-rediscover", { type: "radio", name: "reset-mode", checked: true });
+    const confirm = makeElement("confirm");
+    const panel = makePanel({ controls: [keep, rediscover, confirm] });
+    expect(getFocusableElements(panel)).toEqual([rediscover, confirm]);
+    rediscover.checked = false;
+    expect(getFocusableElements(panel)).toEqual([keep, confirm]);
+  });
+
   it("keeps focus on the panel when it has no controls", () => {
     const panel = makePanel();
     const event = keyEvent("Tab");
