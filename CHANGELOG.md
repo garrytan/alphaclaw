@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.205] - 2026-11-07
+
+Home's Drift Doctor reminder now counts only the files Drift Doctor reviews, so brain pages, logs and other workspace churn no longer put a warning with a five-digit file count at the top of Home.
+
+### Fixed
+- **Home's Drift Doctor reminder counted every file in the workspace.** The reminder said, for example, "18924 files changed since the last review", because the count included every file the drift scan sees: brain pages, logs, memory notes and generated state. Drift Doctor reviews only the injected prompt files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md`, `MEMORY.md`), `README.md`, `hooks/bootstrap/` and `skills/`. The Doctor status now also reports `reviewedChangedFilesCount`, counted against that same set, and the reminder uses it: "Drift Doctor last ran over a week ago. Since then, 3 of the files it reviews (prompt files, skills and README) changed. Run Drift Doctor to check them." When none of those files changed, Home and the Doctor page show no reminder. The workspace-wide `changedFilesCount`, the drift score, scheduled scans and Doctor's fixes are unchanged.
+
+### Tests
+- New cases in `workspace-fingerprint`, `doctor-service`, `doctor-helpers-more` and `home-tab` cover a workspace with thousands of changed brain pages and logs plus a few changed prompt and skill files, and one where only brain pages, logs and memory notes changed. All fail on the previous main.
+
 ## [0.10.204] - 2026-11-07
 
 The check that a browser request comes from the box's own dashboard now compares scheme and port, not just the host name.
