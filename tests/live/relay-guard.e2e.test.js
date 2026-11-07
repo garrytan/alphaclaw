@@ -228,4 +228,55 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
     },
     kTestTimeoutMs,
   );
+
+  // The adversarial path forms from #336's cross-family reads, against the
+  // real pinned tools: the guard must refuse every form OpenClaw or the
+  // kernel would turn into another path, and no private byte may come back.
+  it(
+    "refuses every rewritten path form against the real read and ls tools (grep and glob when the pin offers them)",
+    async () => {
+      const relay = "agent:main:relay-capy-guardforms";
+      const outside = path.join(kRootDir, "outside");
+      fs.mkdirSync(path.join(outside, "pkg"), { recursive: true });
+      fs.writeFileSync(path.join(outside, "leak.txt"), "outside-leak-5521\n");
+      fs.mkdirSync(path.join(workspace, "data"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "data", ".env"), "ENV_SECRET=env-secret-5521\n");
+      fs.writeFileSync(path.join(workspace, "data", "cache.db"), "db-secret-5521\n");
+      fs.rmSync(path.join(workspace, "node_modules"), { force: true });
+      fs.symlinkSync(path.join(outside, "pkg"), path.join(workspace, "node_modules"));
+      const cases = [
+        ["read", { path: "data/.env</arg_value>>>" }],
+        ["read", { path: "data/cache.db</arg_value>>" }],
+        ["read", { path: path.join(workspace, "data", ".env") + "</arg_value>>" }],
+        ["ls", { path: "node_modules/.." }],
+        ["read", { path: "node_modules/../leak.txt" }],
+        ["read", { path: workspace + "/node_modules/../leak.txt" }],
+        ["grep", { pattern: "leak", path: "node_modules/.." }],
+        ["glob", { pattern: "node_modules/../*.txt" }],
+        ["read", { path: "@data/.env" }],
+        ["read", { path: "@node_modules/../leak.txt" }],
+        ["read", { path: " node_modules/../leak.txt" }],
+        ["read", { path: "data/.env\u200b" }],
+        ["read", { path: "file://" + path.join(workspace, "data", ".env") }],
+        ["read", { path: "./node_modules/../leak.txt" }],
+      ];
+      const leaks = ["outside-leak-5521", "env-secret-5521", "db-secret-5521", "leak.txt"];
+      for (const [toolName, args] of cases) {
+        const answer = await runTurn(relay, toolName, args);
+        const label = toolName + " " + JSON.stringify(args);
+        console.log("[live] relay-guard form " + label + ": " + answer.slice(0, 160));
+        for (const leak of leaks) expect(answer, label).not.toContain(leak);
+        // The pin's default tool profile may not offer grep or glob; a tool
+        // that is not offered cannot read anything. read and ls always are.
+        if (answer.startsWith("NOT-OFFERED")) {
+          expect(["grep", "glob"], label).toContain(toolName);
+          continue;
+        }
+        expect(answer, label).toContain("[relay-guard]");
+      }
+      const plain = await runTurn(relay, "read", { path: "notes.txt" });
+      expect(plain).toContain("workspace-ok-7731");
+    },
+    kTestTimeoutMs,
+  );
 });

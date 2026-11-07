@@ -107,7 +107,7 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
   it("contains read and ls to the agent workspace and the log dirs", () => {
     expect(call("read", { path: "notes/status.md" })).toEqual({});
     expect(call("read", { path: path.join(root.workspace, "AGENTS.md") })).toEqual({});
-    expect(call("read", { path: "@notes/status.md" })).toEqual({});
+    expect(blocked(call("read", { path: "@notes/status.md" }))).toBe(true);
     expect(call("read", { path: path.join(root.rootDir, "logs", "openclaw", "gateway.log") })).toEqual({});
     expect(call("ls", {})).toEqual({});
     expect(call("ls", { path: "notes" })).toEqual({});
@@ -258,6 +258,125 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
     expect(blocked(ctxless("read", { path: "/proc/self/environ" }))).toBe(true);
     expect(ctxless("session_status", {})).toEqual({});
     expect(guard.handlers.before_tool_call({ toolName: "exec", params: { command: "id" } }, kMainSession)).toEqual({});
+  });
+
+  // gpt-6.1-sol on #336 (6bce314e), probe 1: path.resolve collapsed ".."
+  // before symlinks were resolved, but the kernel follows the symlink first.
+  it("refuses .. through a workspace symlink, which the kernel resolves outside the workspace", () => {
+    const outside = path.join(root.rootDir, "outside");
+    fs.mkdirSync(path.join(outside, "pkg"), { recursive: true });
+    fs.writeFileSync(path.join(outside, "leak.txt"), "outside-the-workspace\n");
+    fs.symlinkSync(path.join(outside, "pkg"), path.join(root.workspace, "node_modules"));
+    expect(fs.readdirSync(path.join(root.workspace, "node_modules") + "/..")).toContain("leak.txt");
+    expect(blocked(call("ls", { path: "node_modules/.." }))).toBe(true);
+    expect(blocked(call("read", { path: "node_modules/../leak.txt" }))).toBe(true);
+    expect(blocked(call("ls", { path: root.workspace + "/node_modules/.." }))).toBe(true);
+    expect(blocked(call("grep", { pattern: "outside", path: "node_modules/.." }))).toBe(true);
+    expect(blocked(call("glob", { pattern: "*.txt", path: "node_modules/.." }))).toBe(true);
+    expect(blocked(call("glob", { pattern: "node_modules/../*.txt" }))).toBe(true);
+  });
+
+  // Probe 2: OpenClaw repairs a path after before_tool_call, so the guard
+  // checked "data/.env</arg_value>>>" and the tool opened "data/.env".
+  it("refuses a path OpenClaw repairs after the hook, so a repair can never turn it into a private file", () => {
+    expect(blocked(call("read", { path: "data/.env</arg_value>>>" }))).toBe(true);
+    expect(blocked(call("read", { path: "data/cache.db</arg_value>>" }))).toBe(true);
+    expect(blocked(call("read", { path: path.join(root.rootDir, "relay", "secrets.json") + "</arg_value>>" }))).toBe(true);
+    expect(blocked(call("ls", { path: "data</arg_value>>" }))).toBe(true);
+    expect(blocked(call("grep", { pattern: "x", path: "data/.env</arg_value>>" }))).toBe(true);
+    expect(blocked(call("read", { path: "notes/report.docodex" }))).toBe(true);
+    expect(call("read", { path: "notes/status.md" })).toEqual({});
+  });
+
+  // The path the guard checks must be the path the tool opens: every form
+  // OpenClaw or the kernel would rewrite is refused, whatever it points at.
+  it("refuses every non-plain path form in every path tool (adversarial table)", () => {
+    fs.symlinkSync(root.rootDir, path.join(root.workspace, "up"));
+    const forms = [
+      "notes/../AGENTS.md",
+      "./notes/status.md",
+      "notes/./status.md",
+      "notes//status.md",
+      "..",
+      "../.env",
+      "notes/..",
+      "up/../.env",
+      root.workspace + "/../.env",
+      root.workspace + "/./AGENTS.md",
+      "@notes/status.md",
+      "@@notes/status.md",
+      "@" + path.join(root.rootDir, ".env"),
+      "~",
+      "~/.env",
+      " notes/status.md",
+      "notes/status.md ",
+      "notes/status.md\n",
+      "\tnotes/status.md",
+      "notes/\u200bstatus.md",
+      "notes/status.md\u00a0",
+      "\ufeffnotes/status.md",
+      "notes\\status.md",
+      "notes/status.md</arg_value>>",
+      "data/.env</arg_value>>>",
+      "data/report.xlsxodex",
+      "file:///etc/passwd",
+      "FILE:" + path.join(root.rootDir, ".env"),
+      "media://inbound/x.png",
+      "MEDIA:notes/status.md",
+      "data:text/plain,x",
+      "C:\\x",
+    ];
+    for (const form of forms) {
+      for (const [tool, params] of [
+        ["read", { path: form }],
+        ["ls", { path: form }],
+        ["grep", { pattern: "x", path: form }],
+        ["glob", { pattern: "*", path: form }],
+        ["glob", { pattern: form + "/*" }],
+        ["read", { path: "notes/status.md", file_path: form }],
+      ]) {
+        expect(blocked(call(tool, params)), tool + " " + JSON.stringify(params)).toBe(true);
+      }
+    }
+    for (const plain of ["notes/status.md", "AGENTS.md", "notes", "notes/", path.join(root.workspace, "notes", "status.md"), "notes/%2e%2e", "notes/missing.md"]) {
+      expect(call("read", { path: plain }), "read " + plain).toEqual({});
+    }
+    expect(call("ls", {})).toEqual({});
+    expect(call("ls", { path: "." })).toEqual({});
+    expect(call("glob", { pattern: "notes/*.md" })).toEqual({});
+  });
+
+  // Pins the guard to the installed OpenClaw: for every form, the path the
+  // real tool code would open (its repair, then its input resolution) is the
+  // string the guard checked, or the guard refuses the call.
+  it("checks exactly the path the pinned OpenClaw opens, or refuses (contract with the installed dist)", async () => {
+    const dist = path.join(__dirname, "..", "..", "node_modules", "openclaw", "dist");
+    const findExport = async (functionName) => {
+      const file = fs.readdirSync(dist).find((name) => name.endsWith(".mjs") && fs.readFileSync(path.join(dist, name), "utf8").includes("\nfunction " + functionName + "("));
+      expect(file, functionName + " in the OpenClaw dist").toBeTruthy();
+      const mod = await import(path.join(dist, file));
+      const fn = Object.values(mod).find((value) => typeof value === "function" && value.name === functionName);
+      expect(fn, functionName + " exported").toBeTruthy();
+      return fn;
+    };
+    const repair = await findExport("normalizeFileToolPathParam");
+    const resolveInput = await findExport("resolveSandboxInputPath");
+    const opened = (raw) => path.normalize(resolveInput(repair(raw), root.workspace));
+    const forms = [
+      "notes/status.md", "AGENTS.md", "notes", path.join(root.workspace, "AGENTS.md"),
+      "data/.env</arg_value>>>", "data/cache.db</arg_value>>", "notes/x.docodex", "notes/x.PPTXCODEX",
+      "@notes/status.md", "@@notes/status.md", "~/x", "~", "notes/../AGENTS.md", "./AGENTS.md", "notes//status.md",
+      "notes/status.md/", root.workspace + "/../.env",
+    ];
+    let refusedRewrites = 0;
+    for (const raw of forms) {
+      // A trailing slash names the same directory to the kernel and to path.resolve.
+      const checked = (path.isAbsolute(raw) ? raw : path.join(root.workspace, raw)).replace(/(.)\/$/, "$1");
+      if (opened(raw) === checked && !raw.includes("..") && !raw.startsWith("./") && !raw.includes("//")) continue;
+      refusedRewrites += 1;
+      expect(blocked(call("read", { path: raw })), "read " + raw + " opens " + opened(raw)).toBe(true);
+    }
+    expect(refusedRewrites).toBeGreaterThanOrEqual(10);
   });
 
   it("a relay call whose agent workspace cannot be resolved is denied, never allowed", () => {
