@@ -8,6 +8,7 @@ const fetchedUrls = new Set();
 const refreshed = [];
 let visibleInterval = null;
 const readFixtures = new Map();
+const readErrors = new Map();
 let shellFixture = {};
 
 vi.mock("preact/hooks", () => ({
@@ -30,7 +31,7 @@ vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({
     if (enabled) Promise.resolve().then(() => fetcher()).catch(() => {});
     return {
       data: readFixtures.get(key) ?? null,
-      error: null,
+      error: readErrors.get(key) ?? null,
       loading: false,
       refresh: async (options) => {
         refreshed.push([key, options]);
@@ -176,6 +177,7 @@ const kAllowedHomeReads = new Set([
 beforeEach(async () => {
   fetchedUrls.clear();
   readFixtures.clear();
+  readErrors.clear();
   refreshed.length = 0;
   visibleInterval = null;
   shellFixture = kRunningShell;
@@ -207,6 +209,15 @@ describe("frontend/home tab", () => {
       [kHomeReadKeys.incidents, kHomeReadKeys.usage, kHomeReadKeys.cron, kHomeReadKeys.relay].sort(),
     );
     expect(refreshed.every(([, options]) => options?.force === true)).toBe(true);
+  });
+
+  it("does not keep retrying a read the server refused (401 or 403)", async () => {
+    readErrors.set(kHomeReadKeys.usage, Object.assign(new Error("forbidden"), { status: 403 }));
+    readErrors.set(kHomeReadKeys.relay, Object.assign(new Error("signed out"), { status: 401 }));
+    readErrors.set(kHomeReadKeys.cron, Object.assign(new Error("boom"), { status: 500 }));
+    render();
+    await visibleInterval.callback();
+    expect(refreshed.map(([key]) => key).sort()).toEqual([kHomeReadKeys.incidents, kHomeReadKeys.cron].sort());
   });
 
   it("renders no Gateway card", () => {

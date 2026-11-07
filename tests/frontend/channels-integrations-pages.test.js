@@ -164,6 +164,12 @@ describe("frontend/integrations page", () => {
     expect(nodes.props.detail).toBe("Couldn't load nodes");
   });
 
+  it("shows a failed re-read even when an earlier read is cached", () => {
+    reads({ "/api/nodes": { data: { nodes: [] }, error: new Error("spawn failed") } });
+    const nodes = byType(IntegrationsRoute({}), IntegrationLinkRow).find((row) => row.props.title === "Nodes");
+    expect(nodes.props.detail).toBe("Couldn't load nodes");
+  });
+
   it("shows a dash while the counts load", () => {
     reads({});
     const rows = byType(IntegrationsRoute({}), IntegrationLinkRow).map((row) => row.props.detail);

@@ -177,6 +177,24 @@ describe("frontend/home status strip", () => {
     );
   });
 
+  it("spend's last 7 days counts calendar days across a DST change", () => {
+    const daily = [
+      { date: "2026-10-30", totalCost: 1 },
+      { date: "2026-10-31", totalCost: 1 },
+      { date: "2026-11-01", totalCost: 1 },
+      { date: "2026-11-02", totalCost: 1 },
+      { date: "2026-11-03", totalCost: 1 },
+      { date: "2026-11-04", totalCost: 1 },
+      { date: "2026-11-05", totalCost: 1 },
+      { date: "2026-11-06", totalCost: 1 },
+    ];
+    const usage = { totals: { totalCost: 8, turnCount: 8 }, daily };
+    const lateNov6 = new Date(2026, 10, 6, 23, 30).getTime();
+    expect(cell(buildStripCells({ chip: kRunning, usage: { data: usage }, nowMs: lateNov6 }), "spend").detail).toBe(
+      "$7.00 last 7 days · 8 turns",
+    );
+  });
+
   it("spend cell: loaded, loading, error, gateway down", () => {
     expect(cell(loaded(), "spend")).toMatchObject({ value: "$76.73", detail: "$19.55 last 7 days · 967 turns" });
     expect(cell(buildStripCells({ chip: kRunning }), "spend")).toMatchObject({ value: "—", loading: true });
