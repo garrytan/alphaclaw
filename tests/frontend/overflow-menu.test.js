@@ -92,6 +92,34 @@ describe("frontend/overflow-menu dismissal", () => {
     expect(spy).toHaveBeenCalledWith("keydown", expect.any(Function), true);
   });
 
+  it("leaves Escape to a dialog that holds focus over the menu", () => {
+    const body = {};
+    vi.stubGlobal("document", { body, activeElement: { id: "dialog-field" } });
+    const trigger = { focus: vi.fn() };
+    const onClose = openMenu({ inside: false, trigger });
+    const event = Object.assign(new Event("keydown", { cancelable: true }), { key: "Escape" });
+    target.dispatchEvent(event);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(trigger.focus).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("claims Escape when focus is inside the menu or on the page body", () => {
+    const body = {};
+    const doc = { body, activeElement: body };
+    vi.stubGlobal("document", doc);
+    const onBody = openMenu({ inside: false });
+    target.dispatchEvent(keyEvent("Escape"));
+    expect(onBody).toHaveBeenCalledTimes(1);
+    cleanups.forEach((cleanup) => cleanup?.());
+    cleanups = [];
+    harness.effects = [];
+    doc.activeElement = { id: "menu-item" };
+    const inside = openMenu({ inside: true });
+    target.dispatchEvent(keyEvent("Escape"));
+    expect(inside).toHaveBeenCalledTimes(1);
+  });
+
   it("stays open for clicks inside the menu", () => {
     const onClose = openMenu({ inside: true });
     target.dispatchEvent(new Event("click"));

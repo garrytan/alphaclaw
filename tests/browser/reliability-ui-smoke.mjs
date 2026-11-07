@@ -96,7 +96,9 @@ try {
   await expandAccount();
   await page.getByText("Watching", { exact: true }).waitFor();
   fixture.state.gmailError = true;
-  const gmailBox = page.locator('[role="button"]').filter({ has: page.getByText("🔔 Gmail", { exact: true }) });
+  const gmailBox = page
+    .getByRole("button", { name: "Gmail: open webhook", exact: true })
+    .locator("xpath=ancestor::div[contains(@class, 'justify-between')][1]");
   await gmailBox.locator("label.ac-toggle").click();
   await hasText("Couldn't refresh Gmail watch status. Showing the last known status.");
   assert.equal(fixture.state.gmail.enabled, false);

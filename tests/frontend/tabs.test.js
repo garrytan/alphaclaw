@@ -134,6 +134,24 @@ describe("frontend/tabs keyboard model", () => {
     expect(focusTargets[0].focus).toHaveBeenCalled();
   });
 
+  it("with manual activation, arrows move focus from the focused tab without selecting", () => {
+    const onSelectTab = vi.fn();
+    const tree = Tabs({ tabs: kTabs, activeTab: "overview", onSelectTab, activation: "manual" });
+    const focusTargets = kTabs.map(() => ({ focus: vi.fn() }));
+    const event = {
+      key: "ArrowRight",
+      preventDefault: vi.fn(),
+      target: focusTargets[1],
+      currentTarget: { querySelectorAll: () => focusTargets },
+    };
+    tree.props.onKeyDown(event);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(onSelectTab).not.toHaveBeenCalled();
+    expect(focusTargets[2].focus).toHaveBeenCalled();
+    tabButtons(tree)[2].props.onclick();
+    expect(onSelectTab).toHaveBeenCalledWith("sessions");
+  });
+
   it("leaves other keys to the browser", () => {
     const onSelectTab = vi.fn();
     const { event } = keyDown(Tabs({ tabs: kTabs, activeTab: "tools", onSelectTab }), "Tab");
@@ -147,6 +165,7 @@ describe("frontend/watchdog console tabs", () => {
     const tree = WatchdogConsoleCard({ activeConsoleTab: "logs", logs: "line", loadingLogs: false });
     const tablist = collect(tree).find((node) => node.type === Tabs);
     expect(tablist.props.variant).toBe("segmented");
+    expect(tablist.props.activation).toBe("manual");
     expect(tablist.props.tabs.map((tab) => tab.label)).toEqual(["Logs", "Terminal"]);
     const panels = collect(tree).filter((node) => node.props?.role === "tabpanel");
     expect(panels.map((panel) => panel.props.id)).toEqual([
