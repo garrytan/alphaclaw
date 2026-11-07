@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.181] - 2026-11-07
+
+Design tokens from the /design-consultation (ALPH-69, GST-1697). Nine colour values in `theme.css` move to meet the contrast floors DESIGN.md already states, and DESIGN.md records the "Instrument panel" direction and Garry's font decision. No component code changes.
+
+### Changed
+- **Input borders are visible.** `--field-border-contrast` goes from a 13% white wash to #626d7c in dark (1.48 to 3.26:1) and from a 15% black wash to #7a8491 in light (1.41 to 3.33:1), the WCAG 1.4.11 floor for a control's only edge.
+- **File viewer syntax colours.** Comments go to #8b949e in dark (3.56 to 5.57:1) and #5f6873 in light (2.26 to 4.96:1). In light, keywords go to #b91c1c (4.23 to 5.67:1) and numbers to #0369a1 (3.59 to 5.20:1).
+- **A focused input keeps a visible edge.** Its border now turns to the accent colour (12.1:1 dark, 4.8:1 light) instead of a 28% or 35% wash, which would have read fainter than the new resting border.
+- **Completed-step connectors** use `--accent-dim` #3f93a8 in light (1.43 to 3.15:1), so a finished step reads as a state.
+- **Light gateway dot** goes to #15803d (2.94 to 4.47:1 on the sidebar).
+- **DESIGN.md** gains the direction (cyan means act here, one solid button per page, status always carries a word, mono only for what an operator could paste into a terminal, motion limits) and records that JetBrains Mono is self-hosted and interface text stays on the system sans stack.
+
 ## [0.10.180] - 2026-11-07
 
 Security hotfix for a stored XSS in the Setup UI's Browse file viewer (GST-1743, found by the ALPH-71 CSO audit).
