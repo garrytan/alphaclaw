@@ -130,6 +130,24 @@ describe("chat session list (ALPH-68)", () => {
       },
     });
     expect(await down.resolve("agent:main:relay-capy-x")).toBeNull();
+    const slow = createSessionListCache({ requestGateway: () => new Promise(() => {}), policyReadMs: 20 });
+    expect(await slow.resolve("agent:main:main")).toBeNull();
+  });
+
+  it("reads a cold cache before the gateway ever answered, and answers from that read even when an invalidation raced it", async () => {
+    const telegramMain = { key: "agent:main:main", deliveryContext: { channel: "telegram" } };
+    let release;
+    const cache = createSessionListCache({
+      requestGateway: () =>
+        new Promise((resolve) => {
+          release = () => resolve({ sessions: [telegramMain] });
+        }),
+    });
+    const resolving = cache.resolve("agent:main:main");
+    cache.invalidate();
+    release();
+    expect(resolveSessionPolicy(await resolving, "agent:main:main")).toMatchObject({ readOnly: true });
+    expect(cache.get("agent:main:main")).toBeNull();
   });
 
   it("starts a new read after an invalidation instead of joining the one it raced", async () => {
@@ -321,6 +339,23 @@ describe("chat bridge session watching (ALPH-68, d4)", () => {
     const failed = await browser.waitFor((m) => m.type === "send-failed");
     expect(failed).toMatchObject({ code: "read_only_session", retryable: false, notSubmitted: true });
     expect(harness.requests.some((r) => r.method === "chat.send")).toBe(false);
+  });
+
+  it("settles a retry of an already submitted message through dedupe, even after its session turned read-only", async () => {
+    const { kit, harness, browser } = await setup();
+    await kit.startRun({ harness, browser, sessionKey: "agent:main:main", runId: "r-1", clientMsgId: "c-retry" });
+    const previous = harness.onRequest;
+    harness.onRequest = (frame) => {
+      if (frame.method === "sessions.list") {
+        harness.respond(frame.id, { sessions: [{ key: "agent:main:main", deliveryContext: { channel: "telegram" } }] });
+        return;
+      }
+      previous(frame);
+    };
+    browser.send({ type: "message", sessionKey: "agent:main:main", content: "go", clientMsgId: "c-retry" });
+    await browser.waitFor((m) => m.type === "ack" && m.clientMsgId === "c-retry", "re-ack");
+    expect(browser.messages.some((m) => m.type === "send-failed" && m.code === "read_only_session")).toBe(false);
+    expect(harness.requests.filter((r) => r.method === "chat.send")).toHaveLength(1);
   });
 
   it("pages older history through the anchor read and the gateway cursor", async () => {
