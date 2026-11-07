@@ -56,9 +56,24 @@ import { WatchdogOverseerCard } from "../../lib/public/js/components/watchdog-ta
 import { WatchdogIncidentsCard } from "../../lib/public/js/components/watchdog-tab/incidents/index.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
-import { Gateway } from "../../lib/public/js/components/gateway.js";
+import { GatewayStateLabel } from "../../lib/public/js/components/gateway.js";
 import { WatchdogRestartEvidence } from "../../lib/public/js/components/watchdog-tab/restart-evidence.js";
 import { gatewayShellStore } from "../../lib/public/js/components/restart-progress-card.js";
+import { RoutePageHeader } from "../../lib/public/js/components/page-header.js";
+import {
+  GatewayDetails,
+  GatewayRepairControl,
+  GatewayRestartControl,
+} from "../../lib/public/js/components/gateway.js";
+import { WatchdogResourcesCard } from "../../lib/public/js/components/watchdog-tab/resources/index.js";
+import { WatchdogConsoleCard } from "../../lib/public/js/components/watchdog-tab/console/index.js";
+import { WatchdogBoxCard } from "../../lib/public/js/components/watchdog-tab/box/index.js";
+import { WatchdogSettingsCard } from "../../lib/public/js/components/watchdog-tab/settings/index.js";
+import { WatchdogAutotuneCard } from "../../lib/public/js/components/watchdog-tab/autotune/index.js";
+import { WatchdogRescueSessionCard } from "../../lib/public/js/components/watchdog-tab/rescue-session-card.js";
+import { WatchdogStatusDetails } from "../../lib/public/js/components/watchdog-tab/status-details.js";
+import { WatchdogNarrativeCard } from "../../lib/public/js/components/watchdog-tab/narrative-card.js";
+import { WatchdogDegradedCard } from "../../lib/public/js/components/watchdog-tab/degraded-card.js";
 
 const harness = preactHooks.__harness;
 
@@ -159,7 +174,7 @@ describe("frontend/watchdog tab (safe-mode ownership + upstream-merge seams)", (
     // Even with safeMode true, the standalone banner must NOT render — the
     // server-driven Gateway card presents safe_mode itself.
     expect(findAllByType(tree, WatchdogSafeModeBanner)).toHaveLength(0);
-    expect(findAllByType(tree, Gateway)).toHaveLength(1);
+    expect(findAllByType(tree, GatewayStateLabel)).toHaveLength(1);
   });
 
   it("a failed restart gets a 'Restart evidence' disclosure that loads the redacted tail on open — nothing while running or idle", async () => {
@@ -392,3 +407,190 @@ describe("frontend/watchdog tab (lifted overseer state feeds both cards)", () =>
     expect(findAllByType(tree, WatchdogIncidentsCard)).toHaveLength(1);
   });
 });
+
+describe("frontend/health briefing (ALPH-69 slot map)", () => {
+  const handlers = () => ({
+    refreshResources: vi.fn(),
+    setMemoryExpanded: vi.fn(),
+    onSelectIncidentsTab: vi.fn(),
+    onToggleIncident: vi.fn(),
+    onLoadMoreIncidents: vi.fn(),
+    onSetIncludeRoutine: vi.fn(),
+    refreshEvents: vi.fn(),
+    setStickToBottom: vi.fn(),
+    handleSelectConsoleTab: vi.fn(),
+    onRestartTerminalSession: vi.fn(),
+    onCopyAll: vi.fn(),
+    setBoxExpanded: vi.fn(),
+    refreshBox: vi.fn(),
+    onRetryLoadSettings: vi.fn(),
+    onToggleAutoRepair: vi.fn(),
+    onToggleNotifications: vi.fn(),
+    onToggleNotificationsVerbose: vi.fn(),
+    onRepair: vi.fn(),
+    onViewLogs: vi.fn(),
+    onResumeChannels: vi.fn(),
+  });
+
+  let state;
+  beforeEach(() => {
+    harness.reset();
+    gatewayShellStore.reset();
+    state = { currentWatchdogStatus: { phase: "healthy" }, incidents: [], incidentsLoaded: true, ...handlers() };
+    useWatchdogTab.mockImplementation(() => state);
+  });
+
+  it("puts the health header above the page body", () => {
+    const tree = renderTab({ watchdogStatus: {} });
+    const children = [tree.props.children].flat(Infinity).filter((child) => child && typeof child === "object");
+    expect(children[0].type).toBe(RoutePageHeader);
+    expect(children[0].props.routeId).toBe("health");
+  });
+
+  it("renders every slot and hands each one the hook's own handlers", () => {
+    const onRestartGateway = vi.fn();
+    const tree = renderTab({ watchdogStatus: {}, onRestartGateway });
+    const one = (type) => {
+      const found = findAllByType(tree, type);
+      expect(found).toHaveLength(1);
+      return found[0].props;
+    };
+    const resources = one(WatchdogResourcesCard);
+    expect(resources.onRetry).toBe(state.refreshResources);
+    expect(resources.onSetMemoryExpanded).toBe(state.setMemoryExpanded);
+    const incidents = one(WatchdogIncidentsCard);
+    expect(incidents.onSelectTab).toBe(state.onSelectIncidentsTab);
+    expect(incidents.onToggleIncident).toBe(state.onToggleIncident);
+    expect(incidents.onLoadMore).toBe(state.onLoadMoreIncidents);
+    expect(incidents.onSetIncludeRoutine).toBe(state.onSetIncludeRoutine);
+    expect(incidents.onRefresh).toBe(state.refreshEvents);
+    const console = one(WatchdogConsoleCard);
+    expect(console.onSetStickToBottom).toBe(state.setStickToBottom);
+    expect(console.onSelectConsoleTab).toBe(state.handleSelectConsoleTab);
+    expect(console.onRestartTerminalSession).toBe(state.onRestartTerminalSession);
+    expect(console.onCopyAll).toBe(state.onCopyAll);
+    const box = one(WatchdogBoxCard);
+    expect(box.onSetExpanded).toBe(state.setBoxExpanded);
+    expect(box.onRetry).toBe(state.refreshBox);
+    const settings = one(WatchdogSettingsCard);
+    expect(settings.onRetryLoadSettings).toBe(state.onRetryLoadSettings);
+    expect(settings.onToggleAutoRepair).toBe(state.onToggleAutoRepair);
+    expect(settings.onToggleNotifications).toBe(state.onToggleNotifications);
+    expect(settings.onToggleNotificationsVerbose).toBe(state.onToggleNotificationsVerbose);
+    const overseer = one(WatchdogOverseerCard);
+    expect(overseer.onRepair).toBe(state.onRepair);
+    expect(overseer.onRestartGateway).toBe(onRestartGateway);
+    expect(overseer.onResumeChannels).toBe(state.onResumeChannels);
+    expect(one(WatchdogAutotuneCard).onRestartGateway).toBe(onRestartGateway);
+    one(WatchdogRescueSessionCard);
+    one(WatchdogRestartEvidence);
+    one(WatchdogStatusDetails);
+    one(WatchdogNarrativeCard);
+    one(WatchdogDegradedCard);
+    one(GatewayDetails);
+    const actions = findAllByType(tree, RoutePageHeader)[0].props.actions;
+    expect(findAllByType(actions, GatewayRestartControl)).toHaveLength(1);
+    expect(findAllByType(actions, GatewayRepairControl)).toHaveLength(1);
+    const viewLogs = findAllByType(actions, ActionButton).find((button) => button.props.idleLabel === "View logs");
+    viewLogs.props.onClick();
+    expect(state.onViewLogs).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Recent boots and Watchdog settings in closed disclosures, settings last", () => {
+    const tree = renderTab({ watchdogStatus: {} });
+    const disclosures = findAllByType(tree, "details");
+    expect(disclosures.map((node) => node.props["data-disclosure"])).toEqual(["boots", "settings"]);
+    for (const node of disclosures) expect(node.props.open).toBeUndefined();
+    expect(findAllByType(disclosures[0], WatchdogBoxCard)).toHaveLength(1);
+    expect(findAllByType(disclosures[1], WatchdogSettingsCard)).toHaveLength(1);
+    expect(findAllByType(disclosures[1], WatchdogAutotuneCard)).toHaveLength(1);
+  });
+
+  it("says Repairing the gateway while a Repair from the header runs", () => {
+    let tree = renderTab({ watchdogStatus: {} });
+    const repair = findAllByType(findAllByType(tree, RoutePageHeader)[0].props.actions, GatewayRepairControl)[0];
+    repair.props.onBusyChange(true);
+    tree = renderTab({ watchdogStatus: {} });
+    let headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("Repairing the gateway.");
+    repair.props.onBusyChange(false);
+    tree = renderTab({ watchdogStatus: {} });
+    headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("Healthy. No incidents today.");
+  });
+
+  it("does not report a live state when the snapshot is stale or AlphaClaw is offline", () => {
+    gatewayShellStore.publish({ hasStatus: true, statusFreshness: { mode: "stale" } });
+    let tree = renderTab({ watchdogStatus: {} });
+    let headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("Gateway status is out of date. Showing the last known status.");
+    harness.reset();
+    gatewayShellStore.publish({ hasStatus: true, connectivityMode: "offline", statusFreshness: { mode: "fresh" } });
+    tree = renderTab({ watchdogStatus: {} });
+    headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("AlphaClaw is not answering. Showing the last known status.");
+  });
+
+  it("keeps the phone's More menu open for a click in Repair's confirm dialog, so a failure stays visible", () => {
+    const actionsOf = (tree) => findAllByType(tree, RoutePageHeader)[0].props.actions;
+    const moreOf = (tree) => collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more");
+    const toggleOf = (tree) =>
+      collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more-toggle");
+    let tree = renderTab({ watchdogStatus: {} });
+    toggleOf(tree).props.onclick();
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("true");
+    const listeners = {};
+    const previousWindow = globalThis.window;
+    globalThis.window = {
+      addEventListener: (type, fn) => {
+        listeners[type] = fn;
+      },
+      removeEventListener: () => {},
+    };
+    try {
+      for (const effect of harness.effects) {
+        try {
+          effect();
+        } catch {}
+      }
+    } finally {
+      globalThis.window = previousWindow;
+    }
+    const inDialog = { closest: (selector) => (selector.includes("role=dialog") ? {} : null) };
+    listeners.click({ target: inDialog });
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("true");
+    listeners.click({ target: { closest: () => null } });
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("false");
+  });
+
+  it("shows Repair's result under the header, outside the phone menu, and View logs closes the menu", () => {
+    const actionsOf = (tree) => findAllByType(tree, RoutePageHeader)[0].props.actions;
+    const moreOf = (tree) => collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more");
+    let tree = renderTab({ watchdogStatus: {} });
+    collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more-toggle").props.onclick();
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("true");
+
+    findAllByType(actionsOf(tree), GatewayRepairControl)[0].props.onOutcomeChange("Not started: gateway busy");
+    tree = renderTab({ watchdogStatus: {} });
+    const alert = collectNodes(tree).find((node) => String(node.props?.class || "").includes("health-repair-outcome"));
+    expect(alert.props.role).toBe("alert");
+    expect(collectText(alert).join("").trim()).toBe("Not started: gateway busy");
+    expect(collectNodes(actionsOf(tree)).some((node) => node === alert)).toBe(false);
+
+    findAllByType(actionsOf(tree), ActionButton).find((button) => button.props.idleLabel === "View logs").props.onClick();
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("false");
+    expect(state.onViewLogs).toHaveBeenCalledTimes(1);
+  });
+
+  it("leads with the headline sentence", () => {
+    const tree = renderTab({ watchdogStatus: {} });
+    const headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("Healthy. No incidents today.");
+  });
+});
+

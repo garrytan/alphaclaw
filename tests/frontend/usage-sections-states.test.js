@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { SessionsSection } from "../../lib/public/js/components/usage-tab/sessions-section.js";
 import { OverviewSection } from "../../lib/public/js/components/usage-tab/overview-section.js";
 import { SegmentedControl } from "../../lib/public/js/components/segmented-control.js";
+import { EmptyState } from "../../lib/public/js/components/empty-state.js";
+import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 
 // Stateless components: invoke them directly and walk the vnode tree
 // (saved-toggle-component.test.js pattern) — no DOM renderer needed.
@@ -102,7 +104,7 @@ describe("frontend/usage-tab overview-section initial load", () => {
         periodSummary: kPeriodSummary,
       }),
     );
-    expect(collectText(tree).join(" ")).toContain("Loading usage summary...");
+    expect(collectText(tree).join(" ")).toContain("Loading…");
     const controls = collectNodes(tree).filter(
       (vnode) => vnode.type === SegmentedControl,
     );
@@ -119,8 +121,41 @@ describe("frontend/usage-tab overview-section initial load", () => {
         periodSummary: kPeriodSummary,
       }),
     );
-    expect(collectText(refreshed).join(" ")).not.toContain(
-      "Loading usage summary...",
+    expect(collectText(refreshed).join(" ")).not.toContain("Loading…");
+  });
+});
+
+describe("frontend/usage-tab empty and error states (ALPH-69)", () => {
+  const kPeriod = {
+    today: { tokens: 0, cost: 0 },
+    week: { tokens: 0, cost: 0 },
+    month: { tokens: 0, cost: 0 },
+  };
+
+  it("shows the EmptyState instead of a bare chart axis when there is no usage", () => {
+    const tree = expandTree(OverviewSection({ summary: { totals: {}, daily: [] }, periodSummary: kPeriod }));
+    const empty = collectNodes(tree).find((node) => node.type === EmptyState);
+    expect(empty.props).toMatchObject({
+      title: "No usage yet",
+      body: "Spend appears here after your agents' first turns.",
+    });
+    expect(collectNodes(tree).some((node) => node.type === "canvas")).toBe(false);
+  });
+
+  it("shows the read's error with Retry, never the chart", () => {
+    const onRetry = () => {};
+    const tree = expandTree(
+      OverviewSection({ summary: { totals: { turnCount: 3 } }, summaryError: new Error("down"), onRetry, periodSummary: kPeriod }),
     );
+    const chip = collectNodes(tree).find((node) => node.type === InlineErrorChip);
+    expect(chip.props.headline).toBe("Couldn't load usage.");
+    expect(chip.props.onRetry).toBe(onRetry);
+    expect(collectNodes(tree).some((node) => node.type === "canvas")).toBe(false);
+  });
+
+  it("gives Sessions its own empty state", () => {
+    const tree = expandTree(SessionsSection({ sessions: [] }));
+    const empty = collectNodes(tree).find((node) => node.type === EmptyState);
+    expect(empty.props.title).toBe("No sessions yet");
   });
 });

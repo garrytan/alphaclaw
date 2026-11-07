@@ -69,9 +69,22 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await page.getByRole("button", { name: "duration", exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: path.join(artifacts, "history-mobile.png"), fullPage: true });
+  // The overview (scheduler status, calendar, recent runs across jobs) stays
+  // reachable on a phone: below the list in the list view.
+  await page.goto(`${fixture.url}/cron`);
+  const firstJob = page.locator(".cron-list-group-items .cron-list-item").first();
+  await firstJob.waitFor();
+  const totalJobs = page.getByText("Total jobs", { exact: true });
+  await totalJobs.waitFor();
+  assert.equal(await totalJobs.isVisible(), true);
+  const listBox = await firstJob.boundingBox();
+  const overviewBox = await totalJobs.boundingBox();
+  assert.ok(overviewBox.y > listBox.y, "the list comes first, the overview below it");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.screenshot({ path: path.join(artifacts, "overview-mobile.png"), fullPage: true });
   assert.deepEqual(errors, []);
   assert.equal(fixture.requests.some((request) => request.method !== "GET"), false);
-  console.log("PASS: pinned runtime history, duration chart, status filter, range, unavailable/retry, mobile, no page errors or mutations");
+  console.log("PASS: pinned runtime history, duration chart, status filter, range, unavailable/retry, mobile, overview on a phone, no page errors or mutations");
 } finally {
   await browser?.close();
   await fixture?.close();

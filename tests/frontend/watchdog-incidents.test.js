@@ -219,8 +219,8 @@ describe("frontend/watchdog incidents card", () => {
       incidentsError: null,
     });
     const text = treeText(tree);
-    expect(text).toContain("Loading incidents...");
-    expect(text).not.toContain("No incidents recorded");
+    expect(text).toContain("Loading…");
+    expect(text).not.toContain("No incidents in the last 30 days");
   });
 
   it("renders the error chip with Retry when the first load fails", () => {
@@ -236,7 +236,7 @@ describe("frontend/watchdog incidents card", () => {
     expect(chips[0].props.onRetry).toBe(onRefresh);
     const text = treeText(tree);
     expect(text).toContain("Couldn't load incidents.");
-    expect(text).not.toContain("No incidents recorded");
+    expect(text).not.toContain("No incidents in the last 30 days");
   });
 
   it("keeps the stale list visible with a refresh-failed note", () => {
@@ -259,9 +259,8 @@ describe("frontend/watchdog incidents card", () => {
       incidentsLoaded: true,
       incidentsError: null,
     });
-    expect(treeText(tree)).toContain(
-      "No incidents recorded — the watchdog is quiet.",
-    );
+    expect(treeText(tree)).toContain("No incidents in the last 30 days");
+    expect(treeText(tree)).toContain("The watchdog has not had to step in.");
     expect(findAllByType(tree, InlineErrorChip).length).toBe(0);
   });
 
