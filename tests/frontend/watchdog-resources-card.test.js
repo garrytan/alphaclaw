@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   WatchdogResourcesCard,
   buildCapacityHeaderModel,
+  buildResourceMeters,
   buildMemoryTrendModel,
 } from "../../lib/public/js/components/watchdog-tab/resources/index.js";
 import { ResourceBar } from "../../lib/public/js/components/watchdog-tab/resource-bar.js";
@@ -76,9 +77,10 @@ const renderCard = (props = {}) => expandTree(WatchdogResourcesCard(props));
 describe("frontend/watchdog resources card", () => {
   it("keeps the card frame while loading instead of unmounting", () => {
     const tree = renderCard({ resources: null, error: null });
-    // The frame (root div) is present with a scoped loading line.
-    expect(collectNodes(tree).some((n) => n.type === "div")).toBe(true);
-    expect(treeText(tree)).toContain("Loading system resources...");
+    // The section frame is present with a scoped loading line.
+    expect(collectNodes(tree).some((n) => n.type === "section")).toBe(true);
+    expect(treeText(tree)).toContain("Resources");
+    expect(treeText(tree)).toContain("Loading…");
     expect(findAllByType(tree, ResourceBar).length).toBe(0);
   });
 
@@ -89,7 +91,7 @@ describe("frontend/watchdog resources card", () => {
     expect(chips.length).toBe(1);
     expect(chips[0].props.onRetry).toBe(onRetry);
     expect(treeText(tree)).toContain("Couldn't load system resources.");
-    expect(treeText(tree)).not.toContain("Loading system resources...");
+    expect(treeText(tree)).not.toContain("Loading…");
   });
 
   it("keeps stale bars on screen with a refresh-failed note", () => {
@@ -116,8 +118,10 @@ describe("frontend/watchdog resources card", () => {
       memoryExpanded: true,
     });
     const bars = findAllByType(tree, ResourceBar);
-    expect(bars.length).toBe(1);
+    expect(bars.length).toBe(3);
+    expect(bars[0].props.label).toBe("Memory");
     expect(bars[0].props.expanded).toBe(true);
+    expect(bars[1].props.expanded).toBe(false);
     expect(bars[0].props.segments).toBeUndefined();
     expect(treeText(tree)).toContain("Process RSS counts shared pages");
     expect(treeText(tree)).not.toContain("Other 640 B");
@@ -421,3 +425,42 @@ describe("memory budget source (ALPH-22)", () => {
   });
 });
 
+
+describe("buildResourceMeters (Health meters, ALPH-69)", () => {
+  it("builds memory with the gateway share, disk with its path and CPU of cores", () => {
+    const meters = buildResourceMeters({
+      ...kResources,
+      gatewayMemory: { process: { workerRssBytes: 512 } },
+    });
+    expect(meters.map((meter) => meter.key)).toEqual(["memory", "disk", "cpu"]);
+    expect(meters[0].detail).toMatch(/ · gateway /);
+    expect(meters[1].detail).toMatch(/ on \/data$/);
+    expect(meters[2].detail).toBe("5% of 2 cores");
+  });
+
+  it("hides CPU instead of showing 0% when the percent is unknown", () => {
+    const meters = buildResourceMeters({ ...kResources, cpu: { percent: null, cores: 8 } });
+    expect(meters.map((meter) => meter.key)).toEqual(["memory", "disk"]);
+    expect(buildResourceMeters(null)).toEqual([]);
+  });
+
+  it("renders a role=meter with its range and the value as text", () => {
+    const tree = expandTree(ResourceBar({ label: "Disk", percent: 42.25, detail: "42 GB of 100 GB" }));
+    const meter = collectNodes(tree).find((node) => node.props?.role === "meter");
+    expect(meter.props).toMatchObject({
+      "aria-valuenow": "42.3",
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-label": "Disk",
+    });
+    expect(treeText(tree)).toContain("42 GB of 100 GB");
+  });
+
+  it("labels the memory meter with a toggle that announces its state", () => {
+    const onToggle = () => {};
+    const tree = expandTree(ResourceBar({ label: "Memory", percent: 10, detail: "x", expanded: true, onToggle }));
+    const button = collectNodes(tree).find((node) => node.type === "button");
+    expect(button.props["aria-expanded"]).toBe("true");
+    expect(button.props.onclick).toBe(onToggle);
+  });
+});
