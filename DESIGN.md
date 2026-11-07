@@ -8,7 +8,7 @@ Status of each part of this document:
 |---|---|
 | Tokens, status tones, Badge and ActionButton on tokens, contrast floor | PR 1a |
 | Direction, colour budget, motion rules; token fixes for code colours, field borders, light accent-dim and the light green dot | Design consultation token PR |
-| Typography switch (sans for UI text, mono for data) and the type scale applied | PR 1b |
+| Typography switch (sans for UI text, mono for data) and the type scale applied | PR 1b (shipped) |
 | Accessible primitives (ModalShell dialog semantics, Tabs, SegmentedControl, focus ring) | PR 1c |
 | Navigation names and grouping | PR 2b |
 | General split into Home and Integrations | PR 3a |
@@ -102,7 +102,7 @@ Tailwind opacity modifiers such as `bg-accent/20` do not work on these colours, 
 
 ## Type
 
-The scale has six sizes. Today the UI is all monospace at 13 px; PR 1b switches interface text to the system sans stack and applies this scale. Until then the tokens exist but are not applied broadly.
+The scale has six sizes. PR 1b switched interface text to the system sans stack and applied the scale. Body text is 13 px (`--font-size-small`), and every font size in `theme.css` and `shell.css` is a `--font-size-*` token. Tailwind's `text-xs` (12 px) and `text-sm` (14 px) sit on the scale and stay valid. Arbitrary sizes such as `text-[11px]` and the off-scale `text-lg` and `text-2xl` are gone from the Setup UI outside `#/chat` and `#/relay`, and `tests/frontend/typography.test.js` fails on a new one.
 
 | Size | Token | Tailwind | Line height | Use |
 |---|---|---|---|---|
@@ -115,21 +115,28 @@ The scale has six sizes. Today the UI is all monospace at 13 px; PR 1b switches 
 
 Weights are 400 for text, 500 for labels and buttons, and 600 for titles. Use no other sizes.
 
-Typography decision (Garry's decision 1, ships in PR 1b). Interface text uses the system sans stack and monospace stays for data, meaning ids, paths, versions, keys, hashes, logs and code.
+### Families (decision 1, shipped in PR 1b)
 
-| Role | Stack | Notes |
-|---|---|---|
-| Interface (`--font-sans`) | `ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif` | No download. SF Pro on macOS and iOS, Segoe UI on Windows, Roboto on Android. The deliberate exception to "pick a real typeface": on an operate surface read at 13 to 14 px, the native face renders best, and the identity is carried by the mono, the cyan and the wolf. |
-| Data (`--font-mono`) | `"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace` | Ids, paths, versions, model refs, env keys, pids, durations, timestamps, logs, code and the wordmark. |
+Interface text uses the system sans stack, with no webfont, and monospace stays for data. The mono face is self-hosted.
+
+| Role | Token | Tailwind | Stack | Notes |
+|---|---|---|---|---|
+| Interface | `--font-sans` | `font-sans` (the body default) | `ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif` | No download. SF Pro on macOS and iOS, Segoe UI on Windows, Roboto on Android. On an operate surface read at 13 to 14 px the native face renders best, and the identity is carried by the mono, the cyan and the wolf. |
+| Data | `--font-mono` | `font-mono` | `"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace` | Ids, paths, versions, model refs, env keys, pids, durations, timestamps, logs, code and the wordmark. |
 
 Rules for the two voices:
 
-- If an operator could paste it into a terminal or a config file, it is mono. Everything else is sans.
-- Mono inside sans copy is set one step down (13 px inside 14 px copy, 12 px inside captions) so the two match optically.
-- Numbers that update in place (spend, counts, memory) use `font-variant-numeric: tabular-nums` in sans, so a status strip does not jitter.
+- If an operator could paste it into a terminal or a config file, it is mono. Everything else is sans. That covers ids (agent, job, run, session keys), paths, versions and pins, hashes, model refs such as `openai/gpt-5`, env var names and values, keys and tokens, pids and ports, durations, cron expressions, log lines, code and terminal output. A model shown by its friendly name is sans; shown as its raw ref, it is mono.
+- The wordmark (`.ac-wordmark`) is the one mono use that is not data.
+- Mark data with `font-mono` or a `<code>`, `<pre>`, `<kbd>` or `<samp>` element (Tailwind's base styles give those the mono token). In hand-written CSS use `font-family: var(--font-mono)`. Never name a face directly.
+- Mono inside sans copy is set one step down (13 px inside 14 px copy, 12 px inside captions) so the two match optically. `theme.css` does this for inline `<code>`, `<kbd>` and `<samp>`, and an explicit `text-*` class still wins.
+- Numbers that update in place (spend, counts, memory) use `tabular-nums` (`font-variant-numeric: tabular-nums`) in sans, so a status strip does not jitter. `SummaryStatCard` values have it, and `monospace=${true}` makes a data value mono.
 - Sidebar group labels are sentence case at 12 px, weight 600, muted. No uppercase tracking.
+- Fixed mono surfaces are the log viewer (`<pre>`), the terminal (xterm sets its own monospace), the file tree (`.file-tree`), the file editor and its highlight layer, frontmatter keys, git hashes and changed paths, Envars names and values, the cron expression and ID fields, the gateway uptime and the version line in the status bar.
+- Inputs inherit sans. An input whose value is data (a key, a value, a path, a token) adds `font-mono`.
+- `#/chat` and `#/relay` keep their own code-block styles; their message text now inherits the sans body.
 
-Font loading (Garry's decision, 2026-11-07). JetBrains Mono is self-hosted and the Google Fonts link in `setup.html` and `login.html` goes, because a third-party request from a self-hosted box leaks a page view and fails offline. The files are the upright variable woff2 (latin 31 KB, latin-ext 12 KB loaded only when those characters appear), SIL OFL 1.1 with the licence text beside them, the same files the OpenClaw Control UI already serves. Interface text stays on the system sans stack, so no sans webfont is added. PR 1b ships the font files.
+Font loading (Garry's decision, 2026-11-07). JetBrains Mono is self-hosted and nothing is fetched from Google Fonts. `lib/public/css/fonts/` holds the upright variable woff2 files the OpenClaw Control UI serves (latin 31 KB, latin-ext 12 KB), unmodified under the SIL Open Font License 1.1 with its text in `jetbrains-mono-OFL.txt`. The two `@font-face` rules at the top of `theme.css` use `font-display: swap`, and latin-ext loads only for characters in its `unicode-range`. `setup.html` and `login.html` load no third-party stylesheet. There is no italic face, so the browser slants the upright one where an italic is asked for.
 
 ## Spacing
 
