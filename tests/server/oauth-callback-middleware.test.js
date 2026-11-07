@@ -75,6 +75,27 @@ describe("server/oauth-callback-middleware", () => {
     }
   });
 
+  it.each(["wake", "agent"])(
+    "returns 404 for a callback on the gateway's built-in %s hook, which reads the raw payload",
+    async (hookName) => {
+      const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+      const app = createApp({
+        gatewayUrl,
+        getOauthCallbackById: (id) => (id === "abc123" ? { id, hookName } : null),
+      });
+
+      try {
+        const response = await request(app).get(
+          "/oauth/abc123?code=c&text=injected&mode=now&agentId=main&sessionKey=s",
+        );
+        expect(response.status).toBe(404);
+        expect(calls).toHaveLength(0);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
+  );
+
   it("rewrites oauth callback requests into POST hook calls with injected auth", async () => {
     const { server, calls, gatewayUrl } = await createGatewaySpyServer();
     const originalWebhookToken = process.env.WEBHOOK_TOKEN;
