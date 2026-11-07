@@ -368,3 +368,100 @@ describe("server/routes/auth", () => {
     });
   });
 });
+
+// CSO ALPH-71 L-2: legacy owner sessions are signed with a key derived from a
+// random secret in AlphaClaw's state, a session epoch and SETUP_PASSWORD, so a
+// cookie is no offline oracle for the password and logout ends it everywhere.
+describe("server/routes/auth legacy sessions (ALPH-71 L-2)", () => {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth-legacy-session-"));
+  });
+  afterEach(() => {
+    delete process.env.SETUP_PASSWORD;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const createStatefulApp = (pw, legacySessionStatePath) => {
+    process.env.SETUP_PASSWORD = pw;
+    const { registerAuthRoutes } = loadAuthRoutes();
+    const app = express();
+    app.use(express.json());
+    registerAuthRoutes({ app, loginThrottle: createLoginThrottleMock(), legacySessionStatePath });
+    app.get("/api/protected", (req, res) => res.json({ ok: true }));
+    return app;
+  };
+  const protectedStatus = async (app, cookie) => (await request(app).get("/api/protected").set("Cookie", cookie)).status;
+
+  it("refuses a cookie signed with SETUP_PASSWORD itself, the old offline oracle", async () => {
+    const { app } = createTestApp({ setupPassword: "fake-owner-pass" });
+    const payload = Buffer.from(JSON.stringify({ iat: Date.now(), exp: Date.now() + 60_000, nonce: "00" })).toString("base64url");
+    const signature = crypto.createHmac("sha256", "fake-owner-pass").update(payload).digest("base64url");
+    expect(await protectedStatus(app, "setup_token=" + payload + "." + signature)).toBe(401);
+    expect(await protectedStatus(app, await loginCookie(app, "fake-owner-pass"))).toBe(200);
+  });
+
+  it("logout ends the owner's sessions server-side, on every device", async () => {
+    const { app } = createTestApp({ setupPassword: "fake-owner-pass" });
+    const laptop = await loginCookie(app, "fake-owner-pass");
+    const phone = await loginCookie(app, "fake-owner-pass");
+    expect(await protectedStatus(app, laptop)).toBe(200);
+    expect((await request(app).post("/api/auth/logout").set("Cookie", laptop).send({})).status).toBe(200);
+    expect(await protectedStatus(app, laptop)).toBe(401);
+    expect(await protectedStatus(app, phone)).toBe(401);
+    expect(await protectedStatus(app, await loginCookie(app, "fake-owner-pass"))).toBe(200);
+  });
+
+  it("an unauthenticated logout ends nobody's session", async () => {
+    const { app } = createTestApp({ setupPassword: "fake-owner-pass" });
+    const cookie = await loginCookie(app, "fake-owner-pass");
+    await request(app).post("/api/auth/logout").send({});
+    await request(app).post("/api/auth/logout").set("Cookie", "setup_token=forged.value").send({});
+    expect(await protectedStatus(app, cookie)).toBe(200);
+  });
+
+  it("keeps the secret and epoch in a 0600 state file: a restart keeps sessions, a password change or a logout ends them", async () => {
+    const statePath = path.join(tmpDir, "legacy-session.json");
+    const first = createStatefulApp("fake-owner-pass", statePath);
+    const cookie = await loginCookie(first, "fake-owner-pass");
+    expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(statePath, "utf8")).not.toContain("fake-owner-pass");
+    expect(await protectedStatus(createStatefulApp("fake-owner-pass", statePath), cookie)).toBe(200);
+    expect(await protectedStatus(createStatefulApp("fake-changed-pass", statePath), cookie)).toBe(401);
+    const restarted = createStatefulApp("fake-owner-pass", statePath);
+    await request(restarted).post("/api/auth/logout").set("Cookie", cookie).send({});
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).epoch).toBe(1);
+    expect(await protectedStatus(createStatefulApp("fake-owner-pass", statePath), cookie)).toBe(401);
+  });
+
+  // #342 round 4: a logout whose epoch cannot be saved ends the sessions only
+  // in this process; after a restart the stored (old) epoch makes them valid
+  // again, so the caller is told, not answered 200.
+  it("a logout whose epoch cannot be saved clears the cookie, keeps the bump in memory and answers 500", async () => {
+    const statePath = path.join(tmpDir, "legacy-session.json");
+    const app = createStatefulApp("fake-owner-pass", statePath);
+    const laptop = await loginCookie(app, "fake-owner-pass");
+    const phone = await loginCookie(app, "fake-owner-pass");
+    fs.rmSync(statePath);
+    fs.mkdirSync(path.join(statePath, "blocker"), { recursive: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await request(app).post("/api/auth/logout").set("Cookie", laptop).send({});
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ ok: false, error: "logout could not be saved; other sessions may survive a restart" });
+      expect((res.headers["set-cookie"] || []).some((line) => /^setup_token=;.*Expires=Thu, 01 Jan 1970/.test(line))).toBe(true);
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("Logout could not save the session epoch");
+      expect(lines[0]).toContain("may work again after a restart");
+      expect(lines[0]).not.toContain("sessions end when AlphaClaw restarts");
+      expect(await protectedStatus(app, phone)).toBe(401);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+

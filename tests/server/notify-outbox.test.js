@@ -154,7 +154,39 @@ describe("server/notify-outbox", () => {
     const message = logger.error.mock.calls[0][0];
     expect(message).toContain("GIVING UP");
     expect(message).toContain('"e1"');
-    expect(message).toContain("critical upgrade failure");
+    expect(message).not.toContain("critical upgrade failure");
+  });
+
+  it("never logs or persists an abandoned message's text (a confirm code must not reach agent-readable logs)", async () => {
+    const kCode = "CONFIRM-FAKE-123456";
+    const kText = `Approve the agent's request with code ${kCode}`;
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const insertEvent = vi.fn();
+    const leaks = () =>
+      [...logger.log.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls, ...insertEvent.mock.calls]
+        .map((call) => JSON.stringify(call))
+        .filter((line) => line.includes("CONFIRM-FAKE") || line.includes("Approve the agent"));
+
+    const capped = makeOutbox({ maxAttempts: 2, logger, insertEvent });
+    capped.outbox.enqueue({ id: "confirm-1", message: kText, eventType: "agent_confirm" });
+    const failing = vi.fn(async () => ({ ok: false, reason: "api down" }));
+    await capped.outbox.flush({ deliver: failing });
+    capped.nowRef.now += 60_000;
+    await capped.outbox.flush({ deliver: failing });
+    capped.nowRef.now += 48 * 60 * 60 * 1000;
+    await capped.outbox.flush({ deliver: failing });
+
+    const terminal = makeOutbox({ logger, insertEvent });
+    terminal.outbox.enqueue({ id: "confirm-2", message: kText, eventType: "agent_confirm" });
+    await terminal.outbox.flush({
+      deliver: async () => ({ ok: false, reason: "no_channels_delivered", failed: 1, terminal: true,
+        failures: [{ channel: "telegram", reason: "Forbidden: bot was blocked by the user", deterministic: true }] }),
+    });
+
+    expect(logger.error.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(insertEvent).toHaveBeenCalledTimes(2);
+    expect(insertEvent.mock.calls.map(([event]) => event.details.id)).toEqual(["confirm-1", "confirm-2"]);
+    expect(leaks()).toEqual([]);
   });
 
   it("persists across instances (restart survival)", async () => {
@@ -263,7 +295,7 @@ describe("server/notify-outbox", () => {
       expect(logger.error).toHaveBeenCalledTimes(1);
       expect(logger.error.mock.calls[0][0]).toContain("GIVING UP");
       expect(logger.error.mock.calls[0][0]).toContain('"e1"');
-      expect(logger.error.mock.calls[0][0]).toContain(
+      expect(logger.error.mock.calls[0][0]).not.toContain(
         "critical never-delivered failure",
       );
       expect(insertEvent).toHaveBeenCalledTimes(1);
@@ -471,7 +503,6 @@ describe("server/notify-outbox", () => {
               errorCode: 403,
             },
           ],
-          message: "backup failed, downgrade refused",
         },
       });
 

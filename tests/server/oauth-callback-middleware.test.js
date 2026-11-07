@@ -269,3 +269,54 @@ describe("server/oauth-callback-middleware", () => {
     });
   });
 });
+
+describe("server/oauth-callback-middleware mapping selection and rate budget", () => {
+  const withApp = async (run) => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createApp({
+      gatewayUrl,
+      getOauthCallbackById: (id) =>
+        id === "abc123" ? { callbackId: "abc123", hookName: "provider-oauth" } : null,
+    });
+    app.set("trust proxy", true);
+    try {
+      await run({ app, calls });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  };
+
+  it("never forwards source, which OpenClaw's hook mappings match on", async () => {
+    await withApp(async ({ app, calls }) => {
+      const fromQuery = await request(app).get("/oauth/abc123?code=AUTH&source=gmail");
+      expect(fromQuery.status).toBe(200);
+      const fromBody = await request(app).post("/oauth/abc123").send({ code: "AUTH2", source: "gmail" });
+      expect(fromBody.status).toBe(200);
+      const fromForm = await request(app).post("/oauth/abc123").type("form").send("code=AUTH3&source=gmail");
+      expect(fromForm.status).toBe(200);
+      expect(calls.map((call) => JSON.parse(call.bodyText))).toEqual([
+        { code: "AUTH" },
+        { code: "AUTH2" },
+        { code: "AUTH3" },
+      ]);
+    });
+  });
+
+  // #342 round 4: behind trust proxy req.ip is whatever X-Forwarded-For says,
+  // so a per-caller bucket let one caller rotate past the limit. The budget is
+  // per id again: 10 a minute however the header changes.
+  it("rotating X-Forwarded-For cannot get past the per-id limit", async () => {
+    await withApp(async ({ app, calls }) => {
+      const statuses = [];
+      for (let index = 0; index < 15; index += 1) {
+        const res = await request(app)
+          .get(`/oauth/abc123?code=S${index}`)
+          .set("X-Forwarded-For", `203.0.113.${index}`);
+        statuses.push(res.status);
+      }
+      expect(statuses.slice(0, 10).every((status) => status === 200)).toBe(true);
+      expect(statuses.slice(10).every((status) => status === 429)).toBe(true);
+      expect(calls).toHaveLength(10);
+    });
+  });
+});

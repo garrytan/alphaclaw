@@ -283,3 +283,27 @@ describe("server/webhooks", () => {
     expect(reset?.to ?? "").toBe("");
   });
 });
+
+describe("server/webhooks reserved names", () => {
+  const createReservedFs = () =>
+    createMemoryFs({
+      [path.join("/tmp/openclaw", "openclaw.json")]: JSON.stringify({
+        agents: { list: [{ id: "main", default: true }] },
+      }),
+    });
+
+  it.each(["wake", "agent"])("createWebhook refuses the gateway's built-in %s hook name", (name) => {
+    expect(() =>
+      createWebhook({ fs: createReservedFs(), constants: { OPENCLAW_DIR: "/tmp/openclaw" }, name }),
+    ).toThrow(/reserved/);
+  });
+
+  it("createWebhook accepts wake-up", () => {
+    const detail = createWebhook({
+      fs: createReservedFs(),
+      constants: { OPENCLAW_DIR: "/tmp/openclaw" },
+      name: "wake-up",
+    });
+    expect(detail?.name).toBe("wake-up");
+  });
+});

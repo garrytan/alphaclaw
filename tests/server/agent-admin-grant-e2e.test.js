@@ -6,9 +6,10 @@ const request = require("supertest");
 
 const { initAgentAdminDb, closeAgentAdminDb } = require("../../lib/server/db/agent-admin");
 const { createConfirmService } = require("../../lib/server/agent-admin/confirm-service");
-const { kGenericServerError } = require("../../lib/server/agent-admin/redact");
+const { kGenericServerError, kMask } = require("../../lib/server/agent-admin/redact");
 
 const kToken = "a".repeat(64);
+const kInv = "inv-fixture-41";
 const kConfirmHeaderName = "X-AlphaClaw-Confirm";
 
 // Fresh auth + enforcement modules per app (same reason as agent-admin-e2e).
@@ -42,7 +43,7 @@ const kRawClientError = "Invalid setting for token=abc123secret (Bearer eyJhbGci
 // deliberately registered BEFORE the enforcement mount to model the failure
 // modes the grant exists for (a requireAdmin route with no enforcement in front,
 // and a forged plain-property "grant").
-const createApp = ({ confirmService = null } = {}) => {
+const createApp = ({ confirmService = null, rewriteInviteBody = true } = {}) => {
   process.env.SETUP_PASSWORD = "secret";
   const { registerAuthRoutes, createAgentAdminEnforcement } = loadModules();
 
@@ -94,12 +95,22 @@ const createApp = ({ confirmService = null } = {}) => {
   app.post(
     "/api/team/invites",
     (req, _res, next) => {
-      req.body = { ...(req.body || {}), role: "admin" };
+      if (rewriteInviteBody) req.body = { ...(req.body || {}), role: "admin" };
       next();
     },
     requireAdmin,
-    echo,
+    rewriteInviteBody
+      ? echo
+      : (req, res) =>
+          res.json({
+            ok: true,
+            invite: { id: "inv-1", role: req.body?.role || "member" },
+            token: kInv,
+            url: "https://box.example.com/login?invite=" + kInv,
+          }),
   );
+  app.patch("/api/team/members/:id", requireAdmin, echo); // team.members.update
+  app.delete("/api/team/members/:id", requireAdmin, echo); // team.members.remove
   // Error hygiene fixtures at manifest paths (safe + write tiers).
   app.get("/api/status", (_req, res) =>
     res.status(500).json({ ok: false, error: kRawServerError, code: "status_failed", hint: "See Watchdog." }),
@@ -209,6 +220,58 @@ describe("agent-admin enforcement grant end-to-end (F067: requireAdmin and the a
     const { app } = createApp();
     const res = await request(app).get("/api/team");
     expect(res.status).toBe(401);
+  });
+});
+
+describe("agent-admin team authority changes need an operator confirm (CSO ALPH-71 M-3)", () => {
+  afterEach(() => {
+    delete process.env.SETUP_PASSWORD;
+  });
+
+  it("refuses the agent's admin invite without a confirm", async () => {
+    const { app } = createApp({ rewriteInviteBody: false });
+    const res = await withBearer(request(app).post("/api/team/invites").send({ role: "admin" }));
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("dangerous_op_requires_confirmation");
+  });
+
+  it("lets the agent create a member invite but masks its token and URL", async () => {
+    const { app } = createApp({ rewriteInviteBody: false });
+    const res = await withBearer(
+      request(app).post("/api/team/invites").send({ email: "a@example.com", role: "member" }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.invite).toEqual({ id: "inv-1", role: "member" });
+    expect(JSON.stringify(res.body)).not.toContain(kInv);
+    expect(res.body.token).toBe(kMask);
+    expect(res.body.url).toBe(kMask);
+  });
+
+  it("a human admin still gets the invite token and URL", async () => {
+    const { app } = createApp({ rewriteInviteBody: false });
+    const cookie = await loginAsHumanAdmin(app);
+    const res = await request(app).post("/api/team/invites").set("Cookie", cookie).send({ role: "admin" });
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBe(kInv);
+  });
+
+  it("gates a member role or disabled change, not a display-name edit", async () => {
+    const { app } = createApp();
+    for (const body of [{ role: "admin" }, { role: "member" }, { disabled: true }, { disabled: false, displayName: "x" }]) {
+      const res = await withBearer(request(app).patch("/api/team/members/m1").send(body));
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("dangerous_op_requires_confirmation");
+    }
+    const rename = await withBearer(request(app).patch("/api/team/members/m1").send({ displayName: "Ada" }));
+    expect(rename.status).toBe(200);
+    expect(rename.body.echoed).toEqual({ displayName: "Ada" });
+  });
+
+  it("gates removing a member, which can remove another admin", async () => {
+    const { app } = createApp();
+    const res = await withBearer(request(app).delete("/api/team/members/m1"));
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("dangerous_op_requires_confirmation");
   });
 });
 

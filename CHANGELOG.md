@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.195] - 2026-11-07
+
+Secrets and auth fixes from the ALPH-71 audit (M-3, L-2, L-6, GST-1743): the agent cannot mint an admin or remove a member without an operator confirm, and logging out really logs out. M-1 (deployment secrets out of every process environment) moved to its own, later PR. L-8 (applying system and launcher keys on an .env reload only when AlphaClaw wrote them) moved to a separate design issue; env reload is unchanged.
+
+### Security
+- **Admin invites, role changes and member removal need an operator confirm (M-3).** For the agent, `team.invites.create` with any role but `member`, `team.members.update` with `role` or `disabled`, and `team.members.remove` are dangerous-tier ops, and an invite's token and URL are masked in the agent's response.
+- **Owner sessions are signed with a random secret, and logout ends them (L-2).** A legacy cookie was `HMAC(SETUP_PASSWORD)`, an offline oracle for the password, and logout only cleared the browser. The key now comes from a random secret and a session epoch in `.openclaw/.alphaclaw/legacy-session.json` (0600) plus `SETUP_PASSWORD`: logout bumps the epoch and ends every owner session, a member logout rotates that member's token secret, and a password change ends every session. If the new epoch cannot be saved, logout still clears the cookie and ends the sessions in the running process, but answers 500 ("logout could not be saved; other sessions may survive a restart"), because after a restart the stored epoch would let them back in. **Everyone is signed out once after this upgrade.**
+- **Logout closes open terminal and chat sockets.** Both are authorized only when they open, so a socket opened before logout kept working: the Watchdog terminal kept running input. Logout now emits an event (`lib/server/logout-sockets.js`) and both socket servers close with code 1000 "Logged out": every socket on an owner logout, and the sockets that member opened on a member logout. Terminal input that arrives while the socket closes is dropped. A chat run in flight continues server-side, as on any disconnect.
+- **Confirm codes stay out of logs (L-6).** An abandoned notification's log line and `notification_abandoned` event no longer carry its text, which can hold an operator confirm code.
+- **Logout passes the origin check.** `POST /api/auth/logout` is registered before `requireAuth`, so the cookie-write origin check never ran for it and a same-site sibling origin could log the owner out. It now runs the same check first: a cookie logout from another origin gets 403 `origin_mismatch` with the same `[origin] refused` log line, and the session keeps working. A request with no Origin follows the existing non-browser rule.
+- **Hook names `wake` and `agent` are reserved.** OpenClaw serves `/hooks/wake` and `/hooks/agent` itself from the raw payload, so creating a webhook by either name is a 400.
+- **The /oauth alias cannot pick a hook mapping.** `source`, which OpenClaw's hook mappings match on, is no longer forwarded. The budget stays 10 a minute per id across all callers: a per-caller budget needs a client IP the caller cannot choose, and behind `trust proxy` a caller rotating `X-Forwarded-For` got past one.
+
+### Tests
+- New cases in `routes-auth`, `routes-auth-team`, `origin-guard`, `agent-admin-grant-e2e`, `notify-outbox`, `webhooks`, `routes-webhooks` and `oauth-callback-middleware`, each failing on the previous main. The two per-caller /oauth budget cases are removed with the per-caller budget.
+- `tests/server/logout-closes-sockets.test.js` (real auth routes, upgrade bridge and chat service on real sockets: an owner logout closes every terminal and chat socket and drops input sent after it, a member logout closes only that member's) and a real-process case in `e2e-proxy-gateway` (a real shell runs input sent before logout and never the input sent after it). A new `origin-guard` case: a cross-origin cookie logout is refused and the session keeps working, and a same-origin logout still ends it.
+
 ## [0.10.194] - 2026-11-07
 
 Setup UI web hardening from the ALPH-71 audit (L-1, L-3, L-4, L-5, L-10 and two follow-ups from #329). The dashboard now refuses to be framed or to run injected script, cookie requests from other sites are refused, and OAuth starts and results stay on the box's own origins.
