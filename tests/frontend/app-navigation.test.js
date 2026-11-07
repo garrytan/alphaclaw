@@ -46,6 +46,11 @@ describe("app-navigation gated sections", () => {
     ).toBe(false);
   });
 
+  it("selects the relay nav item for /relay locations", () => {
+    expect(getSelectedNavId({ location: "/relay" })).toBe("relay");
+    expect(getSelectedNavId({ location: "/relay?tab=log" })).toBe("relay");
+  });
+
   it("selects the team nav item for /team locations", () => {
     expect(getSelectedNavId({ location: "/team" })).toBe("team");
     expect(getSelectedNavId({ location: "/team/anything" })).toBe("team");

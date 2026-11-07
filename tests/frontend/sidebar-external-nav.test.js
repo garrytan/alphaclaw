@@ -148,3 +148,21 @@ describe("frontend/sidebar external nav items", () => {
     expect(onExternalNavClick).not.toHaveBeenCalled();
   });
 });
+
+describe("frontend/sidebar brand menu", () => {
+  beforeEach(() => {
+    harness.reset();
+    vi.clearAllMocks();
+  });
+
+  it("closes the menu on dismiss instead of toggling it back open", () => {
+    const onToggleMenu = vi.fn();
+    const onCloseMenu = vi.fn();
+    const tree = renderSidebar({ authEnabled: true, menuOpen: true, onToggleMenu, onCloseMenu });
+    const menu = collectNodes(tree).find((vnode) => vnode.type?.name === "OverflowMenu");
+    expect(menu).toBeTruthy();
+    menu.props.onClose({ target: null });
+    expect(onCloseMenu).toHaveBeenCalledTimes(1);
+    expect(onToggleMenu).not.toHaveBeenCalled();
+  });
+});
