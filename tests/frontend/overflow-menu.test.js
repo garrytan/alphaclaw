@@ -44,10 +44,10 @@ describe("frontend/overflow-menu dismissal", () => {
     vi.unstubAllGlobals();
   });
 
-  const openMenu = ({ inside = false } = {}) => {
+  const openMenu = ({ inside = false, trigger = null } = {}) => {
     const onClose = vi.fn();
     const tree = OverflowMenu({ open: true, onClose });
-    findRef(tree)({ contains: () => inside });
+    findRef(tree)({ contains: () => inside, querySelector: () => trigger });
     harness.effects.forEach((effect) => cleanups.push(effect()));
     return onClose;
   };
@@ -64,6 +64,60 @@ describe("frontend/overflow-menu dismissal", () => {
     const onClose = openMenu();
     target.dispatchEvent(new Event("click"));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an Escape another handler used or an IME is composing", () => {
+    target.addEventListener("keydown", (event) => {
+      if (event.consumed) event.preventDefault();
+    });
+    const onClose = openMenu();
+    target.dispatchEvent(Object.assign(new Event("keydown", { cancelable: true }), { key: "Escape", consumed: true }));
+    target.dispatchEvent(Object.assign(keyEvent("Escape"), { isComposing: true }));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("returns focus to the trigger and claims the Escape", () => {
+    const trigger = { focus: vi.fn() };
+    const onClose = openMenu({ trigger });
+    const event = Object.assign(new Event("keydown", { cancelable: true }), { key: "Escape" });
+    target.dispatchEvent(event);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(trigger.focus).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("listens for Escape in the capture phase so a menu inside a dialog goes first", () => {
+    const spy = vi.spyOn(target, "addEventListener");
+    openMenu();
+    expect(spy).toHaveBeenCalledWith("keydown", expect.any(Function), true);
+  });
+
+  it("leaves Escape to a dialog that holds focus over the menu", () => {
+    const body = {};
+    vi.stubGlobal("document", { body, activeElement: { id: "dialog-field" } });
+    const trigger = { focus: vi.fn() };
+    const onClose = openMenu({ inside: false, trigger });
+    const event = Object.assign(new Event("keydown", { cancelable: true }), { key: "Escape" });
+    target.dispatchEvent(event);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(trigger.focus).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("claims Escape when focus is inside the menu or on the page body", () => {
+    const body = {};
+    const doc = { body, activeElement: body };
+    vi.stubGlobal("document", doc);
+    const onBody = openMenu({ inside: false });
+    target.dispatchEvent(keyEvent("Escape"));
+    expect(onBody).toHaveBeenCalledTimes(1);
+    cleanups.forEach((cleanup) => cleanup?.());
+    cleanups = [];
+    harness.effects = [];
+    doc.activeElement = { id: "menu-item" };
+    const inside = openMenu({ inside: true });
+    target.dispatchEvent(keyEvent("Escape"));
+    expect(inside).toHaveBeenCalledTimes(1);
   });
 
   it("stays open for clicks inside the menu", () => {

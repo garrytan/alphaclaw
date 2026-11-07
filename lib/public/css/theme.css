@@ -40,6 +40,7 @@
   --accent: #63ebff;
   --accent-dim: rgba(99, 235, 255, 0.4);
   --accent-link: rgba(99, 235, 255, 0.6);
+  --focus-ring: #63ebff;
   --orange: #d98a58;
   --comment: #8b949e;
   --keyword: #ff7b72;
@@ -148,6 +149,7 @@
   --accent: #0e7490;
   --accent-dim: #3f93a8;
   --accent-link: #0e7490;
+  --focus-ring: #0e7490;
   --orange: #c2410c;
   --comment: #5f6873;
   --keyword: #b91c1c;
@@ -345,6 +347,27 @@ body::before {
 .bg-modal {
   background: var(--bg) !important;
   border-color: var(--panel-border-contrast) !important;
+}
+
+/* Keyboard focus ring. --focus-ring is at least 3:1 against every surface in
+   both themes. [tabindex="0"] covers the focusable tooltip marks and logs.
+   The :is() list carries a[href], so the rule outranks Tailwind's
+   focus:outline-none and a control that hides the mouse outline still shows
+   the keyboard ring. Chat keeps its own rings (chat.css), and the file editor
+   shows focus with its caret. */
+:is(a[href], button, [role="tab"], [role="button"], [tabindex="0"], summary, input, select, textarea):focus-visible:where(:not([class^="chat-"], [class*=" chat-"], .file-viewer-editor)) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ac-segmented-control .ac-segmented-control-button:focus-visible {
+  outline-offset: -2px;
+}
+
+/* A dialog panel takes focus when it opens so screen readers announce it;
+   it is not a control, so it draws no ring. */
+.ac-dialog-panel:focus {
+  outline: none;
 }
 
 .border-border {
@@ -875,6 +898,11 @@ textarea:focus {
 
 .ac-btn-green:active:not(:disabled) {
   transform: translateY(1px);
+}
+
+.ac-btn-green:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 @keyframes acSpinnerOrbit {

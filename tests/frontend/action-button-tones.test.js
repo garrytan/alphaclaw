@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   ActionButton,
   getActionButtonToneClass,
@@ -37,6 +39,16 @@ describe("frontend/action button tones", () => {
     expect(getActionButtonToneClass("warning", false)).toContain("cursor-not-allowed");
     expect(getActionButtonToneClass("neutral", false, true)).toBe("ac-btn-neutral");
     expect(getActionButtonToneClass("primary", false)).toBe("ac-btn-cyan");
+  });
+
+  it("gives every tone a disabled look, from theme.css or from ActionButton", () => {
+    const css = fs.readFileSync(path.resolve(__dirname, "../../lib/public/css/theme.css"), "utf8");
+    for (const tone of ["primary", "secondary", "success", "danger", "ghost", "neutral", "warning"]) {
+      const disabledClass = getActionButtonToneClass(tone, false);
+      if (disabledClass.includes("opacity-50")) continue;
+      const rule = new RegExp("\\." + disabledClass + ":disabled\\s*\\{[^}]*opacity:\\s*0\\.5");
+      expect(css, disabledClass + " has no :disabled rule").toMatch(rule);
+    }
   });
 
   it("keeps the button API", () => {
