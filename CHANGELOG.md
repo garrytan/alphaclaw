@@ -24,7 +24,7 @@ The Relay page now shows every Agent Relay conversation, both sides, searchable 
 - Bridge: the ALPH-64 timeline (ack after the send timeout, run end 8 s later, one reply), an ambiguous send left to its lifecycle end and kept for the whole grace after a restart, two reconcile triggers racing a lifecycle end posting exactly one reply, host-notice stripping, and the store's claim.
 - Routes: listing, filters, paging, the retention-gap row, the transcript merge of replies and bridge state, and the agent's metadata-only view. Masker: the keyring default leaves text alone, through the real masker and the bridge, while plain-word secrets, the same value under another key and a `.env` secret are masked. The agent actor's text search is refused. Browser smoke: the conversation list, transcript and Chat link at 1100 and 390 px.
 
-## [0.10.173] - 2026-11-07
+## [0.10.174] - 2026-11-07
 
 #/chat now lists and shows every conversation on the box: direct chats, Telegram DMs, groups and forum topics, and Agent Relay sessions, with full history and live updates (ALPH-68 PR1, GST-1696).
 
@@ -46,6 +46,16 @@ The Relay page now shows every Agent Relay conversation, both sides, searchable 
 ### Tests
 - `tests/server/chat-session-watch.test.js` (watch fan-out, H16, list paging and caching, the read-only refusal, the history cursor, the agent's key set); session-key classifier matrix and browser parity; route tests for the gateway list and the CLI fallback; frontend label and markdown cases.
 
+## [0.10.173] - 2026-11-07
+
+Every browser tab can open the Control UI at `/openclaw/*` again, not only the first one after a login (ALPH-68, live finding 8).
+
+### Fixed
+- **A second tab, a tab opened from the dashboard, a reload or a deep link showed "This Gateway expects its token".** The Control UI keeps its gateway token in per-tab `sessionStorage`, but the `/gateway/attach` detour that seeds it ran once per login: after the first tab, the session's `alphaclaw_control_ui` cookie sent every other tab straight to the gateway without a token. The cookie is now a pass for one navigation: the attach page's token answer hands it out (so a tab opened while another tab's token read is slow still attaches), and the navigation it admits spends it (60 s at most). Every top-level navigation, reloads included, attaches once and connects. If the token request cannot reach AlphaClaw at all, the attach page says so instead of looping. The attach page keeps a `#token=` fragment across the detour, and the gateway's own `/openclaw/__openclaw__/*` handoffs (the UI moves a `/chat/<session>` tab to `session-entry`) never detour. The token still never rides a URL, a redirect or a cacheable response.
+
+### Tests
+- `tests/live/control-ui-direct-open.e2e.test.js`: a second tab, a tab the dashboard opens with `noopener`, a deep link under the installed service worker, and each one's reload all attach exactly once and connect; a reload re-attaches once.
+
 ## [0.10.172] - 2026-11-07
 
 Phase 0 of the Setup UI overhaul (ALPH-69, GST-1697). It fixes five small UI defects that a live audit in real Chrome found.
@@ -65,7 +75,6 @@ Phase 0 of the Setup UI overhaul (ALPH-69, GST-1697). It fixes five small UI def
 - `tests/frontend/overflow-menu.test.js`: Escape closes the menu, an outside click closes it, and a click inside keeps it open.
 - `tests/frontend/sidebar-external-nav.test.js`: the sidebar menu's dismiss calls the close action, never the toggle.
 - `tests/frontend/cron-overview-attention.test.js`: the attention line uses body text with no warnings and the warning tone with one.
-
 
 ## [0.10.171] - 2026-11-06
 
