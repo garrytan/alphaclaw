@@ -7,6 +7,7 @@ const {
   classifyEvent,
   kIncidentKeyByTrigger,
 } = require("../../lib/server/watchdog-incidents");
+const { classifyAutoReviewEligibility } = require("../../lib/server/watchdog-overseer-eligibility");
 
 const loadWatchdogDb = () => {
   const modulePath = require.resolve("../../lib/server/db/watchdog");
@@ -690,7 +691,7 @@ describe("boot carry-over after an AlphaClaw or container restart", () => {
     const incidentId = crashLoopBeforeRestart();
 
     // The container restarts: a fresh process and tracker.
-    const bootTracker = createTracker();
+    const bootTracker = createTracker({ getStatus: () => ({ health: "healthy", readiness: "ready" }) });
     const insert = wrapped(bootTracker);
     expect(bootTracker.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([incidentId]);
     expect(db.getIncidentById(incidentId).status).toBe("open");
@@ -763,6 +764,147 @@ describe("boot carry-over after an AlphaClaw or container restart", () => {
     expect(bootTracker.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([incidentId]);
     expect(bootTracker.getActiveIncidentId()).toBe(null);
     expect(db.getIncidentById(incidentId).status).toBe("abandoned");
+  });
+
+  it("keeps a carried incident open on a green probe whose readiness failed open and closes it on the first verified ready probe; an incident opened in this process still closes on a plain green probe", () => {
+    initContext();
+    const tracker = createTracker();
+    wrapped(tracker)(crashEvent());
+    const incidentId = tracker.getActiveIncidentId();
+
+    const status = { health: "healthy", readiness: "unknown" };
+    const bootTracker = createTracker({ getStatus: () => status });
+    const insert = wrapped(bootTracker);
+    bootTracker.carryOverOnBoot({ bootCause: "shutdown" });
+
+    // /readyz timed out, 404'd or is unconfigured: the watchdog failed
+    // readiness open and logged its step-5 recovery and ok rows.
+    insert(recoveryEvent());
+    insert(healthyProbe());
+    expect(bootTracker.getActiveIncidentId()).toBe(incidentId);
+    expect(db.getIncidentById(incidentId).status).toBe("open");
+
+    status.readiness = "ready";
+    insert(healthyProbe());
+    expect(bootTracker.getActiveIncidentId()).toBe(null);
+    const incident = db.getIncidentById(incidentId);
+    expect(incident.status).toBe("resolved");
+    expect(incident.summary.outcome).toBe("recovered");
+    expect(incident.summary.recoveredAfterRestart).toBe("shutdown");
+    expect(incident.summary.eventCounts).toMatchObject({ crash: 1, recovery: 1, health_check: 2 });
+    // A warning-level carried incident with no action of its own stays
+    // eligible for the automatic review.
+    expect(incident.summary.actions).toEqual([]);
+    expect(
+      classifyAutoReviewEligibility(incident, Date.parse(incident.resolvedAt)),
+    ).toEqual({ eligible: true, reason: null });
+
+    // An incident opened in this process keeps the plain close rule.
+    status.readiness = "unknown";
+    insert(crashEvent({ correlationId: "c7" }));
+    const freshId = bootTracker.getActiveIncidentId();
+    expect(freshId).not.toBe(incidentId);
+    insert(healthyProbe());
+    expect(bootTracker.getActiveIncidentId()).toBe(null);
+    expect(db.getIncidentById(freshId).status).toBe("resolved");
+    expect(db.getIncidentById(freshId).summary.recoveredAfterRestart).toBeUndefined();
+  });
+
+  it("reseeds identical-crash fingerprints, so the third identical crash across the restart escalates to critical", () => {
+    initContext();
+    const fingerprint = "a1b2c3d4e5f6";
+    const tracker = createTracker();
+    const before = wrapped(tracker);
+    before(crashEvent({ details: { code: 1, fingerprint } }));
+    before(crashEvent({ correlationId: "c3", details: { code: 1, fingerprint } }));
+    const incidentId = tracker.getActiveIncidentId();
+    expect(db.getIncidentById(incidentId).severity).not.toBe("critical");
+
+    const activity = [];
+    const bootTracker = createTracker({ onIncidentActivity: (entry) => activity.push(entry.kind) });
+    bootTracker.carryOverOnBoot({ bootCause: "unclean_exit" });
+    wrapped(bootTracker)(crashEvent({ correlationId: "c4", details: { code: 1, fingerprint } }));
+
+    expect(db.getIncidentById(incidentId).severity).toBe("critical");
+    expect(activity).toEqual(["open", "escalation"]);
+  });
+
+  it("abandons a gateway_crash incident that logged a safe_mode row, as it does a safe-mode incident", () => {
+    initContext();
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    insert(crashEvent());
+    insert({
+      eventType: "safe_mode",
+      source: "health_timer",
+      status: "failed",
+      details: { suppressed: ["telegram"] },
+    });
+    const incidentId = tracker.getActiveIncidentId();
+    expect(db.getIncidentById(incidentId).incidentKey).toBe("gateway_crash");
+
+    const bootTracker = createTracker();
+    expect(bootTracker.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([incidentId]);
+    expect(bootTracker.getActiveIncidentId()).toBe(null);
+    expect(db.getIncidentById(incidentId).status).toBe("abandoned");
+  });
+
+  it("drops recoveredAfterRestart once this process ran its own repair or restart on the carried incident", () => {
+    initContext();
+    const ready = () => ({ health: "healthy", readiness: "ready" });
+    const carry = () => {
+      const tracker = createTracker();
+      wrapped(tracker)(crashEvent());
+      const incidentId = tracker.getActiveIncidentId();
+      const bootTracker = createTracker({ getStatus: ready });
+      bootTracker.carryOverOnBoot({ bootCause: "shutdown" });
+      return { incidentId, insert: wrapped(bootTracker) };
+    };
+
+    // Skipped rows and the boot launch's own rows are not actions of ours.
+    const quiet = carry();
+    quiet.insert({ eventType: "repair", source: "health_timer", status: "skipped", details: { reason: "auto_repair_paused" } });
+    quiet.insert({ eventType: "restart", source: "boot", status: "failed", details: { reason: "replacement_not_ready" } });
+    quiet.insert(healthyProbe());
+    expect(db.getIncidentById(quiet.incidentId).summary.recoveredAfterRestart).toBe("shutdown");
+
+    for (const action of [
+      { eventType: "repair", source: "health_timer", status: "ok", details: { ok: true } },
+      { eventType: "restart", source: "exit_event", status: "ok", details: { code: 1 } },
+    ]) {
+      const repaired = carry();
+      repaired.insert(action);
+      repaired.insert(healthyProbe());
+      const incident = db.getIncidentById(repaired.incidentId);
+      expect(incident.status).toBe("resolved");
+      expect(incident.summary.outcome).toBe("recovered");
+      expect(incident.summary.recoveredAfterRestart).toBe(null);
+      expect(incident.summary.actions).toContain(action.eventType);
+    }
+  });
+
+  it("does nothing, and says so, when an incident is already active", () => {
+    initContext();
+    const tracker = createTracker();
+    wrapped(tracker)(crashEvent());
+    const incidentId = tracker.getActiveIncidentId();
+
+    const lines = [];
+    const bootTracker = createTracker({ logger: { error: () => {}, info: (line) => lines.push(line) } });
+    // An open-class row reached the sink first and adopted the orphan.
+    wrapped(bootTracker)(crashEvent({ correlationId: "c8" }));
+    expect(bootTracker.getActiveIncidentId()).toBe(incidentId);
+    lines.length = 0;
+
+    expect(bootTracker.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([]);
+    expect(bootTracker.getActiveIncidentId()).toBe(incidentId);
+    expect(lines).toEqual([
+      `[watchdog-incidents] boot carry-over skipped: incident #${incidentId} is already active`,
+    ]);
+    // Not a carried incident: the plain close rule applies, with no restart named.
+    wrapped(bootTracker)(healthyProbe());
+    expect(db.getIncidentById(incidentId).status).toBe("resolved");
+    expect(db.getIncidentById(incidentId).summary.recoveredAfterRestart).toBeUndefined();
   });
 
   it("is a no-op with nothing open and falls back to abandoning on DB errors", () => {
