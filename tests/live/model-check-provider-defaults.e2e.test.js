@@ -12,7 +12,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const { kLiveEnabled, mkTemp, runCliJson, repoOpenclawBin } = require("./live-helpers");
+const { kLiveEnabled, mkTemp, runCliJson, repoOpenclawBin, scrubTestRunnerEnv } = require("./live-helpers");
 const {
   kOpenclawBuiltInProviderIds,
   readOpenclawProviderDefaults,
@@ -44,7 +44,7 @@ const validate = (providers) => {
   const configPath = path.join(dir, "openclaw.json");
   fs.writeFileSync(configPath, JSON.stringify({ models: { providers } }));
   return runCliJson(repoOpenclawBin(), ["config", "validate", "--json"], {
-    env: { ...process.env, HOME: dir, OPENCLAW_STATE_DIR: path.join(dir, "state"), OPENCLAW_CONFIG_PATH: configPath },
+    env: { ...scrubTestRunnerEnv(), HOME: dir, OPENCLAW_STATE_DIR: path.join(dir, "state"), OPENCLAW_CONFIG_PATH: configPath },
     exits: [0, 1],
   });
 };
