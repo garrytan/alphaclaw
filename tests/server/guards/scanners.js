@@ -459,7 +459,40 @@ const scanEnvValueLogs = (rawText, relPath) => {
   return hits;
 };
 
+// Raw marked (raw-marked guard, ALPH-71). marked does not sanitize, so its
+// output in dangerouslySetInnerHTML is a script vector (H-2, the file-viewer
+// preview). Every Markdown render goes through renderMarkdownSafe in
+// lib/public/js/lib/safe-markdown.js, the one file allowed to load marked.
+// Any other import or require of "marked" (static, dynamic, or a subpath such
+// as "marked/lib/marked.esm.js") and any marked.parse / marked( / new Marked(
+// call is a hit, counted per file.
+const kSafeMarkdownFile = "lib/public/js/lib/safe-markdown.js";
+const kRawMarkedRes = [
+  /\bfrom\s*["']marked(?:\/[^"']*)?["']/g,
+  /\bimport\s*["']marked(?:\/[^"']*)?["']/g,
+  /\b(?:require|import)\s*\(\s*["']marked(?:\/[^"']*)?["']\s*\)/g,
+  /\bmarked\s*\.\s*(?:parse|parseInline|lexer|parser)\s*\(/g,
+  /(?<![.\w$])marked\s*\(/g,
+  /\bnew\s+Marked\s*\(/g,
+];
+const scanRawMarked = (rawText, relPath) => {
+  if (relPath === kSafeMarkdownFile) return [];
+  const text = stripComments(rawText);
+  const matches = kRawMarkedRes
+    .flatMap((re) => [...text.matchAll(re)])
+    .sort((a, b) => a.index - b.index);
+  if (matches.length === 0) return [];
+  return [
+    {
+      key: `${relPath}::${matches.length}`,
+      file: relPath,
+      line: lineOf(text, matches[0].index),
+    },
+  ];
+};
+
 module.exports = {
+  scanRawMarked,
   scanEnvValueLogs,
   scanUnattributedRestarts,
   scanConfigWriters,

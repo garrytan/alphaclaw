@@ -67,10 +67,23 @@ describe("agent-admin bearer auth", () => {
     const { app } = createApp({ agentThrottle: throttle });
     const res = await request(app)
       .get("/api/protected")
-      .set("Authorization", "Bearer wrong-token");
+      .set("Authorization", `Bearer ${"e".repeat(64)}`);
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("unauthorized");
     expect(throttle.recordLoginFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a bearer that is not token-shaped without counting it as a guess (ALPH-71 L-3)", async () => {
+    const throttle = createThrottleMock();
+    const { app } = createApp({ agentThrottle: throttle });
+    for (const bearer of ["wrong-token", "sk-proj-abc123", "a".repeat(63), "A".repeat(64), `${kToken}0`]) {
+      const res = await request(app)
+        .get("/api/protected")
+        .set("Authorization", `Bearer ${bearer}`);
+      expect(res.status, bearer).toBe(401);
+      expect(res.body.code, bearer).toBe("unauthorized");
+    }
+    expect(throttle.recordLoginFailure).not.toHaveBeenCalled();
   });
 
   it("returns agent_admin_disabled (not unauthorized) when the flag is off, even with a valid token", async () => {
@@ -138,7 +151,7 @@ describe("agent-admin bearer auth", () => {
     const { app } = createApp({ agentThrottle: throttle, onAuthEvent });
     const res = await request(app)
       .get("/api/protected")
-      .set("Authorization", "Bearer wrong");
+      .set("Authorization", `Bearer ${"f".repeat(64)}`);
     expect(res.status).toBe(429);
     expect(onAuthEvent).toHaveBeenCalledWith(
       expect.objectContaining({ event: "bearer_lockout" }),
