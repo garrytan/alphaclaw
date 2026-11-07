@@ -35,7 +35,7 @@
 }
 
 .global-restart-banner__text {
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   color: #fde68a;
   line-height: 1.4;
 }
@@ -46,7 +46,7 @@
 
 .global-restart-banner__reasons {
   margin-top: 2px;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: rgba(253, 230, 138, 0.8);
   line-height: 1.4;
 }
@@ -58,7 +58,7 @@
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.25);
   color: #fde68a;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   color-scheme: dark;
 }
 
@@ -210,7 +210,7 @@
 
 .sidebar-brand {
   padding: 16px;
-  font-size: 14px;
+  font-size: var(--font-size-copy);
   letter-spacing: 0.03em;
   color: var(--text-muted);
   display: flex;
@@ -220,11 +220,9 @@
 
 .sidebar-label {
   padding: 12px 16px 6px;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  color: var(--text-muted);
   user-select: none;
 }
 
@@ -237,7 +235,7 @@
   padding: 6px 16px 6px 16px;
   color: var(--text-muted);
   text-decoration: none;
-  font-size: 13px;
+  font-size: var(--font-size-small);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
   position: relative;
@@ -293,7 +291,7 @@
 
 .sidebar-footer {
   margin-top: auto;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   color: var(--text-dim);
 }
 
@@ -347,7 +345,7 @@
   width: 100%;
   padding: 6px 10px;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   color: var(--text-muted);
   text-decoration: none;
   border-radius: 5px;
@@ -372,7 +370,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 12px;
-  font-size: 11px;
+  min-width: 0;
+  font-size: var(--font-size-caption);
   color: var(--text-dim);
 }
 
@@ -408,7 +407,7 @@
   justify-content: center;
   width: 100%;
   text-align: center;
-  font-size: 14px;
+  font-size: var(--font-size-copy);
   letter-spacing: 0.03em;
   color: var(--text-muted);
 }
@@ -572,7 +571,7 @@
   border-radius: 5px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   font-family: inherit;
   cursor: pointer;
   transition: color 0.15s, background 0.15s;

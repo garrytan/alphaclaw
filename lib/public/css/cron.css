@@ -582,7 +582,7 @@
 
 .cron-calendar-compact-time {
   font-size: 10px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   opacity: 0.72;
   white-space: nowrap;
 }
