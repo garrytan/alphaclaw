@@ -109,4 +109,31 @@ describe("POST /api/auth/login with a full global bucket", () => {
     expect(owner.status).toBe(200);
     expect(owner.body).toEqual({ ok: true });
   });
+
+  it("lets one client's parallel attempts during the soft delay check no more passwords than its own limit", async () => {
+    process.env.SETUP_PASSWORD = "owner-pass";
+    const { registerAuthRoutes } = loadAuthRoutes();
+    const app = express();
+    app.set("trust proxy", 1);
+    app.use(express.json());
+    const throttle = createLoginThrottle({ globalMode: "delay", globalSoftDelayMs: 200 });
+    fillGlobalBucket(throttle, Date.now());
+    const recordLoginFailure = vi.fn(throttle.recordLoginFailure);
+    registerAuthRoutes({
+      app,
+      loginThrottle: { ...throttle, recordLoginFailure, getClientKey },
+    });
+    const burst = kLoginMaxAttempts + 4;
+    const results = await Promise.all(
+      Array.from({ length: burst }, () =>
+        request(app)
+          .post("/api/auth/login")
+          .set("X-Forwarded-For", "198.51.100.42")
+          .send({ password: "wrong" }),
+      ),
+    );
+    expect(recordLoginFailure.mock.calls.length).toBeLessThanOrEqual(kLoginMaxAttempts);
+    expect(results.filter((res) => res.status === 401).length).toBeLessThan(kLoginMaxAttempts);
+    expect(results.filter((res) => res.status === 429).length).toBeGreaterThanOrEqual(burst - kLoginMaxAttempts);
+  });
 });

@@ -149,6 +149,22 @@ describe("cookie-authenticated /api writes must come from the box's origin (L-4)
     expect(crossGet.status).toBe(200);
   });
 
+  it("refuses a cross-origin cookie POST on a case-variant /API path (Express routes ignore case)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const app = createAuthApp();
+    const cookie = await loginCookie(app);
+    for (const path of ["/API/thing", "/Api/thing"]) {
+      const res = await request(app)
+        .post(path)
+        .set("Cookie", cookie)
+        .set("Host", "box.lan:3000")
+        .set("Origin", "https://evil.example")
+        .send({});
+      expect(res.status, path).toBe(403);
+      expect(res.body.code, path).toBe("origin_mismatch");
+    }
+  });
+
   it("exempts bearer requests: the agent token never rides the browser's ambient credential", async () => {
     const app = createAuthApp();
     const res = await request(app)
@@ -243,5 +259,12 @@ describe("WebSocket upgrades (L-4 origin, L-1 catch-all allowlist)", () => {
       expect(socket.destroy).toHaveBeenCalled();
     }
     expect(bridge.proxied).toEqual(forwarded);
+  });
+
+  it("forwards the Chrome extension relay path /browser/extension (OpenClaw 2026.10.9 registers it beside /browser/screencast)", () => {
+    const bridge = createBridge();
+    const socket = upgrade(bridge, "/browser/extension");
+    expect(socket.write).not.toHaveBeenCalled();
+    expect(bridge.proxied).toEqual(["/browser/extension"]);
   });
 });
