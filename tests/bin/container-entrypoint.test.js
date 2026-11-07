@@ -42,6 +42,26 @@ describe("bin/container-entrypoint.js", () => {
     expect(report.mode).toBe(0o600);
   });
 
+  it("recognizes AlphaClaw behind a shell-form start command or a node launch", () => {
+    if (process.platform !== "linux") return;
+    const shellProbe = writeProbe("alphaclaw");
+    const nodeProbe = writeProbe("alphaclaw.js");
+    for (const argv of [
+      ["/bin/sh", "-c", shellProbe + " start --port 3000"],
+      [process.execPath, nodeProbe, "start"],
+    ]) {
+      const result = spawnSync(process.execPath, [entrypoint, ...argv], {
+        encoding: "utf8",
+        env: { PATH: process.env.PATH, SETUP_PASSWORD: "fake-setup-pass-9" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const report = JSON.parse(result.stdout.trim());
+      expect(report.environ).not.toContain("SETUP_PASSWORD");
+      expect(report.handoff).toEqual({ SETUP_PASSWORD: "fake-setup-pass-9" });
+      expect(report.mode).toBe(0o600);
+    }
+  });
+
   it("leaves any other command's environment unchanged, so no handoff is left behind", () => {
     if (process.platform !== "linux") return;
     const probe = writeProbe("diagnose-shell");

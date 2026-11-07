@@ -18,7 +18,9 @@ if (!command) {
   console.error("[alphaclaw] usage: container-entrypoint.js <init> [args...]");
   process.exit(64);
 }
-const runsAlphaclaw = [command, ...args].some((arg) => path.basename(arg) === "alphaclaw");
+const runsAlphaclaw = [command, ...args].some((arg) =>
+  arg.split(/\s+/).some((word) => ["alphaclaw", "alphaclaw.js"].includes(path.basename(word))),
+);
 const env = runsAlphaclaw ? withDeploymentSecretsHandoff(process.env) : { ...process.env };
 try {
   process.execve(command, [command, ...args], env);
