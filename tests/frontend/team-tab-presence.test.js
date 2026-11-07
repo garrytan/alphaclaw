@@ -466,5 +466,70 @@ describe("frontend/team-tab invite links (GST-1787)", () => {
       "error",
     );
   });
+  it("clears a link already shown for an invite when a newer action drops that invite's Copy new link reply (round 4)", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    const kRotated = { ...kLink, url: "https://claw.example.com/login.html?invite=rotated-link" };
+    copyTeamInviteLink.mockResolvedValueOnce(kLink);
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    expect(useTeamTab().freshInvite).toEqual(kLink);
+
+    let resolveCopy;
+    copyTeamInviteLink.mockReturnValueOnce(new Promise((resolve) => { resolveCopy = resolve; }));
+    createTeamInvite.mockRejectedValueOnce(new Error("create failed"));
+    harness.beginRender();
+    const copying = useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    await useTeamTab().onCreateInvite({ email: "", role: "member" });
+    resolveCopy(kRotated);
+    await copying;
+    harness.beginRender();
+
+    expect(useTeamTab().freshInvite).toBe(null);
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).not.toHaveBeenCalledWith(kRotated.url);
+  });
+
+  it("clears a link already shown for an invite when a revoke in flight drops its Copy new link reply and then fails (round 4)", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    const kRotated = { ...kLink, url: "https://claw.example.com/login.html?invite=rotated-link" };
+    copyTeamInviteLink.mockResolvedValueOnce(kLink);
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    expect(useTeamTab().freshInvite).toEqual(kLink);
+
+    let rejectRevoke;
+    revokeTeamInvite.mockReturnValueOnce(new Promise((_, reject) => { rejectRevoke = reject; }));
+    let resolveCopy;
+    copyTeamInviteLink.mockReturnValueOnce(new Promise((resolve) => { resolveCopy = resolve; }));
+    harness.beginRender();
+    const revoking = useTeamTab().onRevokeInvite("inv-1");
+    harness.beginRender();
+    const copying = useTeamTab().onCopyInviteLink("inv-1");
+    resolveCopy(kRotated);
+    await copying;
+    rejectRevoke(new Error("revoke failed"));
+    await revoking;
+    harness.beginRender();
+
+    expect(useTeamTab().freshInvite).toBe(null);
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).not.toHaveBeenCalledWith(kRotated.url);
+  });
+
+  it("disables Create invite while a Copy new link request is in flight (round 4)", () => {
+    const createButtonOf = (tree) =>
+      collectNodes(tree).find((node) => node.props?.idleLabel === "Create invite");
+    expect(createButtonOf(renderCard({})).props.disabled).toBeFalsy();
+    expect(createButtonOf(renderCard({ linkingInviteId: "inv-1" })).props.disabled).toBe(true);
+  });
 });
 
