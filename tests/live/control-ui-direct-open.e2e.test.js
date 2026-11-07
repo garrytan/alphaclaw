@@ -13,6 +13,8 @@ const {
 //   fresh browser ── GET /openclaw/chat ──▶ 302 /gateway/attach?to=/openclaw/chat
 //        page POSTs /gateway/attach ──▶ token ──▶ sessionStorage ──▶ /openclaw/chat ──▶ hello-ok
 //
+// The token is per tab, so every new tab and every reload takes that detour.
+//
 // Before, the gateway token only reached a tab through /gateway/launch's
 // #token=, and the sidebar logout clears both storages, so a fresh tab, a new
 // browser or a log-out/log-in landed on "This Gateway expects its token".
@@ -67,12 +69,14 @@ describeLive("live: a signed-in admin opens the Control UI directly (real browse
       const location = res.headers().location;
       if (location) seen.locations.push(location);
     });
-    const page = await context.newPage();
-    page.on("websocket", (ws) => {
-      ws.on("framereceived", ({ payload }) => {
-        seen.frames.push(typeof payload === "string" ? payload : Buffer.from(payload).toString("utf8"));
+    context.on("page", (tab) => {
+      tab.on("websocket", (ws) => {
+        ws.on("framereceived", ({ payload }) => {
+          seen.frames.push(typeof payload === "string" ? payload : Buffer.from(payload).toString("utf8"));
+        });
       });
     });
+    const page = await context.newPage();
     return { context, page, seen };
   };
 
@@ -94,6 +98,9 @@ describeLive("live: a signed-in admin opens the Control UI directly (real browse
     expect(install.getServerLog().includes(kGatewayToken)).toBe(false);
   };
 
+  // One per detour: the attach page's GET carries ?to=, its token POST does not.
+  const attachDetours = (seen) => seen.urls.filter((u) => u.includes("/gateway/attach?to=")).length;
+
   const skipWithoutBrowser = (ctx) => {
     if (browser) return false;
     ctx.skip(`browser unavailable: ${browserSkipReason || "not launched"}`);
@@ -113,11 +120,13 @@ describeLive("live: a signed-in admin opens the Control UI directly (real browse
         await expectConnected(seen, "fresh /openclaw/chat", mark);
         await chatRoundTrip(page);
 
-        const detoursBefore = seen.urls.filter((u) => u.includes("/gateway/attach")).length;
+        // The token is per tab and a reload carries nothing that says the tab
+        // holds it, so a reload attaches again, exactly once (finding 8).
+        const detoursBefore = attachDetours(seen);
         mark = connectMark(seen);
         await page.reload({ waitUntil: "load" });
         await expectConnected(seen, "reload", mark);
-        expect(seen.urls.filter((u) => u.includes("/gateway/attach")).length).toBe(detoursBefore);
+        expect(attachDetours(seen)).toBe(detoursBefore + 1);
         expectTokenNeverExposed(seen);
       } finally {
         await context.close().catch(() => {});
@@ -139,6 +148,82 @@ describeLive("live: a signed-in admin opens the Control UI directly (real browse
         await expectConnected(seen, "fresh /openclaw/chat/main", mark);
         expect(await page.evaluate(() => document.body.innerText)).not.toContain("Conversation unavailable");
         await chatRoundTrip(page);
+        expectTokenNeverExposed(seen);
+      } finally {
+        await context.close().catch(() => {});
+      }
+    },
+    kTestTimeoutMs,
+  );
+
+  // Finding 8 (ALPH-64, 2026-11-07): the token lives in per-tab
+  // sessionStorage, but the detour used to run once per login, so every tab
+  // after the first landed on "This Gateway expects its token". Every new tab
+  // and every reload must attach exactly once and connect. The deep link runs
+  // under the worker the first tab installed, which answers /chat/<session>
+  // navigations itself (sw.js fetchChatNavigation) before the network, and
+  // the loaded UI then moves itself to /__openclaw__/session-entry.
+  itLive(
+    "every tab attaches once and connects: a second tab, a tab the dashboard opens, a deep link under the installed worker, and each one's reload",
+    async (ctx) => {
+      if (skipWithoutBrowser(ctx)) return;
+      const { context, page, seen } = await openContext();
+      const hasToken = (tab) =>
+        tab.evaluate(() => Object.keys(sessionStorage).some((k) => k.startsWith("openclaw.control.token.v1:")));
+      const expectTabConnects = async (label, path, open) => {
+        let before = attachDetours(seen);
+        let mark = connectMark(seen);
+        const tab = await open();
+        await tab.waitForURL((url) => url.pathname.startsWith(path), { timeout: 30_000 });
+        await expectConnected(seen, label, mark);
+        expect(attachDetours(seen), `${label}: attach detours`).toBe(before + 1);
+        expect(await hasToken(tab), `${label}: token seeded`).toBe(true);
+
+        before = attachDetours(seen);
+        mark = connectMark(seen);
+        await tab.reload({ waitUntil: "load" });
+        await expectConnected(seen, `${label} reload`, mark);
+        expect(attachDetours(seen), `${label} reload: attach detours`).toBe(before + 1);
+        return tab;
+      };
+      try {
+        expect(await loginInPage(page, base, kSetupPassword)).toBe(200);
+        await expectTabConnects("first tab", "/openclaw/chat", async () => {
+          await page.goto(`${base}/openclaw/chat`, { waitUntil: "load" });
+          return page;
+        });
+        const workerReady = await page.evaluate(() =>
+          Promise.race([
+            navigator.serviceWorker.ready.then(() => true),
+            new Promise((resolve) => setTimeout(() => resolve(false), 30_000)),
+          ]),
+        );
+        expect(workerReady, "the Control UI installs its service worker").toBe(true);
+
+        await expectTabConnects("second tab", "/openclaw/chat", async () => {
+          const tab = await context.newPage();
+          await tab.goto(`${base}/openclaw/chat`, { waitUntil: "load" });
+          return tab;
+        });
+
+        const dashboard = await context.newPage();
+        await dashboard.goto(`${base}/`, { waitUntil: "load" });
+        await expectTabConnects("tab opened from the dashboard", "/openclaw/chat", async () => {
+          const opened = context.waitForEvent("page");
+          await dashboard.evaluate(() => window.open("/openclaw/chat", "_blank", "noopener"));
+          const tab = await opened;
+          await tab.waitForLoadState("load");
+          return tab;
+        });
+
+        const deepLink = await expectTabConnects("deep link under the worker", "/openclaw/", async () => {
+          const tab = await context.newPage();
+          await tab.goto(`${base}/openclaw/chat/main`, { waitUntil: "load" });
+          return tab;
+        });
+        expect(await deepLink.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
+        expect(await deepLink.evaluate(() => document.body.innerText)).not.toContain("Conversation unavailable");
+        await chatRoundTrip(deepLink);
         expectTokenNeverExposed(seen);
       } finally {
         await context.close().catch(() => {});

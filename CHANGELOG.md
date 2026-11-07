@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.173] - 2026-11-07
+
+Every browser tab can open the Control UI at `/openclaw/*` again, not only the first one after a login (ALPH-68, live finding 8).
+
+### Fixed
+- **A second tab, a tab opened from the dashboard, a reload or a deep link showed "This Gateway expects its token".** The Control UI keeps its gateway token in per-tab `sessionStorage`, but the `/gateway/attach` detour that seeds it ran once per login: after the first tab, the session's `alphaclaw_control_ui` cookie sent every other tab straight to the gateway without a token. The cookie is now a pass for one navigation: the attach page's token answer hands it out (so a tab opened while another tab's token read is slow still attaches), and the navigation it admits spends it (60 s at most). Every top-level navigation, reloads included, attaches once and connects. If the token request cannot reach AlphaClaw at all, the attach page says so instead of looping. The attach page keeps a `#token=` fragment across the detour, and the gateway's own `/openclaw/__openclaw__/*` handoffs (the UI moves a `/chat/<session>` tab to `session-entry`) never detour. The token still never rides a URL, a redirect or a cacheable response.
+
+### Tests
+- `tests/live/control-ui-direct-open.e2e.test.js`: a second tab, a tab the dashboard opens with `noopener`, a deep link under the installed service worker, and each one's reload all attach exactly once and connect; a reload re-attaches once.
+
 ## [0.10.172] - 2026-11-07
 
 Phase 0 of the Setup UI overhaul (ALPH-69, GST-1697). It fixes five small UI defects that a live audit in real Chrome found.
