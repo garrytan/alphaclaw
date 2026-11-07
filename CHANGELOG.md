@@ -11,9 +11,9 @@ Phase 0 of the Setup UI overhaul (ALPH-69, GST-1697). It fixes five small UI def
 
 ### Fixed
 - **Relay nav highlight**: the sidebar highlighted General while the Relay page was open, because `getSelectedNavId` had no `/relay` case.
-- **Sidebar ⋮ menu reopened itself**: an outside click (for example on the Agents "+" button, which opens Add Agent) closed the sidebar's Log out menu and then toggled it straight back open. Two handlers closed it: the app shell's own capture listener, and the overflow menu's outside-click handler, which was wired to the toggle. The sidebar now passes a close action, so the menu stays shut behind the modal.
+- **Sidebar ⋮ menu reopened itself**: an outside click (for example on the Agents "+" button, which opens Add Agent) closed the sidebar's Log out menu and then toggled it straight back open. Two handlers closed it. One was the app shell's own capture listener; the other was the overflow menu's outside-click handler, which was wired to the toggle. The sidebar now passes a close action, so the menu stays shut behind the modal.
 - **Overflow menus ignore Escape**: the sidebar ⋮ menu and the other overflow menus (add channel, agent model card, Google accounts, connected nodes) stayed open on Escape. They now close on Escape.
-- **Cron "no warnings" line**: "No warnings currently need your attention" was painted in the warning colour with a warning icon. It now uses body text, and the warning tone appears only when a warning or error exists.
+- **Cron "no warnings" line**: "No warnings currently need your attention" was painted in the warning colour. The line and its icon now use body text, and the warning tone appears only when a warning or error exists.
 - **Phone status bar**: the version text in the bottom status bar wrapped to two lines on a 390 px screen and overflowed its 24 px bar. It now stays on one line and truncates with an ellipsis.
 
 ### Changed

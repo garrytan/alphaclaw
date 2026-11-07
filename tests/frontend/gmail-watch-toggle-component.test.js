@@ -173,16 +173,19 @@ describe("frontend/gmail watch toggle danger state", () => {
   });
 
   it("keeps Enter and Space on the focusable info tooltip from opening the webhook row", () => {
-    const onOpenWebhook = vi.fn();
-    const tree = render({ watchStatus: { enabled: true }, onOpenWebhook });
+    const tree = render({ watchStatus: { enabled: true } });
     const wrapper = collectNodes(tree).find((vnode) =>
       (Array.isArray(vnode.props?.children) ? vnode.props.children : [vnode.props?.children])
         .some((child) => child?.type === InfoTooltip),
     );
     expect(wrapper.props.onKeyDown).toBeTypeOf("function");
-    const event = { key: "Enter", stopPropagation: vi.fn(), preventDefault: vi.fn() };
-    wrapper.props.onKeyDown(event);
-    expect(event.stopPropagation).toHaveBeenCalledTimes(1);
-    expect(onOpenWebhook).not.toHaveBeenCalled();
+    for (const key of ["Enter", " "]) {
+      const event = { key, stopPropagation: vi.fn() };
+      wrapper.props.onKeyDown(event);
+      expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+    }
+    const escape = { key: "Escape", stopPropagation: vi.fn() };
+    wrapper.props.onKeyDown(escape);
+    expect(escape.stopPropagation).not.toHaveBeenCalled();
   });
 });
