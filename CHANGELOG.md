@@ -5,6 +5,11 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.193] - 2026-11-07
+
+### Changed
+- `.gstack/pregate.json` gains five allowlist entries for six secret-scan false positives, all from the web-hardening PR (ALPH-71 PR 3, #343). Two are the login and accept-invite request body fields in `lib/public/js/login.js` (`token: inviteToken`, `password: passwordEl.value`), filled at runtime. One is a structural guard's offender key in `tests/server/guards/scanners.js`. Two are dummy `SETUP_PASSWORD` fixtures, in `origin-guard.test.js` and `web-hardening-real-server.test.js`. The last reads a test login's `set-cookie` header. Each entry names `env.kv`, its paths and a pattern anchored at both ends of the flagged value, with its reason. There are no blanket rules.
+
 ## [0.10.192] - 2026-11-07
 
 Setup UI phase 3a (ALPH-69). Home is rebuilt as a status page with next steps, and Channels and Integrations become pages of their own. No server, restart, watchdog, gateway or relay behaviour changes.
