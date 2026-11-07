@@ -69,6 +69,52 @@ describe("server/doctor/workspace-fingerprint", () => {
     expect(first).toBe(second);
   });
 
+  it("counts only the files Drift Doctor reviews among thousands of churned brain pages and logs", () => {
+    const previousManifest = {
+      "AGENTS.md": { hash: "agents-1", size: 900 },
+      "skills/research/SKILL.md": { hash: "skill-1", size: 400 },
+      "README.md": { hash: "readme-1", size: 200 },
+      "logs/gateway.log": { hash: "log-1", size: 10000 },
+    };
+    const currentManifest = {
+      "AGENTS.md": { hash: "agents-2", size: 1400 },
+      "skills/research/SKILL.md": { hash: "skill-2", size: 450 },
+      "README.md": { hash: "readme-1", size: 200 },
+      "hooks/bootstrap/AGENTS.md": { hash: "hook-1", size: 300 },
+      "logs/gateway.log": { hash: "log-2", size: 90000 },
+      "memory/2026-11-06.md": { hash: "memory-1", size: 700 },
+    };
+    for (let index = 0; index < 5000; index += 1) {
+      currentManifest[`brain/people/person-${index}.md`] = { hash: `brain-${index}`, size: 800 };
+      currentManifest[`logs/run-${index}.jsonl`] = { hash: `run-${index}`, size: 1200 };
+    }
+
+    const delta = calculateWorkspaceDelta({ previousManifest, currentManifest });
+
+    expect(delta.changedFilesCount).toBe(10005);
+    expect(delta.reviewedChangedFilesCount).toBe(3);
+  });
+
+  it("counts no reviewed changes when only brain pages, logs and memory notes churned", () => {
+    const previousManifest = {
+      "AGENTS.md": { hash: "agents-1", size: 900 },
+      "logs/gateway.log": { hash: "log-1", size: 10000 },
+    };
+    const currentManifest = {
+      "AGENTS.md": { hash: "agents-1", size: 900 },
+      "logs/gateway.log": { hash: "log-2", size: 90000 },
+      "memory/2026-11-06.md": { hash: "memory-1", size: 700 },
+    };
+    for (let index = 0; index < 2000; index += 1) {
+      currentManifest[`brain/companies/company-${index}.md`] = { hash: `brain-${index}`, size: 800 };
+    }
+
+    const delta = calculateWorkspaceDelta({ previousManifest, currentManifest });
+
+    expect(delta.changedFilesCount).toBe(2002);
+    expect(delta.reviewedChangedFilesCount).toBe(0);
+  });
+
   it("scores added, removed, and modified files with path and byte-delta weights", () => {
     const previousManifest = {
       "docs/notes.md": { hash: "a", size: 1000 },

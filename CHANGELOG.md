@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.205] - 2026-11-07
+## [0.10.206] - 2026-11-07
 
 Someone hammering the sign-in page can no longer lock the owner out, and sign-in now blocks and logs by client address. The box-wide cap on password guesses stays exactly where it was.
 
@@ -19,6 +19,32 @@ Someone hammering the sign-in page can no longer lock the owner out, and sign-in
 
 ### Tests
 - New `routes-auth-owner-lane` and `login-client-ip` files, plus a new case in `proxy-identity`. They cover owner access during an attack, per-address blocks against forged headers, the audit lines, the recovery-code rules and the pass rules, and they fail on the previous main. A throughput guard checks that 475 rotating clients sending forged, tampered and expired passes, passes for the wrong account and wrong codes get at most 25 password checks between them (at most 30 when one valid pass is stolen). It passes on the previous main, and fails if the box-wide count is removed or a tampered pass is accepted.
+
+## [0.10.205] - 2026-11-07
+
+Home's Drift Doctor reminder now counts only the files Drift Doctor reviews, so brain pages, logs and other workspace churn no longer put a warning with a five-digit file count at the top of Home.
+
+### Fixed
+- **Home's Drift Doctor reminder counted every file in the workspace.** The reminder said, for example, "18924 files changed since the last review", because the count included every file the drift scan sees: brain pages, logs, memory notes and generated state. Drift Doctor reviews only the injected prompt files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md`, `MEMORY.md`), `README.md`, `hooks/bootstrap/` and `skills/`. The Doctor status now also reports `reviewedChangedFilesCount`, counted against that same set, and the reminder uses it: "Drift Doctor last ran over a week ago. Since then, 3 of the files it reviews (prompt files, skills and README) changed. Run Drift Doctor to check them." When none of those files changed, Home and the Doctor page show no reminder. The workspace-wide `changedFilesCount`, the drift score, scheduled scans and Doctor's fixes are unchanged.
+
+### Tests
+- New cases in `workspace-fingerprint`, `doctor-service`, `doctor-helpers-more` and `home-tab` cover a workspace with thousands of changed brain pages and logs plus a few changed prompt and skill files, and one where only brain pages, logs and memory notes changed. All fail on the previous main.
+
+## [0.10.204] - 2026-11-07
+
+The check that a browser request comes from the box's own dashboard now compares scheme and port, not just the host name.
+
+### Security
+- **An http page on the box's host name counted as the https dashboard.** AlphaClaw refuses cookie-authenticated writes, the chat and terminal WebSockets and the OAuth starts from other sites by comparing the request's `Origin` with the host it was sent to. It compared host names only and dropped `:80` and `:443` whatever the scheme, so `http://box.example`, `http://box.example:443` and `https://box.example:80` passed as the https dashboard on `box.example`. Chrome keeps the session cookie off those requests; Firefox and Safari don't by default, so someone who could serve plain http on the box's name (an open Wi-Fi network, for example) could make writes with the owner's session. Now an `Origin` with an explicit port (`:443` on http, `:80` on https) matches only a request sent to that port, and when a proxy in front says the browser came over https (`X-Forwarded-Proto`, `Forwarded: proto=https` or Cloudflare's `CF-Visitor`), an http `Origin` is refused.
+
+### Changed
+- A forwarded `http` refuses nothing, so behind Cloudflare Flexible SSL, or an https edge whose inner proxy reports `http`, the dashboard keeps working; the https signal from the edge is what refuses the downgrade. A proxy that sends `X-Forwarded-Proto: https` for a plain-http page (a hard-coded header, or an inner TLS hop) does refuse that page's http origin. The configured setup URL gets the same downgrade check, so an `http://` setup URL no longer vouches for an http origin when a proxy says https.
+- Only `http` and `https` origins can match the box. The Control UI's connect to the gateway uses the same rule, so a same-host browser on the same scheme and port is vouched for as before.
+- A new real-server test runs AlphaClaw behind nginx, Caddy (with and without `trusted_proxies`), a Cloudflare Flexible SSL edge and a direct connection, and checks each accepts the dashboard's own origin and refuses the downgrades. Its nginx and Caddy cases skip when the binary is not installed.
+
+### Not covered
+- With no proxy saying https, the scheme can't be known. A TLS front that sends none of those headers (nginx without `X-Forwarded-Proto`, some Apache and HAProxy setups) still lets `http://box.example` match, and a page on `http://box.example:8443` still matches a box reached directly on port 8443. Every TLS front tested sets `X-Forwarded-Proto`.
+- nginx's common `proxy_set_header Host $host` drops a custom port, so a dashboard on `https://box.example:8443` behind it is matched only through the configured setup URL, as before this change.
 
 ## [0.10.203] - 2026-11-07
 

@@ -57,7 +57,7 @@ describe("frontend/doctor helpers", () => {
         {
           needsInitialRun: false,
           stale: true,
-          changeSummary: { hasMeaningfulChanges: true },
+          changeSummary: { hasMeaningfulChanges: true, reviewedChangedFilesCount: 1 },
         },
         Date.now() + 1000,
       ),
@@ -66,17 +66,17 @@ describe("frontend/doctor helpers", () => {
       helpers.shouldShowDoctorWarning({
         needsInitialRun: false,
         stale: true,
-        changeSummary: { hasMeaningfulChanges: true },
+        changeSummary: { hasMeaningfulChanges: true, reviewedChangedFilesCount: 1 },
       }),
     ).toBe(true);
     expect(
       helpers.getDoctorWarningMessage({
         needsInitialRun: false,
         stale: true,
-        changeSummary: { changedFilesCount: 3 },
+        changeSummary: { changedFilesCount: 3, reviewedChangedFilesCount: 3 },
       }),
     ).toBe(
-      "Drift Doctor has not been run in the last week and 3 files changed since the last review.",
+      "Drift Doctor last ran over a week ago. Since then, 3 of the files it reviews (prompt files, skills and README) changed. Run Drift Doctor to check them.",
     );
   });
 
