@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRelayPageModel, kRelayPhaseCopy } from "../../lib/public/js/components/relay-tab/model.js";
+import { buildArchiveModel, buildRelayPageModel, kArchiveCodeCopy, kRelayPhaseCopy } from "../../lib/public/js/components/relay-tab/model.js";
 
 describe("Relay page model", () => {
   it("has copy for every service phase", () => {
@@ -42,5 +42,41 @@ describe("Relay page model", () => {
     const model = buildRelayPageModel({ status: { enabled: true, phase: "ready", bridge: { failure } } });
     expect(model).toMatchObject({ phaseLabel: "Not answering", phaseTone: "danger", phaseText: failure, bridgeFailure: failure });
     expect(buildRelayPageModel({ status: { enabled: true, phase: "ready", bridge: { failure: null } } }).phaseLabel).toBe("Ready");
+  });
+});
+
+describe("Relay brain archive model (ALPH-68 PR3)", () => {
+  it("names why nothing is saved, and lists conversations waiting for Retry", () => {
+    expect(buildArchiveModel(null)).toMatchObject({ phase: "off", canRetry: false });
+    expect(buildArchiveModel({ enabled: true, phase: "unavailable", code: "source_missing" })).toMatchObject({ label: "Not set up", tone: "neutral" });
+    expect(buildArchiveModel({ enabled: true, phase: "unavailable", code: "gbrain_missing" })).toMatchObject({ label: "Not set up", tone: "neutral" });
+    expect(buildArchiveModel({ enabled: true, phase: "unavailable", code: "source_federated" })).toMatchObject({ label: "Not saving", tone: "danger" });
+    const model = buildArchiveModel({
+      enabled: true,
+      phase: "ready",
+      counts: { idle: 3, due: 1, backoff: 1, parked: 1, pages: 4, pendingWrites: 1, commitsQueued: 0 },
+      parked: [{ code: "masked_refused", count: 1 }],
+      lastSavedAt: "2026-11-07T00:00:00Z",
+    });
+    expect(model).toMatchObject({ label: "Saving", pages: 4, waiting: 2, pendingWrites: 1, canRetry: true });
+    expect(model.parked[0]).toMatchObject({ code: "masked_refused", tone: "danger" });
+    for (const code of Object.keys(kArchiveCodeCopy)) expect(kArchiveCodeCopy[code].text).toBeTruthy();
+  });
+
+  it("names each peer past its archive budget and when it resumes", () => {
+    const model = buildArchiveModel({
+      enabled: true,
+      phase: "ready",
+      overBudget: [
+        { peer: "capy-x", code: "peer_budget_daily", conversations: 2, resumesAt: "2026-11-08T00:00:00.000Z" },
+        { peer: "capy-y", code: "peer_budget_total", conversations: 1, resumesAt: null },
+      ],
+      budget: { peerDailyBytes: 8 * 1024 * 1024, peerTotalBytes: 512 * 1024 * 1024 },
+    });
+    expect(model.overBudget.map((row) => row.text)).toEqual([
+      "@capy-x reached today's budget (8 MB); 2 conversations resume after 00:00 UTC.",
+      "@capy-y is past its total budget (512 MB); 1 conversation is not saved until the budget is raised and Retry is pressed.",
+    ]);
+    expect(buildArchiveModel({ enabled: true, phase: "ready" }).overBudget).toEqual([]);
   });
 });

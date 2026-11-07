@@ -181,3 +181,37 @@ describe("relay conversations (ALPH-68)", () => {
   });
 });
 
+
+describe("relay brain archive route (ALPH-68 PR3)", () => {
+  const archiveService = () => {
+    const service = createRelayService();
+    service.retryArchive = vi.fn(() => ({ retried: 2 }));
+    service.getStatus = () => ({ enabled: true, phase: "ready", archive: { enabled: true, phase: "ready", code: null, parked: [] } });
+    return service;
+  };
+
+  it("Retry is for signed-in people: a human retries, the agent actor is refused and the op is not in the manifest", async () => {
+    const service = archiveService();
+    const human = await request(appWith(service)).post("/api/relay/archive/retry");
+    expect(human.status).toBe(200);
+    expect(human.body).toMatchObject({ ok: true, retried: 2, archive: { phase: "ready" } });
+    const app = express();
+    app.use((req, res, next) => {
+      req.alphaclawActor = { type: "agent" };
+      next();
+    });
+    registerRelayRoutes({ app, requireAuth: (req, res, next) => next(), relayService: service });
+    const agent = await request(app).post("/api/relay/archive/retry");
+    expect(agent.status).toBe(403);
+    expect(agent.body.code).toBe("admin_required");
+    expect(service.retryArchive).toHaveBeenCalledTimes(1);
+    expect(findOp("POST", "/api/relay/archive/retry")).toBeFalsy();
+  });
+
+  it("Retry before the relay is ready answers a coded problem", async () => {
+    const service = createRelayService({ ready: false });
+    service.retryArchive = () => null;
+    const res = await request(appWith(service)).post("/api/relay/archive/retry");
+    expect(res.body.code).toBe("provisioning_pending");
+  });
+});
