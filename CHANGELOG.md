@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.205] - 2026-11-07
+
+Someone hammering the sign-in page can no longer lock the owner out, and sign-in now blocks and logs by client address. The box-wide cap on password guesses stays exactly where it was.
+
+### Security
+- **The owner gets past a sign-in lockout.** Until now, 25 bad sign-ins from any mix of addresses refused every sign-in for up to 15 minutes, the owner's included, for as long as the attack kept going. Now every successful sign-in also sets a known-browser pass: a signed, HttpOnly cookie scoped to `/api/auth` that lasts 90 days. Later sign-ins from that browser, as the same owner or member, count in a bucket of their own (5 bad passwords per window) instead of the shared one. For a new device, the owner can set `ALPHACLAW_LOGIN_RECOVERY_CODE` (32+ random characters, deployment environment only) and enter it with their password after "Locked out? Use your recovery code" appears on a 429. In team mode it goes with an admin's own email and password. Neither replaces the password. Owner logout or a `SETUP_PASSWORD` change ends every owner pass, and a member's logout or removal ends theirs. A wrong recovery code gets the same 401 as a wrong password and never reaches a password check, so it can't be guessed through the lockout or used to lock the recovery lane.
+- **Per-address blocks can't be dodged or framed with a forged header.** The per-address limit (5 bad sign-ins in 10 minutes, then a lock of 60 s that doubles on every repeat up to 15 min) now takes the client address from `X-Forwarded-For` only when the connection comes from a loopback or private address, where a proxy sits. Any other connection is keyed on its own address. On a bare install with the default `TRUST_PROXY_HOPS=1`, a client could pick its address before this change: a new one for every guess, or the owner's to get the owner blocked. Express's `trust proxy` setting is unchanged everywhere else. A client on the same private network can still choose its address (README, Security Notes).
+- **Every sign-in is logged with its address.** Each failed sign-in, successful sign-in and 429 on `/api/auth/login` and `/api/auth/accept-invite` writes one line, for example `[auth] sign-in failed route=POST /api/auth/login ip="203.0.113.9" actor=owner lane=shared`. No line carries a password, the recovery code, the pass or an email.
+
+### Changed
+- The gateway proxy strips the new `alphaclaw_device` cookie along with the session cookie, and the gateway gets `ALPHACLAW_LOGIN_RECOVERY_CODE` as an empty value.
+
+### Tests
+- New `routes-auth-owner-lane` and `login-client-ip` files, plus a new case in `proxy-identity`. They cover owner access during an attack, per-address blocks against forged headers, the audit lines, the recovery-code rules and the pass rules, and they fail on the previous main. A throughput guard checks that 475 rotating clients sending forged, tampered and expired passes, passes for the wrong account and wrong codes get at most 25 password checks between them (at most 30 when one valid pass is stolen). It passes on the previous main, and fails if the box-wide count is removed or a tampered pass is accepted.
+
 ## [0.10.203] - 2026-11-07
 
 Models & keys groups API keys by provider and saves one key at a time; agent pages get a one-line description and tabs. Home no longer shows an old git-sync result as if it were current. No server, restart, watchdog, gateway or relay behaviour changes, and every action keeps its handler.
