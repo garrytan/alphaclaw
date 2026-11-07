@@ -80,7 +80,7 @@ const kAnchors = [
   {
     id: "P7",
     text: () =>
-      "Changes to env vars are made through the **Envars** tab (`" + kSetupUrl + "#envars`). After saving, a " +
+      "Changes to env vars are made through the **Environment** page (`" + kSetupUrl + "#environment`). After saving, a " +
       "gateway restart may be required to pick up the changes — the UI prompts for this automatically. " +
       "Do not edit `" + kEnvFile + "` directly; use the Setup UI so changes are validated and the gateway " +
       "restart is handled.",
@@ -321,9 +321,9 @@ describe("slim bootstrap files (ALPH-58)", () => {
         "needs to find something in the UI.",
     );
     expect(rules).not.toContain("| Tab ");
-    expect(rules).not.toContain(kSetupUrl + "#cron");
-    expect(setupUi).toContain("| Tab ");
-    expect(setupUi).toContain("| Cron     | `" + kSetupUrl + "#cron`");
+    expect(rules).not.toContain(kSetupUrl + "#schedules");
+    expect(setupUi).toContain("| Page ");
+    expect(setupUi).toContain("| Schedules | `" + kSetupUrl + "#schedules`");
     expect(setupUi).toContain("saved to `" + kEnvFile + "`");
     expect(setupUi).not.toContain("{{");
   });

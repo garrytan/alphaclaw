@@ -16,7 +16,7 @@
 #
 # Covers the normalization contract end-to-end:
 #   1. Gateway card "Last health check" equals Intl(medium/short) of the API ISO
-#   2. Watchdog console lines carry local `YYYY-MM-DD HH:mm:ss ±HH:MM` prefixes
+#   2. Health page console lines carry local `YYYY-MM-DD HH:mm:ss ±HH:MM` prefixes
 #      (no raw `...Z` ISO at line starts), the zone caption names the browser's
 #      zone, and the copy action reads "Copy diagnostics (UTC)"
 #   3. Incident timeline shows SECONDS (sub-minute causality) and tooltips are
@@ -119,7 +119,7 @@ done
 echo "  ok: Last health check renders the Intl medium/short value"
 
 echo "== watchdog console: local prefixes, zone caption, UTC copy label =="
-"$B" goto "http://127.0.0.1:$kPort/#/watchdog" >/dev/null
+"$B" goto "http://127.0.0.1:$kPort/#/health" >/dev/null
 sleep 3
 # Multiline anchors ('m' flag): a regression on lines 2..N must fail the
 # smoke, not hide behind a clean first line.
@@ -142,7 +142,7 @@ for i in $(seq 1 24); do
   sleep 5
 done
 [ "$opened" = "true" ] || fail "no incident opened within the poll window"
-"$B" goto "http://127.0.0.1:$kPort/#/watchdog" >/dev/null
+"$B" goto "http://127.0.0.1:$kPort/#/health" >/dev/null
 sleep 3
 # The incidents section loads async and the card must be expanded before its
 # timeline (and titles) exist — retry expand+check until the tooltips appear.

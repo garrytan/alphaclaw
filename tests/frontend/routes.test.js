@@ -19,19 +19,18 @@ import {
 import { parseBrowseRoute } from "../../lib/public/js/lib/browse-route.js";
 import { getHashRouterPath } from "../../lib/public/js/hooks/use-hash-location.js";
 
-// ALPH-69 PR 2a: the route table is the single source for every Setup UI
-// hash route. These tests pin today's hashes, the old -> new aliases, the
-// sidebar's current lists and highlight, and the IA data PR 2b will render.
+// ALPH-69 PR 2a/2b: the route table is the single source for every Setup UI
+// hash route. These tests pin today's hashes, the old -> new redirects (query
+// kept), the sidebar's groups and highlight, and the IA data the shell renders.
 
 const servedRoutes = kRoutes.filter((route) => !route.planned);
 
-// Every hash the Setup UI served before the route table, with the route id
-// and params it must still resolve to.
+// Every hash the Setup UI serves, with the route id and params it resolves to.
 const kTodaysHashes = [
-  ["/general", "general", {}],
+  ["/home", "home", {}],
   ["/doctor", "doctor", {}],
-  ["/watchdog", "watchdog", {}],
-  ["/watchdog?incident=5", "watchdog", {}],
+  ["/health", "health", {}],
+  ["/health?incident=5", "health", {}],
   ["/team", "team", {}],
   ["/usage", "usage", {}],
   ["/usage/sess-1", "usage", { sessionId: "sess-1" }],
@@ -46,9 +45,9 @@ const kTodaysHashes = [
   ["/agents/main/tools", "agents", { agentId: "main", tab: "tools" }],
   ["/chat", "chat", {}],
   ["/chat/agent%3Amain%3Amain", "chat", { sessionKey: "agent%3Amain%3Amain" }],
-  ["/cron", "cron", {}],
-  ["/cron/nightly%20sync", "cron", { jobId: "nightly%20sync" }],
-  ["/envars", "envars", {}],
+  ["/schedules", "schedules", {}],
+  ["/schedules/nightly%20sync", "schedules", { jobId: "nightly%20sync" }],
+  ["/environment", "environment", {}],
   ["/models", "models", {}],
   ["/nodes", "nodes", {}],
   ["/browse", "browse", {}],
@@ -65,9 +64,6 @@ describe("route table shape", () => {
     expect(new Set(patterns).size).toBe(patterns.length);
     const aliases = kRoutes.flatMap((route) => route.redirectFrom);
     expect(new Set(aliases).size).toBe(aliases.length);
-    const planned = kRoutes.map((route) => route.plannedPath).filter(Boolean);
-    expect(new Set(planned).size).toBe(planned.length);
-    expect(planned.filter((path) => paths.includes(path))).toEqual([]);
   });
 
   it("gives every route a title, nav label, IA group and admin flag", () => {
@@ -84,49 +80,55 @@ describe("route table shape", () => {
     expect(kRouteGroups).toEqual(["home", "chat", "agents", "operate", "connect", "settings"]);
   });
 
-  it("carries the new names without showing them yet", () => {
+  it("shows the new names in the sidebar", () => {
     const labels = Object.fromEntries(kRoutes.map((route) => [route.id, route.navLabel]));
     expect(labels).toMatchObject({
-      general: "Home",
-      watchdog: "Health",
-      cron: "Schedules",
-      envars: "Environment",
+      home: "Home",
+      health: "Health",
+      schedules: "Schedules",
+      environment: "Environment",
       models: "Models & keys",
       channels: "Channels",
       integrations: "Integrations",
     });
-    expect(getRoute("general").title).toBe("Home");
-    expect(getRoute("watchdog").purpose).toBe("Gateway, watchdog and incidents");
+    expect(getRoute("home").title).toBe("Home");
+    expect(getRoute("health").purpose).toBe("Gateway, watchdog and incidents");
     const shownLabels = kNavSections.flatMap((section) => section.items.map((item) => item.label));
     for (const label of ["Home", "Health", "Schedules", "Environment", "Models & keys"]) {
+      expect(shownLabels).toContain(label);
+    }
+    for (const label of ["General", "Watchdog", "Cron", "Envars", "Models"]) {
       expect(shownLabels).not.toContain(label);
+    }
+    for (const label of ["Config", "Monitoring", "Setup"]) {
+      expect(kNavSections.map((section) => section.label)).not.toContain(label);
     }
   });
 
   it("puts each route in its IA group", () => {
     const groupOf = (id) => getRoute(id).group;
-    expect(groupOf("general")).toBe("home");
+    expect(groupOf("home")).toBe("home");
     expect(groupOf("chat")).toBe("chat");
     expect(groupOf("agents")).toBe("agents");
-    expect(["watchdog", "doctor", "cron", "usage"].map(groupOf)).toEqual(Array(4).fill("operate"));
+    expect(["health", "doctor", "schedules", "usage"].map(groupOf)).toEqual(Array(4).fill("operate"));
     expect(["channels", "integrations", "relay", "webhooks", "nodes", "telegram"].map(groupOf)).toEqual(
       Array(6).fill("connect"),
     );
-    expect(["models", "envars", "team"].map(groupOf)).toEqual(Array(3).fill("settings"));
+    expect(["models", "environment", "team"].map(groupOf)).toEqual(Array(3).fill("settings"));
   });
 
-  it("records the hashes PR 2b moves to, none of which is served yet", () => {
-    const planned = Object.fromEntries(
-      kRoutes.filter((route) => route.plannedPath).map((route) => [route.id, route.plannedPath]),
-    );
-    expect(planned).toEqual({
-      general: "/home",
-      watchdog: "/health",
-      cron: "/schedules",
-      envars: "/environment",
-    });
-    for (const path of [...Object.values(planned), "/channels", "/integrations"]) {
-      expect(resolveRoute(path), path).toEqual({ route: null, params: {}, redirectTo: "/general" });
+  it("serves the renamed hashes and leaves Channels and Integrations to PR 3a", () => {
+    for (const [id, path] of [
+      ["home", "/home"],
+      ["health", "/health"],
+      ["schedules", "/schedules"],
+      ["environment", "/environment"],
+    ]) {
+      expect(getRoutePath(id)).toBe(path);
+      expect(resolveRoute(path).route?.id, path).toBe(id);
+    }
+    for (const path of ["/channels", "/integrations"]) {
+      expect(resolveRoute(path), path).toEqual({ route: null, params: {}, redirectTo: "/home" });
     }
   });
 });
@@ -150,36 +152,68 @@ describe("route resolution", () => {
       kRoutes.flatMap((route) => route.redirectFrom.map((from) => [from, route.path])),
     );
     expect(aliases).toEqual({
+      "/general": "/home",
+      "/watchdog": "/health",
+      "/cron/:jobId?": "/schedules",
+      "/envars/:rest*": "/environment",
       "/providers": "/models",
       "/telegram": "/telegram/default",
     });
-    for (const [from, to] of Object.entries(aliases)) {
+    for (const [from, to] of [
+      ["/general", "/home"],
+      ["/watchdog", "/health"],
+      ["/cron", "/schedules"],
+      ["/envars", "/environment"],
+      ["/providers", "/models"],
+      ["/telegram", "/telegram/default"],
+    ]) {
       expect(resolveRoute(from).redirectTo).toBe(to);
       expect(resolveRoute(`${from}/`).redirectTo).toBe(to);
       expect(resolveRoute(to).redirectTo).toBe("");
     }
   });
 
+  it.each([
+    ["/watchdog?incident=x", "health", "/health?incident=x"],
+    ["/watchdog?incident=12&tab=log", "health", "/health?incident=12&tab=log"],
+    ["/Watchdog?incident=3", "health", "/health?incident=3"],
+    ["/general?focus=channels", "home", "/home?focus=channels"],
+    ["/cron/nightly%20sync", "schedules", "/schedules/nightly%20sync"],
+    ["/cron/nightly?trendStart=1", "schedules", "/schedules/nightly?trendStart=1"],
+    ["/envars/anything", "environment", "/environment"],
+    ["/providers?x=1", "models", "/models?x=1"],
+  ])("redirects %s to %s with its params and query", (location, id, redirectTo) => {
+    const resolved = resolveRoute(location);
+    expect(resolved.route.id).toBe(id);
+    expect(resolved.redirectTo).toBe(redirectTo);
+    expect(resolveRoute(redirectTo)).toMatchObject({ route: getRoute(id), redirectTo: "" });
+  });
+
+  it("drops the query when an unknown hash falls back to Home", () => {
+    expect(resolveRoute("/nope?incident=1").redirectTo).toBe("/home");
+  });
+
   it("sends unknown and empty hashes to the default route", () => {
     expect(kDefaultUiTab).toBe(kDefaultRouteId);
-    for (const location of ["", "/", "/nope", "/webhooks/a/b", "/telegram/a/b", "/chatty", "/general/x"]) {
+    for (const location of ["", "/", "/nope", "/webhooks/a/b", "/telegram/a/b", "/chatty", "/general/x", "/home/x"]) {
       expect(resolveRoute(location), location).toEqual({
         route: null,
         params: {},
-        redirectTo: "/general",
+        redirectTo: "/home",
       });
     }
   });
 
   it("matches like wouter did: case-insensitive with one optional trailing slash", () => {
-    expect(getRouteId("/Watchdog")).toBe("watchdog");
+    expect(getRouteId("/Health")).toBe("health");
     expect(getRouteId("/usage/")).toBe("usage");
     expect(getRouteId("/doctor/")).toBe("doctor");
   });
 
   it("lets pane routes own their deeper paths, as location.startsWith did", () => {
     expect(getRouteId("/models/anything")).toBe("models");
-    expect(getRouteId("/envars/x/y")).toBe("envars");
+    expect(getRouteId("/environment/x/y")).toBe("environment");
+    expect(getRouteId("/schedules/a")).toBe("schedules");
     expect(getRouteId("/nodes/x")).toBe("nodes");
     expect(resolveRoute("/agents/main/tools/extra").params).toEqual({ agentId: "main", tab: "tools" });
     expect(resolveRoute("/chat/agent:main:a/b").params).toEqual({ sessionKey: "agent:main:a/b" });
@@ -191,10 +225,12 @@ describe("route resolution", () => {
       globalThis.window = originalWindow;
     });
     it.each([
-      ["#envars", "envars"],
-      ["#watchdog?incident=5", "watchdog"],
+      ["#environment", "environment"],
+      ["#health?incident=5", "health"],
+      ["#envars", "environment"],
+      ["#watchdog?incident=5", "health"],
       ["#browse/skills/notes.md", "browse"],
-      ["", "general"],
+      ["", "home"],
       ["#/chat/agent%3Amain%3Amain", "chat"],
     ])("resolves %s to %s", (hash, id) => {
       globalThis.window = { location: { hash } };
@@ -223,82 +259,104 @@ describe("route resolution", () => {
     ]);
     expect(menuReturn.agents).toBe("session");
     const surfaces = servedRoutes.filter((route) => route.gatewaySurface).map((route) => route.id);
-    expect(surfaces).toEqual(["general", "watchdog"]);
+    expect(surfaces).toEqual(["home", "health"]);
     const panes = servedRoutes.filter((route) => route.shell === "pane").map((route) => route.id);
-    expect(panes.sort()).toEqual(["agents", "browse", "chat", "cron", "envars", "models", "nodes"]);
+    expect(panes.sort()).toEqual(["agents", "browse", "chat", "environment", "models", "nodes", "schedules"]);
   });
 });
 
 describe("sidebar lists and highlight from the route table", () => {
   it("builds exactly today's sidebar sections", () => {
     expect(kNavSections).toEqual([
-      { label: "Setup", items: [{ id: "general", label: "General" }] },
       {
-        label: "Monitoring",
+        id: "start",
+        label: "",
         items: [
-          { id: "cron", label: "Cron" },
-          { id: "usage", label: "Usage" },
-          { id: "doctor", label: "Doctor" },
-          { id: "watchdog", label: "Watchdog" },
-          { id: "relay", label: "Relay" },
+          { id: "home", label: "Home", path: "/home" },
+          { id: "chat", label: "Chat", path: "/chat" },
+        ],
+      },
+      {
+        id: "operate",
+        label: "Operate",
+        items: [
+          { id: "health", label: "Health", path: "/health" },
+          { id: "doctor", label: "Doctor", path: "/doctor" },
+          { id: "schedules", label: "Schedules", path: "/schedules" },
+          { id: "usage", label: "Usage", path: "/usage" },
           kClaudeCodeNavItem,
         ],
       },
       {
-        label: "Config",
+        id: "connect",
+        label: "Connect",
         items: [
-          { id: "models", label: "Models" },
-          { id: "envars", label: "Envars" },
-          { id: "webhooks", label: "Webhooks" },
-          { id: "nodes", label: "Nodes" },
-          { id: "team", label: "Team" },
+          { id: "channels", label: "Channels", path: "/home", anchor: "home-channels" },
+          { id: "integrations", label: "Integrations", path: "/home", anchor: "home-integrations" },
+          { id: "webhooks", label: "Webhooks", path: "/webhooks" },
+          { id: "nodes", label: "Nodes", path: "/nodes" },
+          { id: "relay", label: "Relay", path: "/relay" },
+        ],
+      },
+      {
+        id: "settings",
+        label: "Settings",
+        items: [
+          { id: "models", label: "Models & keys", path: "/models" },
+          { id: "environment", label: "Environment", path: "/environment" },
+          { id: "team", label: "Team", path: "/team" },
         ],
       },
     ]);
     for (const item of kNavSections.flatMap((section) => section.items)) {
-      if (item.href) continue;
-      expect(getRoutePath(item.id)).toBe(`/${item.id}`);
+      if (item.href || item.anchor) continue;
+      expect(item.path).toBe(getRoutePath(item.id));
     }
   });
 
-  it("matches today's admin gating: members see only Cron, Usage and Team", () => {
-    expect([...kMemberNavIds].sort()).toEqual(["cron", "team", "usage"]);
-    const memberIds = filterNavSectionsForRole(kNavSections, "member").flatMap((section) =>
-      section.items.map((item) => item.id),
-    );
-    expect(memberIds).toEqual(["cron", "usage", "team"]);
+  it("gives members exactly Usage, Schedules and Team", () => {
+    expect([...kMemberNavIds].sort()).toEqual(["schedules", "team", "usage"]);
+    const memberSections = filterNavSectionsForRole(kNavSections, "member");
+    const memberIds = memberSections.flatMap((section) => section.items.map((item) => item.id));
+    expect(memberIds).toEqual(["schedules", "usage", "team"]);
+    expect(memberSections.map((section) => section.label)).toEqual(["Operate", "Settings"]);
     const adminOnly = kRoutes.filter((route) => route.adminOnly).map((route) => route.id);
     expect(adminOnly.sort()).toEqual(
       kRoutes
         .map((route) => route.id)
-        .filter((id) => !["cron", "team", "usage"].includes(id))
+        .filter((id) => !["schedules", "team", "usage"].includes(id))
         .sort(),
     );
+    expect(filterNavSectionsForRole(kNavSections, "admin")).toBe(kNavSections);
   });
 
   it.each([
-    ["/general", "general"],
-    ["/watchdog?incident=5", "watchdog"],
-    ["/cron/nightly", "cron"],
+    ["/home", "home"],
+    ["/general", "home"],
+    ["/health?incident=5", "health"],
+    ["/watchdog?incident=5", "health"],
+    ["/schedules/nightly", "schedules"],
+    ["/cron/nightly", "schedules"],
     ["/usage/sess-1", "usage"],
     ["/doctor", "doctor"],
     ["/relay", "relay"],
     ["/models", "models"],
     ["/providers", "models"],
-    ["/envars", "envars"],
+    ["/environment", "environment"],
+    ["/envars", "environment"],
     ["/webhooks/gmail", "webhooks"],
     ["/nodes", "nodes"],
     ["/team", "team"],
     ["/agents/main/tools", "agents"],
-    ["/telegram/default", ""],
-    ["/telegram", ""],
-    ["/chat/agent%3Amain%3Amain", ""],
+    ["/telegram/default", "channels"],
+    ["/telegram", "channels"],
+    ["/chat/agent%3Amain%3Amain", "chat"],
     ["/team/anything", "team"],
-    ["/watchdog/extra", "watchdog"],
-    ["/telegram/a/b", ""],
+    ["/health/extra", "health"],
+    ["/telegram/a/b", "channels"],
     ["/providers/x", "models"],
-    ["/nope", "general"],
-    ["", "general"],
+    ["/nope", "home"],
+    ["", "home"],
   ])("highlights today's sidebar item for %s", (location, navId) => {
     expect(getSelectedNavId({ location })).toBe(navId);
   });

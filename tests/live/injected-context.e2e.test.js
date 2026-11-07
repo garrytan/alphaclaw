@@ -46,7 +46,7 @@ const kAnchors = {
   P4: "- Before you start, update only with `git pull --ff-only`.",
   P5: "end your message with a **Changes committed** summary",
   P6: "Do not deflect actionable requests to the Setup UI.",
-  P7: "Changes to env vars are made through the **Envars** tab (`" + kSetupUrl + "#envars`).",
+  P7: "Changes to env vars are made through the **Environment** page (`" + kSetupUrl + "#environment`).",
   P8: "- **Links:** Use markdown syntax `[text](URL)`",
   P9: "- Never create transform files outside of hooks/transforms/",
   P10: "Only act for admins listed\nin that skill; changes are audited and admins are notified.",
@@ -54,7 +54,7 @@ const kAnchors = {
 const kPointer =
   "Setup UI map (tab URLs and what each does): read `hooks/bootstrap/reference/setup-ui.md` when someone " +
   "needs to find something in the UI.";
-const kTabTableRow = "| Cron     | `" + kSetupUrl + "#cron`";
+const kTabTableRow = "| Schedules | `" + kSetupUrl + "#schedules`";
 
 const textOf = (content) =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => part?.text || "").join(" ") : "";

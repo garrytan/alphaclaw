@@ -541,7 +541,7 @@ describe("hash routing with deep-link queries", () => {
       globalThis.window.location.hash = "#/watchdog";
       expect(getHashRouterPath()).toBe("/watchdog");
       globalThis.window.location.hash = "";
-      expect(getHashRouterPath()).toBe("/general");
+      expect(getHashRouterPath()).toBe("/home");
     } finally {
       globalThis.window = originalWindow;
     }

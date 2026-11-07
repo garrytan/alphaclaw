@@ -320,9 +320,9 @@ try {
     assert.equal(await button("Try again").count(), 0);
     await button("View logs").waitFor();
     await shot("failure-stop-refused");
-    // View logs navigates to the Watchdog tab (no handler wired in this harness).
+    // View logs navigates to the Health page (no handler wired in this harness).
     await button("View logs").click();
-    assert.equal(new URL(page.url()).hash, "#/watchdog");
+    assert.equal(new URL(page.url()).hash, "#/health");
     // Policy refusal on a fresh attempt: info line, no failure.
     await secondTab.reload();
     await button("View logs", secondTab).waitFor();
@@ -333,7 +333,7 @@ try {
     await button("Restart", secondTab).waitFor();
     await shot("policy-refusal", secondTab);
     restartMode = "accept";
-    checks.push("ready_timeout renders the budgeted sentence (reload-stable) with Try again/View logs; Try again posts once; stop_refused hides Try again; View logs → #/watchdog; 409 → info line");
+    checks.push("ready_timeout renders the budgeted sentence (reload-stable) with Try again/View logs; Try again posts once; stop_refused hides Try again; View logs → #/health; 409 → info line");
   } finally { await secondTab.close(); }
   assert.equal(errors.length, 0, errors.join("\n"));
   fs.writeFileSync(path.join(artifacts, "requests.json"), JSON.stringify(requests, null, 2));

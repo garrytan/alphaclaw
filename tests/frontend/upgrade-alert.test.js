@@ -201,10 +201,10 @@ describe("frontend/upgrade-alert", () => {
     vi.stubGlobal("window", fakeWindow);
     try {
       requestUpgradeRetryConfirm();
-      expect(fakeWindow.location.hash).toBe("/general");
+      expect(fakeWindow.location.hash).toBe("/home");
       expect(consumeUpgradeRetryRequest()).toBe(true);
       expect(consumeUpgradeRetryRequest()).toBe(false);
-      fakeWindow.location.hash = "#/general";
+      fakeWindow.location.hash = "#/home";
       requestUpgradeRetryConfirm();
       expect(fakeWindow.dispatchEvent).toHaveBeenCalledTimes(1);
     } finally {

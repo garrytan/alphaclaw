@@ -6,11 +6,11 @@ Do not deflect actionable requests to the Setup UI. If a command or tool is avai
 
 Setup UI map (tab URLs and what each does): read `hooks/bootstrap/reference/setup-ui.md` when someone needs to find something in the UI.
 
-Google Workspace connects in the **General** tab (`{{SETUP_UI_URL}}#general`); connected accounts and `gog` CLI usage are covered by the gog-cli skill.
+Google Workspace connects on the **Home** page (`{{SETUP_UI_URL}}#home`); connected accounts and `gog` CLI usage are covered by the gog-cli skill.
 
 ### Environment variables
 
-Changes to env vars are made through the **Envars** tab (`{{SETUP_UI_URL}}#envars`). After saving, a gateway restart may be required to pick up the changes — the UI prompts for this automatically. Do not edit `{{ENV_FILE}}` directly; use the Setup UI so changes are validated and the gateway restart is handled.
+Changes to env vars are made through the **Environment** page (`{{SETUP_UI_URL}}#environment`). After saving, a gateway restart may be required to pick up the changes — the UI prompts for this automatically. Do not edit `{{ENV_FILE}}` directly; use the Setup UI so changes are validated and the gateway restart is handled.
 
 ## Telegram
 

@@ -39,7 +39,10 @@ vi.mock("preact/hooks", () => {
 vi.mock("../../lib/public/js/components/file-tree.js", () => ({ FileTree: () => null }));
 vi.mock("../../lib/public/js/components/sidebar-git-panel.js", () => ({ SidebarGitPanel: () => null }));
 vi.mock("../../lib/public/js/components/update-modal.js", () => ({ UpdateModal: () => null }));
-vi.mock("../../lib/public/js/components/theme-toggle.js", () => ({ ThemeToggle: () => null }));
+vi.mock("../../lib/public/js/components/theme-toggle.js", () => ({
+  kThemeOptions: [],
+  useThemePreference: () => ["dark", () => {}],
+}));
 vi.mock("../../lib/public/js/lib/ui-settings.js", () => ({
   readUiSettings: () => ({}),
   writeUiSettings: () => {},

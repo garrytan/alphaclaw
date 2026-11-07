@@ -43,7 +43,7 @@
 - **Nodes:** Guided local-node setup for VPS deployments with per-node browser attach checks, reconnect commands, and routing/pairing controls.
 - **Webhooks:** Named webhook endpoints with per-hook transform modules, request logging, payload inspection, editable delivery destinations, and OAuth callback support for third-party auth flows.
 - **File Explorer:** Browser-based workspace explorer with file visibility, inline edits, diff view, and Git-aware sync for quick fixes without SSH.
-- **Prompt Hardening:** Ships anti-drift bootstrap rules as `hooks/bootstrap/AGENTS.md` (rules first, under 5,000 chars on a default install) plus `hooks/bootstrap/reference/AGENTS.md` (Google accounts and up to about 25 Telegram topics, the rest one `alphaclaw telegram topics list --agent <id>` away), injected into your agent's system prompt on every message, with the Setup UI tab map in `hooks/bootstrap/reference/setup-ui.md` for the agent to read when it needs it. You may take the reference file out of `bootstrap-extra-files` in `openclaw.json`: AlphaClaw records that and keeps it out (Drift Doctor says so; `POST /api/doctor/prompt-files/reference` with `{"enabled": true}` turns it back on), but it always puts the rules file back — enforcing safe practices, commit discipline, and change summaries out of the box on every supported OpenClaw version (existing installs migrate automatically, and the General tab shows whether the rules are actually reaching the agent — a compact status badge, escalating to an actionable card naming the affected file, the true cause, and the fix when hardening is dropped, truncated, or blocked, with a one-click jump into the Doctor's context meter).
+- **Prompt Hardening:** Ships anti-drift bootstrap rules as `hooks/bootstrap/AGENTS.md` (rules first, under 5,000 chars on a default install) plus `hooks/bootstrap/reference/AGENTS.md` (Google accounts and up to about 25 Telegram topics, the rest one `alphaclaw telegram topics list --agent <id>` away), injected into your agent's system prompt on every message, with the Setup UI tab map in `hooks/bootstrap/reference/setup-ui.md` for the agent to read when it needs it. You may take the reference file out of `bootstrap-extra-files` in `openclaw.json`: AlphaClaw records that and keeps it out (Drift Doctor says so; `POST /api/doctor/prompt-files/reference` with `{"enabled": true}` turns it back on), but it always puts the rules file back — enforcing safe practices, commit discipline, and change summaries out of the box on every supported OpenClaw version (existing installs migrate automatically, and the Home page shows whether the rules are actually reaching the agent — a compact status badge, escalating to an actionable card naming the affected file, the true cause, and the fix when hardening is dropped, truncated, or blocked, with a one-click jump into the Doctor's context meter).
 - **Git Sync:** Automatic hourly commits of your OpenClaw workspace to GitHub with configurable cron schedule. Combined with prompt hardening, every agent action is version-controlled and auditable.
 - **Version Management:** In-place updates for both AlphaClaw and OpenClaw with in-app release notes, changelog review, and one-click apply.
 - **Agent Administration:** Optional (off by default) mode that lets the OpenClaw agent drive the same dashboard API the web UI uses through an `alphaclaw admin` CLI, with tiered guardrails, confirm codes for dangerous operations, a rotatable bearer token, and full Watchdog audit logging.
@@ -131,18 +131,20 @@ the container E2E runs against an image built from it (docker required).
 
 ## Setup UI
 
-| Tab           | What it manages                                                                                                          |
+The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage), **Connect** (Channels, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
+
+| Page          | What it manages                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **General**   | Gateway status, channel health, pending pairings, Google Workspace, repo sync schedule, prompt-hardening status (compact badge, actionable card in problem states), one-click OpenClaw dashboard (opens signed in) |
+| **Home**      | Gateway status, channel health, pending pairings, Google Workspace, repo sync schedule, prompt-hardening status (compact badge, actionable card in problem states), one-click OpenClaw dashboard (opens signed in) |
 | **Browse**    | File explorer for workspace visibility, inline edits, diff review, and Git-backed sync                                   |
 | **Usage**     | Token summaries, per-session and per-agent cost and token breakdown with source/agent dimension comparisons              |
-| **Cron**      | Cron job management, interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns |
+| **Schedules** | Cron job management, interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns |
 | **Doctor**    | Drift Doctor workspace health review — LLM scan plus deterministic environment checks, model-drift checks (outdated model bindings, invalid model codings, context-limit drift, and skills still steering the agent toward old models), and bridged `openclaw doctor` findings, a context-budget meter against OpenClaw's real injection budget with self-explaining Blocked/Dropped/Truncated chips, opt-in scheduled scans, configurable scan limits, and queued fixes you can dispatch to your agent in the chat you pick |
 | **Nodes**     | Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
 | **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
-| **Watchdog**  | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, gateway memory trend + leak-detection settings, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
-| **Models**    | AI provider credentials (Anthropic, OpenAI, Gemini, Particle, Mistral, Voyage, Groq, Deepgram) and model selection       |
-| **Envars**    | Environment variables — view, edit, add — with gateway restart prompts                                                   |
+| **Health**    | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, gateway memory trend + leak-detection settings, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
+| **Models & keys** | AI provider credentials (Anthropic, OpenAI, Gemini, Particle, Mistral, Voyage, Groq, Deepgram) and model selection       |
+| **Environment** | Environment variables — view, edit, add — with gateway restart prompts                                                   |
 | **Webhooks**  | Webhook endpoints, transform modules, request history, payload inspection, OAuth callbacks, Gmail watch delivery flows   |
 
 ## Particle (particle-1)
@@ -237,7 +239,7 @@ AlphaClaw runs exactly the OpenClaw version pinned in its `package.json`. The pi
 
 ## Agent Administration
 
-Off by default. When you enable `features.agentAdmin` (Setup UI -> General tab, "Agent Administration" panel, or `PUT /api/alphaclaw/config/features/agent-admin`), the OpenClaw agent can administer the deployment on behalf of admin users. It works through an `alphaclaw admin <METHOD> /api/path` CLI that drives the same dashboard HTTP API the web UI uses, so the server owns all validation and side effects. With the flag off, nothing observable changes.
+Off by default. When you enable `features.agentAdmin` (Setup UI -> Home page, "Agent Administration" panel, or `PUT /api/alphaclaw/config/features/agent-admin`), the OpenClaw agent can administer the deployment on behalf of admin users. It works through an `alphaclaw admin <METHOD> /api/path` CLI that drives the same dashboard HTTP API the web UI uses, so the server owns all validation and side effects. With the flag off, nothing observable changes.
 
 Enabling it regenerates an `alphaclaw-admin` skill into the agent's workspace (a short `SKILL.md` index plus one `references/<domain>.md` file per domain that the agent opens when it needs it; rebuilt at boot, effective on the agent's next session) and appends an "AlphaClaw Administration" pointer stanza to the merged `hooks/bootstrap/AGENTS.md` prompt-hardening file in every agent workspace (written when you enable the flag and re-rendered at every boot; it appears only once the skill is actually installed). Nothing is written to a `TOOLS.md` — OpenClaw 2026.8.1+ no longer accepts it as a bootstrap file, and any legacy AlphaClaw-owned `hooks/bootstrap/TOOLS.md` is removed on sync. Operations are tiered: **safe** reads run freely, **write** operations mutate immediately, **restart** operations apply but need a gateway restart, **dangerous** operations require a one-time confirm code delivered to a configured admin channel, and **denied** operations stay operator-only. Every agent mutation is written to the Watchdog event log, and admins are notified of restart-level and dangerous changes. A bearer token (mode `0600`, kept in the managed state dir, never git-synced) authenticates the CLI; rotate it from the panel.
 
@@ -630,7 +632,7 @@ Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from 
 
 ## OpenAI-compatible `/v1` proxy
 
-AlphaClaw can expose an OpenAI-compatible API surface on the same public port as the Setup UI. It is disabled by default. Enable it from the Setup UI under General -> Features -> API; the setting is persisted in `alphaclaw.json` in the OpenClaw repo so workspace sync can commit the change.
+AlphaClaw can expose an OpenAI-compatible API surface on the same public port as the Setup UI. It is disabled by default. Enable it from the Setup UI under Home -> Features -> API; the setting is persisted in `alphaclaw.json` in the OpenClaw repo so workspace sync can commit the change.
 
 | Path                            | Method  | Notes                                                              |
 | ------------------------------- | ------- | ------------------------------------------------------------------ |

@@ -745,7 +745,7 @@ describe("useClaudeCodeLauncher local 202 poll", () => {
     expect(win.location.href).toBe(kSessionUrl);
     expect(win.close).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith(
-      "Set up local rescue sessions from the Watchdog page",
+      "Set up local rescue sessions from the Health page",
       "info",
       { durationMs: 10_000 },
     );
@@ -771,7 +771,7 @@ describe("useClaudeCodeLauncher local 202 poll", () => {
     await vi.advanceTimersByTimeAsync(1_500);
 
     expect(showToast).not.toHaveBeenCalledWith(
-      "Set up local rescue sessions from the Watchdog page",
+      "Set up local rescue sessions from the Health page",
       "info",
       { durationMs: 10_000 },
     );
@@ -803,7 +803,7 @@ describe("useClaudeCodeLauncher local 202 poll", () => {
       expect(win.close).not.toHaveBeenCalled();
       expect(showToast).toHaveBeenCalledWith("Claude Code session started", "success");
       expect(showToast).not.toHaveBeenCalledWith(
-        "Set up local rescue sessions from the Watchdog page",
+        "Set up local rescue sessions from the Health page",
         "info",
         { durationMs: 10_000 },
       );
@@ -852,7 +852,7 @@ describe("useClaudeCodeLauncher local → routine fallback matrix", () => {
     renderHook().openClaudeCode(plainClick());
     await flush();
     expect(showToast).toHaveBeenCalledWith(
-      "Set up local rescue sessions from the Watchdog page",
+      "Set up local rescue sessions from the Health page",
       "info",
       { durationMs: 10_000 },
     );
@@ -869,7 +869,7 @@ describe("useClaudeCodeLauncher local → routine fallback matrix", () => {
     renderHook().openClaudeCode(plainClick());
     await flush();
     expect(showToast).not.toHaveBeenCalledWith(
-      "Set up local rescue sessions from the Watchdog page",
+      "Set up local rescue sessions from the Health page",
       "info",
       { durationMs: 10_000 },
     );

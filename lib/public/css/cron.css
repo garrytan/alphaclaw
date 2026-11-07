@@ -11,7 +11,7 @@
 }
 
 .cron-tab-header {
-  padding: 0 0 16px;
+  padding: 16px 0;
 }
 
 .cron-tab-header-content {
@@ -51,7 +51,7 @@
   }
 
   .cron-tab-header {
-    padding: 0 0 12px;
+    padding: 16px 0 12px;
   }
 }
 

@@ -267,7 +267,8 @@ describe("old #/relay links (ALPH-69)", () => {
     kPolled.set("/api/relay/conversations", { conversations: kConversations, nextBefore: null });
     const tree = expandTree(RelayRoute());
     const text = collectText(tree);
-    expect(text).toContain("Agent Relay");
+    expect(text).toContain("Relay");
+    expect(text).toContain("Other agents can message this box's agent over the relay");
     expect(text).toContain("Conversations");
     const hrefs = collectNodes(tree).filter((node) => node.type === "a").map((node) => node.props.href);
     expect(hrefs).toContain("#/chat/" + encodeURIComponent("agent:main:relay-capy-ops"));

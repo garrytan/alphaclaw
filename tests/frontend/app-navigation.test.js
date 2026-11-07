@@ -24,12 +24,12 @@ describe("app-navigation gated sections", () => {
     );
   });
 
-  it("appends the Dashboards external link to Monitoring when the gate is open", () => {
+  it("appends the Dashboards external link to Operate when the gate is open", () => {
     const sections = buildNavSections({
       features: { sessionDashboards: true },
     });
-    const monitoring = sections.find((s) => s.label === "Monitoring");
-    expect(monitoring.items[monitoring.items.length - 1]).toEqual(
+    const operate = sections.find((s) => s.id === "operate");
+    expect(operate.items[operate.items.length - 1]).toEqual(
       kDashboardsNavItem,
     );
     // Contract pin: the server-side launcher route the item (and the three
@@ -40,9 +40,9 @@ describe("app-navigation gated sections", () => {
       "Opens OpenClaw session dashboards in a new tab (signed in automatically)",
     );
     // The base sections are never mutated.
-    const baseMonitoring = kNavSections.find((s) => s.label === "Monitoring");
+    const baseOperate = kNavSections.find((s) => s.id === "operate");
     expect(
-      baseMonitoring.items.some((item) => item.id === "dashboards"),
+      baseOperate.items.some((item) => item.id === "dashboards"),
     ).toBe(false);
   });
 
@@ -140,9 +140,9 @@ describe("buildDashboardFocusUrl", () => {
 });
 
 describe("claude-code launcher nav item", () => {
-  it("is the last static Monitoring item with the external href", () => {
-    const monitoring = kNavSections.find((s) => s.label === "Monitoring");
-    const last = monitoring.items[monitoring.items.length - 1];
+  it("is the last static Operate item with the external href", () => {
+    const operate = kNavSections.find((s) => s.id === "operate");
+    const last = operate.items[operate.items.length - 1];
     expect(last).toEqual(kClaudeCodeNavItem);
     expect(last).toEqual({
       id: "claude-code",
@@ -154,8 +154,8 @@ describe("claude-code launcher nav item", () => {
 
   it("keeps Dashboards appended after it when the gate is open", () => {
     const sections = buildNavSections({ features: { sessionDashboards: true } });
-    const monitoring = sections.find((s) => s.label === "Monitoring");
-    const ids = monitoring.items.map((item) => item.id);
+    const operate = sections.find((s) => s.id === "operate");
+    const ids = operate.items.map((item) => item.id);
     expect(ids.indexOf("claude-code")).toBe(ids.length - 2);
     expect(ids[ids.length - 1]).toBe("dashboards");
   });

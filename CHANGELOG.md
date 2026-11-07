@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.999] - 2026-11-07
+
+Setup UI phase 2b (ALPH-69). The sidebar follows the new IA, four pages get plain names, a status chip shows the gateway on every page, and every page opens with one title and a purpose line. Page bodies are unchanged.
+
+### Changed
+- **Renamed pages.** General is now Home (`#/home`), Watchdog is Health (`#/health`), Cron is Schedules (`#/schedules` and `#/schedules/<job>`), Envars is Environment (`#/environment`), and Models shows as Models & keys (`#/models` is unchanged). Every old hash still works. `#/watchdog?incident=7` lands on `#/health?incident=7`, `#/cron/<job>` keeps its job, the slashless form (`#envars`) is accepted, and the redirect replaces the history entry, so Back leaves the app instead of bouncing. A last-visited tab saved under an old name reopens as the new one.
+- **Sidebar.** Groups are always open and in sentence case. Home and Chat come first, then Agents (one row per agent, a Default badge on the default agent, and an Add agent row), Operate (Health, Doctor, Schedules, Usage, Open Claude Code, Dashboards when available), Connect (Channels, Integrations, Webhooks, Nodes, Relay) and Settings (Models & keys, Environment, Team). Until PR 3a gives Channels and Integrations their own pages, those rows open their part of Home, and Webhooks and Nodes keep a row each. Rows are real links (keyboard focus, open in a new tab), 32 px tall on desktop and 40 px in the phone drawer, and the active row has the active fill, an accent bar and bright text in both themes. The sidebar is 248 px wide by default. A member still sees only Schedules, Usage and Team, and no agent rows.
+- **Status chip.** Under the wordmark and in the phone top bar, a chip says Running, Starting, Restarting, Degraded, Down, Connecting… or Offline with a dot shaped for each and links to Health. It reads the status stream the page already holds and makes no request of its own.
+- **Sidebar foot.** The version line moved from the bottom statusbar to the sidebar foot (AlphaClaw on the first line, OpenClaw on the second, the full text on hover), next to a ⋯ menu with Docs, Discord, GitHub, the theme and Log out. The bottom statusbar is gone.
+- **Page headers.** Every page has one h1 from the route table with its purpose line (Home, Health, Doctor, Schedules, Usage, Relay, Models & keys, Environment, Team, Webhooks, Nodes, Telegram), and the browser tab says which page is open ("Health · AlphaClaw"). An Agent page's h1 is the agent's name. Doctor's title is now Doctor and Relay's is Relay. A skip link and a `<main>` landmark lead keyboard users past the sidebar.
+- Links inside the app (View logs, the rescue card, the upgrade retry, Features) and the injected Setup UI map, the agent admin skill and the README use the new names.
+
+### Tests
+- New `status-chip.test.js` (each chip state from fixture status frames, no fetch), `page-header.test.js` (title and purpose per route), `sidebar-ia.test.js` (groups, labels, Default badge, member nav, chip, foot) and `browse-navigation-redirects.test.js` (saved tab mapping, Home section links). `routes.test.js` and `use-hash-location.test.js` cover the redirects with their query and job id and the in-place replace. The typography check on the removed status bar now checks the version line in the sidebar foot.
+
 ## [0.10.188] - 2026-11-07
 
 Phase 1c of the Setup UI overhaul (ALPH-69, GST-1697). It adds accessible building blocks for dialogs, tabs and focus, and clears the remaining axe violations (28 on a real box at 53ed55ba) on main.
