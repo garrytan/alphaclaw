@@ -436,6 +436,116 @@ describe("frontend/app-shell controller (shared status feed)", () => {
     expect(state.state.restartOperation).toBeNull();
   });
 
+  it("records the running restart's own lock badge and keeps it on the success outcome", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    let streamHandlers = null;
+    api.subscribeStatusEvents.mockImplementation((handlers) => {
+      streamHandlers = handlers;
+      return () => {};
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-1" });
+
+    let state = await settle();
+    streamHandlers.onOpen();
+    state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    streamHandlers.onMessage({
+      status: { gateway: "running", state: { state: "starting", operation: { kind: "restart", label: "Restarting gateway", startedAt: 1234 } } },
+    });
+    state = await settle();
+    expect(state.state.restartOperation.lockStartedAt).toBe(1234);
+    streamHandlers.onMessage({
+      status: { gateway: "running", state: { state: "starting", operation: { kind: "repair", label: "Repairing", startedAt: 9999 } } },
+    });
+    state = await settle();
+    expect(state.state.restartOperation.lockStartedAt).toBe(1234);
+    restartHandlers.onMessage({ event: "done", data: { ok: true, durationMs: 4200, downtimeMs: 1800 } });
+    state = await settle();
+    expect(state.state.restartOperation.phase).toBe("succeeded");
+    expect(state.state.restartOperation.lockStartedAt).toBe(1234);
+  });
+
+  it("keeps the recorded lock when a dropped restart stream reattaches to the same operation", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    let streamHandlers = null;
+    api.subscribeStatusEvents.mockImplementation((handlers) => {
+      streamHandlers = handlers;
+      return () => {};
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-1" });
+
+    let state = await settle();
+    streamHandlers.onOpen();
+    state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    streamHandlers.onMessage({
+      status: { gateway: "running", state: { state: "starting", operation: { kind: "restart", label: "Restarting gateway", startedAt: 1234 } } },
+    });
+    state = await settle();
+    expect(state.state.restartOperation.lockStartedAt).toBe(1234);
+
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: true,
+      reasons: [],
+      lastOperation: { operationId: "op-1", status: "running" },
+    });
+    const subscribes = api.subscribeGatewayRestartEvents.mock.calls.length;
+    restartHandlers.onError();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2000);
+    state = await settle();
+    expect(api.subscribeGatewayRestartEvents.mock.calls.length).toBeGreaterThan(subscribes);
+    expect(state.state.restartOperation.operationId).toBe("op-1");
+    expect(state.state.restartOperation.lockStartedAt).toBe(1234);
+  });
+
+  it("a restart badge seen while a success line shows re-reads the record and attaches a newer restart", async () => {
+    let restartHandlers = null;
+    api.subscribeGatewayRestartEvents.mockImplementation((options) => {
+      restartHandlers = options;
+      return vi.fn();
+    });
+    let streamHandlers = null;
+    api.subscribeStatusEvents.mockImplementation((handlers) => {
+      streamHandlers = handlers;
+      return () => {};
+    });
+    api.restartGatewayAsync.mockResolvedValue({ ok: true, operationId: "op-1" });
+
+    let state = await settle();
+    streamHandlers.onOpen();
+    state.actions.handleGatewayRestart();
+    await flushMicrotasks();
+    restartHandlers.onMessage({ event: "done", data: { ok: true, durationMs: 4200, downtimeMs: 1800 } });
+    state = await settle();
+    expect(state.state.restartOperation.phase).toBe("succeeded");
+    const readsBefore = api.fetchRestartStatus.mock.calls.length;
+
+    api.fetchRestartStatus.mockResolvedValue({
+      restartRequired: false,
+      restartInProgress: true,
+      reasons: [],
+      activeOperation: { operationId: "op-2", status: "running", kind: "gateway_restart", startedAt: 5000, phaseAt: {} },
+    });
+    streamHandlers.onMessage({
+      status: { gateway: "running", state: { state: "starting", operation: { kind: "restart", label: "Restarting gateway", startedAt: 5000 } } },
+    });
+    state = await settle();
+    expect(api.fetchRestartStatus.mock.calls.length).toBeGreaterThan(readsBefore);
+    expect(api.subscribeGatewayRestartEvents).toHaveBeenLastCalledWith(expect.objectContaining({ operationId: "op-2" }));
+    expect(state.state.restartOperation.operationId).toBe("op-2");
+    expect(state.state.restartOperation.phase).toBe("running");
+  });
+
   it("booting rejection clears the operation and toasts the server copy", async () => {
     api.restartGatewayAsync.mockRejectedValue(
       Object.assign(
