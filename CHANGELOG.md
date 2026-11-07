@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.199] - 2026-11-07
+
+git-sync's overflow sentence is stable (GST-1820, ALPH-73).
+
+### Fixed
+- **The overflow sentence named a size that depended on how Node read git's output.** When git prints more than the sync can read, the stored detail said "over N MB". N was the length of what Node had buffered, which can run up to one 64 KiB read past the limit, so the same overflow said "over 1.0 MB" on one run and "over 1.1 MB" on another, and the real-git test that pins the sentence failed now and then in CI. The figure was also wrong in other cases: it counted characters after path names were decoded, it left out stderr (Node's `maxBuffer` counts both streams together), and it counted invalid UTF-8 as 3 bytes per byte. The sentence now has no size: "git status printed more output than the sync can read". Hermetic tests cover overflows up to just under 64 KiB past the limit, multibyte path names, stderr alone and both streams partly filled, and check that no MB figure appears.
+
 ## [0.10.198] - 2026-11-07
 
 Pending invite links for admins (GST-1787, ALPH-73). Since 0.10.195 the agent's copy of a new invite's token and URL is masked, and the Setup UI showed an invite link only in the browser that created it, so an invite the agent created could not be delivered.

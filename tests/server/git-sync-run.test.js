@@ -327,6 +327,46 @@ describe("lib/cli/git-sync performGitSync", () => {
     expect(result).toMatchObject({ code: "deadline_exceeded", exitCode: 75 });
   });
 
+  it("names git's output overflow with one fixed sentence, however far past the limit Node's last read went", () => {
+    for (const extra of [1, 40 * 1024, 64 * 1024 - 1]) {
+      const overflow = Object.assign(new Error("spawnSync git ENOBUFS"), {
+        code: "ENOBUFS",
+        stdout: "x".repeat(1024 * 1024 + extra),
+      });
+      const { git } = createRunner({ outputs: happyOutputs(), fail: { status: overflow } });
+      const result = performGitSync({ git, ...baseInput() });
+      expect(result).toMatchObject({ code: "failed", committed: false, pushed: false });
+      expect(result.detail).toBe("git status printed more output than the sync can read");
+      expect(result.detail).not.toMatch(/MB/);
+    }
+  });
+
+  it("names an overflow of multibyte path names or of stderr with the same fixed sentence", () => {
+    const multibyte = Buffer.from("€".repeat(Math.ceil((1024 * 1024 + 1) / 3)), "utf8").toString("latin1");
+    for (const streams of [{ stdout: multibyte }, { stdout: "", stderr: "x".repeat(1024 * 1024 + 1) }]) {
+      const overflow = Object.assign(new Error("spawnSync git ENOBUFS"), { code: "ENOBUFS", ...streams });
+      const { git, calls } = createRunner({ outputs: happyOutputs(), fail: { status: overflow } });
+      const result = performGitSync({ git, ...baseInput() });
+      expect(calls.find((c) => c.args[0] === "status").opts.bytes).toBe(true);
+      expect(result).toMatchObject({ code: "failed", committed: false, pushed: false });
+      expect(result.detail).toBe("git status printed more output than the sync can read");
+      expect(result.detail).not.toMatch(/MB/);
+    }
+  });
+
+  it("names an overflow that fills both streams with the same fixed sentence", () => {
+    const overflow = Object.assign(new Error("spawnSync git ENOBUFS"), {
+      code: "ENOBUFS",
+      stdout: "x".repeat(584_704),
+      stderr: "warning: could not open directory\n".repeat(16_384).slice(0, 524_288),
+    });
+    const { git } = createRunner({ outputs: happyOutputs(), fail: { status: overflow } });
+    const result = performGitSync({ git, ...baseInput() });
+    expect(result).toMatchObject({ code: "failed", committed: false, pushed: false });
+    expect(result.detail).toBe("git status printed more output than the sync can read");
+    expect(result.detail).not.toMatch(/MB/);
+  });
+
   it("passes the remaining budget to every git child", () => {
     const { git, calls } = createRunner({ outputs: happyOutputs() });
     performGitSync({ git, ...baseInput({ deadlineAtMs: Date.now() + 30_000 }) });
