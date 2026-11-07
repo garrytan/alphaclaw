@@ -321,7 +321,7 @@ textarea {
 input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
 select:focus,
 textarea:focus {
-  border-color: rgba(255, 255, 255, 0.28);
+  border-color: var(--accent);
 }
 
 ::placeholder { color: var(--text-dim) !important; opacity: 1 !important; }
@@ -1026,12 +1026,6 @@ textarea:focus {
 
 [data-theme="light"] .snippet-collapse-fade {
   background: linear-gradient(to bottom, transparent 0%, rgba(255, 255, 255, 0.85) 70%);
-}
-
-[data-theme="light"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
-[data-theme="light"] select:focus,
-[data-theme="light"] textarea:focus {
-  border-color: rgba(0, 0, 0, 0.35);
 }
 
 [data-theme="light"] ::-webkit-scrollbar-thumb {
