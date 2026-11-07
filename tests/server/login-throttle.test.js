@@ -198,29 +198,6 @@ describe("server/login-throttle", () => {
     expect(repeatResult.retryAfterSec).toBeGreaterThan(0);
   });
 
-  it("an in-flight hold never lapses, a release counts once, and the sweep drops only released holds", () => {
-    let clock = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => clock);
-    const throttle = createLoginThrottle({ maxAttempts: 1, globalMaxAttempts: 1 });
-    const inFlight = throttle.holdAttempt({ clientKey: "198.51.100.1" }, clock);
-    const finished = throttle.holdAttempt({ laneKey: "device:x" }, clock);
-    finished();
-    finished();
-    clock += 61 * 60 * 1000;
-    expect(throttle.evaluateClientThrottle("198.51.100.1", clock).blocked).toBe(true);
-    expect(throttle.evaluateLaneThrottle("device:x", clock).blocked).toBe(false);
-    expect(throttle.listHolds()).toHaveLength(3);
-    throttle.cleanupLoginAttemptStates();
-    expect(throttle.listHolds()).toEqual([
-      ["client:198.51.100.1", 1],
-      ["global:login", 1],
-    ]);
-    expect(throttle.evaluateClientThrottle("198.51.100.1", clock).blocked).toBe(true);
-    inFlight();
-    expect(throttle.evaluateClientThrottle("198.51.100.1", clock).blocked).toBe(false);
-    vi.restoreAllMocks();
-  });
-
   it("works with stores that do not implement runExclusive", () => {
     const states = new Map();
     const store = {

@@ -12,7 +12,14 @@ const {
   kLoginBaseLockMs,
   kLoginGlobalMaxAttempts,
   kLoginMaxAttempts,
+  kLoginWindowMs,
 } = require("../../lib/server/constants");
+const {
+  kHashGateQueueLimit,
+  kHashGateReservedSlots,
+  kHashGateRetryAfterSec,
+  kHashGateSlots,
+} = require("../../lib/server/utils/hash-gate");
 const { getClientKey } = require("../../lib/server/helpers");
 const timingSafe = require("../../lib/server/utils/timing-safe");
 const {
@@ -49,15 +56,29 @@ const createMembersStore = (list, { checkDelayMs = 0 } = {}) => {
     const member = find(email);
     return member && password === member.password ? toModel(member) : null;
   });
-  const store = {
-    // A test sets checkHook to hold every check open, or to throw mid-check.
-    checkHook: null,
-    verifyMemberPassword,
-    verifyMemberPasswordAsync: async (args) => {
-      const member = verifyMemberPassword(args);
+  // Each call that stands for a password hash (a member check, a decoy, an
+  // invite accept) is counted while it runs; a test sets checkHook to hold
+  // hashes open, or to throw mid-hash.
+  const hashes = { started: 0, inFlight: 0, peak: 0 };
+  const hashed = async (args, result) => {
+    hashes.started += 1;
+    hashes.inFlight += 1;
+    hashes.peak = Math.max(hashes.peak, hashes.inFlight);
+    try {
       if (checkDelayMs) await new Promise((resolve) => setTimeout(resolve, checkDelayMs));
       if (store.checkHook) await store.checkHook(args);
-      return member;
+      return result();
+    } finally {
+      hashes.inFlight -= 1;
+    }
+  };
+  const store = {
+    checkHook: null,
+    hashes,
+    verifyMemberPassword,
+    verifyMemberPasswordAsync: (args) => {
+      const member = verifyMemberPassword(args);
+      return hashed(args, () => member);
     },
     getMemberByEmail: (email) => toModel(find(email)),
     getMember: (id) => toModel(list.find((m) => m.id === id)),
@@ -66,8 +87,8 @@ const createMembersStore = (list, { checkDelayMs = 0 } = {}) => {
       tokenKeys.set(id, randomValue(32));
       return true;
     },
-    acceptInvite: vi.fn(() => ({ ok: false, code: "invite_invalid" })),
-    burnDecoyVerification: vi.fn(),
+    acceptInvite: vi.fn((args) => hashed(args, () => ({ ok: false, code: "invite_invalid" }))),
+    burnDecoyVerification: vi.fn((password) => hashed({ password }, () => undefined)),
   };
   return store;
 };
@@ -187,7 +208,43 @@ const resetPasswordChecks = (h) => {
   h.membersStore.verifyMemberPassword.mockClear();
 };
 
-const heldSlots = (h) => h.loginThrottle.listHolds().reduce((sum, [, count]) => sum + count, 0);
+const gateStats = () => require("../../lib/server/utils/hash-gate").hashGate.stats();
+
+const acceptInvite = (h, { peer = kOwnerPeer, ...body } = {}) =>
+  request(h.server).post("/api/auth/accept-invite").set("x-test-peer", peer).send(body);
+
+// Collects answers as they arrive; settled() resolves once none arrived for a while.
+const tracker = () => {
+  const answered = [];
+  const sent = [];
+  return {
+    answered,
+    sent,
+    send: (pending) => {
+      sent.push(pending.then((res) => {
+        answered.push(res);
+        return res;
+      }));
+    },
+    settled: async () => {
+      let seen = -1;
+      while (answered.length !== seen) {
+        seen = answered.length;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      return sent.length - answered.length;
+    },
+  };
+};
+
+const stalledHashes = (h, { except = () => false } = {}) => {
+  let release;
+  const stall = new Promise((resolve) => {
+    release = resolve;
+  });
+  h.membersStore.checkHook = (args) => (except(args) ? undefined : stall);
+  return release;
+};
 
 const auditLines = (...spies) =>
   spies
@@ -570,7 +627,10 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
             }),
           ),
         );
-        expect(results.every((r) => r.status === 401)).toBe(true);
+        // A decoy the full hash gate refuses gets the gate's 429, which a right
+        // code gets too while the gate is full; never anything that tells codes apart.
+        const gateBusy = (r) => r.status === 429 && r.headers["retry-after"] === String(kHashGateRetryAfterSec);
+        expect(results.every((r) => r.status === 401 || gateBusy(r))).toBe(true);
       }
       const decoys = h.membersStore.burnDecoyVerification.mock.calls.length;
       expect(decoys).toBeGreaterThan(0);
@@ -630,7 +690,7 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       expect(readSession(res)).toMatch(/^setup_token=/);
     });
 
-    it("a password check that throws mid-request answers 500, counts as a failure and leaves no hold", async () => {
+    it("a password check that throws mid-request answers 500, counts as a failure and gives its hash slot back", async () => {
       const h = await createHarness({ team: true, members: [memberA] });
       const peer = "198.51.100.110";
       h.membersStore.checkHook = () => {
@@ -642,44 +702,23 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
         statuses.push((await signIn(h, { peer, email: memberA.email, password: "guess-" + i })).status);
       }
       expect(statuses).toEqual([500, ...Array(kLoginMaxAttempts - 2).fill(401), 429]);
-      expect(heldSlots(h)).toBe(0);
-    });
 
-    it("holds stay while their checks are pending, even past a minute, and the bound holds when they finish", async () => {
-      let clock = Date.now();
-      vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const h = await createHarness({ team: true, members: [memberA] });
-      let finishChecks;
-      const pending = new Promise((resolve) => {
-        finishChecks = resolve;
-      });
-      h.membersStore.checkHook = () => pending;
-      resetPasswordChecks(h);
-      const attempt = (i) => signIn(h, { peer: attackerPeer(i), email: memberA.email, password: "guess-" + i });
-      const first = Array.from({ length: kLoginGlobalMaxAttempts }, (_, i) => attempt(i).then((res) => res));
-      await vi.waitFor(() => expect(passwordChecks(h)).toBe(kLoginGlobalMaxAttempts));
-      clock += 61 * 1000;
-      let answered = 0;
-      const second = Array.from({ length: kLoginGlobalMaxAttempts }, (_, i) =>
-        attempt(100 + i).then((res) => {
-          answered += 1;
-          return res;
-        }),
-      );
-      try {
-        for (let tries = 0; tries < 500 && answered < second.length && passwordChecks(h) <= kLoginGlobalMaxAttempts; tries += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        expect(passwordChecks(h)).toBe(kLoginGlobalMaxAttempts);
-        expect(answered).toBe(second.length);
-      } finally {
-        finishChecks();
+      h.membersStore.checkHook = () => {
+        throw new Error("scrypt failed");
+      };
+      for (let i = 0; i < 8; i += 1) {
+        expect((await signIn(h, { peer: attackerPeer(i), email: memberA.email, password: "throw-" + i })).status).toBe(500);
       }
-      expect((await Promise.all(second)).every((res) => res.status === 429)).toBe(true);
-      expect((await Promise.all(first)).filter((res) => res.status === 200)).toHaveLength(0);
-      expect((await attempt(200)).status).toBe(429);
-      expect(passwordChecks(h)).toBe(kLoginGlobalMaxAttempts);
-      expect(heldSlots(h)).toBe(0);
+      expect(gateStats()).toEqual({ running: 0, queued: 0 });
+      const release = stalledHashes(h);
+      const t = tracker();
+      for (let i = 0; i < kHashGateSlots; i += 1) {
+        t.send(signIn(h, { peer: attackerPeer(100 + i), email: memberA.email, password: "stall-" + i }));
+      }
+      await t.settled();
+      expect(h.membersStore.hashes.inFlight).toBe(kHashGateSlots - kHashGateReservedSlots);
+      release();
+      await Promise.all(t.sent);
     });
 
     it("six invite accepts sent at once from one address: the sixth is refused", async () => {
@@ -696,20 +735,20 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
         ),
       );
       expect(results.map((res) => res.status).sort()).toEqual([...Array(kLoginMaxAttempts).fill(400), 429]);
-      expect(heldSlots(h)).toBe(0);
+      expect(gateStats()).toEqual({ running: 0, queued: 0 });
     });
 
-    it("a password, email, code or token that is not a string gets a normal answer, never a 500, and leaves no hold", async () => {
+    it("a password, code or token that is not a string gets a normal answer, never a 500, and leaves the hash gate idle", async () => {
       const h = await createHarness({ team: true, members: [memberA] });
       const odd = { toString: 1 };
       const send = (path, body) => request(h.server).post(path).set("x-test-peer", "198.51.100.121").send(body);
       expect((await send("/api/auth/login", { password: odd })).status).toBe(401);
       expect((await send("/api/auth/login", { email: memberA.email, password: odd })).status).toBe(401);
-      expect((await send("/api/auth/login", { email: odd, password: "guess" })).status).toBe(401);
+      expect((await send("/api/auth/login", { email: odd, password: "guess" })).status).toBe(400);
       expect((await send("/api/auth/login", { email: memberA.email, password: odd, recoveryCode: odd })).status).toBe(401);
       expect((await send("/api/auth/accept-invite", { token: odd, password: "long-enough-guess" })).status).toBe(400);
       expect((await send("/api/auth/accept-invite", { token: "t", password: odd })).status).toBe(400);
-      expect(heldSlots(h)).toBe(0);
+      expect(gateStats()).toEqual({ running: 0, queued: 0 });
     });
 
     it("rejects a short or repetitive code at boot with a warning that names only the key", async () => {
@@ -728,6 +767,127 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
         expect(readSession(res)).toBe("");
         warn.mockRestore();
       }
+    });
+  });
+
+  describe("one hash gate for every sign-in hash", () => {
+    // Rotating IPv4 and IPv6 /64 clients on every lane: known and unknown
+    // member emails, a pass issued to another subject and a tampered pass,
+    // the right code with wrong passwords, junk codes, and invite accepts.
+    const flood = (h, t, { offset, passB }) => {
+      for (let i = 0; i < 30; i += 1) {
+        const n = offset + i;
+        t.send(signIn(h, { peer: attackerPeer(n), xff: forgedAddress(i), email: i % 2 ? memberA.email : "nobody@example.test", password: "guess-" + n }));
+        t.send(signIn(h, { peer: "2001:db8:" + n.toString(16) + "::1", email: "nobody@example.test", password: "guess", recoveryCode: randomValue(32) }));
+        t.send(signIn(h, { peer: attackerPeer(n + 2000), email: memberA.email, password: "guess-p" + n, pass: i % 2 ? passB : tamper(passB) }));
+        t.send(signIn(h, { peer: "2001:db8:1:" + n.toString(16) + "::1", email: memberA.email, password: "guess-c" + n, recoveryCode: kRecoveryCode }));
+        t.send(acceptInvite(h, { peer: attackerPeer(n + 4000), token: randomValue(), password: "long-enough-" + n }));
+      }
+    };
+
+    const expectRefusedAtOnce = (answered) => {
+      for (const res of answered) {
+        expect([401, 429]).toContain(res.status);
+        if (res.status === 429) expect(Number(res.headers["retry-after"])).toBeGreaterThan(0);
+      }
+    };
+
+    it("with hashes stalled past the box-wide window, at most the gate's slots run and its queue waits, overflow gets 429 at once and never runs later", async () => {
+      let clock = Date.now();
+      vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const h = await createHarness({ team: true, members: [memberA, memberB] });
+      const passB = readPass(await signIn(h, { peer: "198.51.100.75", ...credentialsOf(memberB) }));
+      const hashes = h.membersStore.hashes;
+      const startedBefore = hashes.started;
+      const release = stalledHashes(h);
+      const t = tracker();
+      try {
+        flood(h, t, { offset: 0, passB });
+        const waiting = await t.settled();
+        expect(hashes.inFlight).toBeLessThanOrEqual(kHashGateSlots);
+        expect(waiting - hashes.inFlight).toBeLessThanOrEqual(kHashGateQueueLimit);
+        expectRefusedAtOnce(t.answered);
+        expect(t.answered.some((res) => res.status === 429 && res.headers["retry-after"] === String(kHashGateRetryAfterSec))).toBe(true);
+
+        clock += kLoginWindowMs + 60 * 1000;
+        flood(h, t, { offset: 500, passB });
+        const stillWaiting = await t.settled();
+        expect(hashes.peak).toBeLessThanOrEqual(kHashGateSlots);
+        expect(stillWaiting - hashes.inFlight).toBeLessThanOrEqual(kHashGateQueueLimit);
+        expectRefusedAtOnce(t.answered);
+
+        const waitingAtRelease = stillWaiting;
+        release();
+        await Promise.all(t.sent);
+        expect(hashes.started - startedBefore).toBe(waitingAtRelease);
+        expect(hashes.peak).toBeLessThanOrEqual(kHashGateSlots);
+      } finally {
+        release();
+        await Promise.all(t.sent);
+      }
+    });
+
+    it("the owner with a known-browser pass signs in during that flood, through the reserved slot", async () => {
+      let clock = Date.now();
+      vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const h = await createHarness({ team: true, members: [memberA, memberB] });
+      const passA = readPass(await signIn(h, { peer: "198.51.100.76", ...credentialsOf(memberA) }));
+      const passB = readPass(await signIn(h, { peer: "198.51.100.75", ...credentialsOf(memberB) }));
+      const ownerPass = readPass(await signIn(h, { password: kOwnerPassword }));
+      const release = stalledHashes(h, { except: (args) => args?.password === memberA.password });
+      const t = tracker();
+      try {
+        flood(h, t, { offset: 0, passB });
+        await t.settled();
+        clock += kLoginWindowMs + 60 * 1000;
+        flood(h, t, { offset: 500, passB });
+        await t.settled();
+
+        const admin = await signIn(h, { ...credentialsOf(memberA), pass: passA });
+        expect(admin.status).toBe(200);
+        expect(readSession(admin)).toMatch(/^setup_token=v2\./);
+        const owner = await signIn(h, { password: kOwnerPassword, pass: ownerPass });
+        expect(owner.status).toBe(200);
+        expect(h.membersStore.hashes.peak).toBeLessThanOrEqual(kHashGateSlots);
+      } finally {
+        release();
+        await Promise.all(t.sent);
+      }
+    });
+
+    it("a pipelined burst from one address gets at most its five checks, across sign-ins, junk codes and invite accepts", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      const release = stalledHashes(h);
+      const t = tracker();
+      const peer = "198.51.100.131";
+      try {
+        for (let i = 0; i < 12; i += 1) {
+          t.send(signIn(h, { peer, email: memberA.email, password: "burst-" + i }));
+          t.send(signIn(h, { peer, email: "nobody@example.test", password: "burst", recoveryCode: randomValue(32) }));
+          t.send(acceptInvite(h, { peer, token: randomValue(), password: "long-enough-" + i }));
+        }
+        await t.settled();
+      } finally {
+        release();
+        await Promise.all(t.sent);
+      }
+      expect(h.membersStore.hashes.started).toBeLessThanOrEqual(kLoginMaxAttempts);
+      expect(t.answered.filter((res) => res.status === 429).length).toBeGreaterThanOrEqual(36 - kLoginMaxAttempts);
+    });
+
+    it("a sign-in or invite accept whose email is present but not text gets 400 and no check", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      for (const email of [["x"], { address: memberA.email }, 7, true]) {
+        const res = await signIn(h, { email, password: kOwnerPassword });
+        expect(res.status, JSON.stringify(email)).toBe(400);
+        expect(readSession(res)).toBe("");
+        const member = await signIn(h, { email, password: memberA.password });
+        expect(member.status).toBe(400);
+      }
+      const invite = await acceptInvite(h, { token: randomValue(), password: "long-enough-guess", email: ["new@example.test"] });
+      expect(invite.status).toBe(400);
+      expect(h.membersStore.acceptInvite).not.toHaveBeenCalled();
+      expect(h.membersStore.verifyMemberPassword).not.toHaveBeenCalled();
     });
   });
 
