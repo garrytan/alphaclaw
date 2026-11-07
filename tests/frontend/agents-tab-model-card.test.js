@@ -309,6 +309,42 @@ describe("frontend/agents-tab model card", () => {
     });
   });
 
+  describe("plain model copy", () => {
+    it("says Uses the box default for an inheriting agent and Uses for an override", () => {
+      harness.beginRender();
+      let text = collectText(expandTree(AgentModelCard({ agent: { id: "a1" }, onUpdateAgent: vi.fn() })))
+        .join("")
+        .replace(/\s+/g, " ");
+      expect(text).toContain("Uses the box default: Claude Sonnet 4.5");
+      expect(text).toContain("anthropic/claude-sonnet-4-5");
+      expect(text).not.toContain("Inherited");
+
+      harness.reset();
+      harness.beginRender();
+      text = collectText(
+        expandTree(AgentModelCard({ agent: { id: "a1", model: { primary: "anthropic/claude-opus-4-6" } }, onUpdateAgent: vi.fn() })),
+      )
+        .join("")
+        .replace(/\s+/g, " ");
+      expect(text).toContain("Uses Claude Opus 4.6");
+      expect(text).not.toContain("box default");
+    });
+
+    it("does not repeat the ref under the sentence when the model has no friendlier name", () => {
+      useModels.mockReturnValue({ ...kModelsReady, primary: "mock/echo" });
+      harness.beginRender();
+      const tree = expandTree(AgentModelCard({ agent: { id: "a1" }, onUpdateAgent: vi.fn() }));
+      const text = collectText(tree).join("").replace(/\s+/g, " ");
+      expect(text).toContain("Uses the box default: mock/echo");
+      expect(text.split("mock/echo").length - 1).toBe(2);
+    });
+
+    it("labels the inherited thinking level Thinking, not Inherited", async () => {
+      const { formatInheritedThinkingLabel } = await import("../../lib/public/js/lib/thinking-levels.js");
+      expect(formatInheritedThinkingLabel("off")).toBe("Thinking: Off");
+    });
+  });
+
   describe("card header while loading", () => {
     it("keeps the overflow menu rendered with only data-independent items", () => {
       useModels.mockReturnValue({ ...kModelsReady, loading: true, ready: false });
