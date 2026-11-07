@@ -11,7 +11,7 @@ Status of each part of this document:
 | Typography switch (sans for UI text, mono for data) and the type scale applied | PR 1b (shipped) |
 | Accessible primitives (ModalShell dialog semantics, Tabs, SegmentedControl, focus ring) | PR 1c |
 | Navigation names and grouping | PR 2b |
-| General split into Home and Integrations | PR 3a |
+| General split into Home, Channels and Integrations; StatusStrip; the solid button | PR 3a (shipped) |
 
 ## Direction
 
@@ -75,7 +75,7 @@ Planned tokens, added by the PR that first uses them:
 
 | Token | Dark | Light | Added in |
 |---|---|---|---|
-| `--on-accent` | `#0d121b` (13.3:1 on accent) | `#ffffff` (5.4:1 on accent) | The PR that ships the solid primary button (PageHeader, PR 2b) |
+| `--on-accent` | `#0d121b` (13.3:1 on accent) | `#ffffff` (5.4:1 on accent) | PR 3a (shipped): the solid button, ActionButton `tone="solid"` (`.ac-btn-solid`) |
 | `--focus-ring` | `#63ebff` (12.1:1) | `#0e7490` (4.7:1) | PR 1c. A 2 px outline with a 2 px offset on `:focus-visible`. Today's `focus-visible:ring-border` ring measures 1.2:1 and is replaced. |
 
 Do not lower text with `opacity` to make it look secondary. An opacity of 0.7 on muted text drops it under 4.5:1. Use `text-fg-muted` or `text-fg-dim` instead. Disabled controls are exempt from the contrast rule and keep `opacity-50`.
@@ -191,12 +191,12 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 
 | Block | Where | Rule |
 |---|---|---|
-| ActionButton | `components/action-button.js` | The one button. One solid accent button per page at most, the page's primary action in the PageHeader; every other primary-looking action uses the tinted primary tone. Sizes still use `rounded-lg`/`rounded-xl` today and move to `rounded-control` in a screen pass. Tones are primary (accent), secondary, success (ok), danger (bad), warning (warn), neutral and ghost; `subtle` is an alias of neutral. Sizes sm, md and lg. Every button has a `type`. |
+| ActionButton | `components/action-button.js` | The one button. One solid accent button per page at most, the page's primary action in the PageHeader; every other primary-looking action uses the tinted primary tone. Sizes still use `rounded-lg`/`rounded-xl` today and move to `rounded-control` in a screen pass. Tones are solid (the page's one solid accent button, on `--on-accent`), primary (tinted accent), secondary, success (ok), danger (bad), warning (warn), neutral and ghost; `subtle` is an alias of neutral. Sizes sm, md and lg. Every button has a `type`. |
 | Badge | `components/badge.js` | Status label in one of the five tones. Accepts the tone names `ok`, `warn`, `bad`, `accent`, `neutral` and the older names (`success`, `warning`, `danger`, `info`, `cyan`, `secondary`, `subtle`) as aliases; an unknown tone renders neutral. |
 | RoutePageHeader | `components/page-header.js` | A page's h1, purpose line and primary action (see above). `PageHeader` is the section and dialog title row. |
 | StatusChip | `components/status-chip.js` | The global gateway status under the wordmark and in the phone top bar, linking to Health. Running is a filled green dot, Starting and Restarting an accent ring that pulses only while the operation runs, Degraded a half-filled warn dot, Down a red dot with the word in the bad tone, and Connecting… and Offline a grey ring. It reads the status stream the shell already holds and never fetches. |
 | Card | planned (PR 3a) | Header with a title and an actions slot, then a body. Today use `bg-surface border border-border rounded-xl p-4`. |
-| StatusStrip | planned (PR 3a) | A row of 2 to 4 status cells (label, value, tone). |
+| StatusStrip | `components/home/index.js` (PR 3a) | A row of 2 to 4 status cells, each a link: label (12/600), value (20/600, tabular numerals, a status dot), one mono detail line. 4 across, 2×2 under 768 px. |
 | EmptyState | planned (PR 3b) | A title, one sentence and one action. |
 | AsyncSection | `components/async-section.js` | Loading, error and empty states for a section. |
 | ModalShell | `components/modal-shell.js` | Every modal. A `role="dialog"` with `aria-modal`, named by `ariaLabel`, `ariaLabelledby` or its first heading. Traps Tab, moves focus in on open (an `autofocus` control, else the panel) and back to the opener on close. Only the topmost open dialog handles Tab and Escape. |
@@ -227,7 +227,7 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 
 The sidebar regroups into Home, Chat, Agents, Operate (Health, Doctor, Schedules, Usage), Connect (Channels, Integrations, Relay) and Settings (Models & keys, Environment, Team). The renames are General to Home, Watchdog to Health, Cron to Schedules and Envars to Environment. Old hash links (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) redirect to the new ones in place, so Back never lands on the redirect, and keep their query string and job id.
 
-The shell since PR 2b has the wolf mark and the mono wordmark, the status chip on the next line, the Menu, Browse and Chat mode tabs, then the groups. Groups are always open with no chevrons. Rows are 32 px on desktop and 40 px in the phone drawer, with a 16 px icon. The active row has the `--bg-active` fill, a 2 px accent bar on its left edge and bright text. The sidebar foot holds the version line in mono and a ⋯ menu with Docs, Discord, GitHub, the theme and Log out, and the bottom statusbar is gone. A member sees only Schedules, Usage and Team. Until PR 3a gives Channels and Integrations their own pages, those two rows open their part of Home, and Webhooks and Nodes keep their own rows under Connect so neither page loses its way in.
+The shell since PR 2b has the wolf mark and the mono wordmark, the status chip on the next line, the Menu, Browse and Chat mode tabs, then the groups. Groups are always open with no chevrons. Rows are 32 px on desktop and 40 px in the phone drawer, with a 16 px icon. The active row has the `--bg-active` fill, a 2 px accent bar on its left edge and bright text. The sidebar foot holds the version line in mono and a ⋯ menu with Docs, Discord, GitHub, the theme and Log out, and the bottom statusbar is gone. A member sees only Schedules, Usage and Team. Since PR 3a Channels and Integrations are pages of their own; Webhooks and Nodes have no rows and are reached from Integrations, which their pages highlight (Telegram highlights Channels).
 
 ## General card disposition (decision 3, ships in PR 3a)
 

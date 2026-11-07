@@ -38,6 +38,7 @@
   --text-dim: #848d97;
   --card-label-bright: #dbe7f6;
   --accent: #63ebff;
+  --on-accent: #0d121b;
   --accent-dim: rgba(99, 235, 255, 0.4);
   --accent-link: rgba(99, 235, 255, 0.6);
   --focus-ring: #63ebff;
@@ -147,6 +148,7 @@
   --text-bright: #111827;
   --card-label-bright: #1f2937;
   --accent: #0e7490;
+  --on-accent: #ffffff;
   --accent-dim: #3f93a8;
   --accent-link: #0e7490;
   --focus-ring: #0e7490;
@@ -427,6 +429,32 @@ textarea:focus {
   background: rgba(255, 255, 255, 0.03);
   color: #f3f4f6;
   border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* The page's one solid button (DESIGN.md: one per page, its primary action) */
+.ac-btn-solid {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 500;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.ac-btn-solid:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ac-btn-solid:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.ac-btn-solid:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Reusable cyan action buttons */

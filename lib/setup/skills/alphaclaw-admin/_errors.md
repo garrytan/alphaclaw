@@ -2,7 +2,7 @@
 
 | Code | Meaning | What to do |
 | ---- | ------- | ---------- |
-| `agent_admin_disabled` | The feature is off | Tell the operator to enable it (Setup UI → Home). Do not fall back to other credentials. |
+| `agent_admin_disabled` | The feature is off | Tell the operator to enable it (Setup UI → Integrations). Do not fall back to other credentials. |
 | `agent_admin_unavailable` | Flag on but token missing | Tell the operator to check server logs; a mint failure occurred. |
 | `route_not_found` (HTTP 404) | No such route | Fix the path; check `alphaclaw admin manifest`. |
 | `method_not_allowed` (HTTP 405) | Route exists for other methods | Use a method from `allow`. |

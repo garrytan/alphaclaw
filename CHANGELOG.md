@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.192] - 2026-11-07
+## [0.10.194] - 2026-11-07
 
 Secrets and auth fixes from the ALPH-71 audit (M-1, M-3, L-2, L-6, L-8, GST-1743). Deployment secrets no longer sit in any environment block the agent can read, the agent cannot mint an admin without an operator confirm, and logging out really logs out.
 
@@ -21,6 +21,23 @@ Secrets and auth fixes from the ALPH-71 audit (M-1, M-3, L-2, L-6, L-8, GST-1743
 
 ### Tests
 - New: `tests/server/deployment-secrets.test.js`, `tests/bin/deployment-secrets-boot.test.js` (no `/proc/*/environ` holds `SETUP_PASSWORD` when a `start` boot loads the server; two did before), `tests/bin/deployment-secrets-preload-boot.test.js` (the real `start` under `--env-file`, a `-r` preload and an `--import` preload execs at most once, binds the port and accepts the password), `tests/bin/container-entrypoint.test.js`. New cases in `routes-auth`, `env`, `agent-admin-grant-e2e`, `notify-outbox`, `webhooks`, `routes-webhooks`, `helpers` and `oauth-callback-middleware`, each failing on the previous main. The two per-caller /oauth budget cases are removed with the per-caller budget.
+## [0.10.193] - 2026-11-07
+
+### Changed
+- `.gstack/pregate.json` gains five allowlist entries for six secret-scan false positives, all from the web-hardening PR (ALPH-71 PR 3, #343). Two are the login and accept-invite request body fields in `lib/public/js/login.js` (`token: inviteToken`, `password: passwordEl.value`), filled at runtime. One is a structural guard's offender key in `tests/server/guards/scanners.js`. Two are dummy `SETUP_PASSWORD` fixtures, in `origin-guard.test.js` and `web-hardening-real-server.test.js`. The last reads a test login's `set-cookie` header. Each entry names `env.kv`, its paths and a pattern anchored at both ends of the flagged value, with its reason. There are no blanket rules.
+
+## [0.10.192] - 2026-11-07
+
+Setup UI phase 3a (ALPH-69). Home is rebuilt as a status page with next steps, and Channels and Integrations become pages of their own. No server, restart, watchdog, gateway or relay behaviour changes.
+
+### Changed
+- **Home.** A one-line headline (for example "Your box is running. 2 things need you.") sits above a four-cell status strip for the gateway, the watchdog, incidents in the last 7 days and spend in the last 30 days, each linking to its page. Below it are Attention (numbered rows for pending device approvals, the OpenClaw data upgrade, the Drift Doctor reminder, prompt-hardening problems, pin drift and workspace sync turned off, where only the first row's action is a solid button), Finish setting up, Coming up (the next five scheduled jobs), Agents, a Channels summary with the relay, and This box (versions and the update button, the OpenClaw dashboard launch, the hardening state, Back up now and the auto-sync schedule). The Gateway card leaves Home; restart and repair stay on Health.
+- **Channels** (`#/channels`). Channel accounts, the WhatsApp QR flow, chat pairing approvals and device approvals, with Add channel as the page's solid button.
+- **Integrations** (`#/integrations`). Google Workspace, feature health, the OpenAI-compatible API and Agent Administration toggles, and link rows to Webhooks and Nodes with their counts.
+- **Sidebar.** Connect lists Channels, Integrations and Relay. Webhooks and Nodes highlight Integrations, and Telegram highlights Channels. The Home section anchors and their scroll are gone.
+- Home reads no new endpoint. Its strip and Coming up use the existing incidents, usage summary and cron jobs reads, and its Channels card the relay status read.
+- The agent-facing Setup UI map, TOOLS.md, the admin skill, README and DESIGN.md describe the new pages.
+
 ## [0.10.191] - 2026-11-07
 
 Agent Relay security fixes from the ALPH-71 audit (H-1, M-2, L-12, L-13, GST-1743). Relay sessions are now messaging-only by a plugin, not by a prompt, and a remote agent can no longer slip a reply into someone else's conversation.
