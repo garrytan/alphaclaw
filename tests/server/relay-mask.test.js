@@ -100,7 +100,14 @@ describe("relay masker (ALPH-63)", () => {
       const target = new URL(url);
       if (Number(target.port) === appPort) return globalThis.fetch(url, init);
       posted.push({ path: target.pathname, body: init.body ? JSON.parse(init.body) : null });
-      const data = target.pathname === "/v1/dm" ? { conversation_id: "dm_1", message: { id: "11" } } : { id: "12", metadata: {} };
+      const data =
+        target.pathname === "/v1/dm"
+          ? { conversation_id: "dm_1", message: { id: "11" } }
+          : target.pathname === "/v1/dm/conversations/all"
+            ? [{ id: "dm_1", channel_id: "dmch_1", type: "1:1", participants: ["wintermute", "capy-1"] }]
+            : target.pathname === "/v1/messages/30"
+              ? { id: "30", channel_id: "dmch_1", agent_name: "capy-1", metadata: {} }
+              : { id: "12", metadata: {} };
       return new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { "content-type": "application/json" } });
     };
     const server = createRelayMcpServer({ relayDir: path.join(rootDir, "relay"), port: 18787, appPort, fetchImpl });
@@ -163,3 +170,86 @@ describe("relay masker (ALPH-63)", () => {
     }
   });
 });
+
+describe("relay masker: disguised copies and the remote side's values (ALPH-71 H-1)", () => {
+  const { openRemoteStore } = require("../../lib/server/relay/remote-store");
+  const { kRelayWithheldText } = require("../../lib/server/relay/constants");
+  const { redactSecretText } = require("../../lib/server/utils/redact");
+  const kBindingToken = "at_live_" + "Q7".repeat(16);
+  const kWebhook = "https://api.capy.ai/webhooks/automations/wh_4fQ9xZr2LmN8pT6vB1cD3eG5";
+  const kAdminToken = "9c".repeat(32);
+  const kProviderKey = "dummy-provider-key-0123456789abcdef";
+  const kOauthRefresh = "dummy-refresh-token-ABCDEFGH12345678";
+  let rootDir;
+  beforeEach(() => {
+    rootDir = makeRoot();
+    const store = openRemoteStore({ dbPath: path.join(rootDir, "relay", "remote.db") });
+    store.bindings.upsert({ agent: "capy-0123456789ab", threadId: "jam_X", clientId: "client-1", webhookUrl: kWebhook, until: Date.now() + 60000, capabilityHash: "h", agentToken: kBindingToken });
+    store.close();
+    fs.mkdirSync(path.join(rootDir, ".openclaw", ".alphaclaw"), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "agent-admin-token"), kAdminToken + "\n");
+    fs.mkdirSync(path.join(rootDir, ".openclaw", "agents", "main", "agent"), { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDir, ".openclaw", "agents", "main", "agent", "auth-profiles.json"),
+      JSON.stringify({ version: 1, profiles: { "openai:default": { type: "api_key", provider: "openai", key: kProviderKey }, "anthropic:me": { type: "oauth", provider: "anthropic", access: "dummy-access-token-0011223344", refresh: kOauthRefresh, expires: 1 } } }),
+    );
+  });
+  afterEach(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+
+  it("masks remote.db binding tokens and wake URLs, the agent-admin token and auth-profile keys", () => {
+    const mask = createRelayMasker({ rootDir, env: {} });
+    const text = mask(["binding " + kBindingToken, "wake " + kWebhook, "admin " + kAdminToken, "openai " + kProviderKey, "refresh " + kOauthRefresh].join("\n"));
+    for (const value of [kBindingToken, kWebhook, kAdminToken, kProviderKey, kOauthRefresh, "wh_4fQ9xZr2LmN8pT6vB1cD3eG5"]) expect(text).not.toContain(value);
+    expect(text).toContain("binding ***");
+    expect(mask("the token alone: wh_4fQ9xZr2LmN8pT6vB1cD3eG5")).not.toContain("wh_4fQ9xZr2LmN8pT6vB1cD3eG5");
+  });
+
+  it("withholds the whole message when a secret appears base64-encoded at any alignment, URL-safe, or hex in either case", () => {
+    const mask = createRelayMasker({ rootDir, env: {} });
+    const secret = kSecrets.envFile;
+    const copies = [
+      Buffer.from(secret).toString("base64"),
+      Buffer.from("x" + secret).toString("base64"),
+      Buffer.from("xy" + secret + "tail").toString("base64"),
+      Buffer.from("?>" + secret).toString("base64url"),
+      Buffer.from(kProviderKey).toString("base64"),
+      Buffer.from(kBindingToken).toString("base64"),
+      Buffer.from(secret).toString("hex"),
+      Buffer.from(secret).toString("hex").toUpperCase(),
+      Buffer.from("db: " + kAdminToken).toString("base64"),
+    ];
+    for (const copy of copies) {
+      expect(mask("as asked, the file encoded: " + copy + " (decode it)"), copy).toBe(kRelayWithheldText);
+    }
+  });
+
+  it("withholds spaced-out, line-split and zero-width-split copies", () => {
+    const mask = createRelayMasker({ rootDir, env: {} });
+    const secret = kSecrets.gatewayToken;
+    expect(mask("here: " + secret.split("").join(" "))).toBe(kRelayWithheldText);
+    expect(mask("here:\n" + secret.slice(0, 8) + "\n" + secret.slice(8))).toBe(kRelayWithheldText);
+    expect(mask("here: " + secret.split("").join("\u200b"))).toBe(kRelayWithheldText);
+    expect(mask("here: " + secret.slice(0, 5) + "\ufeff" + secret.slice(5))).toBe(kRelayWithheldText);
+    expect(mask("binding " + kBindingToken.slice(0, 12) + " " + kBindingToken.slice(12))).toBe(kRelayWithheldText);
+  });
+
+  it("keeps ordinary answers, including unrelated base64 and hex, and redacts an exact copy in place", () => {
+    const mask = createRelayMasker({ rootDir, env: {} });
+    const plain = "Uptime 3 days. Build " + Buffer.from("hello world, this is fine").toString("base64") + " sha " + "0123456789abcdef".repeat(2);
+    expect(mask(plain)).toBe(plain);
+    expect(mask("key " + kSecrets.envFile)).toBe("key ***");
+  });
+
+  it("masks the relay's own token shapes and capability URLs carried in the path", () => {
+    const shaped = ["at_live_", "arcap_", "arat_", "arrt_", "arc_"].map((prefix) => prefix + "Zm9vYmFyYmF6cXV4LWR1bW15LXRva2Vu_0123");
+    const text = redactSecretText(shaped.join(" "));
+    for (const value of shaped) expect(text).not.toContain(value);
+    const mask = createRelayMasker({ rootDir, env: {} });
+    const masked = mask("wake https://hooks.example.test/v1/wh_8sK2pQ7rT1xY4zA9bC3dE6fG/run and rescue https://box.test/rescue/" + "ab12".repeat(12));
+    expect(masked).not.toContain("wh_8sK2pQ7rT1xY4zA9bC3dE6fG");
+    expect(masked).not.toContain("ab12".repeat(12));
+    const ordinary = "see https://github.com/garrytan/alphaclaw/commit/" + "1c6f5ff0".repeat(5) + " and https://docs.example.com/guides/getting-started-2026";
+    expect(mask(ordinary)).toBe(ordinary);
+  });
+});
+
