@@ -1,5 +1,19 @@
 const kModulePath = "../../lib/server/login-client-ip";
-const loadResolver = () => require(kModulePath).resolveLoginClientIp;
+const kTrustProxyHopsEnvKey = "TRUST_PROXY_HOPS";
+const loadResolver = () => {
+  delete require.cache[require.resolve(kModulePath)];
+  return require(kModulePath).resolveLoginClientIp;
+};
+
+let savedTrustProxyHops;
+beforeEach(() => {
+  savedTrustProxyHops = process.env[kTrustProxyHopsEnvKey];
+  delete process.env[kTrustProxyHopsEnvKey];
+});
+afterEach(() => {
+  if (savedTrustProxyHops === undefined) delete process.env[kTrustProxyHopsEnvKey];
+  else process.env[kTrustProxyHopsEnvKey] = savedTrustProxyHops;
+});
 
 const fakeRequest = ({ peer, ip }) => ({ socket: { remoteAddress: peer }, ip });
 
@@ -33,6 +47,21 @@ describe("server/login-client-ip", () => {
     for (const peer of ["172.32.0.1", "172.15.255.1", "100.128.0.1", "11.0.0.1", "192.169.0.1"]) {
       expect(resolveLoginClientIp(fakeRequest({ peer, ip: "203.0.113.9" }))).toBe(peer);
     }
+  });
+
+  it("an explicitly set TRUST_PROXY_HOPS trusts the declared proxy chain from a public peer", () => {
+    process.env[kTrustProxyHopsEnvKey] = "1";
+    const declared = loadResolver();
+    expect(declared(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }))).toBe("203.0.113.9");
+    expect(declared(fakeRequest({ peer: "10.0.0.2", ip: "203.0.113.9" }))).toBe("203.0.113.9");
+
+    delete process.env[kTrustProxyHopsEnvKey];
+    const unset = loadResolver();
+    expect(unset(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }))).toBe("198.51.100.7");
+
+    process.env[kTrustProxyHopsEnvKey] = "  ";
+    const blank = loadResolver();
+    expect(blank(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }))).toBe("198.51.100.7");
   });
 
   it("falls back to the peer when a proxy hop sent no forwarded address, and to unknown without a peer", () => {

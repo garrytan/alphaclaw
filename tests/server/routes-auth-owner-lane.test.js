@@ -25,6 +25,7 @@ const { blankDeniedGatewayEnvKeys } = require("../../lib/server/gateway-env-poli
 const kAuthPath = require.resolve("../../lib/server/routes/auth");
 const kClientIpPath = "../../lib/server/login-client-ip";
 const kRecoveryEnvKey = "ALPHACLAW_LOGIN_RECOVERY_CODE";
+const kTrustProxyHopsEnvKey = "TRUST_PROXY_HOPS";
 const kSetupPasswordEnvKey = "SETUP_PASSWORD";
 const kPassCookie = "alphaclaw_device";
 const kOwnerPeer = "198.51.100.10";
@@ -57,6 +58,7 @@ const createMembersStore = (list) => {
       return true;
     },
     acceptInvite: vi.fn(() => ({ ok: false, code: "invite_invalid" })),
+    burnDecoyVerification: vi.fn(),
   };
 };
 
@@ -84,13 +86,15 @@ const createHarness = async ({
   else process.env[kRecoveryEnvKey] = recoveryCode;
   delete require.cache[kAuthPath];
   const { registerAuthRoutes } = require(kAuthPath);
+  delete require.cache[require.resolve(kClientIpPath)];
+  const { resolveLoginClientIp } = require(kClientIpPath);
   const store = createMemoryLoginThrottleStore();
   const loginThrottle = {
     ...createLoginThrottle({ store }),
     getClientKey:
       keyMode === "express"
         ? getClientKey
-        : (req) => require(kClientIpPath).resolveLoginClientIp(req),
+        : (req) => resolveLoginClientIp(req),
   };
   const membersStore = createMembersStore(members);
   const app = express();
@@ -177,6 +181,15 @@ const auditLines = (...spies) =>
     .filter((line) => line.startsWith("[auth] sign-in"));
 
 describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 }, () => {
+  let savedTrustProxyHops;
+  beforeAll(() => {
+    savedTrustProxyHops = process.env[kTrustProxyHopsEnvKey];
+    delete process.env[kTrustProxyHopsEnvKey];
+  });
+  afterAll(() => {
+    if (savedTrustProxyHops !== undefined) process.env[kTrustProxyHopsEnvKey] = savedTrustProxyHops;
+  });
+
   beforeEach(() => {
     compareSpy = vi.spyOn(timingSafe, "timingSafeStringEqual");
   });
@@ -204,12 +217,9 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       expect(readSession(res)).toMatch(/^setup_token=/);
     });
 
-    it("the recovery code gets a new device past a blocked IP and a locked shared bucket", async () => {
+    it("the recovery code gets a new device past a locked shared bucket", async () => {
       const h = await createHarness();
       const newDevice = "198.51.100.44";
-      for (let i = 0; i < kLoginMaxAttempts; i += 1) {
-        await signIn(h, { peer: newDevice, password: "wrong-" + i });
-      }
       await lockShared(h);
 
       const res = await signIn(h, { peer: newDevice, password: kOwnerPassword, recoveryCode: kRecoveryCode });
@@ -309,8 +319,8 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       await signIn(h, { peer, password: "wrong-guess" });
       const ok = await signIn(h, { peer, password: kOwnerPassword });
       const pass = readPass(ok);
-      for (let i = 0; i < kLoginMaxAttempts; i += 1) await signIn(h, { peer, password: "wrong-" + i });
       await signIn(h, { peer, password: kOwnerPassword, recoveryCode: randomValue(32) });
+      for (let i = 0; i < kLoginMaxAttempts; i += 1) await signIn(h, { peer, password: "wrong-" + i });
 
       const t = await createHarness({ team: true, members: [memberA] });
       await signIn(t, { peer, email: memberA.email, password: "wrong-member" });
@@ -397,8 +407,89 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       expect(junkWhileLocked.status).toBe(429);
     });
 
+    it("a right, wrong or absent code gets the same answer and the same work on a policy refusal", async () => {
+      const answers = async (h, base) => {
+        const out = [];
+        for (const recoveryCode of [kRecoveryCode, randomValue(32), undefined]) {
+          resetPasswordChecks(h);
+          const res = await signIn(h, { ...base, peer: "198.51.100.90", recoveryCode });
+          out.push({ status: res.status, body: res.body, checks: passwordChecks(h), decoys: h.membersStore.burnDecoyVerification.mock.calls.length });
+          h.membersStore.burnDecoyVerification.mockClear();
+        }
+        return out;
+      };
+      const teamOff = await createHarness({ team: false, members: [memberA] });
+      const [right, wrong, absent] = await answers(teamOff, credentialsOf(memberA));
+      expect(right.status).toBe(403);
+      expect(right.body.code).toBe("team_disabled");
+      expect(wrong).toEqual(right);
+      expect(absent).toEqual(right);
+
+      const legacyOff = await createHarness({ team: true, legacyOff: true, members: [memberA] });
+      const legacy = await answers(legacyOff, { password: kOwnerPassword });
+      expect(legacy[0].status).toBe(403);
+      expect(legacy[0].body.code).toBe("legacy_login_disabled");
+      expect(legacy[1]).toEqual(legacy[0]);
+      expect(legacy[2]).toEqual(legacy[0]);
+
+      const unknown = await createHarness({ team: true, members: [memberA] });
+      const stranger = await answers(unknown, { email: "nobody@example.test", password: "guess" });
+      expect(stranger[0].status).toBe(401);
+      expect(stranger[1]).toEqual(stranger[0]);
+      expect(stranger[2]).toEqual(stranger[0]);
+    });
+
+    it("a wrong code on a member sign-in costs a decoy password check, like a right code", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      resetPasswordChecks(h);
+      await signIn(h, { peer: "198.51.100.91", ...credentialsOf(memberA), recoveryCode: randomValue(32) });
+      expect(h.membersStore.verifyMemberPassword).not.toHaveBeenCalled();
+      expect(h.membersStore.burnDecoyVerification).toHaveBeenCalledTimes(1);
+    });
+
+    it("wrong codes from one address trip that address's block", async () => {
+      const h = await createHarness();
+      const peer = "198.51.100.92";
+      const statuses = [];
+      for (let i = 0; i < kLoginMaxAttempts; i += 1) {
+        statuses.push((await signIn(h, { peer, password: kOwnerPassword, recoveryCode: randomValue(32) })).status);
+      }
+      expect(statuses).toEqual([...Array(kLoginMaxAttempts - 1).fill(401), 429]);
+      expect((await signIn(h, { peer, password: kOwnerPassword })).status).toBe(429);
+      expect(h.store.get("global:login")?.attempts || 0).toBe(0);
+    });
+
+    it("a blocked address gets 429 for a right code too, without the code being compared", async () => {
+      const h = await createHarness();
+      const peer = "198.51.100.93";
+      for (let i = 0; i < kLoginMaxAttempts; i += 1) await signIn(h, { peer, password: "wrong-" + i });
+      compareSpy.mockClear();
+      const right = await signIn(h, { peer, password: kOwnerPassword, recoveryCode: kRecoveryCode });
+      const wrong = await signIn(h, { peer, password: kOwnerPassword, recoveryCode: randomValue(32) });
+      expect(right.status).toBe(429);
+      expect(wrong.status).toBe(429);
+      expect(compareSpy.mock.calls.filter(([, expected]) => expected === kRecoveryCode)).toHaveLength(0);
+    });
+
+    it("wrong codes from many addresses do not lock the code for a clean address", async () => {
+      const h = await createHarness();
+      await Promise.all(
+        Array.from({ length: 40 }, (_, i) =>
+          Promise.all(
+            Array.from({ length: kLoginMaxAttempts + 1 }, () =>
+              signIn(h, { peer: attackerPeer(i), password: kOwnerPassword, recoveryCode: randomValue(32) }),
+            ),
+          ),
+        ),
+      );
+      const res = await signIn(h, { peer: "198.51.100.94", password: kOwnerPassword, recoveryCode: kRecoveryCode });
+      expect(res.status).toBe(200);
+    });
+
     it("rejects a short or repetitive code at boot with a warning that names only the key", async () => {
-      for (const weak of ["ab".repeat(20), randomValue(16).slice(0, 31)]) {
+      const elevenSymbols = "abcdefghijk";
+      const fewSymbols = Array.from({ length: 40 }, (_, i) => elevenSymbols[(i * 7 + Math.floor(i / 3)) % 11]).join("");
+      for (const weak of ["ab".repeat(20), randomValue(16).slice(0, 31), "abcdefghijklmnop".repeat(2), fewSymbols]) {
         const warn = vi.spyOn(console, "warn");
         const h = await createHarness({ recoveryCode: weak });
         const warnings = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes(kRecoveryEnvKey));
