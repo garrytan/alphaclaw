@@ -317,7 +317,7 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
       email: "m@example.com",
       password: "member password",
     });
-    const memberCookie = cookieOf(
+    let memberCookie = cookieOf(
       await loginMember("m@example.com", "member password"),
     );
 
@@ -332,6 +332,12 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
       .set("Cookie", memberCookie)
       .send({});
     expect(logout.status).toBe(200);
+    expect(
+      (await request(app).get("/api/status").set("Cookie", memberCookie)).status,
+    ).toBe(401);
+    memberCookie = cookieOf(
+      await loginMember("m@example.com", "member password"),
+    );
 
     // Denied: sensitive reads and every mutation.
     const deniedEnvars = await request(app)
