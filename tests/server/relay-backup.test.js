@@ -5,6 +5,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { backupRelay } = require("../../lib/server/relay/backup");
 const { relayPaths } = require("../../lib/server/relay/constants");
 const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
+const { openArchiveStore } = require("../../lib/server/relay/brain-archive/store");
 const { planRetention } = require("../../lib/server/copy-retention");
 const { provisionRelay } = require("../../lib/server/relay/provision");
 
@@ -110,3 +111,23 @@ describe("relay backup: stale partial copies", () => {
   });
 });
 
+
+describe("relay backup: the brain archive's state (ALPH-68 PR3)", () => {
+  it("copies archive.db beside the other relay databases when it exists", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-backup-archive-"));
+    try {
+      const paths = relayPaths(root);
+      const backupsDir = path.join(root, "backups");
+      fs.mkdirSync(paths.dir, { recursive: true });
+      fs.writeFileSync(paths.secretsFile, JSON.stringify({ version: 1, state: "ready" }), { mode: 0o600 });
+      const store = openArchiveStore({ dbPath: paths.archiveDb });
+      store.noteActivity({ conversationId: "dm", relayAgent: "wintermute", relayPeer: "capy-1", boxAgent: true, sourceMark: "1" });
+      store.close();
+      const result = backupRelay({ paths, backupsDir });
+      expect(result.ok).toBe(true);
+      expect(Object.keys(result.files)).toContain("archive.db");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

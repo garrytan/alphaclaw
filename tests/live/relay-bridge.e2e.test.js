@@ -40,6 +40,18 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   let secrets;
   let remote;
   const wakePosts = [];
+  // The brain archive writes through a gbrain wrapper: the real gbrain when
+  // OPENCLAW_LIVE_GBRAIN_BIN names one (a scratch brain with a "relay"
+  // source, never a real one), else the recording fake. Its clock runs
+  // ahead on demand so the test need not sit out the 2-minute debounce.
+  const kRealGbrain = process.env.OPENCLAW_LIVE_GBRAIN_BIN || "";
+  const fakeGbrainDir = liveHelpers.mkTemp("alphaclaw-live-relay-gbrain-");
+  const scratchBrain = kRealGbrain ? require("./gbrain-scratch").createScratchBrain(kRealGbrain) : null;
+  let archiveClockOffsetMs = 0;
+  const fakeGbrainCalls = () =>
+    fs.existsSync(path.join(fakeGbrainDir, "calls.jsonl"))
+      ? fs.readFileSync(path.join(fakeGbrainDir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      : [];
 
   const relayUrl = (p) => `http://127.0.0.1:${relayPort}${p}`;
   const relayCall = async (method, p, token, body) => {
@@ -118,7 +130,16 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
     const { createSidecarService } = require("../../lib/server/sidecars");
     const { normalizeBuiltinSidecarEntry } = require("../../lib/server/sidecars/registry");
     relay = createRelayService({
-      env: { ALPHACLAW_RELAY_PORT: String(relayPort), ALPHACLAW_RELAY_AGENT_NAME: "wintermute" },
+      env: {
+        ALPHACLAW_RELAY_PORT: String(relayPort),
+        ALPHACLAW_RELAY_AGENT_NAME: "wintermute",
+        ALPHACLAW_RELAY_BRAIN_BIN: kRealGbrain || path.join(__dirname, "..", "fixtures", "fake-gbrain.js"),
+      },
+      brainArchiveOptions: {
+        env: scratchBrain ? scratchBrain.env : { ...liveHelpers.scrubTestRunnerEnv(), GBRAIN_FAKE_DIR: fakeGbrainDir, GBRAIN_FAKE_CHECKOUT: path.join(fakeGbrainDir, "relay-src") },
+        now: () => Date.now() + archiveClockOffsetMs,
+        sleep: async () => {},
+      },
       rootDir: kRootDir,
       getSupervisor: () => sidecars.find("relay-engine"),
       resolveAgentId: () => "main",
@@ -312,6 +333,61 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       const status = remote.getStatus();
       expect(status.bindings[0]).toMatchObject({ agent: bound.data.agent, lastWakeStatus: "delivered" });
       expect(JSON.stringify(status)).not.toContain(bound.data.capability);
+    },
+    kTestTimeoutMs,
+  );
+
+  it(
+    "the relay conversation is saved to the brain through the gbrain wrapper: both sides, the box agent's session, no tool output, then one commit-push",
+    async () => {
+      expect(relay.isReady()).toBe(true);
+      const archive = relay._internal.state.archive;
+      // The archive's own timer may be mid-tick (one tick at a time), so tick
+      // until the pages are saved and committed, moving its clock 3 minutes
+      // per try.
+      await waitFor(
+        async () => {
+          archiveClockOffsetMs += 3 * 60 * 1000;
+          await archive._internal.tick();
+          const counts = relay.getStatus().archive.counts || {};
+          return counts.pages >= 1 && counts.due === 0 && counts.commitsQueued === 0;
+        },
+        180_000,
+        "relay conversations saved to the brain and committed",
+      );
+      const status = relay.getStatus().archive;
+      console.log("[live] brain archive: " + JSON.stringify({ phase: status.phase, code: status.code, counts: status.counts, parked: status.parked, real: Boolean(kRealGbrain) }));
+      expect(status).toMatchObject({ enabled: true, phase: "ready", code: null, parked: [] });
+      expect(status.counts.pages).toBeGreaterThanOrEqual(1);
+      expect(status.counts.commitsQueued).toBe(0);
+      const slug = "relay/wintermute/capy-live/";
+      let page;
+      if (scratchBrain) {
+        const files = scratchBrain.trackedFiles("relay/wintermute/capy-live");
+        expect(files.filter((name) => /-part-\d+\.md$/.test(name))).toEqual([]);
+        const file = files[0];
+        expect(file).toMatch(/^relay\/wintermute\/capy-live\/.+\.md$/);
+        expect(scratchBrain.json(["get", "--source", "relay", "--json", "--", file.replace(/\.md$/, "")])).toMatchObject({ type: "relay-conversation", source_id: "relay" });
+        expect(scratchBrain.run(["get", "--json", "--", file.replace(/\.md$/, "")]).status).not.toBe(0);
+        page = fs.readFileSync(path.join(scratchBrain.checkout, file), "utf8");
+      } else {
+        const puts = fakeGbrainCalls().filter((call) => call.argv[0] === "put" && call.argv[1].startsWith(slug));
+        expect(puts.length).toBeGreaterThanOrEqual(1);
+        expect(puts[0].argv.slice(2, 4)).toEqual(["--source", "relay"]);
+        expect(puts.filter((call) => /-part-\d+$/.test(call.argv[1]))).toEqual([]);
+        page = puts[puts.length - 1].stdin;
+        const commits = fakeGbrainCalls().filter((call) => call.argv[0] === "git");
+        expect(commits.length).toBeGreaterThanOrEqual(1);
+        expect(commits[0].argv.slice(0, 3)).toEqual(["git", "commit-push", "--path"]);
+      }
+      expect(page).toContain("type: relay-conversation");
+      expect(page).toContain("trust: external");
+      expect(page).toContain("facts_backstop: false");
+      expect(page).toContain("ping-41");
+      expect(page).toContain("pong-41 from the box");
+      expect(page).toContain("@capy-live (peer)");
+      expect(page).not.toContain("Handle it as read-only diagnostics");
+      expect(page).not.toContain(secrets.workspaceKey);
     },
     kTestTimeoutMs,
   );
