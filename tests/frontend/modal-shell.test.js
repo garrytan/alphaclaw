@@ -312,6 +312,54 @@ describe("frontend/modal-shell focus trap", () => {
     expect(getFocusableElements(panel)).toEqual([keep, confirm]);
   });
 
+  it("keeps radio groups apart by form owner", () => {
+    const formA = {};
+    const formB = {};
+    const a = makeElement("radio-a", { type: "radio", name: "g", checked: true, form: formA });
+    const b = makeElement("radio-b", { type: "radio", name: "g", checked: true, form: formB });
+    const panel = makePanel({ controls: [a, b] });
+    expect(getFocusableElements(panel)).toEqual([a, b]);
+  });
+
+  it("gives a group no stop when its checked radio is outside the dialog", () => {
+    const inside = makeElement("inside", { type: "radio", name: "g", checked: false });
+    const outside = makeElement("outside", { type: "radio", name: "g", checked: true });
+    inside.ownerDocument = { querySelectorAll: () => [inside, outside] };
+    const button = makeElement("button");
+    const panel = makePanel({ controls: [button, inside] });
+    expect(getFocusableElements(panel)).toEqual([button]);
+  });
+
+  it("wraps from a focused radio that is not its group's stop, in both directions", () => {
+    const order = [];
+    const positioned = (name, extra) => {
+      const element = makeElement(name, extra);
+      element.compareDocumentPosition = (other) =>
+        order.indexOf(other) > order.indexOf(element) ? 4 : 2;
+      order.push(element);
+      return element;
+    };
+    const r1 = positioned("r1", { type: "radio", name: "g", checked: false });
+    const r2 = positioned("r2", { type: "radio", name: "g", checked: true });
+    const confirm = positioned("confirm");
+    const panel = makePanel({ controls: [r1, r2, confirm] });
+    doc.activeElement = r1;
+    const back = keyEvent("Tab", { shiftKey: true });
+    trapTabKey(back, panel);
+    expect(back.defaultPrevented).toBe(true);
+    expect(doc.activeElement).toBe(confirm);
+
+    r1.checked = true;
+    r2.checked = false;
+    order.splice(0, order.length, confirm, r1, r2);
+    panel.querySelectorAll = () => [confirm, r1, r2];
+    doc.activeElement = r2;
+    const forward = keyEvent("Tab");
+    trapTabKey(forward, panel);
+    expect(forward.defaultPrevented).toBe(true);
+    expect(doc.activeElement).toBe(confirm);
+  });
+
   it("keeps focus on the panel when it has no controls", () => {
     const panel = makePanel();
     const event = keyEvent("Tab");
