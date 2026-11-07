@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.178] - 2026-11-07
+
+Phase 0b of the Setup UI overhaul (ALPH-69, GST-1697). The Gateway card no longer contradicts itself right after a restart.
+
+### Fixed
+- **Restart card said "Starting" and "Running" at once**: for a second or more after a restart finished, the Gateway card showed "Starting · Waiting for the gateway to come up." and the "Restarting gateway" badge beside "Running: restarted in 17s (down for 17s)". The restart's own result reaches the browser first. The status frame catches up later, because the server computed it while the restart still held its lock and before the watchdog's first health check on the new gateway. On a real box the overlap lasted about 1 s with the live status stream and about 3 s on the polling fallback. While a just-finished restart's success line is shown, the card now trusts the server's verified result for the two frames that are stale for certain. One still carries the restart's own lock badge, and the other already has the new gateway serving the port while it waits for the first health check. Those read Running and the restart's own badge clears. A frame with an unverified replacement pending, and a crash relaunch in that window (it clears the serving gateway), still read Starting. If no status frame showed the lock while the restart ran (a very short restart on the polling fallback), the old overlap can still show for a moment. The page records the lock that restart held while it ran, and only that lock counts as stale. A newer restart started from another tab renders as the server sends it, and the page re-reads the restart record at once so it attaches and shows its own progress. A frame that names another operation (a repair that started since), an unfinished data upgrade (it stays on the card until you act, so it never hides a later start) and every other state still render exactly as the server sends them. Nothing changed on the server or in the restart itself.
+
+### Tests
+- `tests/frontend/app-shell-controller.test.js`: the running restart's own lock is recorded from the status frames and kept on the success outcome, and a lock badge during the success window re-reads the record and attaches a newer restart.
+- `tests/frontend/gateway-card.test.js`: the stale frame from the bug report renders as Running with no "Starting", no "Waiting" line and no restart badge next to the success line. A port-up frame still waiting on the first health check reads Running. A finished data upgrade clears its own badge. A running restart, a failed restart, another operation's badge and a fresh Down state keep the server's view.
+
 ## [0.10.177] - 2026-11-07
 
 Two hermetic tests that failed CI by chance, not because of a code change (GST-1109). Both flaked a merge-queue landing on 2026-11-07.
