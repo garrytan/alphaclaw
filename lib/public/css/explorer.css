@@ -545,6 +545,7 @@
 
 .file-tree {
   list-style: none;
+  font-family: var(--font-mono);
 }
 
 .tree-item {
@@ -1076,6 +1077,7 @@
 
 .frontmatter-key {
   padding: 6px 10px;
+  font-family: var(--font-mono);
   color: var(--keyword);
   border-right: 1px solid rgba(255, 255, 255, 0.05);
   word-break: break-word;
@@ -1222,7 +1224,7 @@
   overflow-y: auto;
   background: transparent;
   color: var(--text);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 22px;
   padding: 16px 20px 112px 0;
@@ -1243,7 +1245,7 @@
   overflow: hidden;
   pointer-events: none;
   background: transparent;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 22px;
   color: var(--text);
@@ -1842,6 +1844,7 @@
 
 .sidebar-git-change-path {
   min-width: 0;
+  font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1942,6 +1945,7 @@
 
 .sidebar-git-hash {
   color: var(--accent);
+  font-family: var(--font-mono);
   flex-shrink: 0;
 }
 

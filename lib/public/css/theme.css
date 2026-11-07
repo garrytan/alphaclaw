@@ -1,3 +1,30 @@
+/* JetBrains Mono, self-hosted (SIL OFL 1.1, unmodified; licence text in
+   fonts/jetbrains-mono-OFL.txt). The same upright files the OpenClaw Control UI
+   serves, so a box needs no third-party font request. Latin-ext loads only for
+   the characters in its range. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-latin-ext.woff2") format("woff2");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --bg: #0d121b;
   --bg-sidebar: #0f141f;
@@ -70,6 +97,12 @@
   --tone-neutral: var(--text-muted);
   --tone-neutral-bg: rgba(148, 163, 184, 0.1);
   --tone-neutral-border: rgba(255, 255, 255, 0.14);
+
+  /* Type families: sans for interface text, mono for data (DESIGN.md) */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "Noto Sans", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 
   /* Type scale */
   --font-size-caption: 12px;
@@ -164,8 +197,8 @@ html, body { height: 100%; }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-small);
   line-height: 1.6;
 }
 
@@ -181,6 +214,24 @@ body {
 
 [data-theme="light"] .ac-logo-mark {
   background: var(--accent);
+}
+
+/* The wordmark is the one non-data use of the mono face (DESIGN.md). */
+.ac-wordmark {
+  font-family: var(--font-mono);
+}
+
+/* Inline data inside sans copy sits one scale step down so the two faces
+   match optically (13 px in 14 px copy, never under the 12 px caption). The
+   body prefix outranks Tailwind's base reset; a text-* class still wins. */
+body code,
+body kbd,
+body samp {
+  font-size: max(var(--font-size-caption), 0.93em);
+}
+
+body pre code {
+  font-size: inherit;
 }
 
 /* Subtle grid texture overlay */
@@ -208,7 +259,7 @@ body::before {
 }
 
 .ac-small-heading {
-  font-size: 11px;
+  font-size: var(--font-size-caption);
   font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -569,7 +620,7 @@ textarea:focus {
 }
 
 .ac-toggle-label {
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   color: #d1d5db;
 }
 
@@ -759,14 +810,14 @@ textarea:focus {
   grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 8px;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   color: var(--text-muted);
 }
 .ac-boot-stage__mark {
   display: inline-flex;
   justify-content: center;
   align-items: center;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
 }
 .ac-boot-stage__mark .ac-gateway-dot {
   width: 8px;
@@ -886,7 +937,7 @@ textarea:focus {
   background: transparent;
   color: var(--text-muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   letter-spacing: 0.03em;
   height: 100%;
   line-height: 1;
@@ -914,7 +965,7 @@ textarea:focus {
 }
 
 .ac-segmented-control-lg .ac-segmented-control-button {
-  font-size: 14px;
+  font-size: var(--font-size-copy);
   padding: 0 16px;
 }
 
