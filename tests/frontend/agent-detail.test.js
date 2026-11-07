@@ -3,15 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Agent detail: the description sentence, the 7-day activity
 // numbers, the tabs and the header's one solid button and overflow.
 const readFixtures = new Map();
+const fetchRefreshes = [];
 
 vi.mock("preact/hooks", () => {
-  const harness = { slots: [], cursor: 0 };
+  const harness = { slots: [], cursor: 0, effects: [] };
   harness.begin = () => {
     harness.cursor = 0;
+    harness.effects = [];
   };
   harness.reset = () => {
     harness.slots = [];
     harness.cursor = 0;
+    harness.effects = [];
   };
   const useState = (initial) => {
     const index = harness.cursor++;
@@ -33,7 +36,9 @@ vi.mock("preact/hooks", () => {
     useRef,
     useMemo: (factory) => factory(),
     useCallback: (fn) => fn,
-    useEffect: () => {},
+    useEffect: (effect) => {
+      harness.effects.push(effect);
+    },
     useLayoutEffect: () => {},
     __harness: harness,
   };
@@ -44,7 +49,15 @@ vi.mock("../../lib/public/js/components/channels.js", () => ({
   getChannelMeta: (id) => ({ label: String(id || "") }),
 }));
 vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({
-  useCachedFetch: (key) => ({ data: readFixtures.get(key) ?? null, error: null, loading: false, refresh: async () => null }),
+  useCachedFetch: (key) => ({
+    data: readFixtures.get(key) ?? null,
+    error: null,
+    loading: false,
+    refresh: async (options) => {
+      fetchRefreshes.push([key, options]);
+      return null;
+    },
+  }),
 }));
 vi.mock("../../lib/public/js/components/models-tab/use-models.js", () => ({
   useModels: () => ({
@@ -69,6 +82,8 @@ const { ActionButton } = await import("../../lib/public/js/components/action-but
 const { OverflowMenuItem } = await import("../../lib/public/js/components/overflow-menu.js");
 const { ChannelOperationsPanel } = await import("../../lib/public/js/components/channel-operations-panel.js");
 const { AgentSessionsList } = await import("../../lib/public/js/components/agents-tab/agent-sessions-list.js");
+
+const { kAgentBindingsChangedEvent } = await import("../../lib/public/js/lib/ui-events.js");
 
 const harness = preactHooks.__harness;
 
@@ -106,6 +121,7 @@ const render = (props = {}) => {
 beforeEach(() => {
   harness.reset();
   readFixtures.clear();
+  fetchRefreshes.length = 0;
   vi.clearAllMocks();
 });
 
@@ -277,5 +293,36 @@ describe("frontend/agent detail header and tabs", () => {
     const list = AgentSessionsList({ sessions: [{ key: "agent:main:main" }, { key: "cron:abc", label: "Cron" }] });
     const links = collect(list).filter((node) => node.type === "a");
     expect(links.map((node) => node.props.href)).toEqual(["#/chat/" + encodeURIComponent("agent:main:main")]);
+  });
+});
+
+describe("frontend/agent detail after review", () => {
+  it("re-reads the channel accounts when the Channels tab changes a binding, so the summary stays current", () => {
+    const listeners = new Map();
+    const previousWindow = globalThis.window;
+    globalThis.window = {
+      addEventListener: (name, handler) => listeners.set(name, handler),
+      removeEventListener: (name, handler) => {
+        if (listeners.get(name) === handler) listeners.delete(name);
+      },
+    };
+    try {
+      render({ activeTab: "overview" });
+      const cleanups = harness.effects.map((effect) => effect());
+      const handler = listeners.get(kAgentBindingsChangedEvent);
+      expect(typeof handler).toBe("function");
+      handler({ detail: { agentId: "ops" } });
+      expect(fetchRefreshes).toContainEqual(["/api/channels/accounts", { force: true }]);
+      cleanups.forEach((cleanup) => cleanup?.());
+      expect(listeners.has(kAgentBindingsChangedEvent)).toBe(false);
+    } finally {
+      globalThis.window = previousWindow;
+    }
+  });
+
+  it("Open chat opens the main session while the session list is still loading, instead of starting a new chat", () => {
+    expect(model.resolveOpenChatSessionKey({ agentId: "ops", sessions: [], sessionsLoading: true })).toBe("agent:ops:main");
+    expect(model.resolveOpenChatSessionKey({ agentId: "ops", sessions: [{ key: "agent:ops:main" }] })).toBe("agent:ops:main");
+    expect(model.resolveOpenChatSessionKey({ agentId: "ops", sessions: [{ key: "agent:main:main" }] })).toBe("");
   });
 });

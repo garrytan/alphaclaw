@@ -1813,6 +1813,13 @@ div.home-strip-link:hover { background: none; }
   color: var(--text-muted);
 }
 
+.models-check-note {
+  display: block;
+  font-size: var(--font-size-small);
+  color: var(--tone-warn);
+  overflow-wrap: anywhere;
+}
+
 .models-cell-actions {
   text-align: right;
   white-space: nowrap;

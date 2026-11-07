@@ -82,10 +82,12 @@ const { Models } = await import("../../lib/public/js/components/models-tab/index
 const { SecretInput } = await import("../../lib/public/js/components/secret-input.js");
 const { ActionButton } = await import("../../lib/public/js/components/action-button.js");
 const model = await import("../../lib/public/js/components/models-tab/model.js");
+const apiCache = await import("../../lib/public/js/lib/api-cache.js");
+const { SearchableModelPicker } = await import("../../lib/public/js/components/models-tab/model-picker.js");
 
 const harness = preactHooks.__harness;
 
-const createEnv = (initial) => {
+const createEnv = (initial, routeOptions = {}) => {
   let fileVars = initial.map((entry) => ({ ...entry }));
   const writes = [];
   let restartReason = false;
@@ -111,6 +113,7 @@ const createEnv = (initial) => {
     },
     gatewayLaunchEnv: () => Object.fromEntries(fileVars.map(({ key, value }) => [key, value])),
     scanStaleEnvProcesses: () => ({ available: true, checkedKeys: 0, scannedProcesses: 0, unreadableProcesses: 0, stale: [] }),
+    ...routeOptions,
   });
   return { app, writes, vars: () => fileVars };
 };
@@ -200,6 +203,7 @@ const kModelsBase = {
   getEffectiveOrder: () => [],
   cancelChanges: vi.fn(),
   saveAll: vi.fn(),
+  refresh: vi.fn(async () => {}),
   refreshCodexStatus: vi.fn(),
 };
 const kCheckFixture = {
@@ -417,5 +421,124 @@ describe("frontend/models-tab page", () => {
     const text = textOf(tree).join(" ");
     expect(text.indexOf("is the default for this box.")).toBeGreaterThan(-1);
     expect(text.indexOf("is the default for this box.")).toBeLessThan(text.indexOf("Provider keys"));
+  });
+});
+
+describe("frontend/models-tab after review", () => {
+  const configured = {
+    ...kModelsBase,
+    primary: "anthropic/claude-opus-4-8",
+    configuredModels: { "anthropic/claude-opus-4-8": {}, "openai/gpt-5.5": {} },
+    authProfiles: [
+      { id: "anthropic:default", provider: "anthropic", type: "api_key", key: "k" },
+      { id: "openai:default", provider: "openai", type: "api_key", key: "k" },
+    ],
+    codexStatus: { connected: true },
+    codexStatusKnown: true,
+    getProfileValue: (id) => (id === "anthropic:default" ? { key: "k" } : null),
+  };
+  const kNote = "models.providers.openai.baseUrl points at https://relay.example, not https://api.openai.com; that host receives the OpenAI key.";
+
+  it("shows each check note as plain text under that model's check word", () => {
+    useModels.mockReturnValue(configured);
+    readFixtures.set("/api/env", kEnvFixture);
+    readFixtures.set("/api/models/check", {
+      lastRun: {
+        checkedAt: "2026-11-07T17:00:00.000Z",
+        results: [{ ref: "openai/gpt-5.5", severity: "ok", reason: "Answered", notes: [kNote] }],
+      },
+      failures: [],
+    });
+    const tree = renderModels();
+    const row = collect(tree).find((node) => node.type === "tr" && node.props["data-model-key"] === "openai/gpt-5.5");
+    const cell = collect(row).find((node) => node.props?.["data-label"] === "Check");
+    const text = textOf(cell).join("");
+    expect(text).toContain("Passed");
+    expect(text).toContain(kNote);
+    expect(collect(cell).find((node) => node.props?.class === "models-check-note")).toBeTruthy();
+    expect(model.buildModelRows({ configuredModels: { "openai/gpt-5.5": {} }, lastRun: { results: [{ ref: "openai/gpt-5.5", severity: "ok", notes: [kNote] }] }, running: true })[0].notes).toEqual([]);
+  });
+
+  it("after a key save the page re-reads the model settings, drops that provider's auth-card draft and clears the Claude Code status", async () => {
+    useModels.mockReturnValue(configured);
+    readFixtures.set("/api/env", kEnvFixture);
+    apiCache.setCached("/api/claude-code/status", { available: true });
+    const tree = renderModels();
+    const row = collect(tree).find((node) => node.type === ProviderKeyRow && node.props.entry.key === "ANTHROPIC_API_KEY");
+    await row.props.onSaved({ ok: true, restartRequired: false });
+    expect(configured.refresh).toHaveBeenCalledWith({ force: true, discardProfileEditsFor: "anthropic" });
+    expect(refreshed).toContainEqual(["/api/env", { force: true }]);
+    expect(apiCache.getCached("/api/claude-code/status")).toBeNull();
+  });
+
+  it("a save the server answers with a warning shows that warning on the row", async () => {
+    const env = createEnv([{ key: "OPENAI_API_KEY", value: "sk-old" }], {
+      syncApiKeyAuthProfiles: () => {
+        throw new Error("state database busy");
+      },
+    });
+    envApp = env.app;
+    const tree = await typeAndSave({}, "sk-mock-throwaway");
+    const warning = collect(tree).find((node) => node.type === "p" && node.props.class?.includes("text-status-warning-muted"));
+    expect(warning).toBeTruthy();
+    expect(textOf(warning).join("")).toContain("syncing API-key auth profiles failed (state database busy)");
+    expect(textOf(warning).join("")).not.toContain("sk-mock-throwaway");
+  });
+
+  it("every model the check counted gets a row, with fallbacks and agents' own models named in Used by", () => {
+    const lastRun = {
+      checkedAt: "2026-11-07T17:00:00.000Z",
+      results: [
+        { ref: "anthropic/claude-opus-4-8", severity: "ok", roles: ["primary"] },
+        { ref: "openai/gpt-4.1", severity: "error", roles: ["fallback"], fix: "Remove it from the fallbacks" },
+        { ref: "google/gemini-3.8-flash", severity: "ok", roles: ["primary (agent ops)", "fallback (agent ops)"] },
+        { ref: "mock/echo", severity: "ok", roles: ["allowed (agent helper)"] },
+      ],
+    };
+    const rows = model.buildModelRows({
+      configuredModels: { "anthropic/claude-opus-4-8": {} },
+      primary: "anthropic/claude-opus-4-8",
+      agents: [{ id: "ops", name: "Ops", model: "google/gemini-3.8-flash" }],
+      lastRun,
+    });
+    expect(rows.map((row) => [row.key, row.configured, row.usedBy, row.check.word])).toEqual([
+      ["anthropic/claude-opus-4-8", true, ["Box default"], "Passed"],
+      ["openai/gpt-4.1", false, ["Fallback"], "Failed"],
+      ["google/gemini-3.8-flash", false, ["Ops", "Ops fallback"], "Passed"],
+      ["mock/echo", false, ["helper allowed"], "Passed"],
+    ]);
+
+    useModels.mockReturnValue(configured);
+    readFixtures.set("/api/env", kEnvFixture);
+    readFixtures.set("/api/models/check", { lastRun, failures: [] });
+    const tree = renderModels();
+    const fallbackRow = collect(tree).find((node) => node.type === "tr" && node.props["data-model-key"] === "openai/gpt-4.1");
+    const text = textOf(fallbackRow).join(" ");
+    expect(text).toContain("Fallback");
+    expect(text).toContain("Failed");
+    expect(text).toContain("Remove it from the fallbacks");
+    expect(collect(fallbackRow).filter((node) => node.type === "button")).toEqual([]);
+  });
+
+  it("a signed-in provider with no .env key never shows No provider keys yet", () => {
+    const noKeys = { vars: [{ key: "OPENAI_API_KEY", label: "OpenAI API Key", group: "ai", source: "unset", value: "" }] };
+    expect(model.hasAnyProviderKey(model.buildProviderKeyGroups({ vars: noKeys.vars }), { "openai-codex": true })).toBe(true);
+    expect(model.hasAnyProviderKey(model.buildProviderKeyGroups({ vars: noKeys.vars }), {})).toBe(false);
+
+    useModels.mockReturnValue({ ...configured, authProfiles: [], codexStatus: { connected: true } });
+    readFixtures.set("/api/env", noKeys);
+    expect(textOf(renderModels()).join(" ")).not.toContain("No provider keys yet");
+  });
+
+  it("offers no new default while the credential store cannot be read", () => {
+    useModels.mockReturnValue(configured);
+    readFixtures.set("/api/env", kEnvFixture);
+    const labels = (tree) => collect(tree).filter((node) => node.type === ActionButton).map((node) => node.props.idleLabel);
+    expect(labels(renderModels())).toContain("Change default");
+
+    useModels.mockReturnValue({ ...configured, authStoreUnavailable: { reason: "busy" } });
+    const tree = renderModels();
+    expect(labels(tree)).not.toContain("Change default");
+    expect(collect(tree).some((node) => node.type === SearchableModelPicker && node.props.inputId === "models-change-default")).toBe(false);
   });
 });

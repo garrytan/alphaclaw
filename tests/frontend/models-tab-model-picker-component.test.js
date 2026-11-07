@@ -299,3 +299,28 @@ describe("frontend/models-tab SearchableModelPicker", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 });
+
+describe("frontend/models-tab SearchableModelPicker focus", () => {
+  beforeEach(() => {
+    harness.reset();
+  });
+
+  it("stays open when a click on text inside the list moves focus nowhere, and still closes when Tab leaves", () => {
+    harness.slots[kOpenSlot] = true;
+    const tree = renderPicker({ options: kOptions, popularModels: kPopular });
+    const root = findAllByType(tree, "div")[0];
+    harness.slots[kRootRefSlot].current = { contains: (node) => node === "inside" };
+
+    root.props.onPointerDown();
+    root.props.onFocusOut({ relatedTarget: null });
+    expect(harness.slots[kOpenSlot]).toBe(true);
+    root.props.onPointerUp();
+
+    root.props.onFocusOut({ relatedTarget: null });
+    expect(harness.slots[kOpenSlot]).toBe(false);
+
+    harness.slots[kOpenSlot] = true;
+    root.props.onFocusOut({ relatedTarget: "outside" });
+    expect(harness.slots[kOpenSlot]).toBe(false);
+  });
+});
