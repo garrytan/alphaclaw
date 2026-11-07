@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.999] - 2026-11-07
+## [0.10.202] - 2026-11-07
 
 Models & keys groups API keys by provider and saves one key at a time; agent pages get a one-line description and tabs. Home no longer shows an old git-sync result as if it were current. No server, restart, watchdog, gateway or relay behaviour changes, and every action keeps its handler.
 
@@ -16,6 +16,13 @@ Models & keys groups API keys by provider and saves one key at a time; agent pag
 
 ### Tests
 - New `models-keys` and `agent-detail` files, plus new cases in `home-model`, `home-tab`, `agents-tab-model-card` and `models-tab-model-picker-component`. All fail on the previous main.
+
+## [0.10.201] - 2026-11-07
+
+The Google Workspace CLI (gog) now gets only the environment it needs.
+
+### Security
+- **gog children no longer get AlphaClaw's whole environment.** The four places AlphaClaw runs the `gog` CLI (the Google commands, `gog gmail watch serve`, the account listing and the keyring setup at boot) passed their whole environment, so every gog child carried `SETUP_PASSWORD`, the platform tokens and the provider keys. They now share one allowlist (`lib/server/gog-env.js`): the CLI basics (`PATH`, `HOME`, locale, `TMPDIR`), proxy and CA settings, gog's own `GOG_*` settings, the managed `XDG_CONFIG_HOME` and `GOG_KEYRING_PASSWORD`. gog v0.11.0 takes the keyring password only from its environment or a TTY prompt, so that value still rides gog's environ; keeping it out needs gog support, or running the agent under its own user. A test on each spawn site checks that the setup password and a platform token are absent and the gog settings present.
 
 ## [0.10.200] - 2026-11-07
 
