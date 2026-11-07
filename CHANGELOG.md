@@ -33,6 +33,15 @@ Security remediation, webhooks and dependencies (ALPH-71 PR 4, CSO audit L-7, L-
 - `tests/server/routes-webhooks-coverage.test.js`, `routes-pairings.test.js`, `routes-nodes-coverage.test.js`: header form listed first with the less-safe note; leading-dash ids rejected.
 - Existing tests that used GET to reach a hook now use POST, the OAuth alias test expects no forwarded query string, and the OAuth transform test checks that caller fields are not read.
 
+## [0.10.180] - 2026-11-07
+
+Security hotfix for a stored XSS in the Setup UI's Browse file viewer (GST-1743, found by the ALPH-71 CSO audit).
+
+### Security
+- **The markdown preview in Browse goes through the safe renderer.** It rendered workspace `.md` files with raw `marked`, which keeps raw HTML, and injected the result as HTML. Anything that can write a markdown file under the browse root (the agent through exec or the browse write API, or a relay peer through the agent) could plant `<img src=x onerror=...>` and run script in an admin's session when the admin opened the preview. The preview now uses `renderMarkdownSafe`, as chat and the update modal already do: raw HTML shows as escaped text, and link and image URLs must be http(s), mailto, `#` or start with `/`, `./` or `../`. Frontmatter, GFM tables, code blocks and line breaks render as before. Links now open in a new tab. Links and images starting with `/`, `./` or `../` stay live and resolve as before (a `//host` URL reaches another host, like any https link); a bare relative link such as `[x](notes.md)` now renders as text. Neither kind ever opened the workspace file, because the Setup UI uses hash routes.
+- The Nodes tab's Chrome attach instructions, a hard-coded constant, use the same renderer, so no Setup UI component imports raw `marked` any more.
+- `tests/frontend/file-viewer-markdown-safety.test.js` renders a `.md` holding `<img onerror>`, `<script>`, `<iframe>`, `javascript:` links in plain, mixed-case, entity-encoded and autolink form, a link title that tries to break out of its attribute, and text after an inline `<kbd>`, `<code>`, `<pre>` or `<script>` tag, through the file viewer's own render path and fails on any live tag, handler or link that survives.
+
 ## [0.10.179] - 2026-11-07
 
 Security hotfix (GST-1743, CSO audit). Two ways an unauthenticated caller could exhaust a box through the webhook ingress.
