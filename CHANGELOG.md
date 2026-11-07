@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.187] - 2026-11-07
+
+Phase 1b of the Setup UI overhaul (ALPH-69, GST-1697). Interface text moves from JetBrains Mono to the system sans stack, monospace stays for data and the wordmark, and the type scale from `DESIGN.md` is applied. On a real box the distinct font size and weight combinations per page dropped on 12 of the 14 audited routes (General 11 to 8, Doctor 11 to 8, Watchdog 9 to 7, Usage and Envars 8 to 6), stayed level on Chat and rose by one on Browse (5 to 6), and axe colour contrast stayed at 0 in both themes.
+
+### Changed
+- **JetBrains Mono is self-hosted.** `setup.html` and `login.html` no longer load a Google Fonts stylesheet, so a page view makes no request to fonts.googleapis.com or fonts.gstatic.com and the mono face works offline. `lib/public/css/fonts/` ships the upright variable woff2 files that the OpenClaw Control UI already serves (latin 31 KB, latin-ext 12 KB, byte-identical to OpenClaw 2026.10.9's copies), unmodified under the SIL Open Font License 1.1 with the licence text beside them. Two `@font-face` rules in `theme.css` use `font-display: swap`, and latin-ext loads only through its `unicode-range`. The Google link also asked for weights 300 to 700; the self-hosted face covers 400 to 700.
+- **Typography.** `theme.css` gains `--font-sans` (`ui-sans-serif, system-ui` and the platform faces, no download) and `--font-mono` (JetBrains Mono, then system monospace), and `tailwind.config.cjs` maps `font-sans` and `font-mono` to them. The body is sans at 13 px. Mono is kept for what an operator could paste into a terminal, which covers ids, paths, versions, hashes, model refs, env names and values, pids, durations, cron expressions, logs, code, the terminal, the file tree and editor, plus the wordmark (`.ac-wordmark`). A model shown by its raw ref is mono, and one shown by its friendly name is sans. No sans webfont is loaded.
+- **Type scale applied.** Every font size in `theme.css` and `shell.css` is a `--font-size-*` token. The Setup UI's arbitrary `text-[10px]`, `text-[11px]` and `text-[12px]` classes become `text-xs`, empty-state and onboarding headings move from `text-lg` to `text-heading`, stat values move to `text-stat` with tabular numerals, and the welcome title moves to `text-title`. `#/chat` and `#/relay` component files are untouched, but their message text now inherits the sans body, bare inline `<code>` there is set one step down like everywhere else, and their code blocks keep their own mono.
+- **Inline data** in `<code>`, `<kbd>` and `<samp>` inside sans copy is set one step down (13 px in 14 px copy, never under 12 px). Code blocks keep their size.
+- **Sidebar group labels** are sentence case at 12 px, weight 600, muted, with no uppercase tracking.
+- The gateway uptime and the status bar's version line are mono.
+
+### Fixed
+- On phones the status bar's version line set the page's minimum width, so the layout was 496 px wide inside a 390 px screen and cards ran off the right edge. The status bar no longer widens the layout (`min-width: 0`), and pages fit 390 px. With the page at its real width, two rows no longer fit and now wrap. These are the Cron Trends metric and range controls and the Envars add-variable row, whose **+ Add** button sat past the screen edge.
+
+### Tests
+- `tests/frontend/typography.test.js` checks the two family tokens and their Tailwind mapping, the sans body, that only the token names the mono face, that `theme.css` and `shell.css` use scale tokens only, the inline-data and code-block sizes, the wordmark and sidebar labels, the mono data surfaces in `explorer.css`, the status bar, the raw-model-ref rule, and `SummaryStatCard`. It also fails on an arbitrary `text-[Npx]`, `text-lg` or `text-2xl` class in the Setup UI outside `#/chat` and `#/relay`.
+
 ## [0.10.186] - 2026-11-07
 
 Setup UI phase 2a (ALPH-69). One route table now drives every Setup UI hash route. Nothing looks different, and every link the app makes behaves as before.
