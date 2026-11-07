@@ -5,6 +5,36 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.183] - 2026-11-07
+
+Phase 1c of the Setup UI overhaul (ALPH-69, GST-1697). It adds accessible building blocks for dialogs, tabs and focus, and clears the remaining axe violations (28 on a real box at 53ed55ba) on main.
+
+### Added
+- **Tabs** (`components/tabs.js`), a WAI-ARIA tab list for page sub-navigation. Tabs have `role="tab"`, `aria-selected` and `aria-controls`, panels get `role="tabpanel"` through `getTabPanelProps`, and the arrow keys, Home and End move between tabs with only the selected tab in the Tab order. It replaces `pill-tabs.js` (agent detail, incident history) and the Logs/Terminal bar on the Watchdog console, with the same look.
+- **A focus ring token.** `--focus-ring` in `theme.css` draws a 2 px outline on buttons, links, tabs and inputs on `:focus-visible`, at 3:1 or better against every surface in both themes. It shows even where a control sets Tailwind's `focus:outline-none`.
+
+### Changed
+- **ModalShell** is now a real modal dialog (`role="dialog"`, `aria-modal`), named by the new optional `ariaLabel` or `ariaLabelledby` props or, without them, by its first heading. It traps Tab, moves focus into the dialog when it opens and back to the control that opened it when it closes. Only the topmost open dialog handles Tab and Escape, so a confirmation over a modal closes alone. The other props are unchanged, and every existing modal gets this without edits.
+- **WizardShell** drops its own focus trap and dialog wrapper and uses ModalShell's.
+- **ConfirmDialog** is rebuilt on ModalShell with the same props, so it gets the focus handling, the portal and the drag-safe overlay close.
+- **SegmentedControl** options are `type="button"` with `aria-pressed`.
+- **Escape in overflow menus** is ignored when another handler already used it or an IME is composing, and closing a menu with Escape returns focus to its trigger.
+- **The Gmail watch row** on the Google card is no longer a `role="button"` holding other controls. Its action is a Gmail button stretched over the row, with the "?" tooltip, the status and the toggle beside it. A tap on the "?" no longer opens the webhook page.
+- **Form controls use the field border.** 75 class strings on inputs, selects and textareas (56 on the tags, the rest in field class props, constants and SessionSelectField's default) drop `border-border`, whose `!important` replaced `--field-border-contrast` with the panel border. Chat and the Relay tab are left to ALPH-68.
+- Shared components give every button a `type` (13 buttons in the sidebar, Envars, the credentials modal and the scope picker).
+
+### Fixed
+- The Envars feature icons are named images, which clears 24 `aria-prohibited-attr` violations. Incident and event status dots on the Watchdog page get the same fix.
+- The Doctor run and status filters have accessible names (4 `select-name` violations).
+- The Watchdog log is reachable by keyboard so it can be scrolled (4 `scrollable-region-focusable` violations). So is the Doctor output dialog's text.
+- Space on a focused "?" tooltip no longer scrolls the page, and an InfoTooltip with no text renders nothing instead of an unnamed tab stop.
+- ActionButton's success tone (`ac-btn-green`) dims when disabled, like the other tones.
+
+### Tests
+- `tests/frontend/modal-shell.test.js` covers the dialog semantics, labelling, Escape on the topmost dialog only, the focus trap and focus restore.
+- `tests/frontend/tabs.test.js` covers the tab roles, the roving Tab order and the keyboard model, plus the Watchdog console's tabs and focusable log.
+- `tests/frontend/confirm-dialog.test.js`, `segmented-control.test.js`, `info-tooltip.test.js` and `a11y-primitives.test.js` cover the unchanged ConfirmDialog API, `aria-pressed`, the empty and Space cases, button types, the three axe fixes and the field border on every form control. `overflow-menu.test.js`, `action-button-tones.test.js`, `design-tokens.test.js` and `gmail-watch-toggle-component.test.js` gain cases for the Escape rules, the disabled success tone, the focus ring's contrast and the restructured Gmail row.
+
 ## [0.10.181] - 2026-11-07
 
 Design tokens from the /design-consultation (ALPH-69, GST-1697). Nine colour values in `theme.css` move to meet the contrast floors DESIGN.md already states, and DESIGN.md records the "Instrument panel" direction and Garry's font decision. No component code changes.
