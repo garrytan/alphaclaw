@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.206] - 2026-11-07
+
+A gateway crash incident that outlives an AlphaClaw or container restart now closes as recovered once the gateway's readiness check says it is ready again, instead of staying "abandoned" on the Health page.
+
+### Fixed
+- **A crash incident stayed "abandoned" after a restart brought the gateway back.** When AlphaClaw started, it marked any incident the previous process had left open as abandoned and recorded no outcome. So a crash loop that ended because the operator restarted the container showed on Health as "abandoned" for good, and an incident review could only ever see an outage with no ending. The new process now keeps that incident open and closes it at the first health check whose readiness check (`/readyz`) said ready, as "recovered in …, after AlphaClaw or its container restarted" (or "after an AlphaClaw update", or "after an unexpected AlphaClaw or container restart"). A green health check whose readiness could not be read (a timeout, a 404 or no readiness URL) keeps it open. If the gateway never comes back, the incident stays open; it is never marked recovered. A crash in the new process before the gateway is ready adds to the same incident instead of opening a second one, and identical crashes before and after the restart count together toward the three-identical-crash escalation. If the new process repaired or restarted the gateway itself before the incident closed, the close does not name the restart. The incident review is told which restart ended the incident, and a carried incident that closed this way stays eligible for the automatic review even though the new process took no action.
+
+### Not covered
+- Safe-mode incidents, and any incident that recorded a safe-mode event, are still marked abandoned at startup: only the process that saw safe mode can record its end.
+- On a gateway whose readiness check never answers ready (no readiness URL, or an OpenClaw build without `/readyz`), a carried incident stays open, and automatic incident reviews wait until it closes.
+- Incidents already marked abandoned before this version keep that status.
+
 ## [0.10.205] - 2026-11-07
 
 Home's Drift Doctor reminder now counts only the files Drift Doctor reviews, so brain pages, logs and other workspace churn no longer put a warning with a five-digit file count at the top of Home.
