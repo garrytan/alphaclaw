@@ -327,6 +327,19 @@ describe("lib/cli/git-sync performGitSync", () => {
     expect(result).toMatchObject({ code: "deadline_exceeded", exitCode: 75 });
   });
 
+  it("names git's output overflow in whole MB, however far past the limit Node's last read went", () => {
+    for (const extra of [1, 40 * 1024, 64 * 1024 - 1]) {
+      const overflow = Object.assign(new Error("spawnSync git ENOBUFS"), {
+        code: "ENOBUFS",
+        stdout: "x".repeat(1024 * 1024 + extra),
+      });
+      const { git } = createRunner({ outputs: happyOutputs(), fail: { status: overflow } });
+      const result = performGitSync({ git, ...baseInput() });
+      expect(result).toMatchObject({ code: "failed", committed: false, pushed: false });
+      expect(result.detail).toBe("git status printed more output than the sync can read (over 1 MB)");
+    }
+  });
+
   it("passes the remaining budget to every git child", () => {
     const { git, calls } = createRunner({ outputs: happyOutputs() });
     performGitSync({ git, ...baseInput({ deadlineAtMs: Date.now() + 30_000 }) });
