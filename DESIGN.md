@@ -7,16 +7,27 @@ Status of each part of this document:
 | Part | Ships in |
 |---|---|
 | Tokens, status tones, Badge and ActionButton on tokens, contrast floor | PR 1a |
+| Direction, colour budget, motion rules; token fixes for code colours, field borders, light accent-dim and the light green dot | Design consultation token PR |
 | Typography switch (sans for UI text, mono for data) and the type scale applied | PR 1b |
 | Accessible primitives (ModalShell dialog semantics, Tabs, SegmentedControl, focus ring) | PR 1c |
 | Navigation names and grouping | PR 2b |
 | General split into Home and Integrations | PR 3a |
+
+## Direction
+
+The Setup UI is an instrument panel for one box: a calm, cool control room where neutral surfaces carry everything and colour appears only when it means something. The one thing an operator should take away is "my box is fine, and when it isn't, AlphaClaw tells me exactly what to do next". Every choice below serves that.
+
+- Aesthetic: industrial and utilitarian. Function first, data dense where the data is real, quiet everywhere else.
+- Decoration: minimal. The faint 48 px grid behind the content column (`body::before`) is the only texture. Nothing glows, nothing has a gradient, and cards never sit inside cards.
+- Voices: sans for the interface, JetBrains Mono for literal values. The mono is AlphaClaw's identity, so it is kept for the data the operator copies and for the wordmark.
+- Sibling: the OpenClaw Control UI (`/openclaw`) is warm with a red accent. AlphaClaw stays cool and cyan so the operator always knows which layer they are in, and shares its 6/10 px radii and JetBrains Mono so the jump between them feels like the same box.
 
 ## Principles
 
 - Keep the dark theme, the cyan accent and the wolf mark. The light theme is a first-class theme, so every change is checked in both.
 - One page, one job. A page leads with its title, a one-line purpose and its primary action, then the thing that needs attention.
 - Status is never colour alone. Pair a tone with a word or a glyph.
+- Colour budget. Cyan means "you can act here" or "in progress". Green, amber and red appear only for status, always with a word. A page where nothing is wrong is neutral plus one cyan primary button, so the thing that is wrong is the only thing in colour.
 - Text meets WCAG 2 AA, which is 4.5:1 for normal text and 3:1 for large text and for non-text marks such as dots and borders.
 
 ## Colour
@@ -47,6 +58,25 @@ Contrast floor (PR 1a). `--text-muted` and `--text-dim` both measure at least 4.
 | `--text-dim` | `#848d97` (5.3:1 on a card) | `#5f6873` (5.1:1 on a card) |
 | `--accent` | `#63ebff` | `#0e7490` (was `#0891b2`, 3.7:1 on white) |
 
+Non-text marks (WCAG 1.4.11, 3:1 against the surface they sit on). Measured on the page, sidebar, content column, card and field surfaces; the lowest value is shown.
+
+| Token | Dark | Light | Use |
+|---|---|---|---|
+| `--field-border-contrast` | `#626d7c` (3.3:1, was 1.5:1) | `#7a8491` (3.3:1, was 1.4:1) | Edge of inputs, selects, textareas, toggle tracks |
+| `--accent-dim` | `rgba(99,235,255,0.4)` (3.0:1) | `#3f93a8` (3.2:1, was 1.4:1) | Completed-step connectors, quote rules |
+| `--gateway-dot-*` | gray 3.6, green 7.5, cyan 9.5, yellow 8.9, red 4.6 | gray 6.7, green `#15803d` 4.5 (was `#16a34a`, 2.9 on the sidebar), cyan 3.3, yellow 4.4, red 4.3 | Status dots, including the global status chip in the sidebar |
+
+Card and divider borders (`--border`, `--panel-border-contrast`) and tone borders on badges stay below 3:1 on purpose: they are decorative, because the content or the word carries the meaning. A border that is the only way to see a control uses `--field-border-contrast`.
+
+Code colours (file viewer syntax highlighting) meet the text floor on the content, card and field surfaces: `--comment` is `#8b949e` dark (5.6:1, was 3.6:1) and `#5f6873` light (5.0:1, was 2.3:1); light `--keyword` is `#b91c1c` (5.7:1, was `#dc2626` at 4.2:1 on a field) and light `--number` is `#0369a1` (5.2:1, was `#0284c7` at 3.6:1). Dark `--keyword`, `--string`, `--number` and light `--string` already pass and are unchanged.
+
+Planned tokens, added by the PR that first uses them:
+
+| Token | Dark | Light | Added in |
+|---|---|---|---|
+| `--on-accent` | `#0d121b` (13.3:1 on accent) | `#ffffff` (5.4:1 on accent) | The PR that ships the solid primary button (PageHeader, PR 2b) |
+| `--focus-ring` | `#63ebff` (12.1:1) | `#0e7490` (4.7:1) | PR 1c. A 2 px outline with a 2 px offset on `:focus-visible`. Today's `focus-visible:ring-border` ring measures 1.2:1 and is replaced. |
+
 Do not lower text with `opacity` to make it look secondary. An opacity of 0.7 on muted text drops it under 4.5:1. Use `text-fg-muted` or `text-fg-dim` instead. Disabled controls are exempt from the contrast rule and keep `opacity-50`.
 
 ### Status tones
@@ -60,6 +90,8 @@ One set of five tones covers Badge, ActionButton, status dots and callouts. Each
 | bad | Failed, blocked, destructive | `--tone-bad` | `--tone-bad-bg` | `--tone-bad-border` | `text-tone-bad bg-tone-bad-bg border-tone-bad-border` |
 | accent | In progress, primary, selected | `--tone-accent` | `--tone-accent-bg` | `--tone-accent-border` | `text-tone-accent bg-tone-accent-bg border-tone-accent-border` |
 | neutral | Informational, off, unknown | `--tone-neutral` | `--tone-neutral-bg` | `--tone-neutral-border` | `text-tone-neutral bg-tone-neutral-bg border-tone-neutral-border` |
+
+Every status dot also differs by shape or carries a word next to it, so colour-blind operators and greyscale screenshots read it too: a filled dot for ok, a ring for off or unknown, and the word for warn and bad. Order matters as much as colour: put the state first, then what to do.
 
 Pick by meaning, not by colour. "Nothing needs your attention" is neutral or ok, never warn. A running operation is accent. Reserve bad for something that failed or will destroy data.
 
@@ -82,7 +114,21 @@ The scale has six sizes. Today the UI is all monospace at 13 px; PR 1b switches 
 
 Weights are 400 for text, 500 for labels and buttons, and 600 for titles. Use no other sizes.
 
-Typography decision (Garry's decision 1, ships in PR 1b). Interface text uses the system sans stack and monospace stays for data, meaning ids, paths, versions, keys, hashes, logs and code. No font files are added.
+Typography decision (Garry's decision 1, ships in PR 1b). Interface text uses the system sans stack and monospace stays for data, meaning ids, paths, versions, keys, hashes, logs and code.
+
+| Role | Stack | Notes |
+|---|---|---|
+| Interface (`--font-sans`) | `ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif` | No download. SF Pro on macOS and iOS, Segoe UI on Windows, Roboto on Android. The deliberate exception to "pick a real typeface": on an operate surface read at 13 to 14 px, the native face renders best, and the identity is carried by the mono, the cyan and the wolf. |
+| Data (`--font-mono`) | `"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace` | Ids, paths, versions, model refs, env keys, pids, durations, timestamps, logs, code and the wordmark. |
+
+Rules for the two voices:
+
+- If an operator could paste it into a terminal or a config file, it is mono. Everything else is sans.
+- Mono inside sans copy is set one step down (13 px inside 14 px copy, 12 px inside captions) so the two match optically.
+- Numbers that update in place (spend, counts, memory) use `font-variant-numeric: tabular-nums` in sans, so a status strip does not jitter.
+- Sidebar group labels are sentence case at 12 px, weight 600, muted. No uppercase tracking.
+
+Font loading (Garry's decision, 2026-11-07). JetBrains Mono is self-hosted and the Google Fonts link in `setup.html` and `login.html` goes, because a third-party request from a self-hosted box leaks a page view and fails offline. The files are the upright variable woff2 (latin 31 KB, latin-ext 12 KB loaded only when those characters appear), SIL OFL 1.1 with the licence text beside them, the same files the OpenClaw Control UI already serves. Interface text stays on the system sans stack, so no sans webfont is added. PR 1b ships the font files.
 
 ## Spacing
 
@@ -105,6 +151,18 @@ The spacing scale is 4, 8, 12, 16, 24 and 32 px. These are Tailwind's default un
 | 10 px | `--radius-card` | `rounded-card` | Cards, modals, inset panels |
 | pill | `--radius-pill` | `rounded-pill` (or `rounded-full`) | Badges, toggles, status chips |
 
+## Motion
+
+Minimal and functional. Motion explains a change of state; it never decorates.
+
+| Use | Duration | Easing |
+|---|---|---|
+| Hover, press, colour change | 120 ms | `cubic-bezier(0.2, 0, 0, 1)` |
+| Disclosure, tab switch, drawer | 180 ms | same |
+| Pulse on a status dot or step pill | 2.6 s loop | ease-in-out, only while an operation is in progress |
+
+No entrance animations, no skeleton shimmer longer than the request, and settled states (running, healthy) never pulse. The global `prefers-reduced-motion` block in `theme.css` stops every pulse and slows spinners; new animations join that block. The motion tokens (`--motion-fast`, `--motion-base`, `--ease-standard`) are added by the first screen pass that migrates the literal `0.15s` transitions.
+
 ## Layout
 
 | Measure | Token | Tailwind |
@@ -113,7 +171,7 @@ The spacing scale is 4, 8, 12, 16, 24 and 32 px. These are Tailwind's default un
 | Content max width 1,120 px, left-aligned | `--layout-content-max` | `max-w-content` |
 | Content gutters 40 px (16 px on phones) | `--layout-gutter` | `px-gutter` |
 
-Pages use a 1 or 2 column card grid inside the content column. Two columns from 1,024 px wide, one column below. Phones (390 px) get one column, 40 px minimum tap targets and no horizontal scroll. The current shell still uses a 220 px sidebar and a 672 px column; the layout tokens are applied in the screen passes (PR 3a to 3d).
+A status strip (2 to 4 cells, label, value, one mono detail line) is the first row on Home and Health. On Home its cells follow the path a message takes through the box, gateway first, so a fault reads in the place it happens. Pages use a 1 or 2 column card grid inside the content column; the common split is 3:2 with the work on the left and summaries on the right. Two columns from 1,024 px wide, one column below. Phones (390 px) get one column, 40 px minimum tap targets and no horizontal scroll. The current shell still uses a 220 px sidebar and a 672 px column; the layout tokens are applied in the screen passes (PR 3a to 3d).
 
 ## Page header rule
 
@@ -125,7 +183,7 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 
 | Block | Where | Rule |
 |---|---|---|
-| ActionButton | `components/action-button.js` | The one button. Tones are primary (accent), secondary, success (ok), danger (bad), warning (warn), neutral and ghost; `subtle` is an alias of neutral. Sizes sm, md and lg. Every button has a `type`. |
+| ActionButton | `components/action-button.js` | The one button. One solid accent button per page at most, the page's primary action in the PageHeader; every other primary-looking action uses the tinted primary tone. Sizes still use `rounded-lg`/`rounded-xl` today and move to `rounded-control` in a screen pass. Tones are primary (accent), secondary, success (ok), danger (bad), warning (warn), neutral and ghost; `subtle` is an alias of neutral. Sizes sm, md and lg. Every button has a `type`. |
 | Badge | `components/badge.js` | Status label in one of the five tones. Accepts the tone names `ok`, `warn`, `bad`, `accent`, `neutral` and the older names (`success`, `warning`, `danger`, `info`, `cyan`, `secondary`, `subtle`) as aliases; an unknown tone renders neutral. |
 | PageHeader | `components/page-header.js` | Title, purpose line and primary action (see above). |
 | Card | planned (PR 3a) | Header with a title and an actions slot, then a body. Today use `bg-surface border border-border rounded-xl p-4`. |
