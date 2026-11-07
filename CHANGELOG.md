@@ -5,6 +5,34 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.181] - 2026-11-07
+
+Security remediation, webhooks and dependencies (ALPH-71 PR 4, CSO audit L-7, L-9, L-11, L-14, L-15). Builds on the 0.10.179 hotfix.
+
+### Behavior changes
+- **A GET to `/hooks/<name>` or `/webhook/<name>` is refused with 405 (`Allow: POST`) and no longer forwarded as a POST.** A sender that delivers hooks with GET (for example a `?token=` URL pasted into a tool that only does GET) must switch to POST. Every other non-POST method also gets 405 from AlphaClaw instead of being forwarded (OpenClaw answered those 405 already). A refused request to a configured hook writes a 405 row on the Webhooks page, so the sender shows up; an unknown hook name writes none. `?token=` is still accepted on a POST.
+- **`/oauth/<id>` passes only `code`, `state` and `error` to the hook.** Any `message`, `wakeMode`, `name` or other field in the query or a JSON body is dropped, the query string is no longer forwarded, and values must be printable ASCII up to 4,096 characters. New OAuth transforms use a fixed message, the hook's own name and `wakeMode: "now"`. Each callback id takes at most 10 calls a minute; the 11th gets 429 with `Retry-After`.
+- **Pairing, device-request and node ids that start with `-` are rejected (400)**, so a value can never reach the OpenClaw CLI as a flag.
+
+### Security
+- **Query-string hook tokens (L-7).** A link pre-fetcher, crawler or chat preview that opened a `?token=` hook URL fired the hook, because AlphaClaw turned the GET into a POST. See Behavior changes. The Setup UI and `GET /api/webhooks/<name>` list the header form (`authHeaderValue`) before the query URL, and the query URL now carries `queryStringUrlNote` labelling it less safe.
+- **`/oauth/<id>` rate limit and field allowlist (L-9).** Anyone holding the callback URL could start unlimited agent runs with the injected hook token and choose the agent's message. See Behavior changes.
+- **Request-log header redaction by name (L-11).** Headers are redacted when their name matches the env-secret pattern (token, secret, password, auth, cookie, signature, api-key) or has a bare `key` segment, instead of a fixed list, so `x-api-key`, `x-gitlab-token` and `proxy-authorization` no longer land in plaintext in a log the agent can read.
+- **CLI flag injection (L-14).** See Behavior changes.
+- **Dependencies (L-15).** `express` ^4.22.3 (body-parser 1.20.9, path-to-regexp 0.1.13, qs 6.16.2), `compression` ^1.8.2 and `follow-redirects` 1.16.2 (lockfile only; the `http-proxy-3` pin is unchanged). `npm audit --omit=dev` goes from 8 high and 35 moderate to 5 high and 34 moderate. The rest (undici, zod, brace-expansion, OpenClaw's own body-parser 2.3.0 and its bundled npm) come in through the OpenClaw pin and move with the next pin bump. The hoisted qs that OpenClaw's express now also resolves moved 6.16.0 → 6.16.2.
+
+### Fixed
+- **A quiet hook lost its whole log to busy ones.** With six or more busy hooks the 2,500-row global cap evicted every row of a quiet hook. Rows beyond each hook's newest 25 now go first; the absolute cap still holds.
+- **The global log trim ran inside the first delivery after an upgrade.** It now also runs when the database opens.
+- **Gmail dedupe expiry used the wall clock.** A clock stepped back stalled pruning and stretched the 24 h window; it now uses a monotonic clock.
+- **Every rejected delivery re-read openclaw.json** to decide whether the hook is configured. The name list is cached for 5 s; a read error still counts every name as configured.
+
+### Tests
+- `tests/server/webhook-ingress-hardening.test.js`: GET and every other non-POST method get 405 and are never forwarded; a configured hook logs the refused GET without the token, an unknown one logs nothing; `?token=` on a POST still works; credential-named headers are redacted; dedupe expiry survives a wall-clock step back; the known-hook cache reads once per TTL and fails open; `/oauth/<id>` forwards only code, state and error from the query or a JSON body, rate-limits per id, and spends nothing on unknown ids.
+- `tests/server/webhooks-db.test.js`: a quiet hook keeps its newest 25 rows under busy hooks; an over-cap table is trimmed at open.
+- `tests/server/routes-webhooks-coverage.test.js`, `routes-pairings.test.js`, `routes-nodes-coverage.test.js`: header form listed first with the less-safe note; leading-dash ids rejected.
+- Existing tests that used GET to reach a hook now use POST, the OAuth alias test expects no forwarded query string, and the OAuth transform test checks that caller fields are not read.
+
 ## [0.10.179] - 2026-11-07
 
 Security hotfix (GST-1743, CSO audit). Two ways an unauthenticated caller could exhaust a box through the webhook ingress.

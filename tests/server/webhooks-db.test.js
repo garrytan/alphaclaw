@@ -339,4 +339,54 @@ describe("server/webhooks-db", () => {
     expect(count).toBe(kMaxRequestsTotal);
     expect(JSON.parse(kept.payload).index).toBe(30);
   });
+
+  const insertRow = (insertRequest, hookName, index) =>
+    insertRequest({
+      hookName,
+      method: "POST",
+      headers: {},
+      payload: `{"index":${index}}`,
+      payloadTruncated: false,
+      payloadSize: 12,
+      sourceIp: "127.0.0.1",
+      gatewayStatus: 200,
+      gatewayBody: "",
+    });
+
+  it("keeps a quiet hook's newest rows when busy hooks fill the global cap (ALPH-71)", () => {
+    const { insertRequest, kMaxRequestsTotal, kMaxRequestsPerHook, getRequests } =
+      createWebhooksDbContext("webhooks-db-floor-");
+    for (let index = 0; index < 30; index += 1) insertRow(insertRequest, "quiet", index);
+    const busyHooks = Math.ceil(kMaxRequestsTotal / kMaxRequestsPerHook) + 1;
+    for (let index = 0; index < busyHooks * kMaxRequestsPerHook; index += 1) {
+      insertRow(insertRequest, `busy-${index % busyHooks}`, index);
+    }
+    const quiet = getRequests("quiet", { limit: 200 });
+    expect(quiet).toHaveLength(25);
+    expect(JSON.parse(quiet[0].payload).index).toBe(29);
+    const database = new DatabaseSync(currentDbPath, { readOnly: true });
+    const { count } = database.prepare("SELECT COUNT(*) AS count FROM webhook_requests").get();
+    database.close();
+    expect(count).toBe(kMaxRequestsTotal);
+  });
+
+  it("trims an over-cap table once at open, not on the first insert (ALPH-71)", () => {
+    const { kMaxRequestsTotal, closeWebhooksDb } = createWebhooksDbContext("webhooks-db-open-trim-");
+    closeWebhooksDb();
+    const seed = new DatabaseSync(currentDbPath);
+    const stmt = seed.prepare(
+      "INSERT INTO webhook_requests (hook_name, method, payload, gateway_status) VALUES (?, 'POST', '{}', 200)",
+    );
+    for (let index = 0; index < kMaxRequestsTotal + 400; index += 1) {
+      stmt.run(`legacy-${index % 4}`);
+    }
+    seed.close();
+
+    currentWebhooksDb = loadWebhooksDb();
+    currentWebhooksDb.initWebhooksDb({ rootDir: currentRootDir });
+    const database = new DatabaseSync(currentDbPath, { readOnly: true });
+    const { count } = database.prepare("SELECT COUNT(*) AS count FROM webhook_requests").get();
+    database.close();
+    expect(count).toBe(kMaxRequestsTotal);
+  });
 });

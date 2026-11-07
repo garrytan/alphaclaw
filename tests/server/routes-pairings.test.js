@@ -379,6 +379,43 @@ describe("server/routes/pairings", () => {
     expect(clawCmd).not.toHaveBeenCalled();
   });
 
+  it("rejects a pairing id, account id or device request id that starts with a dash (ALPH-71 L-14)", async () => {
+    const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+    const approveDevicePairingDirect = vi.fn();
+    const fsModule = {
+      existsSync: vi.fn(() => true),
+      mkdirSync: vi.fn(),
+      writeFileSync: vi.fn(),
+    };
+    const app = createApp({
+      clawCmd,
+      isOnboarded: () => true,
+      fsModule,
+      approveDevicePairingDirect,
+    });
+
+    const dashPairingId = await request(app)
+      .post("/api/pairings/--help/approve")
+      .send({ channel: "telegram" });
+    expect(dashPairingId.status).toBe(400);
+
+    const dashAccountId = await request(app)
+      .post("/api/pairings/ABCD1234/approve")
+      .send({ channel: "telegram", accountId: "-x" });
+    expect(dashAccountId.status).toBe(400);
+
+    const dashDeviceId = await request(app).post("/api/devices/--all/approve");
+    expect(dashDeviceId.status).toBe(400);
+
+    const innerDash = await request(app)
+      .post("/api/pairings/AB-CD/approve")
+      .send({ channel: "telegram", accountId: "acct-1" });
+    expect(innerDash.status).toBe(200);
+
+    expect(clawCmd).toHaveBeenCalledTimes(1);
+    expect(approveDevicePairingDirect).not.toHaveBeenCalled();
+  });
+
   it("rejects pairing and removes matching request from store", async () => {
     const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
     const fsModule = {

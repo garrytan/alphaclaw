@@ -83,7 +83,7 @@ describe("server/webhook-middleware", () => {
     const app = createHookApp({ gatewayUrl });
 
     try {
-      const response = await request(app).get(
+      const response = await request(app).post(
         "/hooks/schwab-oauth?code=AUTH_CODE&session=SESSION_ID",
       );
       expect(response.status).toBe(200);
@@ -136,7 +136,7 @@ describe("server/webhook-middleware", () => {
     });
 
     try {
-      const response = await request(app).get(
+      const response = await request(app).post(
         "/hooks/schwab-oauth?code=AUTH_CODE&session=SESSION_ID&refresh_token=REFRESH_TOKEN",
       );
       expect(response.status).toBe(200);
@@ -168,7 +168,7 @@ describe("server/webhook-middleware", () => {
     });
 
     try {
-      const response = await request(app).get("/hooks/schwab-oauth?token=SECRET_TOKEN");
+      const response = await request(app).post("/hooks/schwab-oauth?token=SECRET_TOKEN");
       expect(response.status).toBe(200);
       expect(calls).toHaveLength(1);
       expect(calls[0].method).toBe("POST");
@@ -194,7 +194,7 @@ describe("server/webhook-middleware", () => {
 
     try {
       const response = await request(app)
-        .get("/hooks/schwab-oauth?token=SECRET_TOKEN&session=SESSION_ID")
+        .post("/hooks/schwab-oauth?token=SECRET_TOKEN&session=SESSION_ID")
         .set("authorization", "Bearer HEADER_TOKEN");
       expect(response.status).toBe(200);
       expect(calls).toHaveLength(1);
