@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.177] - 2026-11-07
+
+Two hermetic tests that failed CI by chance, not because of a code change (GST-1109). Both flaked a merge-queue landing on 2026-11-07.
+
+### Fixed
+- **`tests/server/routes-pages.test.js`, the public boot frame.** It banned the string `777` anywhere in the frame, so it failed whenever a millisecond timestamp contained `777` (startedAt `1794027777227` did). It now bans `777` only where it stands alone, outside a run of hex digits. A leaked raw boot id such as `777:3` still fails the test.
+- **`tests/server/openclaw-capture-preflight.test.js`, free space beside a missing capture root.** It compared the preflight's disk reading with a second live reading of the same disk, and other writers moved free space between the two. It now passes a stubbed `statfs`. It asserts that free space is measured at an existing ancestor of the capture root and reports that reading.
+
 ## [0.10.176] - 2026-11-07
 
 Phase 1a of the Setup UI overhaul (ALPH-69, GST-1697). It adds the design system's tokens and a contrast pass. An axe audit of the 14 Setup UI pages in both themes at 1440x900 and 390x844 went from 729 colour-contrast violations on main to 0.
