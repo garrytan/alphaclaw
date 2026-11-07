@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.185] - 2026-11-07
+
+Follow-up to 0.10.184 (ALPH-71 L-9): the `/oauth/<id>` alias forwards provider callback params again and strips only the fields that steer the agent run.
+
+### Behavior changes
+- **`/oauth/<id>` forwards every provider callback param except `message`, `wakeMode`, `name` and `token`.** 0.10.184 passed only `code`, `state` and `error`, so OAuth transforms that read `oauth_token`/`oauth_verifier` (OAuth 1.0a, X), `realmId` (QuickBooks), `shop`/`hmac`/`host`/`timestamp` (Shopify), `iss` (RFC 9207 mix-up defence), `scope`, `error_description` or `error_uri` silently got nothing. Those reach the transform again. `message`, `wakeMode` and `name` (the fields the default transform turns into the agent run) are still dropped, and so is `token`, which never reached the transform before 0.10.184 either. Values stay printable ASCII up to 4,096 characters, a body value still wins over the same query param, and the per-id rate limit (10 a minute, 429 with `Retry-After`) and the 405 for methods other than GET and POST are unchanged.
+
+### Fixed
+- **`response_mode=form_post` callbacks reached the hook as `{}`.** `/oauth/<id>` only had the JSON parser, so a urlencoded POST body (OIDC form_post) was never read. It is parsed now (64 KB cap).
+- **A gzip-encoded hook or OAuth callback body was forwarded with its `Content-Encoding: gzip` header** although AlphaClaw had already inflated it (or, on `/oauth`, replaced it). The header is dropped for every gateway-bound hook request. OpenClaw 2026.10.x ignores the header on hooks, so nothing failed on the current pin; the request was mislabelled.
+
+### Tests
+- `oauth-callback-middleware.test.js`: the test app runs the same JSON parser as `lib/server.js`; provider params (OAuth 1.0a, QuickBooks, Shopify, OIDC, error fields) reach the transform; `message`, `wakeMode`, `name` and `token` do not, from the query or a JSON body; a form_post body is read; a gzip body is forwarded without `Content-Encoding`. All failed on 0.10.184.
+- `webhook-middleware.test.js`: a gzip `/hooks` body is forwarded without `Content-Encoding`.
+- `webhook-ingress-hardening.test.js`: the L-9 allowlist test is renamed to the new contract and expects `extra` to pass.
+
 ## [0.10.184] - 2026-11-07
 
 Security remediation, webhooks and dependencies (ALPH-71 PR 4, CSO audit L-7, L-9, L-11, L-14, L-15). Builds on the 0.10.179 hotfix.

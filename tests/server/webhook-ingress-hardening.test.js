@@ -252,7 +252,7 @@ describe("/oauth/:id alias (ALPH-71 L-9)", () => {
   };
   const getOauthCallbackById = (id) => callbacks[id] || null;
 
-  it("forwards only code, state and error, as a POST with no query string", async () => {
+  it("forwards provider params but not message, wakeMode or name, as a POST with no query string", async () => {
     const gateway = await createGateway();
     const app = createApp({ gatewayUrl: gateway.gatewayUrl, getOauthCallbackById });
     try {
@@ -270,6 +270,7 @@ describe("/oauth/:id alias (ALPH-71 L-9)", () => {
         code: "AUTH",
         state: "STATE",
         error: "denied",
+        extra: "1",
       });
     } finally {
       await closeServer(gateway.server);

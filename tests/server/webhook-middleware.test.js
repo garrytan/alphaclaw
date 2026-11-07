@@ -78,6 +78,26 @@ describe("server/webhook-middleware", () => {
     }
   });
 
+  it("does not forward Content-Encoding for a gzip body express.raw already inflated", async () => {
+    const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+    const app = createHookApp({ gatewayUrl });
+
+    try {
+      const response = await request(app)
+        .post("/hooks/test")
+        .set("Content-Type", "application/json")
+        .set("Content-Encoding", "gzip")
+        .serialize((body) => body)
+        .send(require("zlib").gzipSync(Buffer.from(JSON.stringify({ a: 1 }))));
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].headers["content-encoding"]).toBeUndefined();
+      expect(JSON.parse(calls[0].bodyText)).toEqual({ a: 1 });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("maps hook query params into forwarded JSON body", async () => {
     const { server, calls, gatewayUrl } = await createGatewaySpyServer();
     const app = createHookApp({ gatewayUrl });
