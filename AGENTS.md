@@ -285,6 +285,7 @@ Use these conventions for all UI work under `lib/public/js` and `lib/public/css`
 
 ### Color and theme tokens
 
+- `DESIGN.md` at the repo root is the Setup UI design system (tone, type, spacing, radius and layout tokens, building blocks, copy rules). Read it before UI work and update it when a token or building block changes.
 - Prefer semantic Tailwind color utilities backed by theme tokens (`text-body`, `text-fg-muted`, `text-fg-dim`, `bg-field`, `bg-status-error-bg`, `border-status-warning-border`) instead of raw palette classes like `text-gray-300` or `bg-red-900/30`.
 - When a new reusable UI color role is needed, add the CSS variable in `lib/public/css/theme.css` and expose it through `tailwind.config.cjs` rather than introducing one-off hardcoded color classes in components.
 - Keep component refactors token-based so future theme changes stay centralized in the token layer instead of requiring per-component color rewrites.

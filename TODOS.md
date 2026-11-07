@@ -612,7 +612,7 @@
 - **Effort:** S.
 
 ## P4 — Operator runbook + DESIGN.md + a11y audit
-- **What:** Full operator runbook doc (state glossary → remediation per state); DESIGN.md via /design-consultation capturing the status-surface design system; app-wide accessibility audit extending the Gateway-card live-region/reduced-motion work to the rest of the UI.
+- **What:** Full operator runbook doc (state glossary → remediation per state); app-wide accessibility audit extending the Gateway-card live-region/reduced-motion work to the rest of the UI.
 - **Effort:** M each.
 
 ## P2 — Runtime guard for Express 4/5 dependency drift
@@ -875,8 +875,9 @@
 - **Context:** Deferred from the UI local-time normalization plan (CEO review E8).
 - **Effort:** M. **Depends on:** data migration plan.
 
-## P3 — Run /design-consultation to create DESIGN.md
-- **What:** The repo has no DESIGN.md; design reviews calibrate against universal principles instead of a stated system (fonts, spacing scale, color tokens, interaction patterns).
+## Done (ALPH-69 Phase 1a) — DESIGN.md
+- DESIGN.md now records the Setup UI design system (ALPH-69 Phase 1a). Original note:
+- **What:** The repo had no DESIGN.md; design reviews calibrate against universal principles instead of a stated system (fonts, spacing scale, color tokens, interaction patterns).
 - **Why:** Every future design review (and AI-generated UI work) gets sharper with a written design system; the setup UI already has consistent implicit conventions worth codifying.
 - **Context:** Flagged by the plan-design-review of the UI local-time normalization plan (Pass 5).
 - **Effort:** S (one /design-consultation session). **Depends on:** nothing.
