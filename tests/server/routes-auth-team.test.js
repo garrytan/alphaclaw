@@ -311,6 +311,41 @@ describe("server/routes/auth team mode (4.2/4.6)", () => {
     ).toBe(401);
   });
 
+  it("clears the cookie, closes the member's sockets and answers 500 when the member's secret cannot be rotated on logout", async () => {
+    createAdmin();
+    const member = membersStore.createMember({
+      email: "rot@example.com",
+      password: "member password",
+    });
+    const { registerAuthRoutes } = loadAuthRoutes();
+    const built = express();
+    built.use(express.json());
+    const onLogout = vi.fn();
+    registerAuthRoutes({
+      app: built,
+      loginThrottle: createLoginThrottleMock(),
+      membersStore,
+      readTeamSettings: () => teamSettings,
+      onMemberActivity: vi.fn(),
+      onLogout,
+    });
+    const memberCookie = cookieOf(
+      await request(built).post("/api/auth/login").send({ email: "rot@example.com", password: "member password" }),
+    );
+    expect(memberCookie).toMatch(/^setup_token=v2\./);
+    vi.spyOn(membersStore, "rotateTokenSecret").mockImplementation(() => {
+      throw Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await request(built).post("/api/auth/logout").set("Cookie", memberCookie).send({});
+    warn.mockRestore();
+    expect(res.status).toBe(500);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toMatch(/logout could not be saved/);
+    expect((res.headers["set-cookie"] || []).some((c) => /^setup_token=;/.test(c))).toBe(true);
+    expect(onLogout).toHaveBeenCalledWith({ kind: "member", memberId: member.id });
+  });
+
   it("enforces the member route matrix: reads allowed, everything else admin (4.6)", async () => {
     createAdmin();
     membersStore.createMember({
