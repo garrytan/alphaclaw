@@ -39,17 +39,23 @@ const forgedAddress = (i) => "192.0.2." + ((i % 250) + 1);
 const kOwnerPassword = randomValue();
 const kRecoveryCode = randomValue(32);
 
-const createMembersStore = (list) => {
+const createMembersStore = (list, { checkDelayMs = 0 } = {}) => {
   const tokenKeys = new Map(list.map((m) => [m.id, randomValue(32)]));
   const find = (email) =>
     list.find((m) => m.email === String(email || "").trim().toLowerCase()) || null;
   const toModel = (m) =>
     m ? { id: m.id, email: m.email, displayName: m.email, role: m.role, disabled: false } : null;
+  const verifyMemberPassword = vi.fn(({ email, password }) => {
+    const member = find(email);
+    return member && password === member.password ? toModel(member) : null;
+  });
   return {
-    verifyMemberPassword: vi.fn(({ email, password }) => {
-      const member = find(email);
-      return member && password === member.password ? toModel(member) : null;
-    }),
+    verifyMemberPassword,
+    verifyMemberPasswordAsync: async (args) => {
+      const member = verifyMemberPassword(args);
+      if (checkDelayMs) await new Promise((resolve) => setTimeout(resolve, checkDelayMs));
+      return member;
+    },
     getMemberByEmail: (email) => toModel(find(email)),
     getMember: (id) => toModel(list.find((m) => m.id === id)),
     getTokenSecret: (id) => tokenKeys.get(id) || null,
@@ -80,6 +86,7 @@ const createHarness = async ({
   setupPassword = kOwnerPassword,
   recoveryCode = kRecoveryCode,
   keyMode = "login",
+  checkDelayMs = 0,
 } = {}) => {
   Object.assign(process.env, { [kSetupPasswordEnvKey]: setupPassword });
   if (recoveryCode === null) delete process.env[kRecoveryEnvKey];
@@ -97,7 +104,7 @@ const createHarness = async ({
         ? getClientKey
         : (req) => resolveLoginClientIp(req),
   };
-  const membersStore = createMembersStore(members);
+  const membersStore = createMembersStore(members, { checkDelayMs });
   const app = express();
   app.set("trust proxy", 1);
   // Stands in for the TCP peer: supertest always connects over loopback.
@@ -541,6 +548,80 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       await lockShared(h);
       const res = await signIn(h, { password: kOwnerPassword, pass, recoveryCode: randomValue(32) });
       expect(res.status).toBe(200);
+    });
+
+    it("junk codes from 300 IPv6 /64s run at most the box-wide limit of decoy hashes", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      h.membersStore.burnDecoyVerification.mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      for (let j = 0; j < kLoginMaxAttempts - 1; j += 1) {
+        const results = await Promise.all(
+          Array.from({ length: 300 }, (_, i) =>
+            signIn(h, {
+              peer: "2001:db8:" + (0x1000 + i).toString(16) + "::" + (j + 1),
+              email: "nobody@example.test",
+              password: "guess",
+              recoveryCode: randomValue(32),
+            }),
+          ),
+        );
+        expect(results.every((r) => r.status === 401)).toBe(true);
+      }
+      const decoys = h.membersStore.burnDecoyVerification.mock.calls.length;
+      expect(decoys).toBeGreaterThan(0);
+      expect(decoys).toBeLessThanOrEqual(kLoginGlobalMaxAttempts);
+    });
+
+    // Counts the decoy hashes run before the owner's answer instead of timing
+    // it: each decoy is real scrypt work, so the count bounds the delay.
+    it("an owner sign-in during a junk-code flood is answered after at most the box-wide limit of decoy hashes", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      const pass = readPass(await signIn(h, { password: kOwnerPassword }));
+      const decoys = h.membersStore.burnDecoyVerification;
+      const flood = Array.from({ length: 1200 }, (_, n) =>
+        signIn(h, {
+          peer: "2001:db8:" + (0x2000 + (n % 300)).toString(16) + "::" + (Math.floor(n / 300) + 1),
+          email: "nobody@example.test",
+          password: "guess",
+          recoveryCode: randomValue(32),
+        }).then((res) => res),
+      );
+      const owner = await signIn(h, { password: kOwnerPassword, pass });
+      const decoysBeforeAnswer = decoys.mock.calls.length;
+      await Promise.all(flood);
+      expect(owner.status).toBe(200);
+      expect(decoysBeforeAnswer).toBeLessThanOrEqual(kLoginGlobalMaxAttempts);
+      expect(decoys.mock.calls.length).toBeLessThanOrEqual(kLoginGlobalMaxAttempts);
+    });
+
+    it("concurrent member sign-ins whose password check awaits stay within the box-wide, pass and code limits", async () => {
+      const h = await createHarness({ team: true, members: [memberA], checkDelayMs: 50 });
+      const memberPass = readPass(await signIn(h, { peer: "198.51.100.74", ...credentialsOf(memberA) }));
+      const burst = async (count, offset, extra) => {
+        resetPasswordChecks(h);
+        const results = await Promise.all(
+          Array.from({ length: count }, (_, i) =>
+            signIn(h, { peer: attackerPeer(offset + i), email: memberA.email, password: "guess-" + i, ...extra }),
+          ),
+        );
+        expect(results.filter((r) => r.status === 200)).toHaveLength(0);
+        return passwordChecks(h);
+      };
+      expect(await burst(200, 0, {})).toBeLessThanOrEqual(kLoginGlobalMaxAttempts);
+      expect(await burst(40, 300, { pass: memberPass })).toBeLessThanOrEqual(kLoginMaxAttempts);
+      expect(await burst(40, 400, { recoveryCode: kRecoveryCode })).toBeLessThanOrEqual(kLoginMaxAttempts);
+    });
+
+    it("five typos on the owner's browser lock its pass, and the right password and code with that pass still sign in", async () => {
+      const h = await createHarness();
+      const pass = readPass(await signIn(h, { password: kOwnerPassword }));
+      const typos = [];
+      for (let i = 0; i < kLoginMaxAttempts; i += 1) {
+        typos.push((await signIn(h, { password: "typo-" + i, pass })).status);
+      }
+      expect(typos).toEqual([...Array(kLoginMaxAttempts - 1).fill(401), 429]);
+      const res = await signIn(h, { password: kOwnerPassword, recoveryCode: kRecoveryCode, pass });
+      expect(res.status).toBe(200);
+      expect(readSession(res)).toMatch(/^setup_token=/);
     });
 
     it("rejects a short or repetitive code at boot with a warning that names only the key", async () => {

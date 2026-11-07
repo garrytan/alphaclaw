@@ -58,6 +58,30 @@ describe("server/db/auth members store (4.1)", () => {
     ).toBeNull();
   });
 
+  it("the async password check and the decoy hash give the same answers and leave the event loop free", async () => {
+    const crypto = require("crypto");
+    const owner = createOwner();
+    const spy = vi.spyOn(crypto, "scrypt");
+    let finished = 0;
+    const work = [
+      store.verifyMemberPasswordAsync({ email: "OWNER@example.com", password: "correct horse battery" }),
+      store.verifyMemberPasswordAsync({ email: "owner@example.com", password: "wrong" }),
+      store.verifyMemberPasswordAsync({ email: "nobody@example.com", password: "x" }),
+      store.burnDecoyVerification("x"),
+    ].map((pending) => Promise.resolve(pending).then((value) => {
+      finished += 1;
+      return value;
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(finished).toBe(0);
+    const [right, wrong, unknown] = await Promise.all(work);
+    expect(right).toEqual(expect.objectContaining({ id: owner.id }));
+    expect(wrong).toBeNull();
+    expect(unknown).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(4);
+    spy.mockRestore();
+  });
+
   it("refuses empty, near-miss and different-length passwords, and a corrupt stored hash, without throwing", () => {
     createOwner();
     const verify = (password) =>

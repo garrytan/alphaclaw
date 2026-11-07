@@ -70,10 +70,33 @@ describe("server/login-client-ip", () => {
     expect(loginLimiterKey("2001:0db8:00aa:00bb:ffff:1:2:3")).toBe("2001:db8:aa:bb::/64");
     expect(loginLimiterKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
     expect(loginLimiterKey("::1")).toBe("0:0:0:0::/64");
-    expect(loginLimiterKey("64:ff9b::192.0.2.1")).toBe("64:ff9b:0:0::/64");
+    expect(loginLimiterKey("64:ff9b:2::192.0.2.1")).toBe("64:ff9b:2:0::/64");
     expect(loginLimiterKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
     expect(loginLimiterKey("198.51.100.7")).toBe("198.51.100.7");
     expect(loginLimiterKey("unknown")).toBe("unknown");
+  });
+
+  it("keys an IPv4-mapped or NAT64 address on its embedded IPv4", () => {
+    const { loginLimiterKey } = require(kModulePath);
+    for (const notation of [
+      "198.51.100.7",
+      "::ffff:198.51.100.7",
+      "::ffff:c633:6407",
+      "::FFFF:C633:6407",
+      "0000:0000:0000:0000:0000:ffff:c633:6407",
+      "0:0:0:0:0:FFFF:198.51.100.7",
+      "64:ff9b::198.51.100.7",
+      "64:FF9B::C633:6407",
+      "0064:ff9b:0000:0000:0000:0000:c633:6407",
+      "64:ff9b:1::198.51.100.7",
+      "64:ff9b:1:abcd::c633:6407",
+    ]) {
+      expect(loginLimiterKey(notation), notation).toBe("198.51.100.7");
+    }
+    for (const prefix of ["::ffff:", "64:ff9b::", "64:ff9b:1::"]) {
+      expect(loginLimiterKey(prefix + "198.51.100.7")).not.toBe(loginLimiterKey(prefix + "198.51.100.8"));
+      expect(loginLimiterKey(prefix + "198.51.100.7")).not.toBe(loginLimiterKey(prefix + "203.0.113.7"));
+    }
   });
 
   it("warns once per process when TRUST_PROXY_HOPS is unset and a public peer signs in", () => {
@@ -87,6 +110,9 @@ describe("server/login-client-ip", () => {
     resolve(fakeRequest({ peer: "198.51.100.8", ip: "203.0.113.9" }));
     expect(warnings()).toHaveLength(1);
     expect(warnings()[0]).not.toMatch(/198\.51\.100|203\.0\.113/);
+    expect(warnings()[0]).toContain(
+      "set TRUST_PROXY_HOPS=0 if nothing sits in front; set it to the number of proxies otherwise",
+    );
 
     warn.mockClear();
     process.env[kTrustProxyHopsEnvKey] = "1";
