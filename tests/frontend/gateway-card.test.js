@@ -869,3 +869,182 @@ describe("frontend/gateway card (server-state matrix)", () => {
     }
   });
 });
+
+// ALPH-69 phase 0b: the restart's terminal event reaches the card before a
+// status frame computed after it, so the header said "Starting · Waiting for
+// the gateway to come up." with the "Restarting gateway" badge right beside
+// "Running: restarted in 17s (down for 17s)" (before/d-restart-progress-later.png).
+describe("frontend/gateway card (a finished restart vs a stale status frame)", () => {
+  beforeEach(() => {
+    harness.reset();
+    gatewayShellStore.reset();
+  });
+
+  const kRestartBadge = { kind: "restart", label: "Restarting gateway", startedAt: kNow - 17000 };
+  const succeededRestart = (overrides = {}) => ({
+    operationId: "op-17",
+    kind: "gateway_restart",
+    startedAt: kNow - 18000,
+    phase: "succeeded",
+    steps: [],
+    error: null,
+    durationMs: 17000,
+    downtimeMs: 17000,
+    lockStartedAt: kNow - 17000,
+    ...overrides,
+  });
+  // The frame the box served at that moment: the port still down and the
+  // restart's lifecycle lock still held.
+  const staleStartingFrame = () => ({
+    ...makeServerState({ tcp: kFreshDown, operation: kRestartBadge }),
+    since: kNow - 16000,
+  });
+
+  it("never shows Starting, Waiting or the restart badge next to the success line", () => {
+    const frame = staleStartingFrame();
+    expect(frame.state).toBe("starting");
+    expect(frame.reason).toBe("Waiting for the gateway to come up.");
+    publishShell({ statusState: frame, restartOperation: succeededRestart() });
+    const tree = renderGateway({});
+    const text = treeText(tree);
+    expect(text).toContain("Running: restarted in 17s (down for 17s)");
+    expect(text).not.toContain("Starting");
+    expect(text).not.toContain("Waiting for the gateway to come up.");
+    expect(text).not.toContain("Restarting gateway");
+    expect(text).not.toMatch(/for 16s/);
+    expect(String(findDotSpan(tree).props.class)).toContain("ac-gateway-dot--green");
+    const headline = findAllByType(tree, "span").find((vnode) => vnode.props["aria-live"] === "polite");
+    expect(collectText(headline).join(" ")).toContain("Running");
+    expect(findButton(tree, "View logs")).toBeUndefined();
+  });
+
+  it("a port-up frame still waiting on the watchdog's first health check reads Running too", () => {
+    const frame = makeServerState({ watchdog: { ...kHealthyWatchdog, health: "unknown", servingPid: 4321 } });
+    expect(frame.state).toBe("starting");
+    publishShell({ statusState: frame, restartOperation: succeededRestart() });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Running: restarted in 17s");
+    expect(text).not.toContain("Starting");
+  });
+
+  it("the restart badge clears on success even when the frame already says Running", () => {
+    publishShell({ statusState: makeServerState({ operation: kRestartBadge }), restartOperation: succeededRestart() });
+    const text = treeText(renderGateway({}));
+    expect(text).not.toContain("Restarting gateway");
+    expect(text).toContain("Running: restarted in 17s");
+  });
+
+  it("a finished data upgrade clears its own badge", () => {
+    publishShell({
+      statusState: makeServerState({ operation: { kind: "openclaw_upgrade", label: "Upgrading OpenClaw data", startedAt: kNow } }),
+      restartOperation: succeededRestart({ kind: "openclaw_upgrade", upgrade: { doctor: "ok" }, lockStartedAt: kNow }),
+    });
+    const text = treeText(renderGateway({}));
+    expect(text).not.toContain("Upgrading OpenClaw data");
+    expect(text).toContain("OpenClaw data upgraded");
+  });
+
+  it("keeps the server's state while the restart still runs", () => {
+    publishShell({
+      statusState: staleStartingFrame(),
+      restartOperation: succeededRestart({ phase: "running", steps: [{ name: "waiting_ready", status: "running", at: kNow - 3000 }] }),
+    });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Starting");
+    expect(text).toContain("Waiting for the gateway to come up.");
+    expect(text).toContain("Restarting gateway");
+    expect(text).toContain("Restarting: checking readiness");
+  });
+
+  it("keeps a frame that names another operation untouched (a repair started since)", () => {
+    const repairing = { kind: "repair", label: "Repairing", startedAt: kNow };
+    const frame = makeServerState({ tcp: kFreshDown, operation: repairing });
+    expect(frame.state).toBe("starting");
+    publishShell({ statusState: frame, restartOperation: succeededRestart() });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Repairing");
+    expect(text).toContain("Starting");
+    expect(text).toContain("Waiting for the gateway to come up.");
+  });
+
+  it("keeps a fresh non-starting state after success (the gateway went down again)", () => {
+    publishShell({
+      statusState: makeServerState({ tcp: kFreshDown, watchdog: { ...kHealthyWatchdog, lifecycle: "stopped", health: "unhealthy" } }),
+      restartOperation: succeededRestart(),
+    });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Down");
+    expect(text).toContain("The gateway is not running.");
+  });
+
+  it("an unfinished upgrade (left on the card until the operator acts) never masks a later start", () => {
+    const frame = makeServerState({ watchdog: { ...kHealthyWatchdog, health: "unknown", servingPid: 4321 } });
+    expect(frame.state).toBe("starting");
+    publishShell({
+      statusState: frame,
+      restartOperation: succeededRestart({ kind: "openclaw_upgrade", upgrade: { doctor: "failed", sentence: "Doctor failed" } }),
+    });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Starting");
+  });
+
+  it("a crash relaunch right after success still reads Starting", () => {
+    const frame = makeServerState({
+      tcp: kFreshDown,
+      watchdog: { ...kHealthyWatchdog, lifecycle: "crashed", health: "unhealthy", servingPid: null },
+    });
+    expect(frame.state).toBe("starting");
+    expect(frame.operation).toBeNull();
+    publishShell({ statusState: frame, restartOperation: succeededRestart() });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Starting");
+    expect(text).toContain("Waiting for the gateway to come up.");
+  });
+
+  it("a lock-free starting frame with no serving gateway yet keeps Starting", () => {
+    const frame = makeServerState({ watchdog: { ...kHealthyWatchdog, health: "unknown", servingPid: null } });
+    expect(frame.state).toBe("starting");
+    publishShell({ statusState: frame, restartOperation: succeededRestart() });
+    expect(treeText(renderGateway({}))).toContain("Starting");
+  });
+
+  it("the restart controls stay hidden while the success line shows, so the stale hold never reaches a button", () => {
+    publishShell({ statusState: staleStartingFrame(), restartOperation: succeededRestart() });
+    const tree = renderGateway({});
+    expect(findButton(tree, "Restart")).toBeUndefined();
+    expect(treeText(tree)).toContain("Running: restarted in 17s");
+  });
+
+  it("a newer restart's lock (another tab) renders as the server sends it, never as the finished restart's", () => {
+    const newer = { ...kRestartBadge, startedAt: kNow - 2000 };
+    publishShell({ statusState: makeServerState({ tcp: kFreshDown, operation: newer }), restartOperation: succeededRestart() });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Starting");
+    expect(text).toContain("Restarting gateway");
+  });
+
+  it("a lock the controller never recorded is left to the server", () => {
+    publishShell({ statusState: staleStartingFrame(), restartOperation: succeededRestart({ lockStartedAt: null }) });
+    expect(treeText(renderGateway({}))).toContain("Restarting gateway");
+  });
+
+  it("a starting frame with an unverified replacement pending stays the server's", () => {
+    const frame = {
+      ...makeServerState({ watchdog: { ...kHealthyWatchdog, health: "unknown", servingPid: 4321 } }),
+      replacementPending: { pid: 4400, since: "2026-11-07T00:00:00.000Z" },
+    };
+    expect(frame.state).toBe("starting");
+    publishShell({ statusState: frame, restartOperation: succeededRestart() });
+    expect(treeText(renderGateway({}))).toContain("Starting");
+  });
+
+  it("a failed restart never borrows the success reconciliation", () => {
+    publishShell({
+      statusState: staleStartingFrame(),
+      restartOperation: succeededRestart({ phase: "failed", error: { message: "boom", code: "ready_timeout", budgetMs: 60000 } }),
+    });
+    const text = treeText(renderGateway({}));
+    expect(text).toContain("Starting");
+    expect(text).toContain("Restarting gateway");
+  });
+});

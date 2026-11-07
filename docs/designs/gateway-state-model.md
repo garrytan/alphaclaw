@@ -185,6 +185,8 @@ An existing restart may be observed/attached to its operation id. Unrelated work
 
 **This table is the single source for UI labels, glossary popovers, AND notification copy.** Notifications draw from the same public-label map — no raw `crash_loop` in alerts.
 
+One client-side exception (v0.10.177): while a just-finished restart's success line shows (at most 8 s), the Gateway card renders a server `starting` frame as Running in two cases only. One is a frame that still carries that restart's own lifecycle lock (the lock `startedAt` the browser recorded while the restart ran). The other is a lock-free frame with a serving pid and no pending replacement, which is waiting only on the watchdog's first health check. Every other frame renders as the server sends it (`reconcileFinishedRestart` in `lib/public/js/components/gateway.js`).
+
 | enum | UI label | dot | reason copy template | actions (primary first) |
 |---|---|---|---|---|
 | (no data yet) | "Connecting to AlphaClaw…" | gray | client-owned, only pre-first-frame | Repair · Restart → connection/setup guidance; inspect only |
