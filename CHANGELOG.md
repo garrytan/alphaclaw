@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.185] - 2026-11-07
+## [0.10.187] - 2026-11-07
 
 Phase 1c of the Setup UI overhaul (ALPH-69, GST-1697). It adds accessible building blocks for dialogs, tabs and focus, and clears the remaining axe violations (28 on a real box at 53ed55ba) on main.
 
@@ -36,6 +36,26 @@ Phase 1c of the Setup UI overhaul (ALPH-69, GST-1697). It adds accessible buildi
 - `tests/frontend/tabs.test.js` covers the tab roles, the roving Tab order and both keyboard models, plus the Watchdog console's manual tabs and focusable log. `tests/frontend/overflow-menu.test.js` covers a menu leaving Escape to a focused dialog.
 - `tests/browser/reliability-ui-smoke.mjs` finds the Gmail row by its "Gmail: open webhook" button (6 of 6 journeys pass).
 - `tests/frontend/confirm-dialog.test.js`, `segmented-control.test.js`, `info-tooltip.test.js` and `a11y-primitives.test.js` cover the unchanged ConfirmDialog API, `aria-pressed`, the empty and Space cases, button types, the three axe fixes and the field border on every form control. `overflow-menu.test.js`, `action-button-tones.test.js`, `design-tokens.test.js` and `gmail-watch-toggle-component.test.js` gain cases for the Escape rules, the disabled success tone, the focus ring's contrast and the restructured Gmail row.
+
+## [0.10.186] - 2026-11-07
+
+Setup UI phase 2a (ALPH-69). One route table now drives every Setup UI hash route. Nothing looks different, and every link the app makes behaves as before.
+
+### Changed
+- **`lib/public/js/lib/routes.js` is the single source for Setup UI routes.** Each entry holds the route's id, hash and patterns, the sidebar item it highlights today, its admin-only flag, and the old hashes that redirect to it. It also holds what PR 2b will show, namely the new page title and nav label (General becomes Home, Watchdog becomes Health, Cron becomes Schedules, Envars becomes Environment, Models becomes Models & keys), a one-line purpose, the IA group (Home, Chat, Agents, Operate, Connect, Settings), the page layout, the hash each renamed page moves to, and the parent item a child page highlights (Webhooks and Nodes under Integrations, Telegram under Channels).
+- `app.js` renders the page for the resolved route instead of six `isXRoute` checks and a wouter `Switch`. The sidebar's sections, labels, highlight and member filter, the Browse and Chat sidebar modes, the last-visited tab, the browse parser and the Gateway-card check all read the table instead of their own `location.startsWith` lists.
+- Every hash that worked before still works, including `#/chat/<session key>`, `#/relay`, the slashless form (`#envars`) and the two existing redirects (`#/providers` to `#/models` and `#/telegram` to `#/telegram/default`). Every route now matches case-insensitively with an optional trailing slash, as wouter's page routes already did. The pane routes (Chat, Browse, Agents, Cron, Envars, Models, Nodes) used case-sensitive prefix checks, so a hand-typed #/CRON or #/Browse/notes.md now opens that pane instead of General. A path that only shares a prefix with a page (`#/chatty`, `#/agentsx`) now goes to General instead of opening Chat or Agents.
+
+### Tests
+- `tests/frontend/routes.test.js` covers every route at its own hash, every hash served before the table, the old to new redirects, no duplicate ids, hashes, patterns or aliases, the member nav (Cron, Usage and Team only), today's sidebar sections and highlight for every route pattern, and the parent highlights.
+
+## [0.10.185] - 2026-11-07
+
+The relay brain archive now finds a gbrain wrapper that appears after AlphaClaw starts. On Wintermute's box the boot scripts write `/usr/local/bin/gbrain` about a minute after AlphaClaw starts, and v0.10.183 resolved the wrapper only once at startup, so the archive stayed at Not set up and never saved anything.
+
+### Fixed
+- The wrapper (`ALPHACLAW_RELAY_BRAIN_BIN`, else `/usr/local/bin/gbrain`) is resolved again on every availability check, including the 10-minute re-check while the archive is `gbrain_missing`, so a wrapper written later is picked up within one check interval.
+- Tests: a wrapper written after start is picked up and the conversation saved (fails on v0.10.183); `ALPHACLAW_RELAY_BRAIN=off` stays fully idle with a wrapper and a relay source present (no gbrain run, no archive.db, Retry does nothing, status and the Relay page show Off).
 
 ## [0.10.184] - 2026-11-07
 
