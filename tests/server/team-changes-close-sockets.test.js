@@ -252,6 +252,23 @@ describe("team admin changes close the ended sessions' sockets", () => {
     await expectClosed(owner);
   });
 
+  it("keeps the owner's sockets open when the lockdown is armed while the emergency hatch is open", async () => {
+    settings.enabled = false;
+    vi.stubEnv("ALPHACLAW_ALLOW_LEGACY_LOGIN", "1");
+    const ownerCookie = await loginOwner();
+    const owner = await openBoth(ownerCookie);
+
+    const res = await request(app).post("/api/team/enable").set("Cookie", ownerCookie).send({
+      ownerEmail: "owner@example.com",
+      ownerPassword: "owner member pw",
+      confirmHostIsolation: true,
+      disableLegacyLogin: true,
+    });
+    expect(res.status).toBe(200);
+
+    await expectOpen(owner);
+  });
+
   it("keeps the owner's sockets open when team is enabled without the lockdown", async () => {
     settings.enabled = false;
     const ownerCookie = await loginOwner();
