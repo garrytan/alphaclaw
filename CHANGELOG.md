@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.195] - 2026-11-07
+
+Setup UI phase 3b (ALPH-69). Health, Doctor, Schedules and Usage are rebuilt on the new page layouts. No server, restart, watchdog, gateway or relay behaviour changes, and every action keeps its handler.
+
+### Changed
+- **Health.** One page that reads top to bottom. A headline says how the box is (for example "Healthy. The gateway recovered on its own twice today." or "The gateway is down. The watchdog is repairing it."), with Restart gateway as the page's one solid button and Repair and View logs beside it (in a ⋯ menu on a phone). Below it are the gateway and watchdog status line with Details, Resources as memory, disk and CPU meters (`role="meter"`, the value as text beside each bar, CPU hidden when its percent is unknown), Incidents as expandable rows with the All events tab, "If the gateway goes down" (the Claude Code rescue session and the incident overseer), the gateway log tail, and Recent boots and Watchdog settings in closed disclosures. View logs scrolls to and focuses the log tail. The page uses the content width.
+- **Doctor.** The header button is "Run Doctor". A headline gives the last run's result ("Last run 2 hours ago found 3 things to fix.", "No findings. Last run …", "Doctor's last run failed.", "Doctor has not run yet."), a failed run shows its reason with Run Doctor again, and findings are divided rows with fixed and dismissed ones in a closed disclosure. The summary cards are gone.
+- **Schedules.** Moves onto the fixed-header pane, with the job list (name, next run, agent, paused) beside the selected job, Save changes in the header while a job is open, and "No schedules yet" when there are none. On a phone the list comes first and a job opens as its own view with Back, which returns to the same place in the list.
+- **Usage.** A status strip with 30-day spend, turns, tokens and the most used model, the daily chart in the theme's type and colours, a by-agent table and a sessions table that stack on a phone. An empty range shows "No usage yet" instead of a bare axis, and a failed read shows a dash and its cause in every cell instead of the previous numbers.
+- Shared `EmptyState` and `StatusStrip` components, and `AsyncSection` takes an empty-state title, body and action.
+- The agent-facing Setup UI map describes the new pages.
+
+### Tests
+- New `health-headline-model`, `doctor-headline-model`, `usage-strip-model` and `empty-state-status-strip` files, plus new cases for the Health slot map and handlers (`watchdog-tab`), the meters (`watchdog-resources-card`), the Schedules pane (`cron-tab`), and Usage and Doctor empty, loading and error states. All fail on the previous main.
+
 ## [0.10.194] - 2026-11-07
 
 Setup UI web hardening from the ALPH-71 audit (L-1, L-3, L-4, L-5, L-10 and two follow-ups from #329). The dashboard now refuses to be framed or to run injected script, cookie requests from other sites are refused, and OAuth starts and results stay on the box's own origins.
