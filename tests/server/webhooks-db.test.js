@@ -312,4 +312,31 @@ describe("server/webhooks-db", () => {
     expect(JSON.parse(kept.payload).index).toBe(20);
     expect(oldest.p).toBeTruthy();
   });
+
+  it("keeps only the newest kMaxRequestsTotal rows across all hook names (GST-1743)", () => {
+    const { insertRequest, kMaxRequestsTotal } = createWebhooksDbContext("webhooks-db-global-");
+    expect(kMaxRequestsTotal).toBe(2500);
+    const total = kMaxRequestsTotal + 30;
+    for (let index = 0; index < total; index += 1) {
+      insertRequest({
+        hookName: `random-${index}`,
+        method: "POST",
+        headers: {},
+        payload: `{"index":${index}}`,
+        payloadTruncated: false,
+        payloadSize: 12,
+        sourceIp: "127.0.0.1",
+        gatewayStatus: 401,
+        gatewayBody: "",
+      });
+    }
+    const database = new DatabaseSync(currentDbPath, { readOnly: true });
+    const { count } = database.prepare("SELECT COUNT(*) AS count FROM webhook_requests").get();
+    const kept = database
+      .prepare("SELECT payload FROM webhook_requests ORDER BY id ASC LIMIT 1")
+      .get();
+    database.close();
+    expect(count).toBe(kMaxRequestsTotal);
+    expect(JSON.parse(kept.payload).index).toBe(30);
+  });
 });

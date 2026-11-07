@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.179] - 2026-11-07
+
+Security hotfix (GST-1743, CSO audit). Two ways an unauthenticated caller could exhaust a box through the webhook ingress.
+
+### Security
+- **`/hooks/gmail` remembered message ids from requests the gateway rejected.** The Gmail dedupe map stored every `account:messageId` in the body before the request was forwarded, so before the gateway checked the hook token. Pruning was by age only (24 h), with no size cap, and the path matched whether or not Gmail was configured. One unauthenticated 5 MB POST with about 300k ids retained about 40 MB of heap while the gateway answered 401, and about a dozen took down a 512 MB box. The middleware now marks ids as seen only when the gateway answers 2xx, so a genuine retry after an accepted delivery is still deduped and a rejected request leaves nothing behind. One request dedupe-marks at most 500 ids; the rest are forwarded without being remembered, but ids already seen are still filtered. Dedupe keys use a 16-character digest of the account instead of the caller's account string, and an id longer than 128 characters is never remembered, so an oversized account cannot multiply into hundreds of large keys while the gateway decides (ten in-flight 72 KB requests with a 64 KB account held 126 MB of heap before this, 2 MB after). The map holds at most 50,000 entries and evicts the oldest first. A loopback repro (12 rejected 4.9 MB POSTs through the production parser and middleware) retained 429 MB of heap before the fix and 4.6 MB after, with the map empty.
+- **The webhook request log grew without bound under random hook names.** Every delivery wrote a row, auth rejections included, and retention was 500 rows per hook name. The hook name is the caller's first path segment, so rows spread over random names never trimmed (about 57 KB each). A delivery to a name that is not a configured webhook (a mapping or a managed preset) is now logged only when the gateway accepts it (2xx), which takes the hook token. Rejections of every kind (401, 403, 429, the 405 the gateway answers a non-POST with before its token check, 404, 5xx, an unreachable gateway or a caller hanging up) write no row for such a name; configured hooks still log all of them. Rows for unknown names were never shown on the Webhooks page. The log also keeps at most 2,500 rows across all hook names, oldest first, as a backstop.
+
+### Tests
+- `tests/server/webhook-gmail-dedupe-gate.test.js`: rejected (401) deliveries carrying thousands of ids leave the dedupe map empty; a 2xx marks the ids and a retry is deduped; one request marks at most 500 ids but still filters ids already seen; an oversized account still dedupes and an oversized id is never remembered; a forged request overlapping a genuine one with the same ids does not suppress it; the map holds at 50,000 and evicts the oldest; an unknown hook's rejections (400, 401, 403, 404, 405 including a PUT, 429, 500, an unreachable gateway) write no row, while a configured hook's rejections and an unknown hook's accepted delivery still do.
+- `tests/server/webhooks-db.test.js`: inserts over random hook names keep only the newest 2,500 rows.
+
 ## [0.10.178] - 2026-11-07
 
 Phase 0b of the Setup UI overhaul (ALPH-69, GST-1697). The Gateway card no longer contradicts itself right after a restart.
