@@ -42,6 +42,27 @@ describe("bin/container-entrypoint.js", () => {
     expect(report.mode).toBe(0o600);
   });
 
+  // #342 round 4: a failed handoff write used to put the values back into the
+  // init's environment silently. The box must still boot, so the fallback
+  // stays, but it says where the values are now and why (never the values).
+  it("when the handoff cannot be written, keeps the secrets in the env and warns that PID 1 holds them", () => {
+    if (process.platform !== "linux") return;
+    const probe = writeProbe("alphaclaw");
+    const result = spawnSync(process.execPath, [entrypoint, probe, "start"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, TMPDIR: path.join(tmpDir, "missing"), SETUP_PASSWORD: "fake-setup-pass-10" },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(result.stdout.trim());
+    expect(report.environ).toEqual(["PATH", "SETUP_PASSWORD", "TMPDIR"]);
+    expect(report.handoff).toBeNull();
+    const warnings = result.stderr.split("\n").filter(Boolean);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("handoff could not be written (ENOENT)");
+    expect(warnings[0]).toContain("PID 1's environment");
+    expect(result.stderr).not.toContain("fake-setup-pass-10");
+  });
+
   it("hands off only when the program the init runs is alphaclaw, as the image's CMD does", () => {
     if (process.platform !== "linux") return;
     const init = writeProbe("init");

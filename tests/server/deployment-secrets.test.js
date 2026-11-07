@@ -53,6 +53,18 @@ describe("deployment secrets (ALPH-71 M-1)", () => {
     expect(fs.existsSync(path.dirname(handoff))).toBe(false);
   });
 
+  it("warns once, naming PID 1 and the error code but no value, when a child's handoff cannot be written", () => {
+    const secrets = load();
+    secrets.captureDeploymentSecrets({ SETUP_PASSWORD: "fake-setup-pass-12" });
+    const warnings = [];
+    const childEnv = secrets.withDeploymentSecretsHandoff({ PATH: "/usr/bin" }, { tmpDir: path.join(tmpDir, "missing"), logger: { warn: (line) => warnings.push(line) } });
+    expect(childEnv).toEqual({ PATH: "/usr/bin", SETUP_PASSWORD: "fake-setup-pass-12" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("(ENOENT)");
+    expect(warnings[0]).toContain("PID 1's environment");
+    expect(warnings[0]).not.toContain("fake-setup-pass-12");
+  });
+
   it("ignores a handoff variable that does not name an AlphaClaw handoff file, and deletes nothing", () => {
     const secrets = load();
     const victim = path.join(tmpDir, "keep.json");
@@ -76,6 +88,36 @@ describe("deployment secrets (ALPH-71 M-1)", () => {
     expect([file, args]).toEqual(["/node", ["/node", "--require=x", "/bin/alphaclaw.js", "start"]]);
     expect(Object.keys(childEnv).sort()).toEqual(["ALPHACLAW_DEPLOYMENT_SECRETS_FILE", "PATH"]);
     expect(JSON.parse(fs.readFileSync(childEnv.ALPHACLAW_DEPLOYMENT_SECRETS_FILE, "utf8"))).toEqual({ SETUP_PASSWORD: "fake-setup-pass-4" });
+  });
+
+  // #342 round 4: under --env-file, -r dotenv/config or --import every image
+  // loads the secrets again; a second exec would loop on the same pid forever.
+  it("after a handoff, secrets that came back are captured with one warning naming the preload, and never exec again", () => {
+    const writer = load();
+    writer.captureDeploymentSecrets({ SETUP_PASSWORD: "fake-setup-pass-11" });
+    const handedOver = writer.withDeploymentSecretsHandoff({ PATH: "/usr/bin" }, { tmpDir });
+    const secrets = load();
+    const env = { ...handedOver, SETUP_PASSWORD: "fake-setup-pass-11" };
+    const execve = vi.fn();
+    const warnings = [];
+    expect(secrets.consumeDeploymentSecretsHandoff(env)).toBe(true);
+    expect(
+      secrets.reexecWithoutDeploymentSecrets({
+        env,
+        execArgv: ["--env-file=/srv/app/.env", "--max-old-space-size=512"],
+        argv: ["/node", "/bin/alphaclaw.js", "start"],
+        execve,
+        tmpDir,
+        logger: { warn: (line) => warnings.push(line) },
+      }),
+    ).toBe(false);
+    expect(execve).not.toHaveBeenCalled();
+    expect(env).toEqual({ PATH: "/usr/bin" });
+    expect(secrets.getDeploymentSecret("SETUP_PASSWORD", {})).toBe("fake-setup-pass-11");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("(--env-file=/srv/app/.env)");
+    expect(warnings[0]).not.toContain("fake-setup-pass-11");
+    expect(fs.readdirSync(tmpDir)).toEqual([]);
   });
 
   it("without execve, still keeps the secrets out of process.env for children and says what remains", () => {

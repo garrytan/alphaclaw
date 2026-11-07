@@ -436,5 +436,32 @@ describe("server/routes/auth legacy sessions (ALPH-71 L-2)", () => {
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).epoch).toBe(1);
     expect(await protectedStatus(createStatefulApp("fake-owner-pass", statePath), cookie)).toBe(401);
   });
+
+  // #342 round 4: a logout whose epoch cannot be saved ends the sessions only
+  // in this process; after a restart the stored (old) epoch makes them valid
+  // again, so the caller is told, not answered 200.
+  it("a logout whose epoch cannot be saved clears the cookie, keeps the bump in memory and answers 500", async () => {
+    const statePath = path.join(tmpDir, "legacy-session.json");
+    const app = createStatefulApp("fake-owner-pass", statePath);
+    const laptop = await loginCookie(app, "fake-owner-pass");
+    const phone = await loginCookie(app, "fake-owner-pass");
+    fs.rmSync(statePath);
+    fs.mkdirSync(path.join(statePath, "blocker"), { recursive: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await request(app).post("/api/auth/logout").set("Cookie", laptop).send({});
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ ok: false, error: "logout could not be saved; other sessions may survive a restart" });
+      expect((res.headers["set-cookie"] || []).some((line) => /^setup_token=;.*Expires=Thu, 01 Jan 1970/.test(line))).toBe(true);
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("Logout could not save the session epoch");
+      expect(lines[0]).toContain("may work again after a restart");
+      expect(lines[0]).not.toContain("sessions end when AlphaClaw restarts");
+      expect(await protectedStatus(app, phone)).toBe(401);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 

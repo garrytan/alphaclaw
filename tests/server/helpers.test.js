@@ -372,4 +372,24 @@ describe("server/helpers", () => {
       ["tok-short", "${GITHUB_TOKEN}"],
     ]);
   });
+
+  // #342 round 4: deployment secrets left process.env, so the Claude Code
+  // rescue scrubber and boot-config normalization, which build their list
+  // from env, stopped masking them.
+  it("masks deployment secrets that live outside process.env", () => {
+    const deploymentSecrets = require("../../lib/server/deployment-secrets");
+    const kPw = "plain words";
+    try {
+      deploymentSecrets.captureDeploymentSecrets({
+        SETUP_PASSWORD: kPw,
+        GOG_KEYRING_PASSWORD: "alphaclaw",
+      });
+      const replacements = buildSecretReplacements({ PLAIN_VALUE: "visible" });
+      expect(replacements).toEqual([[kPw, "${SETUP_PASSWORD}"]]);
+      const env = { OPENAI_API_KEY: kPw };
+      expect(buildSecretReplacements(env)).toEqual([[kPw, "${OPENAI_API_KEY}"]]);
+    } finally {
+      deploymentSecrets.resetDeploymentSecretsForTests();
+    }
+  });
 });

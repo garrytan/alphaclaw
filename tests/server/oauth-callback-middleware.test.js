@@ -302,32 +302,21 @@ describe("server/oauth-callback-middleware mapping selection and rate budget", (
     });
   });
 
-  it("one caller spending its budget does not lock out another caller on the same id", async () => {
-    await withApp(async ({ app, calls }) => {
-      for (let index = 0; index < 10; index += 1) {
-        const res = await request(app).get(`/oauth/abc123?code=A${index}`).set("X-Forwarded-For", "10.0.0.7");
-        expect(res.status).toBe(200);
-      }
-      const limited = await request(app).get("/oauth/abc123?code=A10").set("X-Forwarded-For", "10.0.0.7");
-      expect(limited.status).toBe(429);
-      const provider = await request(app).get("/oauth/abc123?code=REAL").set("X-Forwarded-For", "10.0.0.20");
-      expect(provider.status).toBe(200);
-      expect(calls).toHaveLength(11);
-    });
-  });
-
-  it("still caps an id across many callers", async () => {
+  // #342 round 4: behind trust proxy req.ip is whatever X-Forwarded-For says,
+  // so a per-caller bucket let one caller rotate past the limit. The budget is
+  // per id again: 10 a minute however the header changes.
+  it("rotating X-Forwarded-For cannot get past the per-id limit", async () => {
     await withApp(async ({ app, calls }) => {
       const statuses = [];
-      for (let index = 0; index < 70; index += 1) {
+      for (let index = 0; index < 15; index += 1) {
         const res = await request(app)
           .get(`/oauth/abc123?code=S${index}`)
           .set("X-Forwarded-For", `203.0.113.${index}`);
         statuses.push(res.status);
       }
-      expect(statuses.filter((status) => status === 200)).toHaveLength(60);
-      expect(statuses.slice(60).every((status) => status === 429)).toBe(true);
-      expect(calls).toHaveLength(60);
+      expect(statuses.slice(0, 10).every((status) => status === 200)).toBe(true);
+      expect(statuses.slice(10).every((status) => status === 429)).toBe(true);
+      expect(calls).toHaveLength(10);
     });
   });
 });
