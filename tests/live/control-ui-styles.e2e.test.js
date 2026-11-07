@@ -380,10 +380,10 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
     sameSite: "Lax",
   });
 
-  // /gateway/launch marks its session attached (v0.10.15,
-  // lib/server/control-ui-attach.js) so the browser it hands #token= to is
-  // not detoured through /gateway/attach. A context fed only the session
-  // cookie would be detoured, and the attach page drops the fragment.
+  // /gateway/launch hands out a one-navigation pass (v0.10.15, one-shot
+  // since v0.10.174, lib/server/control-ui-attach.js) so the browser it hands
+  // #token= to is not detoured through /gateway/attach on arrival. Later
+  // navigations detour, and the attach page keeps the fragment.
   const kAttachCookieName = "alphaclaw_control_ui";
   const attachMarkerOf = (res) => {
     const line = res.headers.getSetCookie().find((c) => c.startsWith(`${kAttachCookieName}=`));
@@ -598,6 +598,9 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       await noSlashPage.goto(`${baseUrl}${kMountPath}#token=${encodeURIComponent(token)}`, {
         waitUntil: "load",
       });
+      // This tab holds no pass, so it attaches on the way (the attach page
+      // keeps the fragment): read the landing of the page it ends on.
+      await noSlashPage.waitForURL((url) => url.pathname === `${kMountPath}/`, { timeout: 30_000 });
       const noSlashLanding = String(await readLandingHref(noSlashPage));
       expect(
         noSlashLanding.endsWith(`${kMountPath}/#token=${encodeURIComponent(token)}`),
