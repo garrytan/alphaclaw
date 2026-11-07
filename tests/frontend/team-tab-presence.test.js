@@ -82,12 +82,18 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 import * as preactHooks from "preact/hooks";
 import {
+  copyTeamInviteLink,
   fetchDevicePairings,
   fetchTeam,
   fetchTeamPresence,
 } from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 import { useTeamTab } from "../../lib/public/js/components/team-tab/use-team-tab.js";
-import { PresenceCard } from "../../lib/public/js/components/team-tab/index.js";
+import {
+  InvitesCard,
+  PresenceCard,
+} from "../../lib/public/js/components/team-tab/index.js";
+import { formatLocaleDate } from "../../lib/public/js/lib/format.js";
 
 const harness = preactHooks.__harness;
 
@@ -259,3 +265,87 @@ describe("frontend/team-tab PresenceCard failure model", () => {
     expect(nodeText(tree)).toContain("Sam");
   });
 });
+
+describe("frontend/team-tab invite links (GST-1787)", () => {
+  const kExpiresAt = Date.UTC(2026, 10, 14, 12);
+  const kInvite = { id: "inv-1", email: null, role: "member", expiresAt: kExpiresAt };
+  const kLink = {
+    ok: true,
+    invite: kInvite,
+    url: "https://claw.example.com/login.html?invite=fresh-link",
+  };
+
+  beforeEach(() => {
+    harness.reset();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const renderCard = (props) => {
+    harness.beginRender();
+    return InvitesCard({ invites: [kInvite], ...props });
+  };
+  const copyButtonOf = (tree) =>
+    collectNodes(tree).find((node) => node.props?.idleLabel === "Copy new link");
+
+  it("shows a Copy new link button on each pending invite that asks for that invite's link", () => {
+    const onCopyInviteLink = vi.fn();
+    const button = copyButtonOf(renderCard({ onCopyInviteLink }));
+    expect(button).toBeTruthy();
+    expect(button.props.loading).toBe(false);
+    button.props.onClick();
+    expect(onCopyInviteLink).toHaveBeenCalledWith("inv-1");
+    expect(copyButtonOf(renderCard({ linkingInviteId: "inv-1" })).props.loading).toBe(true);
+  });
+
+  it("shows the new link once with the invite's own expiry", () => {
+    const text = nodeText(renderCard({ freshInvite: kLink }));
+    expect(text).toContain(kLink.url);
+    expect(text).toContain("shown only once");
+    expect(text).toContain(formatLocaleDate(kExpiresAt, { valueIsEpochMs: true }));
+    expect(text).not.toContain("7 days");
+  });
+
+  it("onCopyInviteLink fetches a new link, copies it and keeps it on screen", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    copyTeamInviteLink.mockResolvedValue(kLink);
+
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    const hook = useTeamTab();
+
+    expect(copyTeamInviteLink).toHaveBeenCalledWith("inv-1");
+    expect(writeText).toHaveBeenCalledWith(kLink.url);
+    expect(hook.freshInvite).toEqual(kLink);
+    expect(hook.linkingInviteId).toBe(null);
+    expect(showToast).toHaveBeenCalledWith(
+      "New invite link copied. The old link no longer works.",
+      "success",
+    );
+  });
+
+  it("onCopyInviteLink shows the server's refusal and no link", async () => {
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    copyTeamInviteLink.mockRejectedValue(
+      new Error("That invite was used, revoked or has expired. Create a new invite."),
+    );
+
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    expect(useTeamTab().freshInvite).toBe(null);
+    expect(showToast).toHaveBeenCalledWith(
+      "That invite was used, revoked or has expired. Create a new invite.",
+      "error",
+    );
+  });
+});
+

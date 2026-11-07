@@ -311,14 +311,14 @@ How it works:
 
 - **Real member accounts.** Each teammate signs in with their own email and password. OpenClaw sees who's who — messages are attributed per person, everyone gets their own profile, and the roster shows who's online.
 - **Trusted-proxy identity.** With team access on, the gateway switches from shared-token to trusted-proxy auth: AlphaClaw injects the signed-in member's email on every gateway request (HTTP, WebSocket, and webhook paths) and strips client-supplied forwarding headers so identity can't be spoofed.
-- **Invites and roles.** Admins invite members with expiring single-use links, set roles, and disable or remove accounts — sessions and gateway authority end together, and the last admin can never be demoted. Invite acceptance is transactional (a failed signup doesn't burn the link).
+- **Invites and roles.** Admins invite members with expiring single-use links, set roles, and disable or remove accounts — sessions and gateway authority end together, and the last admin can never be demoted. Invite acceptance is transactional (a failed signup doesn't burn the link). Only a hash of each invite link is stored, so a link shows once, when it is created; **Copy new link** on a pending invite gives an admin a new link for it (the old one stops working). That is also how an invite the agent created gets delivered: the agent's copy is masked and the copy-link action is humans only.
 - **Permission boundary.** Members can chat and view status. Updates, secrets, terminals, agents, webhooks, and team management stay admin-only — enforced on every API route, WebSocket, and OAuth callback, with a role-aware nav that hides admin pages.
 - **Safe enable + rollback.** The enable wizard explains the security boundary up front, applies the gateway change, restarts, and verifies the login handshake end to end. If the check fails, it attempts to restore the previous setup and verifies the restored login before reporting recovery. A gateway hold or expired lifecycle lease can defer the restart; the result distinguishes saved auth settings from verified gateway recovery. Optional lockdown turns off shared-password login once your own account works (a break-glass env var is included).
 - **Deferred member sync is explicit.** Member changes can save while a gateway blocker prevents syncing the authentication roster. After clearing the blocker, an administrator must save the member settings again; restarting alone does not sync the roster.
 - **Off means off.** Turning team access off fully ends member access: member sessions and logins stop, and existing shared-password sessions end the moment shared-password login is disabled.
 - **Fail closed on a broken config.** If `alphaclaw.json` exists but cannot be parsed, sign-in answers `503 config_unreadable` and every existing session (shared-password and member) is refused until the file is fixed or restored — a corrupt file never silently re-enables shared-password login. `ALPHACLAW_ALLOW_LEGACY_LOGIN=1` on the server is the emergency hatch for shared-password access meanwhile.
 
-Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `members`, `presence`); all mutations are admin-only.
+Team endpoints live under `/api/team` (`enable`, `disable`, `invites`, `invites/:id/link`, `members`, `presence`); all mutations are admin-only.
 
 ## CLI
 

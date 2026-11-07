@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.198] - 2026-11-07
+
+Pending invite links for admins (GST-1787, ALPH-73). Since 0.10.195 the agent's copy of a new invite's token and URL is masked, and the Setup UI showed an invite link only in the browser that created it, so an invite the agent created could not be delivered.
+
+### Added
+- **Copy new link on each pending invite.** Only a hash of each invite token is stored, so a pending link cannot be shown again. The Team page's Invites list now has **Copy new link** per invite: it gives the invite a new token, copies the new URL to the clipboard and shows it once with the invite's expiry, and the old link stops working. The expiry does not change. Behind it is `POST /api/team/invites/:id/link` (admin only; 404 `invite_not_pending` for a used, revoked or expired invite), audit-logged as `team_invite_link_rotated` with the invite id, role, pinned email and who asked, never the token or URL.
+- **Humans only.** The admin manifest lists the route as `team.invites.link` with tier `denied`, so the agent gets 403 `denied` with a hint to ask an admin, and a member gets 403 from `requireAdmin`.
+
+### Changed
+- The shown-once invite panel names the invite's real expiry date instead of "7 days".
+
+### Docs
+- `alphaclaw-admin/team.md` and the `team.invites.create` note tell the agent to ask an admin to use Copy new link on the Team page to deliver an invite it created. README's team section describes the action and lists the endpoint.
+
+### Tests
+- `routes-team`: an admin gets a new URL, the old link is refused and the new one accepted, and a used invite is 404; the audit line holds no token or URL; a member gets 403 and the invite's link still works. `agent-admin-grant-e2e`: the agent gets 403 `denied` and never the link; a human admin gets it. `db-auth-members`: `rotateInviteToken` for pending, used, expired and unknown invites. `team-tab-presence`: the button, the shown-once panel with the expiry, and the hook's copy and refusal paths. Each new case fails on main except "a human admin gets a pending invite's new link", which guards human access.
+
 ## [0.10.196] - 2026-11-07
 
 Deployment secrets, the small PR of the M-1/L-8 design (ALPH-73, option iii): the agent can no longer replace `SETUP_PASSWORD` or the platform tokens through `.env`, and relay messages mask them. M-1 and L-8 themselves are accepted residual risks until the gateway and agent run as a separate uid.
