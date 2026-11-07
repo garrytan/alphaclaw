@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 The check that a browser request comes from the box's own dashboard now compares scheme and port, not just the host name.
 
 ### Security
-- **An http page on the box's host name counted as the https dashboard.** AlphaClaw refuses cookie-authenticated writes, the chat and terminal WebSockets and the OAuth starts from other sites by comparing the request's `Origin` with the host it was sent to. It compared host names only and dropped `:80` and `:443` whatever the scheme, so `http://box.example`, `http://box.example:443` and `https://box.example:80` passed as the https dashboard on `box.example`. Chrome keeps the session cookie off those requests; Firefox and Safari don't by default, so someone who could serve plain http on the box's name (an open Wi-Fi network, for example) could make writes with the owner's session. Now the `Origin`'s port has to fit the port the request was sent to, and when a proxy in front says the browser came over https (`X-Forwarded-Proto` or Cloudflare's `CF-Visitor`), an http `Origin` is refused.
+- **An http page on the box's host name counted as the https dashboard.** AlphaClaw refuses cookie-authenticated writes, the chat and terminal WebSockets and the OAuth starts from other sites by comparing the request's `Origin` with the host it was sent to. It compared host names only and dropped `:80` and `:443` whatever the scheme, so `http://box.example`, `http://box.example:443` and `https://box.example:80` passed as the https dashboard on `box.example`. Chrome keeps the session cookie off those requests; Firefox and Safari don't by default, so someone who could serve plain http on the box's name (an open Wi-Fi network, for example) could make writes with the owner's session. Now an `Origin` with an explicit port (`:443` on http, `:80` on https) matches only a request sent to that port, and when a proxy in front says the browser came over https (`X-Forwarded-Proto`, `Forwarded: proto=https` or Cloudflare's `CF-Visitor`), an http `Origin` is refused.
 
 ### Changed
 - A forwarded `http` never refuses a request. Behind Cloudflare Flexible SSL, or an https edge whose inner proxy reports `http`, the dashboard keeps working; the https signal from the edge is what refuses the downgrade.
@@ -18,7 +18,7 @@ The check that a browser request comes from the box's own dashboard now compares
 - A new real-server test runs AlphaClaw behind nginx, Caddy (with and without `trusted_proxies`), a Cloudflare Flexible SSL edge and a direct connection, and checks each accepts the dashboard's own origin and refuses the downgrades. Its nginx and Caddy cases skip when the binary is not installed.
 
 ### Not covered
-- With no proxy saying https, the scheme can't be known: a page on `http://box.example:8443` still matches a box reached directly on port 8443. Every TLS front tested sets `X-Forwarded-Proto`.
+- With no proxy saying https, the scheme can't be known. A TLS front that sends none of those headers (nginx without `X-Forwarded-Proto`, some Apache and HAProxy setups) still lets `http://box.example` match, and a page on `http://box.example:8443` still matches a box reached directly on port 8443. Every TLS front tested sets `X-Forwarded-Proto`.
 - nginx's common `proxy_set_header Host $host` drops a custom port, so a dashboard on `https://box.example:8443` behind it is matched only through the configured setup URL, as before this change.
 
 ## [0.10.202] - 2026-11-07

@@ -80,10 +80,17 @@ describe("classifyBrowserOrigin (control-ui-mount.js)", () => {
   it("is cross when the Origin's port is the other scheme's default (http on 443, https on 80)", () => {
     expect(classify({ host: "box.example", origin: "http://box.example:443" }, "")).toBe("cross");
     expect(classify({ host: "box.example", origin: "https://box.example:80" }, "")).toBe("cross");
-    expect(classify({ host: "box.example:443", origin: "http://box.example:443" }, "")).toBe("cross");
     expect(classify({ host: "box.example:443", origin: "https://box.example" }, "")).toBe("same");
     expect(classify({ host: "box.example:80", origin: "http://box.example" }, "")).toBe("same");
-    expect(classify({ host: "box.example:80", origin: "https://box.example" }, "")).toBe("cross");
+  });
+
+  it("matches an explicit Host port of 80 or 443 the way proxies that write $host:$server_port send it", () => {
+    expect(classify({ host: "box.example:443", origin: "http://box.example:443" }, "")).toBe("same");
+    expect(classify({ host: "box.example:80", origin: "https://box.example:80" }, "")).toBe("same");
+    const innerPort80 = { host: "box.example:80", "x-forwarded-proto": "https" };
+    expect(classify({ ...innerPort80, origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ ...innerPort80, origin: "http://box.example" }, "")).toBe("cross");
+    expect(classify({ ...innerPort80, origin: "http://box.example:443" }, "")).toBe("cross");
     expect(classify({ host: "box.example", origin: "https://box.example" }, "")).toBe("same");
     expect(classify({ host: "box.example", origin: "http://box.example" }, "")).toBe("same");
   });
@@ -97,6 +104,12 @@ describe("classifyBrowserOrigin (control-ui-mount.js)", () => {
     expect(classify({ ...innerProxySaysHttp, origin: "http://box.example" }, "")).toBe("cross");
     const chain = { host: "box.example", "x-forwarded-proto": "https, http" };
     expect(classify({ ...chain, origin: "http://box.example" }, "")).toBe("cross");
+    expect(classify({ host: "box.example", "x-forwarded-proto": ["http", "https"], origin: "http://box.example" }, "")).toBe("cross");
+    const rfc7239 = { host: "box.example", forwarded: 'for=10.0.0.1;proto="https";host=box.example' };
+    expect(classify({ ...rfc7239, origin: "http://box.example" }, "")).toBe("cross");
+    expect(classify({ ...rfc7239, origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example", forwarded: "for=10.0.0.1;proto=http", origin: "http://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example", forwarded: "for=10.0.0.1;proto=httpsx", origin: "http://box.example" }, "")).toBe("same");
   });
 
   it("lets the Origin's own scheme stand when no proxy says https", () => {
@@ -105,6 +118,10 @@ describe("classifyBrowserOrigin (control-ui-mount.js)", () => {
     expect(classify({ host: "box.example:3000", origin: "http://box.example:3000" }, "")).toBe("same");
     expect(classify({ host: "box.example:8443", origin: "https://box.example:8443" }, "")).toBe("same");
     expect(classify({ host: "box.example", "cf-visitor": "not json", origin: "http://box.example" }, "")).toBe("same");
+    expect(classify({ host: "[::1]:3000", origin: "http://[::1]:3000" }, "")).toBe("same");
+    expect(classify({ host: "[::1]:3000", origin: "http://[::1]:3001" }, "")).toBe("cross");
+    expect(classify({ host: "box.example:", origin: "http://box.example" }, "")).toBe("cross");
+    expect(classify({ host: "box.example:3000:1", origin: "http://box.example:3000" }, "")).toBe("cross");
   });
 
   it("is cross for an Origin that is not http or https", () => {
