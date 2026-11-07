@@ -106,7 +106,6 @@ describe("server/gog-accounts", () => {
     }
   });
 
-
   it("fails open to no accounts when gog exits non-zero, and never logs its output", async () => {
     await refresh(writeFakeGog(`process.stdout.write(${JSON.stringify(kListing)});`));
     const gogBin = writeFakeGog(

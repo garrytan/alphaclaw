@@ -223,6 +223,8 @@ describe("server/commands", () => {
     vi.stubEnv("SETUP_PASSWORD", "not-a-real-value");
     vi.stubEnv("RAILWAY_TOKEN", "not-a-real-value");
     vi.stubEnv("GOG_ACCOUNT", "ops@example.com");
+    vi.stubEnv("LC_ALL", "C.UTF-8");
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example:3128");
     try {
       const execMock = vi.fn((cmd, opts, callback) => {
         callback(null, "ok\n", "");
@@ -236,6 +238,8 @@ describe("server/commands", () => {
       expect(env).toMatchObject({
         PATH: process.env.PATH,
         GOG_ACCOUNT: "ops@example.com",
+        LC_ALL: "C.UTF-8",
+        HTTPS_PROXY: "http://proxy.example:3128",
         XDG_CONFIG_HOME: OPENCLAW_DIR,
         GOG_KEYRING_PASSWORD,
       });

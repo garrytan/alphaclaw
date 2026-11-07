@@ -91,7 +91,6 @@ describe("server/gmail-serve", () => {
     }
   });
 
-
   it("starts a serve process with default client args", async () => {
     const onServeExit = vi.fn();
     const manager = createGmailServeManager({
