@@ -380,4 +380,20 @@ describe("control-ui-mount: resolveGatewayBrowserOrigin (same-origin Control UI 
     ).toBeNull();
     expect(resolveGatewayBrowserOrigin()).toBeNull();
   });
+
+  it("does not vouch for the https dashboard's host on another scheme or port (ALPH-11 grant)", () => {
+    const httpsBox = "https://box.example";
+    const edge = { host: "127.0.0.1:3000", "x-forwarded-host": "box.example", "x-forwarded-proto": "https" };
+    for (const origin of ["http://box.example", "http://box.example:443", "https://box.example:80"]) {
+      expect(resolveGatewayBrowserOrigin({ headers: { origin, host: "box.example" }, trustedOrigin: httpsBox }), origin).toBeNull();
+      expect(resolve({ ...edge, origin }), origin).toBeNull();
+    }
+    for (const origin of ["https://box.example", "https://box.example:443"]) {
+      expect(resolveGatewayBrowserOrigin({ headers: { origin, host: "box.example" }, trustedOrigin: httpsBox }), origin).toBe(httpsBox);
+      expect(resolve({ ...edge, origin }), origin).toBe(trustedOrigin);
+    }
+    expect(
+      resolveGatewayBrowserOrigin({ headers: { origin: "http://localhost:3000", host: "localhost:3000" }, trustedOrigin: "http://localhost:3000" }),
+    ).toBe("http://localhost:3000");
+  });
 });
