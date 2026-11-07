@@ -121,6 +121,13 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
         models: [{ id: "fixture", name: "fixture", contextWindow: 128000, maxTokens: 1024 }],
       } } },
       channels: {},
+      // The relay guard plugin, as ensureGatewayProxyConfig writes it: the
+      // bridge dispatches only once plugins.list reports it active.
+      plugins: (() => {
+        const cfg = {};
+        require("../../lib/server/relay/guard-entry").applyRelayGuardEntry(cfg, require("../../lib/server/relay/guard-entry").buildRelayGuardEntry({ rootDir: kRootDir }), { log: () => {} });
+        return cfg.plugins;
+      })(),
     }));
     fs.writeFileSync(kOnboardingMarkerPath, JSON.stringify({ live: true }));
     process.env.OPENCLAW_GATEWAY_TOKEN = token;
@@ -210,6 +217,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       const [first] = await repliesOf(capy.token, firstId);
       expect(first.text).toContain("pong-41 from the box");
       expect(relay.getStatus().bridge.counts.answered).toBe(1);
+      expect(relay.getStatus().bridge.guard.state).toBe("active");
       const sessions = await new Promise((resolve, reject) => {
         const { clawCmd } = require("../../lib/server/commands").createCommands({ gatewayEnv: gateway.gatewayEnv });
         clawCmd("gateway call 'sessions.list' --params '{\"limit\":50}' --json", { quiet: true }).then(resolve, reject);
