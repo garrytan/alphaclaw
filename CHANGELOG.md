@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.179] - 2026-11-07
+## [0.10.180] - 2026-11-07
 
 Security hotfix for a stored XSS in the Setup UI's Browse file viewer (GST-1743, found by the ALPH-71 CSO audit).
 
@@ -13,6 +13,18 @@ Security hotfix for a stored XSS in the Setup UI's Browse file viewer (GST-1743,
 - **The markdown preview in Browse goes through the safe renderer.** It rendered workspace `.md` files with raw `marked`, which keeps raw HTML, and injected the result as HTML. Anything that can write a markdown file under the browse root (the agent through exec or the browse write API, or a relay peer through the agent) could plant `<img src=x onerror=...>` and run script in an admin's session when the admin opened the preview. The preview now uses `renderMarkdownSafe`, as chat and the update modal already do: raw HTML shows as escaped text, and link and image URLs must be http(s), mailto, `#` or start with `/`, `./` or `../`. Frontmatter, GFM tables, code blocks and line breaks render as before. Links now open in a new tab. Links and images starting with `/`, `./` or `../` stay live and resolve as before (a `//host` URL reaches another host, like any https link); a bare relative link such as `[x](notes.md)` now renders as text. Neither kind ever opened the workspace file, because the Setup UI uses hash routes.
 - The Nodes tab's Chrome attach instructions, a hard-coded constant, use the same renderer, so no Setup UI component imports raw `marked` any more.
 - `tests/frontend/file-viewer-markdown-safety.test.js` renders a `.md` holding `<img onerror>`, `<script>`, `<iframe>`, `javascript:` links in plain, mixed-case, entity-encoded and autolink form, a link title that tries to break out of its attribute, and text after an inline `<kbd>`, `<code>`, `<pre>` or `<script>` tag, through the file viewer's own render path and fails on any live tag, handler or link that survives.
+
+## [0.10.179] - 2026-11-07
+
+Security hotfix (GST-1743, CSO audit). Two ways an unauthenticated caller could exhaust a box through the webhook ingress.
+
+### Security
+- **`/hooks/gmail` remembered message ids from requests the gateway rejected.** The Gmail dedupe map stored every `account:messageId` in the body before the request was forwarded, so before the gateway checked the hook token. Pruning was by age only (24 h), with no size cap, and the path matched whether or not Gmail was configured. One unauthenticated 5 MB POST with about 300k ids retained about 40 MB of heap while the gateway answered 401, and about a dozen took down a 512 MB box. The middleware now marks ids as seen only when the gateway answers 2xx, so a genuine retry after an accepted delivery is still deduped and a rejected request leaves nothing behind. One request dedupe-marks at most 500 ids; the rest are forwarded without being remembered, but ids already seen are still filtered. Dedupe keys use a 16-character digest of the account instead of the caller's account string, and an id longer than 128 characters is never remembered, so an oversized account cannot multiply into hundreds of large keys while the gateway decides (ten in-flight 72 KB requests with a 64 KB account held 126 MB of heap before this, 2 MB after). The map holds at most 50,000 entries and evicts the oldest first. A loopback repro (12 rejected 4.9 MB POSTs through the production parser and middleware) retained 429 MB of heap before the fix and 4.6 MB after, with the map empty.
+- **The webhook request log grew without bound under random hook names.** Every delivery wrote a row, auth rejections included, and retention was 500 rows per hook name. The hook name is the caller's first path segment, so rows spread over random names never trimmed (about 57 KB each). A delivery to a name that is not a configured webhook (a mapping or a managed preset) is now logged only when the gateway accepts it (2xx), which takes the hook token. Rejections of every kind (401, 403, 429, the 405 the gateway answers a non-POST with before its token check, 404, 5xx, an unreachable gateway or a caller hanging up) write no row for such a name; configured hooks still log all of them. Rows for unknown names were never shown on the Webhooks page. The log also keeps at most 2,500 rows across all hook names, oldest first, as a backstop.
+
+### Tests
+- `tests/server/webhook-gmail-dedupe-gate.test.js`: rejected (401) deliveries carrying thousands of ids leave the dedupe map empty; a 2xx marks the ids and a retry is deduped; one request marks at most 500 ids but still filters ids already seen; an oversized account still dedupes and an oversized id is never remembered; a forged request overlapping a genuine one with the same ids does not suppress it; the map holds at 50,000 and evicts the oldest; an unknown hook's rejections (400, 401, 403, 404, 405 including a PUT, 429, 500, an unreachable gateway) write no row, while a configured hook's rejections and an unknown hook's accepted delivery still do.
+- `tests/server/webhooks-db.test.js`: inserts over random hook names keep only the newest 2,500 rows.
 
 ## [0.10.178] - 2026-11-07
 
