@@ -29,7 +29,7 @@ const makeCard = (overrides = {}) => ({
 
 const cardContainers = (tree) =>
   collectNodes(tree).filter((node) =>
-    String(node.props?.class || "").includes("rounded-xl p-4 space-y-3"),
+    String(node.props?.class || "").includes("doctor-finding "),
   );
 
 describe("frontend/doctor findings list focus highlight", () => {
@@ -40,9 +40,8 @@ describe("frontend/doctor findings list focus highlight", () => {
     });
     const containers = cardContainers(tree);
     expect(containers).toHaveLength(2);
-    expect(containers[0].props.class).toContain("border-cyan-500/60");
-    expect(containers[1].props.class).toContain("border-border");
-    expect(containers[1].props.class).not.toContain("border-cyan-500/60");
+    expect(containers[0].props.class).toContain("is-highlighted");
+    expect(containers[1].props.class).not.toContain("is-highlighted");
   });
 
   it("no card is highlighted when highlightCardId is empty", () => {
@@ -52,7 +51,6 @@ describe("frontend/doctor findings list focus highlight", () => {
     });
     const containers = cardContainers(tree);
     expect(containers).toHaveLength(1);
-    expect(containers[0].props.class).toContain("border-border");
-    expect(containers[0].props.class).not.toContain("border-cyan-500/60");
+    expect(containers[0].props.class).not.toContain("is-highlighted");
   });
 });

@@ -157,6 +157,32 @@ describe("frontend/use-usage-tab summary range race", () => {
   });
 });
 
+describe("frontend/use-usage-tab range change", () => {
+  it("drops the old range's summary while the new range loads, so neither strip nor chart shows it", async () => {
+    fetchUsageSummary.mockResolvedValueOnce({ summary: { daily: [{ date: "2026-11-07", totalTokens: 30 }], totals: { totalTokens: 30 } } });
+    let hook = renderHook();
+    harness.flushEffects();
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.state.summary.totals.totalTokens).toBe(30);
+
+    const slow7 = deferred();
+    fetchUsageSummary.mockReturnValueOnce(slow7.promise);
+    hook.actions.setDays(7);
+    hook = renderHook();
+    harness.flushEffects();
+    hook = renderHook();
+    expect(hook.state.days).toBe(7);
+    expect(hook.state.summary).toBe(null);
+    expect(hook.state.loadingSummary).toBe(true);
+
+    slow7.resolve({ summary: { daily: [], totals: { totalTokens: 7 } } });
+    await flushAsync();
+    hook = renderHook();
+    expect(hook.state.summary.totals.totalTokens).toBe(7);
+  });
+});
+
 describe("frontend/use-usage-tab deep-link session detail", () => {
   it("records a terminal error sentinel and does not refire the deep-link fetch after failure", async () => {
     fetchUsageSessionDetail.mockRejectedValue(new Error("detail down"));
