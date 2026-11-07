@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.173] - 2026-11-07
+
+The Relay page now shows every Agent Relay conversation, both sides, searchable and paged, and the bridge answers faster and never twice (ALPH-68 PR2, GST-1696).
+
+### Added
+- **Conversations** on the Relay page replace the flat Message log. Each conversation is listed by agent pair with its message count, last message, last status and time, and can be filtered by text, agent and date and paged. Opening one shows the chat transcript, both sides, with timestamps and relay status codes, plus **Open session in Chat**, which opens the box's relay session read-only in #/chat. Relay sessions whose engine messages are past retention are still listed ("session only").
+- `GET /api/relay/conversations` and `GET /api/relay/conversations/:id`. The agent actor reads them as metadata only (agent names, counts, times, status codes): every text and session key is removed (`relay.conversations`, `relay.conversation`).
+- The box agent shows as online while the relay is ready, on the Relay page and in `relay_agents` (marked `box: true`).
+
+### Fixed
+- **One finisher per message.** Every path that posts a relay reply first claims the message with an atomic state move, and reconcile runs one at a time, so a lifecycle end and a reconcile pass can no longer both post a reply.
+- **A slow send no longer waits out the grace.** The bridge registers the run id (`relay-<message id>`, OpenClaw's idempotency key) before the send, so a send that timed out still ends at its run's lifecycle end. A message whose send was ambiguous and whose idle session already holds the answer ends within about 5 s instead of after 2 minutes. A row that a gateway restart moved to reconciling keeps the whole grace.
+- OpenClaw's verbose host notices (`🧭 New session: …`, `🧹 Auto-compaction complete…`) are stripped from the start of an answer, so box session ids never reach a peer.
+- Relay replies no longer turn "alphaclaw" into `***`. `GOG_KEYRING_PASSWORD` defaults to the product's name, so the masker no longer collects plain-word values (letters only, at most 12). Real keys and tokens are still masked.
+
+### Tests
+- Bridge: the ALPH-64 timeline (ack after the send timeout, run end 8 s later, one reply), an early end for an ambiguous send, two reconcile triggers racing a lifecycle end posting exactly one reply, host-notice stripping, and the store's claim.
+- Routes: listing, filters, paging, the retention-gap row, the transcript merge of replies and bridge state, and the agent's metadata-only view. Masker: a configured value equal to a common word leaves text alone. Browser smoke: the conversation list, transcript and Chat link at 1100 and 390 px.
+
 ## [0.10.172] - 2026-11-07
 
 #/chat now lists and shows every conversation on the box: direct chats, Telegram DMs, groups and forum topics, and Agent Relay sessions, with full history and live updates (ALPH-68 PR1, GST-1696).

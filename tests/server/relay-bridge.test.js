@@ -1,7 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { createRelayBridge, findAnswerInHistory, relaySessionKey, kHopLimit } = require("../../lib/server/relay/bridge");
+const { createRelayBridge, findAnswerInHistory, relaySessionKey, kHopLimit, stripHostNotices } = require("../../lib/server/relay/bridge");
 const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
 
 // A fake relay engine: a workspace event log, messages with metadata, 1:1
@@ -709,3 +709,96 @@ describe("relay bridge: the relay masker and a failing sessions.list (ALPH-63)",
     expect(ctx.bridge.getStatus().sessionsListFailures).toBe(0);
   });
 });
+
+
+describe("relay bridge: latency and single-finisher fixes (ALPH-68)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  const runStartedDespiteTimeout = (messageId, sessionKey, answer) => {
+    ctx.gateway.history.set(sessionKey, [
+      { role: "user", content: "[Agent Relay message from @capy-t]\n(ref relay:" + messageId + ", hop 0)\npolicy\n\nslow one" },
+      ...(answer ? [{ role: "assistant", content: [{ type: "text", text: answer }] }] : []),
+    ]);
+  };
+
+  it("a send that timed out still ends through its run's lifecycle end, with one reply (the ALPH-64 timeline)", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-t", "slow one");
+    ctx.gateway.failNextSend(Object.assign(new Error("OpenClaw chat.send request timed out"), { written: true }));
+    await ctx.tick();
+    const row = ctx.store.get(messageId);
+    expect(row).toMatchObject({ state: "reconciling", code: "outcome_unknown", runId: "relay-" + messageId });
+    ctx.nowRef.value += 8000;
+    runStartedDespiteTimeout(messageId, row.sessionKey, "Here is the slow answer.");
+    ctx.bridge.handleGatewayEvent({ event: "agent", payload: { runId: "relay-" + messageId, sessionKey: row.sessionKey, stream: "lifecycle", data: { phase: "end" } } });
+    await flush(20);
+    expect(ctx.store.get(messageId).state).toBe("answered");
+    expect(ctx.engine.replies).toEqual([expect.objectContaining({ parentId: messageId, text: "Here is the slow answer." })]);
+    await ctx.reconcile();
+    await flush(20);
+    expect(ctx.engine.replies).toHaveLength(1);
+  });
+
+  it("an ambiguous send whose answer is already in an idle session ends on the next pass, not after the 2-minute grace", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-t", "slow one");
+    ctx.gateway.failNextSend(Object.assign(new Error("OpenClaw chat.send request timed out"), { written: true }));
+    await ctx.tick();
+    const { sessionKey } = ctx.store.get(messageId);
+    runStartedDespiteTimeout(messageId, sessionKey, null);
+    ctx.gateway.active.add(sessionKey);
+    ctx.nowRef.value += 10000;
+    await ctx.reconcile();
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    ctx.gateway.answer({ sessionKey }, "Done after all.");
+    ctx.nowRef.value += 5000;
+    await ctx.reconcile();
+    await flush(20);
+    expect(ctx.store.get(messageId).state).toBe("answered");
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Done after all."]);
+  });
+
+  it("two reconcile triggers and a lifecycle end racing for one message post exactly one reply", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-t", "slow one");
+    ctx.gateway.failNextSend(Object.assign(new Error("OpenClaw chat.send request timed out"), { written: true }));
+    await ctx.tick();
+    const { sessionKey } = ctx.store.get(messageId);
+    runStartedDespiteTimeout(messageId, sessionKey, "Only once.");
+    ctx.nowRef.value += 3 * 60 * 1000;
+    await Promise.all([
+      ctx.reconcile(),
+      ctx.reconcile(),
+      Promise.resolve().then(() =>
+        ctx.bridge.handleGatewayEvent({ event: "agent", payload: { runId: "relay-" + messageId, sessionKey, stream: "lifecycle", data: { phase: "end" } } }),
+      ),
+    ]);
+    await flush(30);
+    expect(ctx.store.get(messageId).state).toBe("answered");
+    expect(ctx.engine.replies).toHaveLength(1);
+  });
+
+  it("strips OpenClaw's verbose host notices from the start of an answer before it leaves the box", async () => {
+    expect(stripHostNotices("🧭 New session: 0c1d-sess\n🧹 Auto-compaction complete (count 2).\n\nThe answer.")).toBe("The answer.");
+    expect(stripHostNotices("The answer mentions 🧭 New session: x later.")).toBe("The answer mentions 🧭 New session: x later.");
+    ctx = setup();
+    await ctx.tick();
+    ctx.engine.dm("capy-v", "hi");
+    await ctx.tick();
+    await ctx.end(ctx.gateway.sends[0], "🧭 New session: 6f1e2c3d-box-session\n\nHello from the box.");
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Hello from the box."]);
+  });
+
+  it("claims a row only from the states it names", () => {
+    ctx = setup();
+    ctx.store.insert({ messageId: "m1", sender: "s", conversationId: "c", threadRoot: "m1", sessionKey: "agent:main:relay-s", state: "reconciling" });
+    expect(ctx.store.claim("m1", ["dispatched", "reconciling"], "completing")).toBe(true);
+    expect(ctx.store.claim("m1", "reconciling", "completing")).toBe(false);
+    expect(ctx.store.get("m1").state).toBe("completing");
+  });
+});
+

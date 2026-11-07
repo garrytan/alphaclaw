@@ -61,6 +61,15 @@ describe("relay masker (ALPH-63)", () => {
     expect(mask("nothing secret here")).toBe("nothing secret here");
   });
 
+  it("leaves a plain word alone when a configured value equals it, and still masks real secrets (ALPH-68)", () => {
+    const mask = createRelayMasker({ rootDir, env: { GOG_KEYRING_PASSWORD: "alphaclaw", DB_PASSWORD: "postgres" } });
+    const answer = "Run the alphaclaw CLI from node_modules/alphaclaw; postgres is fine. Token " + kSecrets.gatewayToken + ".";
+    const text = mask(answer);
+    expect(text).toContain("Run the alphaclaw CLI from node_modules/alphaclaw; postgres is fine.");
+    expect(text).not.toContain(kSecrets.gatewayToken);
+    expect(mask("key " + kSecrets.envFile)).toBe("key ***");
+  });
+
   const kDeployOnly = "f".repeat(16) + "0123456789abcdef".repeat(3);
 
   // AlphaClaw's real mask route on a real port, backed by the real relay

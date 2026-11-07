@@ -64,7 +64,7 @@ describe("relay tools", () => {
   it("relay_agents merges presence", async () => {
     const tools = createRelayTools({ engine: createEngine(), getAuth: auth });
     expect(parse(await tools.call("relay_agents", {}))).toEqual({
-      agents: [{ name: "wintermute", status: "offline" }, { name: "capy-1", status: "online" }],
+      agents: [{ name: "wintermute", status: "online", box: true }, { name: "capy-1", status: "online" }],
     });
   });
 
