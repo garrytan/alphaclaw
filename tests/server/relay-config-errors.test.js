@@ -95,3 +95,21 @@ describe("relay error table", () => {
     expect(JSON.parse(toMcpError(new Error("boom")).content[0].text)).toMatchObject({ error: "engine_error", detail: "boom" });
   });
 });
+
+describe("relay brain archive config (ALPH-68 PR3)", () => {
+  it("is auto by default, off with ALPHACLAW_RELAY_BRAIN=off, and takes only an absolute gbrain path", () => {
+    expect(readRelayConfig({ env: {} })).toMatchObject({ brainMode: "auto", brainBin: "", brainBinRejected: false });
+    expect(readRelayConfig({ env: { ALPHACLAW_RELAY_BRAIN: "off" } }).brainMode).toBe("off");
+    expect(readRelayConfig({ env: { ALPHACLAW_RELAY_BRAIN_BIN: "/usr/local/bin/gbrain" } }).brainBin).toBe("/usr/local/bin/gbrain");
+    expect(readRelayConfig({ env: { ALPHACLAW_RELAY_BRAIN_BIN: "gbrain" } })).toMatchObject({ brainBin: "", brainBinRejected: true });
+  });
+
+  it("per-peer archive budgets default to 8 MB a day and 512 MB in all, in whole MB", () => {
+    expect(readRelayConfig({ env: {} })).toMatchObject({ brainPeerDailyBytes: 8 * 1024 * 1024, brainPeerTotalBytes: 512 * 1024 * 1024 });
+    expect(readRelayConfig({ env: { ALPHACLAW_RELAY_BRAIN_PEER_DAILY_MB: "2", ALPHACLAW_RELAY_BRAIN_PEER_TOTAL_MB: "64" } })).toMatchObject({
+      brainPeerDailyBytes: 2 * 1024 * 1024,
+      brainPeerTotalBytes: 64 * 1024 * 1024,
+    });
+    expect(readRelayConfig({ env: { ALPHACLAW_RELAY_BRAIN_PEER_DAILY_MB: "0" } }).brainPeerDailyBytes).toBe(1024 * 1024);
+  });
+});

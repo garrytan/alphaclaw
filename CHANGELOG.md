@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.183] - 2026-11-07
+## [0.10.184] - 2026-11-07
 
 Security remediation, webhooks and dependencies (ALPH-71 PR 4, CSO audit L-7, L-9, L-11, L-14, L-15). Builds on the 0.10.179 hotfix.
 
@@ -32,6 +32,24 @@ Security remediation, webhooks and dependencies (ALPH-71 PR 4, CSO audit L-7, L-
 - `tests/server/webhooks-db.test.js`: a quiet hook keeps its newest 25 rows under busy hooks; an over-cap table is trimmed at open.
 - `tests/server/routes-webhooks-coverage.test.js`, `routes-pairings.test.js`, `routes-nodes-coverage.test.js`: header form listed first with the less-safe note; leading-dash ids rejected.
 - Existing tests that used GET to reach a hook now use POST, the OAuth alias test expects no forwarded query string, and the OAuth transform test checks that caller fields are not read.
+
+## [0.10.183] - 2026-11-07
+
+Agent Relay conversations are now saved to the brain as gbrain pages wherever the box has gbrain and a non-federated relay source, so they stay searchable after the relay's own 90-day retention (ALPH-68 PR3, GST-1696).
+
+### Added
+- **Brain archive.** When the box has gbrain and the brain has a non-federated `relay` source, each relay conversation is saved as `relay/<box agent>/<peer>/<conversation id>` (type `relay-conversation`, `trust: external`, `facts_backstop: false`), with part pages past 256 KiB. A page holds both sides of the conversation and the box agent's own messages from its relay session, with tool calls named but never their arguments or results; peer text is fenced as quoted data. Saving waits 2 minutes after a conversation's last message (at most 15 minutes while it stays busy) and skips unchanged pages.
+- Writes go only through the box's gbrain wrapper: `gbrain put --source relay` with the revision gbrain returned and a durable request id, then one `gbrain git commit-push` per batch (gbrain 0.60.593 leaves a put untracked). Exit 10 is polled with `gbrain write-request` and never resubmitted; exit 75 and busy codes (`queue_capacity`, lock busy) back off from 1 minute to 6 hours with the same request and never park; exit 3, a page changed in the brain (`revision_conflict`) and a page that still matched the secret scanner (`masked_refused`) wait for **Retry now**. AlphaClaw never creates the source, runs git in the brain or blocks a relay message on the archive.
+- Pages are cleaned first: credential URLs removed, lines that look like email, meeting notes, health or family replaced by `[withheld: private class]`, then the relay masker and private-key and `secret = value` masking.
+- The Relay page's **Brain archive** card (state, pages saved, waiting, parked conversations, **Retry now**), `archive` in `GET /api/relay/status`, `POST /api/relay/archive/retry` (humans only: not in the admin manifest), and `det:relay-archive-*` Doctor cards. `relay/archive.db` is in **Back up now**.
+- `ALPHACLAW_RELAY_BRAIN=off` turns the archive off, and `ALPHACLAW_RELAY_BRAIN_BIN` names the gbrain wrapper (default `/usr/local/bin/gbrain`; without a wrapper the archive is Not set up and runs nothing). Both are deployment env only.
+- A lost or replaced `relay/archive.db` never shrinks a page: the page gbrain already holds is kept as found and new messages continue on the next part. A put that timed out is read back with `gbrain write-request` before the page is written again, and a timed-out gbrain run ends with its whole process group. Credential URL parameters are matched after percent-decoding, and everything after an email address or header line in a message is withheld.
+- **Per-peer budget.** `ALPHACLAW_RELAY_BRAIN_PEER_DAILY_MB` (default 8) and `ALPHACLAW_RELAY_BRAIN_PEER_TOTAL_MB` (default 512) cap what one peer adds to the brain. Past the daily budget its conversations wait until 00:00 UTC; past the total they park with a Doctor card. The Relay page names the peer, and nothing is dropped.
+- gbrain runs with an allowlisted environment (no provider keys or AlphaClaw secrets). Every message on a page is fenced, the box agent's own included. The cleaning and secret-scan patterns are bounded, so a crafted 16 KB message is cleaned in milliseconds (CSO ALPH-71).
+
+### Tests
+- Hermetic, against a fake gbrain on disk (`tests/fixtures/fake-gbrain.js`): exit 0 with the exact argv, stdin page and commit-push; replace with the stored revision; the 2-minute debounce and 15-minute cap; exit 10 polling with no resubmit; exit 3 parking until Retry; exit 75, `queue_capacity` and `writer_busy` backoff with the same request id; exit 2 and non-retryable failures with a new id; a timeout keeping the id; `revision_required` adoption only for the conversation's own page; `revision_conflict` parking and Retry; commit-push 75, `commit_lock_busy` and exit 3; no gbrain, no source or a federated source; part pages; pages only growing after retention; no tool arguments or results, no planted secret, credential URL or private-class line on a page; `masked_refused`; and a gbrain that never answers leaving the relay and bridge ready.
+- Live: the relay e2e saves the real round trip through the fake wrapper, or through a real gbrain with `OPENCLAW_LIVE_GBRAIN_BIN`.
 
 ## [0.10.182] - 2026-11-07
 
