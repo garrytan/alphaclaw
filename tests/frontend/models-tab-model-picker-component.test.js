@@ -137,6 +137,21 @@ describe("frontend/models-tab SearchableModelPicker", () => {
     );
   });
 
+  it("keeps options out of the Tab order and closes when focus leaves the picker", () => {
+    harness.slots[kOpenSlot] = true;
+    const tree = renderPicker({ options: kOptions });
+    const buttons = findAllByType(tree, "button");
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((button) => button.props.tabIndex === "-1")).toBe(true);
+
+    const root = findAllByType(tree, "div")[0];
+    harness.slots[kRootRefSlot].current = { contains: (node) => node === "inside" };
+    root.props.onFocusOut({ relatedTarget: "inside" });
+    expect(harness.slots[kOpenSlot]).toBe(true);
+    root.props.onFocusOut({ relatedTarget: "outside" });
+    expect(harness.slots[kOpenSlot]).toBe(false);
+  });
+
   it("opens on focus, tracks input, and ignores Enter with no options", () => {
     const tree = renderPicker({});
     const input = findAllByType(tree, "input")[0];

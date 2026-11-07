@@ -247,7 +247,15 @@ describe("frontend/home tab", () => {
         openclawPin: { state: "diverged", installed: "2026.10.8", pinned: "2026.10.9" },
         doctorStatus: { stale: true, changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 2 } },
         devicePending: [{ id: "d1", clientMode: "webchat" }],
-        syncCron: { enabled: false },
+        syncCron: {
+          enabled: true,
+          lastRun: {
+            at: "2026-11-07T17:00:00.000Z",
+            outcome: "held",
+            code: "merge_conflict",
+            headline: "Git sync is holding: another writer pushed conflicting changes",
+          },
+        },
       }),
     );
     const tree = render();
@@ -257,6 +265,40 @@ describe("frontend/home tab", () => {
     expect(solid).toHaveLength(1);
     expect(collectNodes(rows[0]).includes(solid[0])).toBe(true);
     expect(textOf(tree).join(" ")).toContain("Your box is running. 4 things need you.");
+  });
+
+  it("an old git-sync hold with auto-sync off is labelled old in This box and raises no Attention row or nudge", () => {
+    mockState(
+      quietState({
+        syncCron: {
+          enabled: false,
+          lastRun: {
+            at: "2026-10-25T09:00:00.000Z",
+            outcome: "held",
+            code: "merge_conflict",
+            headline: "Git sync is holding: another writer pushed conflicting changes",
+            consecutiveFailures: 618,
+          },
+        },
+      }),
+    );
+    const tree = render();
+    expect(collectNodes(tree).some((vnode) => vnode.props?.["data-attention"])).toBe(false);
+    const text = textOf(tree).join(" ");
+    expect(text).not.toContain("Turn auto-sync on");
+    expect(text).toContain("Your box is running. Nothing needs you.");
+    expect(byType(tree, SyncSettings)[0].props.lastRunLine.text).toContain("Auto-sync is off, so this is an old result.");
+  });
+
+  it("with ALPHACLAW_GIT_SYNC=off This box says Git sync is off", () => {
+    mockState(
+      quietState({
+        syncCron: { enabled: true, lastRun: { at: "2026-11-07T17:00:00.000Z", outcome: "disabled", code: "disabled" } },
+      }),
+    );
+    const tree = render();
+    expect(byType(tree, SyncSettings)[0].props.lastRunLine).toEqual({ tone: "neutral", text: "Git sync is off." });
+    expect(collectNodes(tree).some((vnode) => vnode.props?.["data-attention"])).toBe(false);
   });
 
   it("with several devices waiting only the first Approve is solid", () => {

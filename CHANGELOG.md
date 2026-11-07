@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.999] - 2026-11-07
+## [0.10.204] - 2026-11-07
 
 A gateway crash incident that outlives an AlphaClaw or container restart now closes as recovered once the gateway is ready again, instead of staying "abandoned" on the Health page.
 
@@ -15,6 +15,18 @@ A gateway crash incident that outlives an AlphaClaw or container restart now clo
 ### Not covered
 - Safe-mode incidents are still marked abandoned at startup: only the process that saw safe mode can record its end.
 - Incidents already marked abandoned before this version keep that status.
+
+## [0.10.203] - 2026-11-07
+
+Models & keys groups API keys by provider and saves one key at a time; agent pages get a one-line description and tabs. Home no longer shows an old git-sync result as if it were current. No server, restart, watchdog, gateway or relay behaviour changes, and every action keeps its handler.
+
+### Changed
+- **Models & keys.** A sentence under the header names the box's default model ("Claude Opus 4.8 is the default for this box.", or "No default model yet. Add a model to start.") with Change default beside it. Add model is the page's one solid button and Check models sits beside it (in a ⋯ menu on a phone). The Models table lists each model with its ref in mono, its provider, which agents use it and its check word (Not checked, Checking…, Passed, Failed with the fix), and a line under it says when the last check ran. The default model always has a row, even when the allowlist does not name it, and Tab moves past the model search's suggestions instead of through each one. Provider keys are grouped by provider. Each key row says where its value comes from ("Set in .env", "From deployment" or "Not set"), Show reveals only a value from the .env file, and Replace or Add key saves one key through `PATCH /api/env`, after which the restart prompt appears. A group carries "Check passed" or "Check failed" only when the model check says so, and the page never says "Connected".
+- **Agent detail.** The header shows the agent's name once with a Default badge, a one-line description ("main answers Telegram and relay messages using Claude Opus 4.8."), and the id and workspace in a mono line. Open chat is the one solid button, and Edit, Set as default and Delete moved into a ⋯ menu with the same handlers. Tabs (Overview, Tools, Channels, Sessions) carry counts and move with the arrow keys. The Channels count includes relay when the agent answers relay messages, and the Channels tab says so with a link to Relay. The Model card says "Uses the box default: Claude Opus 4.8" or "Uses …" and shows the ref only when it differs from the model's name, the thinking select says "Thinking: Off", and a 7-day activity chart shows this agent's turns and cost per day.
+- **Home git sync.** When no schedule runs git sync, This box labels the last result as old with its date, and neither Attention nor This box suggests turning auto-sync on. When git sync is turned off with `ALPHACLAW_GIT_SYNC=off`, This box says "Git sync is off". A failed or held sync is an Attention row only while the schedule runs.
+
+### Tests
+- New `models-keys` and `agent-detail` files, plus new cases in `home-model`, `home-tab`, `agents-tab-model-card` and `models-tab-model-picker-component`. All fail on the previous main.
 
 ## [0.10.202] - 2026-11-07
 

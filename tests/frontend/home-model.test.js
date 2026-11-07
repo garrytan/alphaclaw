@@ -3,6 +3,7 @@ import {
   buildAgentRows,
   buildChannelRows,
   buildComingUp,
+  buildGitSyncView,
   buildHomeHeadline,
   buildRelayRow,
   buildStripCells,
@@ -10,6 +11,7 @@ import {
   summarizeRecentIncidents,
 } from "../../lib/public/js/components/home/model.js";
 import { deriveStatusChip } from "../../lib/public/js/components/status-chip.js";
+import { formatLocaleDate } from "../../lib/public/js/lib/format.js";
 
 // Home's pure view-models (ALPH-69 PR 3a): the headline templates, the four
 // strip cells in each of their states, and the card rows.
@@ -282,3 +284,51 @@ describe("frontend/home cards", () => {
     expect(ordered.map((item) => item.key)).toEqual(["doctor", "devices", "pin", "sync"]);
   });
 });
+
+describe("frontend/home git sync", () => {
+  const kHeld = {
+    at: "2026-10-25T09:00:00.000Z",
+    outcome: "held",
+    code: "merge_conflict",
+    headline: "Git sync is holding: another writer pushed conflicting changes",
+    firstFailureAt: "2026-10-20T09:00:00.000Z",
+    consecutiveFailures: 618,
+  };
+
+  it("labels the last result old, with its date, and raises nothing when no schedule runs git sync", () => {
+    const view = buildGitSyncView({ repo: "acme/box", syncCron: { enabled: false, lastRun: kHeld }, nowMs });
+    expect(view.attention).toBeNull();
+    expect(view.line.tone).toBe("neutral");
+    expect(view.line.text).toBe(
+      "Auto-sync is off, so this is an old result. Last git sync, " +
+        formatLocaleDate(kHeld.at) +
+        ": Git sync is holding: another writer pushed conflicting changes.",
+    );
+    expect(view.line.text).not.toContain("Turn auto-sync on");
+    expect(view.line.text).not.toContain("not being pushed");
+    expect(buildGitSyncView({ repo: "acme/box", syncCron: { enabled: false, lastRun: null }, nowMs })).toEqual({
+      line: { tone: "neutral", text: "Auto-sync is off. Git sync has not run on this box." },
+      attention: null,
+    });
+  });
+
+  it("says Git sync is off when ALPHACLAW_GIT_SYNC=off, schedule or not", () => {
+    const off = { at: "2026-11-07T17:00:00.000Z", outcome: "disabled", code: "disabled", headline: "Git sync is off (ALPHACLAW_GIT_SYNC=off)" };
+    for (const enabled of [true, false]) {
+      expect(buildGitSyncView({ repo: "acme/box", syncCron: { enabled, lastRun: off }, nowMs })).toEqual({
+        line: { tone: "neutral", text: "Git sync is off." },
+        attention: null,
+      });
+    }
+  });
+
+  it("raises a current hold as Attention only while a schedule runs git sync", () => {
+    const view = buildGitSyncView({ repo: "acme/box", syncCron: { enabled: true, lastRun: { ...kHeld, at: "2026-11-07T17:07:00.000Z" } }, nowMs });
+    expect(view.attention).toMatchObject({ key: "sync", tone: "warn", title: kHeld.headline });
+    expect(view.line.tone).toBe("warning");
+    const ok = buildGitSyncView({ repo: "acme/box", syncCron: { enabled: true, lastRun: { at: "2026-11-07T17:07:00.000Z", outcome: "ok" } }, nowMs });
+    expect(ok.attention).toBeNull();
+    expect(buildGitSyncView({ repo: "", syncCron: { enabled: false } })).toBeNull();
+  });
+});
+
