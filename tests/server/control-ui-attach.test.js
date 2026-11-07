@@ -51,6 +51,20 @@ describe("control-ui-attach: the redirect decision", () => {
     expect(decide()(req)).toBeNull();
   });
 
+  it("spends the pass on the navigation it lets through, so the next tab detours", () => {
+    const res = { clearCookie: vi.fn() };
+    const req = navReq({ headers: { ...kNavigate, cookie: sessionCookie(markerCookie()) } });
+    expect(decide()(req, res)).toBeNull();
+    expect(res.clearCookie).toHaveBeenCalledWith(kControlUiAttachCookie, { path: "/openclaw" });
+    expect(decide()(navReq(), { clearCookie: vi.fn() })).toMatch(/^\/gateway\/attach\?to=/);
+  });
+
+  it("never detours the gateway's own __openclaw__ handoffs, which a loaded tab navigates to itself", () => {
+    const req = navReq({ originalUrl: "/openclaw/__openclaw__/session-entry?path=%2Fopenclaw%2Fchat%2Fmain" });
+    expect(decide()(req)).toBeNull();
+    expect(decide()(navReq({ originalUrl: "/openclaw/chat/__openclaw__/x" }))).toMatch(/^\/gateway\/attach\?to=/);
+  });
+
   it("detours again after a new login: a marker from another session does not count", () => {
     const stale = `${kControlUiAttachCookie}=${computeAttachMarker("old-session.sig")}`;
     const req = navReq({ headers: { ...kNavigate, cookie: sessionCookie(stale) } });
@@ -118,6 +132,8 @@ describe("control-ui-attach: target and page", () => {
     expect(html).not.toContain("</script><img");
     expect(html).toContain("openclaw.control.token.v1:");
     expect(html).toContain('"x-alphaclaw-attach":"1"');
+    expect(html).toContain("location.replace(target+location.hash)");
+    expect(html).toContain("Couldn't reach AlphaClaw. Reload to try again.");
   });
 });
 
@@ -136,7 +152,7 @@ describe("control-ui-attach: routes", () => {
     return { app, resolveDashboardToken };
   };
 
-  it("serves the attach page to an admin: no-store, marker cookie on /openclaw, no token in the body", async () => {
+  it("serves the attach page to an admin: no-store, no token in the body, and no pass yet", async () => {
     const { app, resolveDashboardToken } = createHarness();
     const res = await request(app)
       .get("/gateway/attach?to=%2Fopenclaw%2Fchat")
@@ -145,10 +161,7 @@ describe("control-ui-attach: routes", () => {
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.text).not.toContain(kToken);
     expect(res.text).toContain('"/openclaw/chat"');
-    const cookie = res.headers["set-cookie"].join("\n");
-    expect(cookie).toContain(`${kControlUiAttachCookie}=${computeAttachMarker(kSession)}`);
-    expect(cookie).toMatch(/Path=\/openclaw/);
-    expect(cookie).toMatch(/HttpOnly/);
+    expect(res.headers["set-cookie"]).toBeUndefined();
     expect(resolveDashboardToken).not.toHaveBeenCalled();
   });
 
@@ -172,6 +185,11 @@ describe("control-ui-attach: routes", () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ token: kToken });
       expect(res.headers["cache-control"]).toBe("no-store");
+      const cookie = res.headers["set-cookie"].join("\n");
+      expect(cookie).toContain(`${kControlUiAttachCookie}=${computeAttachMarker(kSession)}`);
+      expect(cookie).toMatch(/Path=\/openclaw/);
+      expect(cookie).toMatch(/HttpOnly/);
+      expect(cookie).toMatch(/Max-Age=60(?:;|$)/);
       expect(log.mock.calls.flat().join(" ")).not.toContain(kToken);
     } finally {
       log.mockRestore();
@@ -194,6 +212,17 @@ describe("control-ui-attach: routes", () => {
       .set("sec-fetch-site", "cross-site");
     expect(crossSite.status).toBe(403);
     expect(resolveDashboardToken).not.toHaveBeenCalled();
+  });
+
+  it("hands out the pass with the answer even when the token read throws, so the page's return never loops", async () => {
+    const { app, resolveDashboardToken } = createHarness();
+    resolveDashboardToken.mockRejectedValueOnce(new Error("cli timed out"));
+    const res = await request(app)
+      .post("/gateway/attach")
+      .set("Cookie", sessionCookie())
+      .set("x-alphaclaw-attach", "1");
+    expect(res.body).toEqual({ token: "" });
+    expect(res.headers["set-cookie"].join("\n")).toContain(`${kControlUiAttachCookie}=${computeAttachMarker(kSession)}`);
   });
 
   it("gives a member no token and never resolves one", async () => {
@@ -242,6 +271,9 @@ describe("control-ui-attach: /openclaw wiring", () => {
       .set(kNavigate)
       .set("Cookie", sessionCookie(markerCookie()));
     expect(attached.status).toBe(200);
+    expect(attached.headers["set-cookie"].join("\n")).toMatch(
+      /^alphaclaw_control_ui=; Path=\/openclaw; Expires=Thu, 01 Jan 1970/m,
+    );
     const asset = await request(app).get("/openclaw/sw.js").set("Cookie", sessionCookie());
     expect(asset.status).toBe(200);
     expect(web).toHaveBeenCalledTimes(2);
