@@ -1,6 +1,7 @@
 const { createChatBridgeTestKit, waitUntil } = require("./helpers/chat-gateway-harness");
 const { buildHistoryMessages, parseRelayEnvelope } = require("../../lib/server/chat/history");
 const { classifySessionRow, createSessionListCache, resolveSessionPolicy } = require("../../lib/server/chat/session-list");
+const { createSessionWatch } = require("../../lib/server/chat/session-watch");
 const systemDomain = require("../../lib/server/admin-manifest/domains/system");
 
 const kRelayContent = [
@@ -117,6 +118,38 @@ describe("chat session list (ALPH-68)", () => {
     }
   });
 
+  it("resolves a send's policy from a fresh read when the cache is cold, not from the bare key", async () => {
+    const telegramMain = { key: "agent:main:main", deliveryContext: { channel: "telegram" } };
+    const cache = createSessionListCache({ requestGateway: async () => ({ sessions: [telegramMain] }) });
+    await cache.list();
+    cache.invalidate();
+    expect(resolveSessionPolicy(await cache.resolve("agent:main:main"), "agent:main:main")).toMatchObject({ readOnly: true });
+    const down = createSessionListCache({
+      requestGateway: async () => {
+        throw new Error("gateway down");
+      },
+    });
+    expect(await down.resolve("agent:main:relay-capy-x")).toBeNull();
+  });
+
+  it("starts a new read after an invalidation instead of joining the one it raced", async () => {
+    const pending = [];
+    const cache = createSessionListCache({
+      requestGateway: () =>
+        new Promise((resolve) => {
+          const key = `k${pending.length + 1}`;
+          pending.push(() => resolve({ sessions: [{ key }] }));
+        }),
+    });
+    const first = cache.list();
+    cache.invalidate();
+    const second = cache.list();
+    for (const release of pending) release();
+    expect(await first).toEqual([{ key: "k1" }]);
+    expect(await second).toEqual([{ key: "k2" }]);
+    expect(cache.get("k2")).toEqual({ key: "k2" });
+  });
+
   it("pages through sessions.list so a box with more than one page of sessions lists them all", async () => {
     const offsets = [];
     const cache = createSessionListCache({
@@ -170,6 +203,31 @@ describe("chat session list (ALPH-68)", () => {
         "replyAccountId", "replyChannel", "replyTo", "sessionId", "topicName", "updatedAt",
       ],
     );
+  });
+});
+
+describe("session watch subscription (ALPH-68)", () => {
+  it("retries a failed sessions.subscribe while someone watches, then has watchers refetch what they missed", async () => {
+    let attempts = 0;
+    const delivered = [];
+    const watch = createSessionWatch({
+      requestGateway: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("gateway busy");
+        return { subscribed: true };
+      },
+      deliver: (ws, sessionKey, serialized) => delivered.push([ws, JSON.parse(serialized)]),
+      subscribeRetryMs: 5,
+    });
+    try {
+      watch.watch("tab", "agent:main:main");
+      await waitUntil(() => watch.stats().subscribed, "subscribed after retries");
+      expect(attempts).toBe(3);
+      expect(watch.stats().subscribeFailures).toBe(2);
+      expect(delivered).toEqual([["tab", { type: "desync", sessionKey: "agent:main:main" }]]);
+    } finally {
+      watch.close();
+    }
   });
 });
 
@@ -240,6 +298,20 @@ describe("chat bridge session watching (ALPH-68, d4)", () => {
     await kit.startRun({ harness, browser, sessionKey: "agent:main:main", runId: "own-run" });
     harness.emit({ type: "event", event: "session.message", payload: { sessionKey: "agent:main:main", runId: "own-run", message: { role: "assistant", content: "x", __openclaw: { id: "a1" } } } });
     await waitUntil(() => service.getChatStats().watch.suppressedRows === 1, "suppressed");
+    expect(browser.messages.some((m) => m.type === "session-event")).toBe(false);
+  });
+
+  it("still forwards those rows to another tab that only watches the session", async () => {
+    const { kit, harness, service, browser } = await setup();
+    const watcher = await kit.openBrowser(service);
+    await watcher.waitFor((m) => m.type === "hello");
+    browser.send({ type: "watch", sessionKey: "agent:main:main" });
+    watcher.send({ type: "watch", sessionKey: "agent:main:main" });
+    await waitUntil(() => harness.requests.some((r) => r.method === "sessions.subscribe"), "subscribe");
+    await kit.startRun({ harness, browser, sessionKey: "agent:main:main", runId: "own-run" });
+    harness.emit({ type: "event", event: "session.message", payload: { sessionKey: "agent:main:main", runId: "own-run", message: { role: "assistant", content: "x", __openclaw: { id: "a1" } } } });
+    const frame = await watcher.waitFor((m) => m.type === "session-event" && m.kind === "row");
+    expect(frame).toMatchObject({ sessionKey: "agent:main:main", runId: "own-run" });
     expect(browser.messages.some((m) => m.type === "session-event")).toBe(false);
   });
 
