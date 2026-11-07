@@ -33,6 +33,33 @@ describe("setup-ui-headers", () => {
     expect(page("POST", "/login.html")).toBe(false);
   });
 
+  it("matches the decoded, slash-collapsed path express.static serves", () => {
+    const page = (path) => isSetupUiPageRequest({ method: "GET", path });
+    for (const path of [
+      "/%73etup.html",
+      "/%6cogin.html",
+      "/%6Cogin.HTML",
+      "//setup.html",
+      "///login.html",
+      "/js/%2e%2e/setup.html",
+      "/%2e/login.html",
+      "/setup%2ehtml",
+      "/%73etup/",
+      "//setup",
+    ]) {
+      expect(page(path), path).toBe(true);
+    }
+    for (const path of ["/%6apenclaw", "//openclaw/", "/js/%2e%2e/js/login.js"]) {
+      expect(page(path), path).toBe(false);
+    }
+  });
+
+  it("does not throw on a malformed encoding", () => {
+    for (const path of ["/%E0%A4%A", "/%", "/setup%zz.html", "/%c0%af"]) {
+      expect(() => isSetupUiPageRequest({ method: "GET", path }), path).not.toThrow();
+    }
+  });
+
   it("sets the headers only on page responses", async () => {
     const app = express();
     app.use(setupUiSecurityHeaders);

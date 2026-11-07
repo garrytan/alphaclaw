@@ -7,13 +7,13 @@ const os = require("os");
 const path = require("path");
 
 const { buildSetupUiCsp } = require("../../lib/server/setup-ui-headers");
-const { kLoginGlobalMaxAttempts, kLoginGlobalSoftDelayMs } = require("../../lib/server/constants");
+const { kLoginGlobalMaxAttempts } = require("../../lib/server/constants");
 
 // ALPH-71 PR 3 (web hardening) against the real lib/server.js, so the
 // production mount order is what is tested: the Setup UI CSP on every Setup
 // UI page and nowhere else, the origin check on cookie writes, the terminal
 // and chat upgrades and the OAuth start, the WebSocket catch-all allowlist,
-// and the login throttle's soft global delay.
+// and the login throttle's box-wide lockout.
 
 const kRepoRoot = path.resolve(__dirname, "..", "..");
 const kServerPath = path.join(kRepoRoot, "lib", "server.js");
@@ -243,6 +243,101 @@ describe("Setup UI CSP (real server)", () => {
   });
 });
 
+describe("Setup UI CSP under path encodings (real server)", () => {
+  const kPublicDir = path.join(kRepoRoot, "lib", "public");
+  const listHtml = (dir) =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return listHtml(full);
+      return entry.name.endsWith(".html") ? [full] : [];
+    });
+  const kStaticPages = listHtml(kPublicDir).map(
+    (file) => `/${path.relative(kPublicDir, file).split(path.sep).join("/")}`,
+  );
+  const kEntryPages = ["/", "/setup", ...kStaticPages];
+  const hex = (char, upper) => {
+    const code = char.charCodeAt(0).toString(16);
+    return `%${upper ? code.toUpperCase() : code}`;
+  };
+  const encodeLetters = (urlPath, { all = false, upper = false } = {}) => {
+    let done = false;
+    return urlPath.replace(/[a-z]/gi, (char) => {
+      if (done && !all) return char;
+      done = true;
+      return hex(char, upper);
+    });
+  };
+  const mixCase = (urlPath) =>
+    urlPath.replace(/[a-z]/gi, (char, index) => (index % 2 ? char.toUpperCase() : char.toLowerCase()));
+  const variantsOf = (urlPath) => {
+    const variants = [
+      urlPath,
+      encodeLetters(urlPath),
+      encodeLetters(urlPath, { upper: true }),
+      encodeLetters(urlPath, { all: true }),
+      `/${urlPath}`,
+      `//${urlPath}`,
+      `/${encodeLetters(urlPath)}`,
+      mixCase(urlPath),
+      mixCase(encodeLetters(urlPath, { upper: true })),
+      `${urlPath}/`,
+      `/%2e${urlPath}`,
+      `/%2E${urlPath}`,
+      `/js/%2e%2e${urlPath}`,
+      `/js/%2E%2E${urlPath}`,
+      `/js%2f..${urlPath}`,
+    ];
+    if (urlPath.includes(".")) {
+      const dot = urlPath.lastIndexOf(".");
+      variants.push(`${urlPath.slice(0, dot)}%2e${urlPath.slice(dot + 1)}`);
+      variants.push(`/${urlPath.slice(0, dot)}%2E${urlPath.slice(dot + 1)}`);
+    }
+    return [...new Set(variants)];
+  };
+  const rawGet = (urlPath) =>
+    new Promise((resolve) => {
+      const req = http.request({ host: "127.0.0.1", port, path: urlPath, method: "GET", headers: { cookie } });
+      req.on("response", (res) => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode, headers: res.headers }));
+      });
+      req.on("error", (error) => resolve({ status: 0, error: error.code, headers: {} }));
+      req.setTimeout(8000, () => {
+        req.destroy();
+        resolve({ status: -1, headers: {} });
+      });
+      req.end();
+    });
+
+  it("finds the static entry pages it walks", () => {
+    expect(kStaticPages).toEqual(expect.arrayContaining(["/login.html", "/setup.html"]));
+  });
+
+  it("serves every entry page with the CSP and frame denial under every encoding", async () => {
+    const served = [];
+    const missing = [];
+    for (const page of kEntryPages) {
+      for (const variant of variantsOf(page)) {
+        const res = await rawGet(variant);
+        if (res.status !== 200 || !/text\/html/.test(String(res.headers["content-type"] || ""))) continue;
+        served.push(variant);
+        if (
+          res.headers["content-security-policy"] !== buildSetupUiCsp({ host }) ||
+          res.headers["x-frame-options"] !== "DENY"
+        ) {
+          missing.push(variant);
+        }
+      }
+    }
+    expect(missing).toEqual([]);
+    for (const page of kStaticPages) {
+      expect(served, page).toEqual(
+        expect.arrayContaining([encodeLetters(page), `/${page}`, `/js/%2e%2e${page}`]),
+      );
+    }
+  }, 30000);
+});
+
 describe("origin checks (real server)", () => {
   it("refuses a cross-origin cookie write with 403 origin_mismatch and lets the box's own through", async () => {
     const cross = await call("POST", "/api/watchdog/events", {
@@ -307,20 +402,24 @@ describe("WebSocket catch-all (real server)", () => {
 });
 
 describe("login throttle (real server)", () => {
-  it("slows sign-in once the global bucket is full instead of refusing it", async () => {
-    for (let i = 0; i < kLoginGlobalMaxAttempts; i += 1) {
-      const res = await call("POST", "/api/auth/login", {
-        headers: { "x-forwarded-for": `203.0.113.${i + 1}` },
-        body: { password: "wrong" },
-      });
-      expect(res.status).toBe(401);
-    }
-    const startedAt = Date.now();
-    const owner = await call("POST", "/api/auth/login", {
+  it("locks the whole box once parallel guesses from rotating clients fill the global bucket", async () => {
+    const extra = 6;
+    const results = await Promise.all(
+      Array.from({ length: kLoginGlobalMaxAttempts + extra }, (_, i) =>
+        call("POST", "/api/auth/login", {
+          headers: { "x-forwarded-for": `203.0.113.${i + 1}` },
+          body: { password: "wrong" },
+        }),
+      ),
+    );
+    const statuses = results.map((res) => res.status);
+    expect(statuses.filter((status) => status === 401).length).toBe(kLoginGlobalMaxAttempts - 1);
+    expect(statuses.filter((status) => status === 429).length).toBe(extra + 1);
+    const fresh = await call("POST", "/api/auth/login", {
       headers: { "x-forwarded-for": "198.51.100.9" },
       body: { password: kPassword },
     });
-    expect(owner.status).toBe(200);
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(kLoginGlobalSoftDelayMs - 100);
+    expect(fresh.status).toBe(429);
+    expect(Number(fresh.headers.get("retry-after"))).toBeGreaterThan(0);
   }, 30000);
 });

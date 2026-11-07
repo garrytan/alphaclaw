@@ -454,8 +454,44 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     global.fetch = async () => ({ ok: false, json: async () => ({ error: "stub" }) });
     const res = await request(app).get(`/auth/google/callback?code=c1&state=${state}`);
     expect(res.text).toContain("google: 'error'");
-    expect(res.text).toContain("}, window.location.origin);");
+    expect(res.text).toContain('}, "http://box.test");');
     expect(res.text).not.toContain("'*'");
+    const unknown = await request(app).get("/auth/google/callback?code=c1&state=unknown");
+    expect(unknown.text).toContain("}, window.location.origin);");
+    expect(unknown.text).not.toContain("'*'");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("posts the result to the origin that started the flow on an alias hostname, never one the callback names (ALPH-71 L-10)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { app, tmpDir } = buildGoogleApp({ getBaseUrl: () => "https://claw.example.com" });
+    const aliasStart = { Host: "alias.example:8443", Origin: "https://alias.example:8443" };
+    const evil = { Host: "evil.example", Origin: "https://evil.example", "X-Forwarded-Host": "evil.example" };
+    const state = await startFlow(app, { body: { services: "gmail" }, headers: aliasStart });
+    global.fetch = async (url) => {
+      if (String(url).includes("oauth2.googleapis.com/token")) {
+        return {
+          ok: true,
+          json: async () => ({ access_token: "at", refresh_token: "rt", scope: "gmail-scope" }),
+        };
+      }
+      return { ok: true, json: async () => ({ email: "linked@example.com" }) };
+    };
+    const success = await request(app)
+      .get(`/auth/google/callback?code=c&state=${state}&origin=${encodeURIComponent("https://evil.example")}`)
+      .set(evil);
+    expect(success.text).toContain("google: 'success'");
+    const failedState = await startFlow(app, { body: { services: "gmail" }, headers: aliasStart });
+    global.fetch = async () => ({ ok: false, json: async () => ({ error: "stub" }) });
+    const failure = await request(app).get(`/auth/google/callback?code=c&state=${failedState}`).set(evil);
+    expect(failure.text).toContain("google: 'error'");
+    for (const page of [success, failure]) {
+      expect(page.text).toContain('}, "https://alias.example:8443");');
+      expect(page.text).not.toContain("evil.example");
+      expect(page.text).not.toContain("claw.example.com");
+      expect(page.text).not.toContain("window.location.origin");
+      expect(page.text).not.toContain("'*'");
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 

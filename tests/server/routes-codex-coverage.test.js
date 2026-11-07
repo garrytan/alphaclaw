@@ -223,10 +223,46 @@ describe("server/routes/codex coverage", () => {
       pages.push(await request(app).get(`/auth/codex/callback?code=c1&state=${state}`));
       for (const page of pages) {
         expect(page.text).toContain("postMessage(");
-        expect(page.text).toContain("}, window.location.origin);");
         expect(page.text).not.toContain("'*'");
       }
+      for (const page of pages.slice(0, 3)) {
+        expect(page.text).toContain("}, window.location.origin);");
+      }
+      expect(pages[3].text).toContain('}, "http://box.test");');
       expect(pages[3].text).toContain("codex: 'success'");
+    });
+
+    it("posts a started flow's results to the origin that started it on an alias hostname, never one the callback names (ALPH-71 L-10)", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { app } = createApp();
+      const startFromAlias = async () => {
+        const res = await request(app)
+          .post("/auth/codex/start")
+          .set("Host", "alias.example:8443")
+          .set("Origin", "https://alias.example:8443")
+          .send({});
+        expect(res.status).toBe(200);
+        return new URL(res.body.url).searchParams.get("state");
+      };
+      const evil = { Host: "evil.example", Origin: "https://evil.example", "X-Forwarded-Host": "evil.example" };
+      const state = await startFromAlias();
+      global.fetch = vi.fn(async () => buildTokenResponse());
+      const pages = [
+        await request(app).get(`/auth/codex/callback?error=denied&state=${state}`).set(evil),
+        await request(app).get(`/auth/codex/callback?state=${state}&origin=https%3A%2F%2Fevil.example`).set(evil),
+        await request(app).get(`/auth/codex/callback?code=c1&state=${state}`).set(evil),
+      ];
+      expect(pages[2].text).toContain("codex: 'success'");
+      const failedState = await startFromAlias();
+      global.fetch = vi.fn(async () => buildTokenResponse({ ok: false, status: 400 }));
+      pages.push(await request(app).get(`/auth/codex/callback?code=c2&state=${failedState}`).set(evil));
+      expect(pages[3].text).toContain("codex: 'error'");
+      for (const page of pages) {
+        expect(page.text).toContain('}, "https://alias.example:8443");');
+        expect(page.text).not.toContain("evil.example");
+        expect(page.text).not.toContain("window.location.origin");
+        expect(page.text).not.toContain("'*'");
+      }
     });
 
     it("reports missing state or code", async () => {
