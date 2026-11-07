@@ -16,6 +16,16 @@ describe("relay doctor card", () => {
     expect(card.recommendation).toContain("Restore relay/secrets.json");
     expect(card.fixPrompt).toContain("never print their contents");
   });
+
+  it("one P1 relay_guard_missing card while the bridge holds messages for a missing relay guard", () => {
+    expect(buildRelayCards({ enabled: true, phase: "ready", bridge: { guard: { state: "active" } } })).toEqual([]);
+    expect(buildRelayCards({ enabled: true, phase: "ready", bridge: { guard: { state: "unknown" } } })).toEqual([]);
+    expect(buildRelayCards({ enabled: false, phase: "off", bridge: { guard: { state: "missing" } } })).toEqual([]);
+    const [card, ...rest] = buildRelayCards({ enabled: true, phase: "ready", bridge: { guard: { state: "missing" } } });
+    expect(rest).toEqual([]);
+    expect(card).toMatchObject({ sourceKey: "det:relay-relay_guard_missing", priority: "P1", recommendation: describeRelayError("relay_guard_missing").fix });
+    expect(card.fixPrompt).toContain("Never remove or loosen the relay-guard plugin entry");
+  });
 });
 
 describe("relay brain archive doctor cards (ALPH-68 PR3)", () => {

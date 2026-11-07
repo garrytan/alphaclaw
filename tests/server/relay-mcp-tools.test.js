@@ -20,6 +20,7 @@ const createEngine = () => ({
   ]),
   listAgents: vi.fn(async () => [{ name: "wintermute" }, { name: "capy-1" }]),
   presence: vi.fn(async () => [{ agent_name: "capy-1", status: "online" }]),
+  conversations: vi.fn(async () => [{ id: "dm_1", channel_id: "dmch_1", type: "1:1", participants: ["wintermute", "capy-1"] }]),
 });
 
 const auth = () => ({ workspaceKey: "rk_live_x", agentToken: "at_live_x", agentName: "wintermute" });
@@ -88,7 +89,7 @@ describe("relay tools", () => {
 describe("relay tools: hop propagation (ALPH-63)", () => {
   it("a message sent during a relay run carries that run's hop + 1, and a reply at least its parent's hop + 1", async () => {
     const engine = createEngine();
-    engine.getMessage = vi.fn(async () => ({ id: "30", metadata: { relay_hop: 2 } }));
+    engine.getMessage = vi.fn(async () => ({ id: "30", channel_id: "dmch_1", metadata: { relay_hop: 2 } }));
     let next = 3;
     const tools = createRelayTools({ engine, getAuth: auth, nextHop: () => next });
     await tools.call("relay_send", { to: "capy-1", text: "forwarding" });
@@ -120,6 +121,58 @@ describe("relay tools: hop propagation (ALPH-63)", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("relay tools: relay_reply is for the conversation's participants only (ALPH-71 M-2)", () => {
+  // Engine 12.8.0 shapes (probed against the pinned binary): a message names
+  // its DM channel, and the workspace's conversation list names the
+  // channel's two participants.
+  const createConversationEngine = () => {
+    const engine = createEngine();
+    engine.getMessage = vi.fn(async (token, id) => {
+      if (id === "400") return { id: "400", channel_id: "dmch_b", agent_name: "capy-b", metadata: { relay_hop: 1 } };
+      if (id === "500") return { id: "500", channel_id: "dmch_a", agent_name: "capy-a", metadata: {} };
+      throw Object.assign(new Error("404"), { engineStatus: 404 });
+    });
+    engine.conversations = vi.fn(async () => [
+      { id: "dm_a", channel_id: "dmch_a", type: "1:1", participants: ["wintermute", "capy-a"] },
+      { id: "dm_b", channel_id: "dmch_b", type: "1:1", participants: ["wintermute", "capy-b"] },
+    ]);
+    return engine;
+  };
+  const as = (agentName) => () => ({ workspaceKey: "rk_live_x", agentToken: "at_live_" + agentName, agentName });
+
+  it("a non-participant's reply is refused exactly like a missing message, and nothing is posted", async () => {
+    const engine = createConversationEngine();
+    const tools = createRelayTools({ engine, getAuth: as("capy-a") });
+    const intruding = await tools.call("relay_reply", { message_id: "400", text: "injected" });
+    const missing = await tools.call("relay_reply", { message_id: "999", text: "injected" });
+    expect(intruding.isError).toBe(true);
+    expect(intruding).toEqual(missing);
+    expect(parse(intruding)).toMatchObject({ error: "message_not_found", detail: "Message not found." });
+    expect(engine.reply).not.toHaveBeenCalled();
+    expect(engine.getMessage).toHaveBeenCalledWith("rk_live_x", "400");
+  });
+
+  it("a participant's reply goes through, hop at least the parent's + 1", async () => {
+    const engine = createConversationEngine();
+    const own = createRelayTools({ engine, getAuth: as("capy-b") });
+    expect(parse(await own.call("relay_reply", { message_id: "400", text: "fine" }))).toEqual({ message_id: "12", in_reply_to: "400" });
+    expect(engine.reply).toHaveBeenCalledWith("at_live_capy-b", "400", "fine", { relay_hop: 2 });
+    const box = createRelayTools({ engine, getAuth: as("wintermute") });
+    expect((await box.call("relay_reply", { message_id: "500", text: "ok" })).isError).toBeFalsy();
+  });
+
+  it("an engine that cannot be read fails the reply instead of posting unchecked", async () => {
+    const engine = createConversationEngine();
+    engine.conversations = vi.fn(async () => {
+      throw Object.assign(new Error("down"), { code: "engine_unavailable" });
+    });
+    const tools = createRelayTools({ engine, getAuth: as("capy-b") });
+    expect((await tools.call("relay_reply", { message_id: "400", text: "x" })).isError).toBe(true);
+    expect(engine.reply).not.toHaveBeenCalled();
   });
 });
 

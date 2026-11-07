@@ -802,7 +802,7 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     }
   });
 
-  it("the hourly cap holds against one JSON-RPC batch and against parallel POSTs, and a failed send gives its slot back", async () => {
+  it("the hourly cap holds against one JSON-RPC batch and against parallel POSTs, and a refused send keeps its slot", async () => {
     ctx = setup({ env: { ALPHACLAW_RELAY_HOURLY_CAP: "3" } });
     const flow = await connect(ctx);
     const token = flow.token.access_token;
@@ -820,7 +820,7 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
       .set("Accept", "application/json, text/event-stream")
       .send(Array.from({ length: 5 }, () => ({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "relay_send", arguments: args("wintermute") } })));
     expect(batch.status).toBe(200);
-    expect(ctx.engine.sent).toHaveLength(3);
+    expect(ctx.engine.sent).toHaveLength(2);
     const other = await connect(ctx);
     const theirs = (await callTool(ctx.app, other.token.access_token, "relay_bind", { thread_id: "jam_D", webhook_url: kWebhook })).data;
     const results = await Promise.all(
@@ -830,7 +830,7 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     );
     expect(results.filter((entry) => !entry.result.isError)).toHaveLength(3);
     expect(results.filter((entry) => entry.data.error === "rate_limited")).toHaveLength(3);
-    expect(ctx.engine.sent).toHaveLength(6);
+    expect(ctx.engine.sent).toHaveLength(5);
   });
 
   it("a wake enqueue that keeps failing is dropped after five tries, so later relay events are not held back", async () => {
@@ -879,3 +879,132 @@ describe("relay remote: fix push after the final /ship (ALPH-63)", () => {
     expect(resolveRelayPublicUrl({ env: { ALPHACLAW_SETUP_URL: "https://box.onrender.com" }, resolveSetupUrl })).toBe("https://box.onrender.com");
   });
 });
+
+describe("relay remote: ALPH-71 (M-2 cap accounting, L-12 bind cap, L-13 client secrets)", () => {
+  let ctx;
+  afterEach(() => ctx?.cleanup());
+
+  it("a refused relay_reply probe uses its hourly slot; only an engine or masking outage gives a slot back", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_HOURLY_CAP: "3" } });
+    ctx.engine.conversations = async () => [{ id: "dm_v", channel_id: "dmch_v", type: "1:1", participants: ["wintermute", "capy-victim00000"] }];
+    ctx.engine.getMessage = async (key, id) => ({ id, channel_id: "dmch_v", agent_name: "capy-victim00000", metadata: {} });
+    const flow = await connect(ctx);
+    const token = flow.token.access_token;
+    const bound = (await callTool(ctx.app, token, "relay_bind", { thread_id: "jam_P", webhook_url: kWebhook })).data;
+    const probe = (id) => callTool(ctx.app, token, "relay_reply", { as: bound.agent, capability: bound.capability, message_id: id, text: "injected" });
+    const first = await probe("244705956220485632");
+    expect(first.data).toMatchObject({ error: "message_not_found", detail: "Message not found." });
+    const realSend = ctx.engine.sendDm;
+    const send = () => callTool(ctx.app, token, "relay_send", { as: bound.agent, capability: bound.capability, to: "wintermute", text: "hi" });
+    const { RelayError } = require("../../lib/server/relay/errors");
+    ctx.engine.sendDm = async () => {
+      throw new RelayError("engine_unavailable", "down");
+    };
+    expect((await send()).data.error).toBe("engine_unavailable");
+    expect((await send()).data.error).toBe("engine_unavailable");
+    ctx.engine.sendDm = realSend;
+    expect((await probe("244705956220485633")).data.error).toBe("message_not_found");
+    expect((await send()).result.isError).toBeFalsy();
+    expect((await send()).data.error).toBe("rate_limited");
+  });
+
+  it("caps active bindings per OAuth client: default 20, ALPHACLAW_RELAY_MAX_BINDINGS_PER_CLIENT from the deployment env only", async () => {
+    const { readRelayConfig, kRelayEnvKeys } = require("../../lib/server/relay/config");
+    const { kDeploymentOnlyEnvKeys } = require("../../lib/server/deployment-only-env");
+    expect(readRelayConfig({ env: {} }).maxBindingsPerClient).toBe(20);
+    expect(kDeploymentOnlyEnvKeys).toContain(kRelayEnvKeys.maxBindingsPerClient);
+    ctx = setup({ env: { ALPHACLAW_RELAY_MAX_BINDINGS_PER_CLIENT: "2" } });
+    const flow = await connect(ctx);
+    const token = flow.token.access_token;
+    const bind = (threadId, extra = {}) => callTool(ctx.app, token, "relay_bind", { thread_id: threadId, webhook_url: kWebhook, ...extra });
+    const a = (await bind("jam_A")).data;
+    expect((await bind("jam_B")).result.isError).toBeFalsy();
+    const refused = await bind("jam_C");
+    expect(refused.data.error).toBe("binding_limit");
+    const agentsBefore = ctx.engine.agents.size;
+    expect((await bind("jam_A", { capability: a.capability })).result.isError).toBeFalsy();
+    expect(ctx.engine.agents.size).toBe(agentsBefore);
+    await callTool(ctx.app, token, "relay_unbind", { as: a.agent, capability: a.capability });
+    expect((await bind("jam_C")).result.isError).toBeFalsy();
+    const other = await connect(ctx);
+    expect((await callTool(ctx.app, other.token.access_token, "relay_bind", { thread_id: "jam_A", webhook_url: kWebhook })).result.isError).toBeFalsy();
+  });
+
+  it("a renewal of an expired binding counts against the cap, so expired bindings cannot be stockpiled past it (ALPH-71 L-12)", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_MAX_BINDINGS_PER_CLIENT: "2" } });
+    const flow = await connect(ctx);
+    const token = flow.token.access_token;
+    const bind = (threadId, extra = {}) => callTool(ctx.app, token, "relay_bind", { thread_id: threadId, webhook_url: kWebhook, ...extra });
+    const a = (await bind("jam_A")).data;
+    expect((await bind("jam_B")).result.isError).toBeFalsy();
+    const { store } = ctx.relayRemote.ensureOpen();
+    store.bindings.upsert({ ...store.bindings.get(a.agent), until: Date.now() - 1000 });
+    const c = (await bind("jam_C")).data;
+    expect(c.agent).toBeTruthy();
+    expect((await bind("jam_A", { capability: a.capability })).data.error).toBe("binding_limit");
+    expect(store.bindings.countActiveForClient(flow.client.client_id)).toBe(2);
+    await callTool(ctx.app, token, "relay_unbind", { as: c.agent, capability: c.capability });
+    const renewed = (await bind("jam_A", { capability: a.capability })).data;
+    expect(renewed.agent).toBe(a.agent);
+    expect((await bind("jam_B", {})).data.error).toBe("binding_capability_invalid");
+  });
+
+  const connectConfidential = async () => {
+    const allowed = await allowConnection(ctx);
+    const client = (await register(ctx.app, { token_endpoint_auth_method: "client_secret_post" })).body;
+    const { verifier, challenge } = pkce();
+    const authorize = await request(ctx.app)
+      .get("/relay/oauth/authorize")
+      .query({ client_id: client.client_id, redirect_uri: kRedirect, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: kPublic + "/relay/mcp" });
+    const consentUrl = new URL(authorize.headers.location, kPublic);
+    const page = await request(ctx.app).get(consentUrl.pathname + consentUrl.search);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page.text)[1];
+    const approved = await request(ctx.app)
+      .post("/relay/oauth/consent")
+      .set("Origin", kPublic)
+      .type("form")
+      .send({ request: consentUrl.searchParams.get("request"), csrf, decision: "approve", consent_code: allowed.body.code });
+    const code = new URL(approved.headers.location).searchParams.get("code");
+    const exchange = (secret) =>
+      request(ctx.app)
+        .post("/relay/oauth/token")
+        .type("form")
+        .send({ grant_type: "authorization_code", client_id: client.client_id, ...(secret === undefined ? {} : { client_secret: secret }), code, code_verifier: verifier, redirect_uri: kRedirect, resource: kPublic + "/relay/mcp" });
+    return { client, exchange };
+  };
+
+  it("a DCR client with a secret is refused with a wrong or missing secret at the token and revoke routes, never skipped", async () => {
+    ctx = setup();
+    const { client, exchange } = await connectConfidential();
+    expect(client.client_secret).toEqual(expect.any(String));
+    const stored = JSON.stringify(ctx.relayRemote.ensureOpen().store.clients.get(client.client_id));
+    expect(stored).not.toContain(client.client_secret);
+    const wrong = await exchange("not-the-secret");
+    expect(wrong.status).toBe(401);
+    expect(wrong.body.error).toBe("invalid_client");
+    const missing = await exchange(undefined);
+    expect(missing.status).toBe(401);
+    expect(missing.body.error).toBe("invalid_client");
+    const right = await exchange(client.client_secret);
+    expect(right.status).toBe(200);
+    const revoke = (secret) =>
+      request(ctx.app).post("/relay/oauth/revoke").type("form").send({ client_id: client.client_id, client_secret: secret, token: right.body.refresh_token });
+    expect((await revoke("not-the-secret")).status).toBe(401);
+    expect((await mcp(ctx.app, right.body.access_token, "tools/list")).status).toBe(200);
+    expect((await revoke(client.client_secret)).status).toBe(200);
+    expect((await mcp(ctx.app, right.body.access_token, "tools/list")).status).toBe(401);
+  });
+
+  it("a client secret stored in plaintext by an earlier version is checked the same way and rehashed", async () => {
+    ctx = setup();
+    const { client, exchange } = await connectConfidential();
+    const { store } = ctx.relayRemote.ensureOpen();
+    const legacyInfo = { ...store.clients.get(client.client_id).info, client_secret: client.client_secret };
+    delete legacyInfo.client_secret_sha256;
+    store.db.prepare("UPDATE oauth_clients SET info = ? WHERE client_id = ?").run(JSON.stringify(legacyInfo), client.client_id);
+    expect((await exchange("not-the-secret")).status).toBe(401);
+    expect((await exchange(client.client_secret)).status).toBe(200);
+    expect(JSON.stringify(store.clients.get(client.client_id))).not.toContain(client.client_secret);
+  });
+});
+
