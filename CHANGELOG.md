@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 git-sync's overflow sentence is stable (GST-1820, ALPH-73).
 
 ### Fixed
-- **The overflow sentence named a size that depended on Node's last read.** When git prints more than the sync can read, the stored detail said "over N MB", where N was the length of what Node had buffered, and that can run up to one 64 KiB read past the limit. So the same overflow said "over 1.0 MB" on one run and "over 1.1 MB" on another, and the real-git test that pins the sentence failed now and then in CI. The size is now whole MB rounded down, which is the limit itself: "git status printed more output than the sync can read (over 1 MB)" under Node's 1 MiB default, "(over 256 MB)" under the sync's own limit. A hermetic test covers overflows from 1 byte to just under 64 KiB past the limit.
+- **The overflow sentence named a size that depended on Node's last read.** When git prints more than the sync can read, the stored detail said "over N MB", where N was the length of what Node had buffered, and that can run up to one 64 KiB read past the limit. So the same overflow said "over 1.0 MB" on one run and "over 1.1 MB" on another, and the real-git test that pins the sentence failed now and then in CI. The size is now whole MB rounded down, which is the limit itself: "git status printed more output than the sync can read (over 1 MB)" under Node's 1 MiB default, "(over 256 MB)" under the sync's own limit. The size counts bytes of whichever stream overflowed, before path names are decoded, so multibyte path names or an overflowing stderr no longer print "over 0 MB". Hermetic tests cover overflows from 1 byte to just under 64 KiB past the limit, multibyte path names and stderr.
 
 ## [0.10.197] - 2026-11-07
 
