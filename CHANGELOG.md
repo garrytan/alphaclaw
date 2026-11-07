@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.186] - 2026-11-07
+
+Setup UI phase 2a (ALPH-69). One route table now drives every Setup UI hash route. Nothing looks different, and every link the app makes behaves as before.
+
+### Changed
+- **`lib/public/js/lib/routes.js` is the single source for Setup UI routes.** Each entry holds the route's id, hash and patterns, the sidebar item it highlights today, its admin-only flag, and the old hashes that redirect to it. It also holds what PR 2b will show, namely the new page title and nav label (General becomes Home, Watchdog becomes Health, Cron becomes Schedules, Envars becomes Environment, Models becomes Models & keys), a one-line purpose, the IA group (Home, Chat, Agents, Operate, Connect, Settings), the page layout, the hash each renamed page moves to, and the parent item a child page highlights (Webhooks and Nodes under Integrations, Telegram under Channels).
+- `app.js` renders the page for the resolved route instead of six `isXRoute` checks and a wouter `Switch`. The sidebar's sections, labels, highlight and member filter, the Browse and Chat sidebar modes, the last-visited tab, the browse parser and the Gateway-card check all read the table instead of their own `location.startsWith` lists.
+- Every hash that worked before still works, including `#/chat/<session key>`, `#/relay`, the slashless form (`#envars`) and the two existing redirects (`#/providers` to `#/models` and `#/telegram` to `#/telegram/default`). Every route now matches case-insensitively with an optional trailing slash, as wouter's page routes already did. The pane routes (Chat, Browse, Agents, Cron, Envars, Models, Nodes) used case-sensitive prefix checks, so a hand-typed #/CRON or #/Browse/notes.md now opens that pane instead of General. A path that only shares a prefix with a page (`#/chatty`, `#/agentsx`) now goes to General instead of opening Chat or Agents.
+
+### Tests
+- `tests/frontend/routes.test.js` covers every route at its own hash, every hash served before the table, the old to new redirects, no duplicate ids, hashes, patterns or aliases, the member nav (Cron, Usage and Team only), today's sidebar sections and highlight for every route pattern, and the parent highlights.
+
 ## [0.10.185] - 2026-11-07
 
 The relay brain archive now finds a gbrain wrapper that appears after AlphaClaw starts. On Wintermute's box the boot scripts write `/usr/local/bin/gbrain` about a minute after AlphaClaw starts, and v0.10.183 resolved the wrapper only once at startup, so the archive stayed at Not set up and never saved anything.
