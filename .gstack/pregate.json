@@ -67,6 +67,46 @@
       ],
       "pattern": "(?:accessToken|refreshToken),?\\s*$",
       "reason": "RFC 6749 token response field names (access_token, refresh_token) mapped from local variables; the values are minted at runtime, never literals"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/public/js/login.js"
+      ],
+      "pattern": "(?:inviteToken|passwordEl\\.value),?\\s*$",
+      "reason": "the login and accept-invite request body fields, filled from the invite link and the password input at runtime; no literal value"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/server/guards/scanners.js"
+      ],
+      "pattern": "`\\$\\{relPath\\}::\\$\\{matches\\.length\\}`,?\\s*$",
+      "reason": "a structural guard's offender key (file path and hit count), not a credential"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/server/origin-guard.test.js"
+      ],
+      "pattern": "origin-secret\";\\s*$",
+      "reason": "a dummy SETUP_PASSWORD the origin-guard tests sign in with; never a deployed value"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/server/web-hardening-real-server.test.js"
+      ],
+      "pattern": "kPassword,?\\s*$",
+      "reason": "the real-server test's child env, set from the file's dummy kPassword constant"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/server/web-hardening-real-server.test.js"
+      ],
+      "pattern": "String\\(res\\.headers\\.get\\(\"set-cookie\"\\) \\|\\| \"\"\\)\\.split\\(\";\"\\)\\[0\\];\\s*$",
+      "reason": "reads the session cookie a test login just received, to send it on later requests; no literal value"
     }
   ]
 }

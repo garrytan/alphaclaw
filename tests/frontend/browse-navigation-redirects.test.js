@@ -23,6 +23,7 @@ vi.mock("../../lib/public/js/lib/ui-settings.js", () => ({
 }));
 
 import { useBrowseNavigation } from "../../lib/public/js/hooks/use-browse-navigation.js";
+import { kNavSections } from "../../lib/public/js/lib/app-navigation.js";
 
 const openMenuFromBrowse = () => {
   const setLocation = vi.fn();
@@ -71,6 +72,17 @@ describe("sidebar items", () => {
     globalThis.document = originalDocument;
   });
 
+  it.each([
+    ["/telegram/ops", "/channels"],
+    ["/webhooks/github", "/integrations"],
+    ["/nodes", "/integrations"],
+  ])("Back from %s goes to its parent page %s", (location, expected) => {
+    const setLocation = vi.fn();
+    const { actions } = useBrowseNavigation({ location, setLocation });
+    actions.exitSubScreen();
+    expect(setLocation).toHaveBeenCalledWith(expected);
+  });
+
   it("routes a page item and closes the phone drawer", () => {
     const setLocation = vi.fn();
     const onCloseMobileSidebar = vi.fn();
@@ -81,31 +93,14 @@ describe("sidebar items", () => {
     expect(frames).toHaveLength(0);
   });
 
-  it("opens Home and scrolls to the Channels section once it renders", () => {
+  it("opens Channels and Integrations on their own pages, with no scroll to a Home section", () => {
     const setLocation = vi.fn();
-    const target = { scrollIntoView: vi.fn() };
-    let rendered = false;
-    globalThis.document = { getElementById: (id) => (rendered && id === "home-channels" ? target : null) };
     const { actions } = useBrowseNavigation({ location: "/health", setLocation });
-    actions.handleSelectNavItem({ id: "channels", path: "/home", anchor: "home-channels" });
-    expect(setLocation).toHaveBeenCalledWith("/home");
-    frames.shift()();
-    expect(target.scrollIntoView).not.toHaveBeenCalled();
-    rendered = true;
-    frames.shift()();
-    expect(target.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
-    expect(frames).toHaveLength(0);
-  });
-
-  it("stops looking for a section that never renders", () => {
-    globalThis.document = { getElementById: () => null };
-    const { actions } = useBrowseNavigation({ location: "/health", setLocation: () => {} });
-    actions.handleSelectNavItem({ id: "integrations", path: "/home", anchor: "home-integrations" });
-    let runs = 0;
-    while (frames.length) {
-      frames.shift()();
-      runs += 1;
+    const items = kNavSections.flatMap((section) => section.items);
+    for (const id of ["channels", "integrations"]) {
+      actions.handleSelectNavItem(items.find((item) => item.id === id));
     }
-    expect(runs).toBe(60);
+    expect(setLocation.mock.calls).toEqual([["/channels"], ["/integrations"]]);
+    expect(frames).toHaveLength(0);
   });
 });

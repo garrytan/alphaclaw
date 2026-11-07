@@ -40,6 +40,9 @@ describe("frontend/whats-next-card (E4/D14)", () => {
     expect(text).toContain("Add a chat channel");
     expect(text).toContain("Connect Google Workspace");
     expect(text).toContain("Hide for now");
+    expect(text).toContain("Open Channels");
+    expect(text).toContain("Open Integrations");
+    expect(text).not.toContain("card below");
   });
 
   it("auto-hides the channel row once a channel exists", () => {

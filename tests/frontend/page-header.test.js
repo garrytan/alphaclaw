@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { RoutePageHeader } from "../../lib/public/js/components/page-header.js";
 import { getRoute, kRoutes } from "../../lib/public/js/lib/routes.js";
-import { GeneralRoute } from "../../lib/public/js/components/routes/general-route.js";
+import { HomeRoute } from "../../lib/public/js/components/routes/home-route.js";
 import { WatchdogRoute } from "../../lib/public/js/components/routes/watchdog-route.js";
 import { TelegramRoute } from "../../lib/public/js/components/routes/telegram-route.js";
 
@@ -71,7 +71,7 @@ describe("RoutePageHeader", () => {
 
 describe("page headers on the column routes", () => {
   it.each([
-    ["home", GeneralRoute],
+    ["home", HomeRoute],
     ["health", WatchdogRoute],
     ["telegram", TelegramRoute],
   ])("puts the %s header above the page body", (routeId, Route) => {

@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.193] - 2026-11-07
+## [0.10.194] - 2026-11-07
 
 Setup UI web hardening from the ALPH-71 audit (L-1, L-3, L-4, L-5, L-10 and two follow-ups from #329). The dashboard now refuses to be framed or to run injected script, cookie requests from other sites are refused, and OAuth starts and results stay on the box's own origins.
 
@@ -22,6 +22,23 @@ Setup UI web hardening from the ALPH-71 audit (L-1, L-3, L-4, L-5, L-10 and two 
 ### Tests
 - New `tests/server/web-hardening-real-server.test.js` boots the real `lib/server.js`: the CSP on every Setup UI page and none on API, assets or `/openclaw`, no inline script or handler in the served pages, origin refusals on POST, chat and terminal upgrades and the Codex start, the WebSocket 404, every static entry page under percent-encoded, doubled-slash, mixed-case, trailing-slash and `%2e` paths, and the box-wide login lockout against parallel guesses from rotating addresses. New `origin-guard`, `setup-ui-headers` and `trust-proxy-hops` tests, and new cases in `agent-admin-auth`, `routes-codex`, `routes-codex-coverage`, `routes-oauth-binding`, `codex-oauth-window`, `google-tab-component` and `safe-markdown`.
 - New structural guard `tests/server/guards/raw-marked.guard.test.js`: Markdown under `lib/public/js` renders through `renderMarkdownSafe`, never raw `marked` (no known offenders).
+
+## [0.10.193] - 2026-11-07
+
+### Changed
+- `.gstack/pregate.json` gains five allowlist entries for six secret-scan false positives, all from the web-hardening PR (ALPH-71 PR 3, #343). Two are the login and accept-invite request body fields in `lib/public/js/login.js` (`token: inviteToken`, `password: passwordEl.value`), filled at runtime. One is a structural guard's offender key in `tests/server/guards/scanners.js`. Two are dummy `SETUP_PASSWORD` fixtures, in `origin-guard.test.js` and `web-hardening-real-server.test.js`. The last reads a test login's `set-cookie` header. Each entry names `env.kv`, its paths and a pattern anchored at both ends of the flagged value, with its reason. There are no blanket rules.
+
+## [0.10.192] - 2026-11-07
+
+Setup UI phase 3a (ALPH-69). Home is rebuilt as a status page with next steps, and Channels and Integrations become pages of their own. No server, restart, watchdog, gateway or relay behaviour changes.
+
+### Changed
+- **Home.** A one-line headline (for example "Your box is running. 2 things need you.") sits above a four-cell status strip for the gateway, the watchdog, incidents in the last 7 days and spend in the last 30 days, each linking to its page. Below it are Attention (numbered rows for pending device approvals, the OpenClaw data upgrade, the Drift Doctor reminder, prompt-hardening problems, pin drift and workspace sync turned off, where only the first row's action is a solid button), Finish setting up, Coming up (the next five scheduled jobs), Agents, a Channels summary with the relay, and This box (versions and the update button, the OpenClaw dashboard launch, the hardening state, Back up now and the auto-sync schedule). The Gateway card leaves Home; restart and repair stay on Health.
+- **Channels** (`#/channels`). Channel accounts, the WhatsApp QR flow, chat pairing approvals and device approvals, with Add channel as the page's solid button.
+- **Integrations** (`#/integrations`). Google Workspace, feature health, the OpenAI-compatible API and Agent Administration toggles, and link rows to Webhooks and Nodes with their counts.
+- **Sidebar.** Connect lists Channels, Integrations and Relay. Webhooks and Nodes highlight Integrations, and Telegram highlights Channels. The Home section anchors and their scroll are gone.
+- Home reads no new endpoint. Its strip and Coming up use the existing incidents, usage summary and cron jobs reads, and its Channels card the relay status read.
+- The agent-facing Setup UI map, TOOLS.md, the admin skill, README and DESIGN.md describe the new pages.
 
 ## [0.10.191] - 2026-11-07
 
