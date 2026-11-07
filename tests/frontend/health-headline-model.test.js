@@ -180,3 +180,54 @@ describe("frontend/health headline model (snapshot that is not live)", () => {
     );
   });
 });
+
+describe("frontend/health headline model (outage the watchdog will not repair)", () => {
+  const crashed = (extra) => ({
+    watchdogStatus: { phase: "crash_backoff", lifecycle: "crashed", ...extra },
+    narrative: { phase: "crash_backoff", headline: "Gateway crashed", tone: "danger" },
+    chipKey: "down",
+  });
+
+  it("names a paused auto-repair instead of claiming the watchdog is repairing", () => {
+    expect(buildHealthHeadline(crashed({ autoRepairPaused: { cause: "schema" } }))).toEqual({
+      tone: "bad",
+      text: "The gateway is down and automatic repair is paused.",
+    });
+  });
+
+  it("names a full disk instead of claiming the watchdog is repairing", () => {
+    expect(buildHealthHeadline(crashed({ diskFull: { dir: "/data", freeBytes: 0 } }))).toEqual({
+      tone: "bad",
+      text: "The gateway is down because the disk is full; it can't start until space is freed.",
+    });
+  });
+
+  it("still says repairing for a crash the watchdog is relaunching", () => {
+    expect(buildHealthHeadline({ ...crashed({}), chipKey: "starting" }).text).toBe(
+      "The gateway is down. The watchdog is repairing it.",
+    );
+  });
+
+  it("lets a down status line win over a healthy phase", () => {
+    expect(
+      buildHealthHeadline({
+        watchdogStatus: { phase: "healthy" },
+        narrative: { phase: "healthy", headline: "x", tone: "neutral" },
+        chipKey: "down",
+        incidentsToday: { count: 0, recovered: 0 },
+      }),
+    ).toEqual({ tone: "bad", text: "The gateway is down." });
+  });
+
+  it("lets a degraded status line win over a healthy phase, with the status reason", () => {
+    expect(
+      buildHealthHeadline({
+        watchdogStatus: { phase: "healthy" },
+        narrative: { phase: "healthy", headline: "x", tone: "neutral" },
+        chipKey: "degraded",
+        statusReason: "Crashed twice in the last 5 minutes. Watching it.",
+        incidentsToday: { count: 2, recovered: 2 },
+      }),
+    ).toEqual({ tone: "warn", text: "Degraded. Crashed twice in the last 5 minutes." });
+  });
+});

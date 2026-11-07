@@ -464,3 +464,22 @@ describe("buildResourceMeters (Health meters, ALPH-69)", () => {
     expect(button.props.onclick).toBe(onToggle);
   });
 });
+
+describe("Health meters with unknown readings (ALPH-69)", () => {
+  it("never shows a missing gateway RSS as 0 B, falling back to the group reading", () => {
+    const missing = buildResourceMeters({ ...kResources, gatewayMemory: { process: { workerRssBytes: null } } });
+    expect(missing[0].detail).not.toMatch(/gateway/);
+    const group = buildResourceMeters({
+      ...kResources,
+      gatewayMemory: { process: { workerRssBytes: null, groupRssBytes: 2048 } },
+    });
+    expect(group[0].detail).toMatch(/ · gateway 2(.0)? KB$/);
+  });
+
+  it("does not announce a meter at 0 for an unknown percent", () => {
+    const tree = expandTree(ResourceBar({ label: "Memory", percent: null, detail: "— of —" }));
+    expect(collectNodes(tree).some((node) => node.props?.role === "meter")).toBe(false);
+    expect(collectNodes(tree).some((node) => node.props?.["aria-valuenow"] != null)).toBe(false);
+    expect(treeText(tree)).toContain("— of —");
+  });
+});

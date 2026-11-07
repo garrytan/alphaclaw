@@ -66,9 +66,14 @@
     overflow: visible;
   }
 
-  .schedules-panes[data-view="list"] .schedules-detail-pane,
+  /* List first, then the overview (scheduler status, calendar, recent
+     runs) below it; a job replaces both with its own view and Back. */
   .schedules-panes[data-view="detail"] .schedules-list-pane {
     display: none;
+  }
+
+  .schedules-panes[data-view="list"] .schedules-detail-pane {
+    margin-top: var(--space-6);
   }
 
   .schedules-back {

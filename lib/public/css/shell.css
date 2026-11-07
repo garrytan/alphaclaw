@@ -1743,3 +1743,8 @@ div.home-strip-link:hover { background: none; }
     min-height: 0;
   }
 }
+
+.health-repair-outcome {
+  margin: 0 0 var(--space-3);
+  text-align: left;
+}

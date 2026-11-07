@@ -65,4 +65,13 @@ describe("frontend/doctor headline model", () => {
       "Couldn't load Doctor's findings.",
     );
   });
+
+  it("counts in-progress findings with open ones, like the list below", () => {
+    const text = buildDoctorHeadline({
+      doctorStatus: { lastRunAt: twoHoursAgo },
+      runs: [{ status: "completed", statusCounts: { open: 0, working: 2 } }],
+      nowMs: kNow,
+    });
+    expect(text).toMatch(/found two things to fix\.$/);
+  });
 });

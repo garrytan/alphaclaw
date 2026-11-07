@@ -120,9 +120,6 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 // Children with their own suites/heavy deps: keep the walk scoped to the
 // header/button behavior under test.
-vi.mock("../../lib/public/js/components/doctor/summary-cards.js", () => ({
-  DoctorSummaryCards: () => null,
-}));
 vi.mock("../../lib/public/js/components/doctor/findings-list.js", () => ({
   DoctorFindingsList: () => null,
 }));

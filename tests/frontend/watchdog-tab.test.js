@@ -492,7 +492,8 @@ describe("frontend/health briefing (ALPH-69 slot map)", () => {
     expect(findAllByType(actions, GatewayRestartControl)).toHaveLength(1);
     expect(findAllByType(actions, GatewayRepairControl)).toHaveLength(1);
     const viewLogs = findAllByType(actions, ActionButton).find((button) => button.props.idleLabel === "View logs");
-    expect(viewLogs.props.onClick).toBe(state.onViewLogs);
+    viewLogs.props.onClick();
+    expect(state.onViewLogs).toHaveBeenCalledTimes(1);
   });
 
   it("keeps Recent boots and Watchdog settings in closed disclosures, settings last", () => {
@@ -563,6 +564,27 @@ describe("frontend/health briefing (ALPH-69 slot map)", () => {
     listeners.click({ target: { closest: () => null } });
     tree = renderTab({ watchdogStatus: {} });
     expect(moreOf(tree).props["data-open"]).toBe("false");
+  });
+
+  it("shows Repair's result under the header, outside the phone menu, and View logs closes the menu", () => {
+    const actionsOf = (tree) => findAllByType(tree, RoutePageHeader)[0].props.actions;
+    const moreOf = (tree) => collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more");
+    let tree = renderTab({ watchdogStatus: {} });
+    collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more-toggle").props.onclick();
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("true");
+
+    findAllByType(actionsOf(tree), GatewayRepairControl)[0].props.onOutcomeChange("Not started: gateway busy");
+    tree = renderTab({ watchdogStatus: {} });
+    const alert = collectNodes(tree).find((node) => String(node.props?.class || "").includes("health-repair-outcome"));
+    expect(alert.props.role).toBe("alert");
+    expect(collectText(alert).join("").trim()).toBe("Not started: gateway busy");
+    expect(collectNodes(actionsOf(tree)).some((node) => node === alert)).toBe(false);
+
+    findAllByType(actionsOf(tree), ActionButton).find((button) => button.props.idleLabel === "View logs").props.onClick();
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("false");
+    expect(state.onViewLogs).toHaveBeenCalledTimes(1);
   });
 
   it("leads with the headline sentence", () => {
