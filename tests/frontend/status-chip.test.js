@@ -107,4 +107,13 @@ describe("StatusChip", () => {
     expect(label.props.children).toBe(word);
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
+
+  it("is plain text for a member, who cannot open Health", () => {
+    currentShell = { hasStatus: true, statusState: { state: "running", label: "Running" } };
+    const vnode = StatusChip({ linkToHealth: false });
+    expect(vnode.type).toBe("span");
+    expect(vnode.props.href).toBeUndefined();
+    expect(vnode.props["data-state"]).toBe("running");
+    expect(vnode.props["aria-label"]).toBeUndefined();
+  });
 });

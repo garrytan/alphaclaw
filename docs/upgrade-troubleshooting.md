@@ -1,7 +1,7 @@
 # Upgrade troubleshooting
 
 Operator runbook for the gateway failure states an AlphaClaw deploy or an
-OpenClaw pin bump can surface (Watchdog tab, notifications, watchdog events).
+OpenClaw pin bump can surface (Health page, notifications, watchdog events).
 AlphaClaw runs exactly the `openclaw` version pinned in its `package.json`;
 the only way to change OpenClaw is to deploy an AlphaClaw release with a
 different pin. There is no in-app version switch, rollback or AlphaClaw-side
@@ -18,7 +18,7 @@ migrations to it) and records the version it completed for in
 fails or times out sends a notification naming the reason and the gateway
 starts anyway; the watchdog's crash classifier and startup medic own whatever
 the build then rejects. To retry by hand, run `openclaw doctor --fix` from the
-Watchdog terminal, read its output, then restart the gateway.
+Health page terminal, read its output, then restart the gateway.
 
 The same file keeps `lastOutcome` (the newest Doctor run from boot, watchdog
 repair or medic: status, failure class and reason, the line OpenClaw failed
@@ -41,7 +41,7 @@ example to `/data/<deployment>/<agent>`), every `doctor --fix` and
 `openclaw config set` failed with `Atomic replace parent must be a real
 directory: /data/.openclaw` (#144). From v0.10.6 AlphaClaw points
 `OPENCLAW_CONFIG_PATH` at the resolved directory (the symlink's target) for the
-gateway, Doctor, the CLI, cron and the Watchdog terminal. `OPENCLAW_STATE_DIR`
+gateway, Doctor, the CLI, cron and the Health page terminal. `OPENCLAW_STATE_DIR`
 and `XDG_CONFIG_HOME` stay on the symlink path on purpose: OpenClaw keys cron
 jobs by the state path, and resolving it would hide every existing job (#117,
 #118). Nothing to do on your side; the first boot of v0.10.6 reruns the Doctor.
@@ -137,7 +137,7 @@ clear the attempt file to bypass this condition.
 
 ## Pending recovery or `cleanup_blocked`
 
-The Watchdog card names the condition delaying crash recovery and shows its age
+The Health page card names the condition delaying crash recovery and shows its age
 and next check. Maintenance and failed restarts do not erase the obligation.
 After the competing operation finishes, recovery retries automatically. An
 explicit stop of the watchdog during AlphaClaw shutdown cancels it; a launched
@@ -195,7 +195,7 @@ retirement record under **OpenClaw** (`retiredChannel`) and the boot report's
 
 ## Back up now
 
-The General tab's **Backups** card runs OpenClaw's own backup:
+The Home page's **Backups** card runs OpenClaw's own backup:
 
 ```bash
 openclaw backup create --output <root>/backups/openclaw --verify --json
@@ -284,7 +284,7 @@ once to let it run.", "Automatic recovery is off — press Repair to run it.",
 or "…could not run (*reason*)". A successful restart that had to force the
 stop says so: "Running: restarted in 12s (forced; 2 other processes exited)".
 
-**Where the evidence lives:** the Watchdog tab's **Restart evidence**
+**Where the evidence lives:** the Health page's **Restart evidence**
 disclosure (admin sessions only; members and the agent actor get the
 sentence, never pids) lists how the gateway was stopped, whether the graceful
 ask ran or why it was skipped, the gateway processes that were stopped, the
@@ -369,7 +369,7 @@ View logs for the `stop_failed survivors=` line — a survivor with
 
 **What it means:** after a gateway relaunch (an AlphaClaw restart, a crash or
 OOM relaunch, a boot) the watchdog sent "⚠️ A session may be stuck after the
-gateway restarted" and the Watchdog tab has a `session_wedge` event with
+gateway restarted" and the Health page has a `session_wedge` event with
 status `alerted` (v0.10.58). The log line is
 `[alphaclaw] wedge-sweep alerted session=<key> reason=not_resumed|recovery_gave_up`.
 
@@ -438,7 +438,7 @@ diagnostic in the `/readyz` body ("event loop under pressure" in the
 timeline, `event_loop_pressure` rows, `eventLoopDegraded` on status) is
 telemetry and never opens a readiness incident on its own — upstream
 documents that it "does not change the readiness result by itself"; the
-Watchdog tab's gateway-health card shows pressure under a neutral LOAD label,
+Health page's gateway-health card shows pressure under a neutral LOAD label,
 never the DEGRADED badge, unless `/readyz` components are also failing. Only
 the newest COMPLETED probe writes a verdict, so a slow older probe (or a Doctor
 run started for an earlier degradation) can no longer reopen an incident the
@@ -631,7 +631,7 @@ outlives its lease still finishes writing `openclaw.json` (cancellation
 signals into the Doctor runner are a TODOS item).
 
 **Next steps:** nothing to repair — the row is informational. Check the
-operation that took the lock (the Watchdog tab's operation badge or
+operation that took the lock (the Health page's operation badge or
 `GET /api/watchdog/status`), and if the gateway is still down after it
 finishes, the next degraded probe re-arms repair normally. If the rows
 recur, raise `GATEWAY_RESTART_READY_TIMEOUT` (the restart budget half of the
@@ -662,7 +662,7 @@ the realpath is re-checked against the inspected inode) with a minimal env
 
 **Next steps:** read the hook's stdout/stderr in the AlphaClaw process log,
 fix the file (`chown 0:0`, `chmod 0755`, move it out of the tree) or the
-script, then restart the gateway from the Watchdog tab. Unset the variable
+script, then restart the gateway from the Health page. Unset the variable
 to turn the hook off — there is no in-tree fallback path. Full reference:
 README "Gateway prelaunch hook".
 
@@ -814,7 +814,7 @@ pause it creates; classification still records.
   `GET /api/watchdog/status` `autoRepairPaused`.
 - **Backups:** `<root>/backups/openclaw` — the archives **Back up now** wrote
   (also listed in the diagnose bundle's **Backups** section).
-- **Watchdog events:** Watchdog tab event log (restart causes, doctor
+- **Watchdog events:** Health page event log (restart causes, doctor
   actions, `notification_partial`, `notification_abandoned`,
   `gateway_restart` (with `code: stop_refused | stop_failed | launch_failed | ready_timeout`; `restart_incumbent` on pre-v0.10.0 records), `prelaunch_hook`, `readiness_degraded`,
   `readiness_probe_error`, `serving_identity_lost`, the
