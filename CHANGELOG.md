@@ -18,7 +18,8 @@ Phase 1c of the Setup UI overhaul (ALPH-69, GST-1697). It adds accessible buildi
 - **WizardShell** drops its own focus trap and dialog wrapper and uses ModalShell's.
 - **ConfirmDialog** is rebuilt on ModalShell with the same props, so it gets the focus handling, the portal and the drag-safe overlay close.
 - **SegmentedControl** options are `type="button"` with `aria-pressed`.
-- **Escape in overflow menus** is ignored when another handler already used it or an IME is composing, and closing a menu with Escape returns focus to its trigger.
+- **Escape in overflow menus** is ignored when another handler already used it, when an IME is composing, or when focus is outside the menu (a dialog opened over a still-open menu keeps its Escape and its focus). Closing a menu with Escape returns focus to its trigger.
+- **The Watchdog console's Logs and Terminal tabs** use manual activation. Arrow keys move focus between them and Enter or Space selects, so an arrow key never opens a terminal session by itself.
 - **The Gmail watch row** on the Google card is no longer a `role="button"` holding other controls. Its action is a Gmail button stretched over the row, with the "?" tooltip, the status and the toggle beside it. A tap on the "?" no longer opens the webhook page.
 - **Form controls use the field border.** 75 class strings on inputs, selects and textareas (56 on the tags, the rest in field class props, constants and SessionSelectField's default) drop `border-border`, whose `!important` replaced `--field-border-contrast` with the panel border. Chat and the Relay tab are left to ALPH-68.
 - Shared components give every button a `type` (13 buttons in the sidebar, Envars, the credentials modal and the scope picker).
@@ -32,7 +33,8 @@ Phase 1c of the Setup UI overhaul (ALPH-69, GST-1697). It adds accessible buildi
 
 ### Tests
 - `tests/frontend/modal-shell.test.js` covers the dialog semantics, labelling, Escape on the topmost dialog only, the focus trap and focus restore.
-- `tests/frontend/tabs.test.js` covers the tab roles, the roving Tab order and the keyboard model, plus the Watchdog console's tabs and focusable log.
+- `tests/frontend/tabs.test.js` covers the tab roles, the roving Tab order and both keyboard models, plus the Watchdog console's manual tabs and focusable log. `tests/frontend/overflow-menu.test.js` covers a menu leaving Escape to a focused dialog.
+- `tests/browser/reliability-ui-smoke.mjs` finds the Gmail row by its "Gmail: open webhook" button (6 of 6 journeys pass).
 - `tests/frontend/confirm-dialog.test.js`, `segmented-control.test.js`, `info-tooltip.test.js` and `a11y-primitives.test.js` cover the unchanged ConfirmDialog API, `aria-pressed`, the empty and Space cases, button types, the three axe fixes and the field border on every form control. `overflow-menu.test.js`, `action-button-tones.test.js`, `design-tokens.test.js` and `gmail-watch-toggle-component.test.js` gain cases for the Escape rules, the disabled success tone, the focus ring's contrast and the restructured Gmail row.
 
 ## [0.10.183] - 2026-11-07
