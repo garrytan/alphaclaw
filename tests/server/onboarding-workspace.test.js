@@ -1318,6 +1318,41 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
     log.mockRestore();
   });
 
+  it("runs gog's keyring setup with the gog allowlist, never the setup password or platform tokens", () => {
+    const scratch = realFs.mkdtempSync(path.join(require("os").tmpdir(), "gog-keyring-env-"));
+    const envPath = path.join(scratch, "env.json");
+    realFs.writeFileSync(
+      path.join(scratch, "gog"),
+      `#!${process.execPath}\nrequire("fs").writeFileSync(${JSON.stringify(envPath)}, JSON.stringify(process.env));\n`,
+      { mode: 0o755 },
+    );
+    vi.stubEnv("PATH", `${scratch}${path.delimiter}${process.env.PATH}`);
+    vi.stubEnv("SETUP_PASSWORD", "not-a-real-value");
+    vi.stubEnv("RAILWAY_TOKEN", "not-a-real-value");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const openclawDir = path.join(scratch, "openclaw");
+      const mockFs = {
+        existsSync: vi.fn(() => false),
+        lstatSync: vi.fn(() => ({ isSymbolicLink: () => true, isFile: () => false })),
+        renameSync: vi.fn(),
+        symlinkSync: vi.fn(),
+        mkdirSync: vi.fn(),
+      };
+      ensureOpenclawRuntimeArtifacts({ fs: mockFs, openclawDir, envFilePath: path.join(scratch, ".env") });
+
+      const env = JSON.parse(realFs.readFileSync(envPath, "utf8"));
+      expect(env).not.toHaveProperty("SETUP_PASSWORD");
+      expect(env).not.toHaveProperty("RAILWAY_TOKEN");
+      expect(env.XDG_CONFIG_HOME).toBe(openclawDir);
+      expect(env).toHaveProperty("GOG_KEYRING_PASSWORD");
+    } finally {
+      log.mockRestore();
+      vi.unstubAllEnvs();
+      realFs.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   it("leaves an existing managed symlink alone", () => {
     const openclawDir = "/tmp/alphaclaw-artifacts";
     const envFilePath = "/tmp/alphaclaw-env-file";

@@ -82,6 +82,30 @@ describe("server/gog-accounts", () => {
     expect(await refresh(gogBin)).toBe(false);
   });
 
+  it("gives gog an allowlisted environment, never the setup password or platform tokens", async () => {
+    vi.stubEnv("SETUP_PASSWORD", "not-a-real-value");
+    vi.stubEnv("RAILWAY_TOKEN", "not-a-real-value");
+    vi.stubEnv("GOG_ACCOUNT", "ops@example.com");
+    try {
+      const envPath = path.join(scratchDir, "env.json");
+      await refresh(
+        writeFakeGog(`fs.writeFileSync(${JSON.stringify(envPath)}, JSON.stringify(process.env)); process.stdout.write("{}");`),
+      );
+
+      const env = JSON.parse(fs.readFileSync(envPath, "utf8"));
+      expect(env).not.toHaveProperty("SETUP_PASSWORD");
+      expect(env).not.toHaveProperty("RAILWAY_TOKEN");
+      expect(env).toMatchObject({
+        PATH: process.env.PATH,
+        GOG_ACCOUNT: "ops@example.com",
+        XDG_CONFIG_HOME: path.join(scratchDir, "openclaw"),
+        GOG_KEYRING_PASSWORD: "test-keyring-pass",
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("fails open to no accounts when gog exits non-zero, and never logs its output", async () => {
     await refresh(writeFakeGog(`process.stdout.write(${JSON.stringify(kListing)});`));
     const gogBin = writeFakeGog(

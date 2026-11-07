@@ -69,6 +69,28 @@ describe("server/gmail-serve", () => {
     spawnState.impl = () => new FakeChild();
   });
 
+  it("gives the serve process an allowlisted environment, never the setup password or platform tokens", async () => {
+    vi.stubEnv("SETUP_PASSWORD", "not-a-real-value");
+    vi.stubEnv("RAILWAY_TOKEN", "not-a-real-value");
+    vi.stubEnv("GOG_KEYRING_BACKEND", "file");
+    try {
+      const manager = createGmailServeManager({ constants: baseConstants, onServeExit: vi.fn() });
+      await manager.startServe({ account: baseAccount, port: 18801, webhookToken: "hook-token" });
+
+      const { env } = spawnState.calls[0].options;
+      expect(env).not.toHaveProperty("SETUP_PASSWORD");
+      expect(env).not.toHaveProperty("RAILWAY_TOKEN");
+      expect(env).toMatchObject({
+        PATH: process.env.PATH,
+        GOG_KEYRING_BACKEND: "file",
+        XDG_CONFIG_HOME: baseConstants.OPENCLAW_DIR,
+      });
+      expect(env.GOG_KEYRING_PASSWORD).toBe(baseConstants.GOG_KEYRING_PASSWORD);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("starts a serve process with default client args", async () => {
     const onServeExit = vi.fn();
     const manager = createGmailServeManager({
