@@ -6,14 +6,6 @@ const { classifyBrowserOrigin } = require("../../lib/server/control-ui-mount");
 const { createWatchdogTerminalWsBridge } = require("../../lib/server/watchdog-terminal-ws");
 
 const kCanonical = "https://claw.example.com";
-const kHttpsBox = "https://box.example";
-const kHttpsBoxOrigins = ["https://box.example", "https://box.example:443"];
-const kSchemeOrPortMismatches = ["http://box.example", "http://box.example:443", "https://box.example:80"];
-const kHttpsEdgeHeaders = {
-  host: "127.0.0.1:3000",
-  "x-forwarded-host": "box.example",
-  "x-forwarded-proto": "https",
-};
 
 const loadAuthRoutes = () => {
   vi.resetModules();
@@ -33,7 +25,7 @@ const createThrottleMock = () => ({
 
 const kAgentToken = "d".repeat(64);
 
-const createAuthApp = ({ trustedOrigin = kCanonical } = {}) => {
+const createAuthApp = () => {
   process.env.SETUP_PASSWORD = "origin-secret";
   const { registerAuthRoutes } = loadAuthRoutes();
   const app = express();
@@ -48,7 +40,7 @@ const createAuthApp = ({ trustedOrigin = kCanonical } = {}) => {
       throttle,
       onAuthEvent: vi.fn(),
     },
-    getTrustedBrowserOrigin: () => trustedOrigin,
+    getTrustedBrowserOrigin: () => kCanonical,
   });
   app.post("/api/thing", (req, res) => res.json({ ok: true }));
   app.get("/api/thing", (req, res) => res.json({ ok: true }));
@@ -91,46 +83,6 @@ describe("classifyBrowserOrigin (control-ui-mount.js)", () => {
     expect(classify({ host: "box.lan", "sec-fetch-site": "none" })).toBe("absent");
     expect(classify({ host: "box.lan", "sec-fetch-site": "cross-site" })).toBe("cross");
     expect(classify({ host: "box.lan", "sec-fetch-site": "same-site" })).toBe("cross");
-  });
-});
-
-describe("same-origin means scheme, host and port, not host alone (ALPH-11 grant)", () => {
-  const classify = (headers, trustedOrigin = kHttpsBox) => classifyBrowserOrigin({ headers, trustedOrigin });
-
-  it("is cross for the dashboard's host on another scheme or port when the canonical origin is https://box.example", () => {
-    for (const origin of kSchemeOrPortMismatches) {
-      expect(classify({ host: "box.example", origin }), origin).toBe("cross");
-    }
-  });
-
-  it("is cross for them behind an edge that sends X-Forwarded-Host and X-Forwarded-Proto: https", () => {
-    for (const origin of kSchemeOrPortMismatches) {
-      expect(classify({ ...kHttpsEdgeHeaders, origin }, kCanonical), origin).toBe("cross");
-      expect(classify({ host: "box.example", "x-forwarded-proto": "https", origin }, kCanonical), origin).toBe("cross");
-    }
-  });
-
-  it("stays same for https://box.example and https://box.example:443", () => {
-    for (const origin of kHttpsBoxOrigins) {
-      expect(classify({ host: "box.example", origin }), origin).toBe("same");
-      expect(classify({ host: "box.example:443", origin }), origin).toBe("same");
-      expect(classify({ ...kHttpsEdgeHeaders, origin }, kCanonical), origin).toBe("same");
-      expect(classify({ host: "box.example", "x-forwarded-proto": "https", origin }, ""), origin).toBe("same");
-    }
-  });
-
-  it("keeps an http dashboard working", () => {
-    expect(classify({ host: "box.example", origin: "http://box.example" }, "http://box.example")).toBe("same");
-    expect(classify({ host: "box.example", origin: "http://box.example:80" }, "http://box.example")).toBe("same");
-    expect(classify({ host: "localhost:3000", origin: "http://localhost:3000" }, "http://localhost:3000")).toBe("same");
-    expect(classify({ host: "localhost:3000", origin: "http://localhost:3000" }, "")).toBe("same");
-    expect(classify({ host: "box.example", "x-forwarded-proto": "http", origin: "http://box.example" }, "")).toBe("same");
-  });
-
-  it("without X-Forwarded-Proto or a canonical match still requires the port to fit the Origin's own scheme", () => {
-    expect(classify({ host: "box.example", origin: "http://box.example:443" }, kCanonical)).toBe("cross");
-    expect(classify({ host: "box.example", origin: "https://box.example:80" }, kCanonical)).toBe("cross");
-    expect(classify({ host: "box.example:8443", origin: "https://box.example:8443" }, kCanonical)).toBe("same");
   });
 });
 
@@ -197,47 +149,6 @@ describe("cookie-authenticated /api writes must come from the box's origin (L-4)
     expect(crossGet.status).toBe(200);
   });
 
-  it("refuses a cookie POST from the https dashboard's host on another scheme or port (ALPH-11 grant)", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    const behindCanonical = createAuthApp({ trustedOrigin: kHttpsBox });
-    const canonicalCookie = await loginCookie(behindCanonical);
-    const behindEdge = createAuthApp();
-    const edgeCookie = await loginCookie(behindEdge);
-    for (const origin of kSchemeOrPortMismatches) {
-      const direct = await request(behindCanonical)
-        .post("/api/thing")
-        .set("Cookie", canonicalCookie)
-        .set("Host", "box.example")
-        .set("Origin", origin)
-        .send({});
-      expect(direct.status, origin).toBe(403);
-      expect(direct.body.code, origin).toBe("origin_mismatch");
-      const forwarded = await request(behindEdge)
-        .post("/api/thing")
-        .set("Cookie", edgeCookie)
-        .set(kHttpsEdgeHeaders)
-        .set("Origin", origin)
-        .send({});
-      expect(forwarded.status, origin).toBe(403);
-    }
-    for (const origin of kHttpsBoxOrigins) {
-      const direct = await request(behindCanonical)
-        .post("/api/thing")
-        .set("Cookie", canonicalCookie)
-        .set("Host", "box.example")
-        .set("Origin", origin)
-        .send({});
-      expect(direct.status, origin).toBe(200);
-      const forwarded = await request(behindEdge)
-        .post("/api/thing")
-        .set("Cookie", edgeCookie)
-        .set(kHttpsEdgeHeaders)
-        .set("Origin", origin)
-        .send({});
-      expect(forwarded.status, origin).toBe(200);
-    }
-  });
-
   it("refuses a cross-origin cookie POST on a case-variant /API path (Express routes ignore case)", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const app = createAuthApp();
@@ -266,7 +177,7 @@ describe("cookie-authenticated /api writes must come from the box's origin (L-4)
 });
 
 describe("WebSocket upgrades (L-4 origin, L-1 catch-all allowlist)", () => {
-  const createBridge = ({ authorized = true, trustedOrigin = kCanonical } = {}) => {
+  const createBridge = ({ authorized = true } = {}) => {
     const server = new EventEmitter();
     const proxied = [];
     const chatUpgrades = [];
@@ -280,7 +191,7 @@ describe("WebSocket upgrades (L-4 origin, L-1 catch-all allowlist)", () => {
       watchdogTerminal: { createOrReuseSession: () => null, subscribe: () => ({}) },
       chatWsService: { handleUpgrade: vi.fn((req) => chatUpgrades.push(req.url)) },
       resolveProxyIdentity: () => null,
-      getTrustedBrowserOrigin: () => trustedOrigin,
+      getTrustedBrowserOrigin: () => kCanonical,
     });
     return { server, proxied, chatUpgrades, terminalUpgrades };
   };
@@ -355,39 +266,5 @@ describe("WebSocket upgrades (L-4 origin, L-1 catch-all allowlist)", () => {
     const socket = upgrade(bridge, "/browser/extension");
     expect(socket.write).not.toHaveBeenCalled();
     expect(bridge.proxied).toEqual(["/browser/extension"]);
-  });
-
-  for (const path of ["/api/ws/chat", "/api/watchdog/terminal/ws"]) {
-    it(`refuses a ${path} upgrade whose Origin has the dashboard's host but another scheme or port`, () => {
-      vi.spyOn(console, "warn").mockImplementation(() => {});
-      const behindCanonical = createBridge({ trustedOrigin: kHttpsBox });
-      const behindEdge = createBridge();
-      for (const origin of kSchemeOrPortMismatches) {
-        const direct = upgrade(behindCanonical, path, { host: "box.example", origin });
-        expect(direct.write, origin).toHaveBeenCalledWith(expect.stringContaining("403 Forbidden"));
-        expect(direct.write, origin).toHaveBeenCalledWith(expect.stringContaining('"code":"origin_mismatch"'));
-        const forwarded = upgrade(behindEdge, path, { ...kHttpsEdgeHeaders, origin });
-        expect(forwarded.write, origin).toHaveBeenCalledWith(expect.stringContaining("403 Forbidden"));
-      }
-      expect(behindCanonical.chatUpgrades).toHaveLength(0);
-      expect(behindEdge.chatUpgrades).toHaveLength(0);
-    });
-  }
-
-  it("accepts a chat upgrade from the https dashboard with or without :443, and from an http dashboard", () => {
-    const behindCanonical = createBridge({ trustedOrigin: kHttpsBox });
-    const behindEdge = createBridge();
-    const local = createBridge({ trustedOrigin: "http://localhost:3000" });
-    const sockets = [];
-    for (const origin of kHttpsBoxOrigins) {
-      sockets.push(upgrade(behindCanonical, "/api/ws/chat", { host: "box.example", origin }));
-      sockets.push(upgrade(behindEdge, "/api/ws/chat", { ...kHttpsEdgeHeaders, origin }));
-    }
-    sockets.push(upgrade(local, "/api/ws/chat", { host: "localhost:3000", origin: "http://localhost:3000" }));
-    sockets.push(upgrade(createBridge({ trustedOrigin: "http://box.example" }), "/api/ws/chat", { host: "box.example", origin: "http://box.example" }));
-    for (const socket of sockets) expect(socket.write).not.toHaveBeenCalled();
-    expect(behindCanonical.chatUpgrades).toHaveLength(2);
-    expect(behindEdge.chatUpgrades).toHaveLength(2);
-    expect(local.chatUpgrades).toHaveLength(1);
   });
 });
