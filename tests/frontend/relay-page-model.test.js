@@ -48,6 +48,7 @@ describe("Relay page model", () => {
 describe("Relay brain archive model (ALPH-68 PR3)", () => {
   it("names why nothing is saved, and lists conversations waiting for Retry", () => {
     expect(buildArchiveModel(null)).toMatchObject({ phase: "off", canRetry: false });
+    expect(buildArchiveModel({ enabled: false, phase: "off", code: null })).toMatchObject({ phase: "off", label: "Off", canRetry: false });
     expect(buildArchiveModel({ enabled: true, phase: "unavailable", code: "source_missing" })).toMatchObject({ label: "Not set up", tone: "neutral" });
     expect(buildArchiveModel({ enabled: true, phase: "unavailable", code: "gbrain_missing" })).toMatchObject({ label: "Not set up", tone: "neutral" });
     expect(buildArchiveModel({ enabled: true, phase: "unavailable", code: "source_federated" })).toMatchObject({ label: "Not saving", tone: "danger" });

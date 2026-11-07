@@ -22,7 +22,7 @@ const msg = (id, from, text, atMs, extra = {}) => ({ id: String(id), from, text,
 // One harness per test: a fake gbrain on disk (argv, stdin and answers
 // recorded in GBRAIN_FAKE_DIR), a fake engine with one conversation between
 // the box agent (wintermute) and capy-x, and the box agent's relay session.
-const setup = ({ brainMode = "auto", brainBin = kFakeGbrain, maskText = null, timeoutMs = undefined, budget = {}, fsModule = undefined } = {}) => {
+const setup = ({ brainMode = "auto", brainBin = kFakeGbrain, maskText = null, timeoutMs = undefined, budget = {}, fsModule = undefined, wrapperPath = undefined } = {}) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-archive-"));
   const fakeDir = path.join(root, "fake");
   fs.mkdirSync(fakeDir);
@@ -71,6 +71,7 @@ const setup = ({ brainMode = "auto", brainBin = kFakeGbrain, maskText = null, ti
     sleep: async () => {},
     logger: quiet,
     ...(fsModule ? { fsModule } : {}),
+    ...(wrapperPath ? { wrapperPath } : {}),
     ...(timeoutMs ? { runner: require("../../lib/server/relay/brain-archive/gbrain").createGbrainRunner({ bin: brainBin, env: { ...process.env, GBRAIN_FAKE_DIR: fakeDir }, timeoutMs }) } : {}),
   });
   ctx.tick = () => ctx.archive._internal.tick();
@@ -416,6 +417,37 @@ describe("relay brain archive: writes through the gbrain CLI", () => {
     await ctx.settle();
     expect(ctx.archive.getStatus()).toMatchObject({ phase: "unavailable", code: "source_federated" });
     expect(ctx.puts()).toHaveLength(0);
+  });
+
+  it("a wrapper written after AlphaClaw starts is picked up by the next availability check, and the conversation is saved", async () => {
+    const wrapperPath = path.join(os.tmpdir(), "late-gbrain-wrapper-" + process.pid);
+    fs.rmSync(wrapperPath, { force: true });
+    ctx = setup({ brainBin: "", wrapperPath });
+    await ctx.settle();
+    expect(ctx.archive.getStatus()).toMatchObject({ phase: "unavailable", code: "gbrain_missing" });
+    expect(ctx.calls()).toEqual([]);
+    fs.symlinkSync(kFakeGbrain, wrapperPath);
+    onTestFinished(() => fs.rmSync(wrapperPath, { force: true }));
+    ctx.advance(10 * 60 * 1000);
+    await ctx.tick();
+    ctx.advance(3 * 60 * 1000);
+    await ctx.tick();
+    expect(ctx.archive.getStatus()).toMatchObject({ phase: "ready" });
+    expect(ctx.puts()).toHaveLength(1);
+  });
+
+  it("ALPHACLAW_RELAY_BRAIN=off stays fully idle with the wrapper present and a relay source: no gbrain run, no archive.db, status off", async () => {
+    ctx = setup({ brainMode: "off" });
+    ctx.archive.start();
+    await ctx.settle();
+    ctx.advance(2 * 60 * 60 * 1000);
+    await ctx.tick();
+    expect(ctx.archive.retry()).toEqual({ retried: 0 });
+    await ctx.tick();
+    expect(ctx.calls()).toEqual([]);
+    expect(fs.existsSync(path.join(ctx.root, "archive.db"))).toBe(false);
+    expect(ctx.archive.getStatus()).toEqual({ enabled: false, phase: "off", code: null });
+    ctx.archive.stop();
   });
 
   it("fails closed when the box is not set up: no wrapper means no gbrain run at all, and a missing relay source means nothing but the sources check, never a write to another source", async () => {

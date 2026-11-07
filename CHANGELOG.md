@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.185] - 2026-11-07
+
+The relay brain archive now finds a gbrain wrapper that appears after AlphaClaw starts. On Wintermute's box the boot scripts write `/usr/local/bin/gbrain` about a minute after AlphaClaw starts, and v0.10.183 resolved the wrapper only once at startup, so the archive stayed at Not set up and never saved anything.
+
+### Fixed
+- The wrapper (`ALPHACLAW_RELAY_BRAIN_BIN`, else `/usr/local/bin/gbrain`) is resolved again on every availability check, including the 10-minute re-check while the archive is `gbrain_missing`, so a wrapper written later is picked up within one check interval.
+- Tests: a wrapper written after start is picked up and the conversation saved (fails on v0.10.183); `ALPHACLAW_RELAY_BRAIN=off` stays fully idle with a wrapper and a relay source present (no gbrain run, no archive.db, Retry does nothing, status and the Relay page show Off).
+
 ## [0.10.184] - 2026-11-07
 
 Security remediation, webhooks and dependencies (ALPH-71 PR 4, CSO audit L-7, L-9, L-11, L-14, L-15). Builds on the 0.10.179 hotfix.
