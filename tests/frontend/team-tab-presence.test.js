@@ -83,6 +83,7 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 import * as preactHooks from "preact/hooks";
 import {
   copyTeamInviteLink,
+  createTeamInvite,
   fetchDevicePairings,
   fetchTeam,
   fetchTeamPresence,
@@ -367,6 +368,86 @@ describe("frontend/team-tab invite links (GST-1787)", () => {
       "New invite link copied. The old link no longer works.",
       "success",
     );
+  });
+
+  const kInvite2 = { id: "inv-2", email: "sam@acme.dev", role: "admin", expiresAt: kExpiresAt };
+
+  it("allows one Copy new link at a time: every other Copy and every Revoke wait while one is in flight", () => {
+    harness.beginRender();
+    const tree = InvitesCard({ invites: [kInvite, kInvite2], linkingInviteId: "inv-1" });
+    const copies = collectNodes(tree).filter((node) => node.props?.idleLabel === "Copy new link");
+    const revokes = collectNodes(tree).filter((node) => node.props?.idleLabel === "Revoke");
+    expect(copies[0].props.loading).toBe(true);
+    expect(copies[1].props.disabled).toBe(true);
+    expect(revokes.every((node) => node.props.disabled === true)).toBe(true);
+  });
+
+  it("ignores a second Copy new link while one is in flight", async () => {
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async () => {}) } });
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    let resolveCopy;
+    copyTeamInviteLink.mockReturnValueOnce(new Promise((resolve) => { resolveCopy = resolve; }));
+
+    harness.beginRender();
+    const first = useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-2");
+    resolveCopy(kLink);
+    await first;
+
+    expect(copyTeamInviteLink).toHaveBeenCalledTimes(1);
+    expect(copyTeamInviteLink).toHaveBeenCalledWith("inv-1");
+  });
+
+  it("ignores a Copy new link reply that a newer invite action superseded", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    fetchTeam.mockResolvedValue(makeTeam({ me: { role: "admin" } }));
+    const kCreated = { ok: true, invite: kInvite2, token: "t", url: "https://claw.example.com/login.html?invite=created" };
+    createTeamInvite.mockResolvedValue(kCreated);
+    let resolveCopy;
+    copyTeamInviteLink.mockReturnValueOnce(new Promise((resolve) => { resolveCopy = resolve; }));
+
+    harness.beginRender();
+    const copying = useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    await useTeamTab().onCreateInvite({ email: "sam@acme.dev", role: "admin" });
+    resolveCopy(kLink);
+    await copying;
+    harness.beginRender();
+
+    expect(useTeamTab().freshInvite).toEqual(kCreated);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("clears the shown link for that invite when Copy new link fails", async () => {
+    vi.stubGlobal("setInterval", vi.fn(() => 1));
+    vi.stubGlobal("clearInterval", vi.fn());
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async () => {}) } });
+    copyTeamInviteLink.mockResolvedValueOnce(kLink);
+
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    expect(useTeamTab().freshInvite).toEqual(kLink);
+
+    copyTeamInviteLink.mockRejectedValueOnce(new Error("network error"));
+    harness.beginRender();
+    await useTeamTab().onCopyInviteLink("inv-1");
+    harness.beginRender();
+    expect(useTeamTab().freshInvite).toBe(null);
+  });
+
+  it("names the invite and its role above the link it shows", () => {
+    const named = nodeText(renderCard({ freshInvite: { ...kLink, invite: kInvite2 } }));
+    expect(named).toContain("sam@acme.dev");
+    expect(named).toContain("(admin)");
+    const open = nodeText(renderCard({ freshInvite: kLink }));
+    expect(open).toContain("anyone with the link");
+    expect(open).toContain("(member)");
   });
 
   it("onCopyInviteLink shows the server's refusal and no link", async () => {
