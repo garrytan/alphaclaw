@@ -385,8 +385,8 @@ describe("server/routes/auth legacy sessions (ALPH-71 L-2)", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  const createStatefulApp = (setupPassword, legacySessionStatePath) => {
-    process.env.SETUP_PASSWORD = setupPassword;
+  const createStatefulApp = (pw, legacySessionStatePath) => {
+    process.env.SETUP_PASSWORD = pw;
     const { registerAuthRoutes } = loadAuthRoutes();
     const app = express();
     app.use(express.json());

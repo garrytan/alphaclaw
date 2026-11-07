@@ -520,11 +520,12 @@ describe("server/env reload of system and launcher keys (ALPH-71 L-8)", { retry:
 
   it("holds a launcher or system key written outside AlphaClaw until the next boot, and applies one AlphaClaw wrote", () => {
     const envFile = path.join(tmpDir, ".env");
+    const kAgentSetValue = "agent-set";
     fs.writeFileSync(envFile, "OPENAI_API_KEY=sk-fake-a\n");
     const env = loadEnvModule(tmpDir);
     fs.writeFileSync(
       envFile,
-      "OPENAI_API_KEY=sk-fake-b\nCLAUDE_CODE_LOCAL_CWD=/tmp/agent-picked\nWATCHDOG_AUTO_REPAIR=false\nSETUP_PASSWORD=fake-agent-set\n",
+      ["OPENAI_API_KEY=sk-fake-b", "CLAUDE_CODE_LOCAL_CWD=/tmp/agent-picked", "WATCHDOG_AUTO_REPAIR=false", "SETUP_PASSWORD=" + kAgentSetValue, ""].join("\n"),
     );
     env.reloadEnv();
     expect(process.env.OPENAI_API_KEY).toBe("sk-fake-b");

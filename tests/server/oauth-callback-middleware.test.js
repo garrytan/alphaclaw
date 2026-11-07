@@ -305,12 +305,12 @@ describe("server/oauth-callback-middleware mapping selection and rate budget", (
   it("one caller spending its budget does not lock out another caller on the same id", async () => {
     await withApp(async ({ app, calls }) => {
       for (let index = 0; index < 10; index += 1) {
-        const res = await request(app).get(`/oauth/abc123?code=A${index}`).set("X-Forwarded-For", "203.0.113.7");
+        const res = await request(app).get(`/oauth/abc123?code=A${index}`).set("X-Forwarded-For", "10.0.0.7");
         expect(res.status).toBe(200);
       }
-      const limited = await request(app).get("/oauth/abc123?code=A10").set("X-Forwarded-For", "203.0.113.7");
+      const limited = await request(app).get("/oauth/abc123?code=A10").set("X-Forwarded-For", "10.0.0.7");
       expect(limited.status).toBe(429);
-      const provider = await request(app).get("/oauth/abc123?code=REAL").set("X-Forwarded-For", "198.51.100.20");
+      const provider = await request(app).get("/oauth/abc123?code=REAL").set("X-Forwarded-For", "10.0.0.20");
       expect(provider.status).toBe(200);
       expect(calls).toHaveLength(11);
     });

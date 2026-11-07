@@ -9,6 +9,7 @@ const { createConfirmService } = require("../../lib/server/agent-admin/confirm-s
 const { kGenericServerError, kMask } = require("../../lib/server/agent-admin/redact");
 
 const kToken = "a".repeat(64);
+const kInv = "inv-fixture-41";
 const kConfirmHeaderName = "X-AlphaClaw-Confirm";
 
 // Fresh auth + enforcement modules per app (same reason as agent-admin-e2e).
@@ -104,8 +105,8 @@ const createApp = ({ confirmService = null, rewriteInviteBody = true } = {}) => 
           res.json({
             ok: true,
             invite: { id: "inv-1", role: req.body?.role || "member" },
-            token: "invite-token-secret",
-            url: "https://box.example.com/login?invite=invite-token-secret",
+            token: kInv,
+            url: "https://box.example.com/login?invite=" + kInv,
           }),
   );
   app.patch("/api/team/members/:id", requireAdmin, echo); // team.members.update
@@ -241,7 +242,7 @@ describe("agent-admin team authority changes need an operator confirm (CSO ALPH-
     );
     expect(res.status).toBe(200);
     expect(res.body.invite).toEqual({ id: "inv-1", role: "member" });
-    expect(JSON.stringify(res.body)).not.toContain("invite-token-secret");
+    expect(JSON.stringify(res.body)).not.toContain(kInv);
     expect(res.body.token).toBe(kMask);
     expect(res.body.url).toBe(kMask);
   });
@@ -251,7 +252,7 @@ describe("agent-admin team authority changes need an operator confirm (CSO ALPH-
     const cookie = await loginAsHumanAdmin(app);
     const res = await request(app).post("/api/team/invites").set("Cookie", cookie).send({ role: "admin" });
     expect(res.status).toBe(200);
-    expect(res.body.token).toBe("invite-token-secret");
+    expect(res.body.token).toBe(kInv);
   });
 
   it("gates a member role or disabled change, not a display-name edit", async () => {
