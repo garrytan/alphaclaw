@@ -3,6 +3,7 @@ import { GmailWatchToggle } from "../../lib/public/js/components/google/gmail-wa
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { ToggleSwitch } from "../../lib/public/js/components/toggle-switch.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
+import { InfoTooltip } from "../../lib/public/js/components/info-tooltip.js";
 
 // Stateless component: invoke it directly and walk the vnode tree
 // (saved-toggle-component.test.js pattern) — no DOM renderer needed.
@@ -169,5 +170,22 @@ describe("frontend/gmail watch toggle danger state", () => {
     // touch) and the bare "Error" label is gone.
     expect(text).toContain("renew the watch or check the account's Pub/Sub setup");
     expect(text).not.toMatch(/\bError\b/);
+  });
+
+  it("keeps Enter and Space on the focusable info tooltip from opening the webhook row", () => {
+    const tree = render({ watchStatus: { enabled: true } });
+    const wrapper = collectNodes(tree).find((vnode) =>
+      (Array.isArray(vnode.props?.children) ? vnode.props.children : [vnode.props?.children])
+        .some((child) => child?.type === InfoTooltip),
+    );
+    expect(wrapper.props.onKeyDown).toBeTypeOf("function");
+    for (const key of ["Enter", " "]) {
+      const event = { key, stopPropagation: vi.fn() };
+      wrapper.props.onKeyDown(event);
+      expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+    }
+    const escape = { key: "Escape", stopPropagation: vi.fn() };
+    wrapper.props.onKeyDown(escape);
+    expect(escape.stopPropagation).not.toHaveBeenCalled();
   });
 });

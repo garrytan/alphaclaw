@@ -119,6 +119,9 @@ const createChatBridgeTestKit = ({ cleanups }) => {
       getGatewayPort: () =>
         typeof portOrHarness === "number" ? portOrHarness : portOrHarness.port,
       ...serviceOptions,
+      // Most harnesses never answer sessions.list: a send's cold-cache policy
+      // read gives up fast instead of holding every first send for seconds.
+      timings: { sessionPolicyReadMs: 25, ...serviceOptions.timings },
     });
     cleanups.push(() => service.close());
     return service;
