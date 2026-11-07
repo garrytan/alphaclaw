@@ -130,7 +130,7 @@ describe("e2e: doctor fix dispatch delivers to the selected session", () => {
     fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Guidance\n", "utf8");
 
     const clawCmd = vi.fn(async (command) => {
-      if (command === "sessions --json --all-agents") {
+      if (command === "sessions --json --all-agents --limit all") {
         return { ok: true, stdout: JSON.stringify(kSessionsPayload) };
       }
       return {
@@ -359,7 +359,7 @@ describe("e2e: doctor fix dispatch delivers to the selected session", () => {
   it("maps a failing sessions CLI to 502 (infrastructure, not a client error)", async () => {
     const { app, clawCmd, doctorDb, card } = await buildStack();
     clawCmd.mockImplementation(async (command) => {
-      if (command === "sessions --json --all-agents") {
+      if (command === "sessions --json --all-agents --limit all") {
         return { ok: false, stdout: "", stderr: "gateway restarting" };
       }
       return { ok: true, stdout: "{}", stderr: "" };
@@ -404,7 +404,7 @@ describe("e2e: doctor fix dispatch delivers to the selected session", () => {
   it("records a failed dispatch on the card and reverts it to open", async () => {
     const { app, clawCmd, doctorDb, card } = await buildStack();
     clawCmd.mockImplementation(async (command) => {
-      if (command === "sessions --json --all-agents") {
+      if (command === "sessions --json --all-agents --limit all") {
         return { ok: true, stdout: JSON.stringify(kSessionsPayload) };
       }
       return { ok: false, stdout: "", stderr: "gateway exploded" };
@@ -430,7 +430,7 @@ describe("e2e: doctor fix dispatch delivers to the selected session", () => {
   it("maps an unrecognizable sessions payload to 502, never a client-blaming 400", async () => {
     const { app, clawCmd, doctorDb, card } = await buildStack();
     clawCmd.mockImplementation(async (command) => {
-      if (command === "sessions --json --all-agents") {
+      if (command === "sessions --json --all-agents --limit all") {
         // A stray log line that parses as JSON — the tolerant extractor
         // would adopt it; the shape guard must refuse a not-found verdict.
         return { ok: true, stdout: '{"level":"warn","msg":"gateway restarting"}' };

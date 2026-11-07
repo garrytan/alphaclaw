@@ -5,6 +5,28 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.174] - 2026-11-07
+
+#/chat now lists and shows every conversation on the box: direct chats, Telegram DMs, groups and forum topics, and Agent Relay sessions, with full history and live updates (ALPH-68 PR1, GST-1696).
+
+### Added
+- **Every session, from the gateway.** `/api/agent/sessions` reads OpenClaw's own `sessions.list` over the chat bridge's gateway connection (paged, so a box with hundreds of sessions lists them all; cached 15 s and invalidated by `sessions.changed`). The CLI path stays as the fallback and now passes `--limit all` instead of OpenClaw's default 100. Each row gets a kind (`direct`, `telegram-dm`, `telegram-group`, `telegram-topic`, `relay`, `cron`, `other`), a readable label (Telegram names and titles, `@peer · relay`), `readOnly`, `isMain`, `running` and `lastActivityAt`. Every configured agent's main session is always listed.
+- **Sidebar.** Labels instead of raw keys, last activity, a running dot, a relay badge, a filter box, a **+ New chat** button per agent (opens `agent:<id>:dashboard:<uuid>`, created by its first message), Scheduled (cron) and Other sessions folded by default, and long lists cut to 30 rows with **Show more**.
+- **Live updates.** Protocol v2 gains `watch`/`unwatch` frames and `session-event`, `sessions` and `run-status` server frames, advertised in `hello.features`. One `sessions.subscribe` per bridge feeds rows, tool results and streaming text of runs the browser did not start (a Telegram message, a relay request) into the open session without a reload; foreign events never attach to a browser-started run (H16).
+- **Full history.** **Load older** (and scrolling to the top) pages back through the gateway's history cursor, keeping the scroll position.
+- **Deep links.** `#/chat/<session key>` selects that session; picking a session puts it in the URL.
+- **Speakers and relay envelopes.** Telegram rows show the sender's name, relay rows show `@peer`, and the bridge's policy envelope folds into a "Relay request" detail.
+- **Rendering.** Ordered lists keep their numbers, tables and code blocks scroll inside the bubble, and code blocks get a Copy button.
+- "Retrying the model…" while OpenClaw retries, and the offline banner shows as soon as the browser goes offline.
+
+### Behavior changes
+- Telegram and relay sessions are read-only in #/chat (decision A1): the composer is replaced by a note (with an **Open Relay** link for relay), and the bridge refuses a `message` frame for them with `read_only_session` before any `chat.send`, so an old bundle cannot half-deliver either. An agent's own Main turns read-only from a Telegram delivery context only when `session.dmScope` is `main` (OpenClaw's default); under `per-channel-peer` and the other scopes it stays writable, even after a forum-topic turn ran under the main key.
+- Picking a session on a phone closes the sidebar drawer.
+- The agent actor's `/api/agent/sessions` view is cut to the 12 routing fields; labels and activity stay human-only.
+
+### Tests
+- `tests/server/chat-session-watch.test.js` (watch fan-out, H16, list paging and caching, the read-only refusal, the history cursor, the agent's key set); session-key classifier matrix and browser parity; route tests for the gateway list and the CLI fallback; frontend label and markdown cases.
+
 ## [0.10.173] - 2026-11-07
 
 Every browser tab can open the Control UI at `/openclaw/*` again, not only the first one after a login (ALPH-68, live finding 8).

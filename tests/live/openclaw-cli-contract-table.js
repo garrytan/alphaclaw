@@ -170,10 +170,10 @@ const kCliContractRows = [
       expect("imageModel" in doc).toBe(true);
     },
   },
-  { kind: "help", argv: ["sessions"], flags: ["--json", "--all-agents"], site: "utils/agent-session-lookup.js" },
+  { kind: "help", argv: ["sessions"], flags: ["--json", "--all-agents", "--limit"], site: "utils/agent-session-lookup.js" },
   {
     kind: "json-shape",
-    argv: ["sessions", "--json", "--all-agents"],
+    argv: ["sessions", "--json", "--all-agents", "--limit", "all"],
     site: "utils/agent-session-lookup.js",
     check: (doc) => {
       expect(Array.isArray(doc.sessions)).toBe(true);

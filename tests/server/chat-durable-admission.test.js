@@ -7,6 +7,9 @@ const { createChatBridgeTestKit, waitUntil } = require("./helpers/chat-gateway-h
 const { createRunRegistry } = require("../../lib/server/chat/run-registry");
 
 const kMessage = { type: "message", sessionKey: "s", clientMsgId: "c", content: "do work" };
+// Gateway work a send caused. A fresh send first reads sessions.list for the
+// session's read-only policy (ALPH-68); that read is not a dispatch.
+const gatewayWork = (harness) => harness.requests.filter((frame) => frame.method !== "sessions.list");
 
 describe("chat durable admission", () => {
   let rootDir, store, raw, cleanups, kit;
@@ -52,7 +55,7 @@ describe("chat durable admission", () => {
     const browser = await kit.openBrowser(kit.createService(harness, { chatRunsStore: store }));
     browser.send({ ...kMessage, retry: true });
     expect(await browser.waitFor((m) => m.type === "send-failed")).toMatchObject({ code: "unknown_outcome", notSubmitted: false });
-    expect(harness.requests).toHaveLength(0);
+    expect(gatewayWork(harness)).toHaveLength(0);
     expect(store.findRun(kMessage)).toMatchObject({ status: "error", submissionState: "not_submitted" });
     raw.exec("DROP TRIGGER reject_claim");
     harness.onRequest = (frame) => {
@@ -78,7 +81,7 @@ describe("chat durable admission", () => {
         runId: "old-run", reason: status === "done" ? "complete" : "error",
       });
     }
-    expect(harness.requests).toHaveLength(0);
+    expect(gatewayWork(harness)).toHaveLength(0);
   });
 
   it("missing evidence, including a lost admission refusal, stays unknown", async () => {
@@ -86,13 +89,13 @@ describe("chat durable admission", () => {
     const browser = await kit.openBrowser(kit.createService(harness, { chatRunsStore: store }));
     browser.send({ ...kMessage, retry: true });
     expect(await browser.waitFor((m) => m.type === "send-failed")).toMatchObject({ code: "unknown_outcome", notSubmitted: false });
-    expect(harness.requests).toHaveLength(0);
+    expect(gatewayWork(harness)).toHaveLength(0);
     // A positively received refusal lets the browser declare this unsent;
     // a genuinely fresh ID still works normally.
     harness.onRequest = (frame) => harness.respond(frame.id, { runId: "new-run" });
     browser.send({ ...kMessage, clientMsgId: "fresh" });
     await browser.waitFor((m) => m.type === "started");
-    expect(harness.requests).toHaveLength(1);
+    expect(gatewayWork(harness)).toHaveLength(1);
   });
 
   it("terminal persistence failure never advertises non-submission", async () => {
@@ -106,7 +109,7 @@ describe("chat durable admission", () => {
     expect(store.findRun(kMessage)).toMatchObject({ status: "pending", submissionState: "possibly_submitted" });
     browser.send({ ...kMessage, retry: true });
     await waitUntil(() => browser.messages.filter((m) => m.type === "send-failed").length === 2);
-    expect(harness.requests).toHaveLength(1);
+    expect(gatewayWork(harness)).toHaveLength(1);
     expect(service.getChatStats().storeFailures).toBe(1);
   });
 
@@ -147,12 +150,12 @@ describe("chat durable admission", () => {
     expect(service.getChatStats().registry.live).toBe(128);
     next.send(kMessage);
     expect(await next.waitFor((m) => m.type === "send-failed")).toMatchObject({ code: "too_many_pending", notSubmitted: true });
-    expect(harness.requests).toHaveLength(128);
+    expect(gatewayWork(harness)).toHaveLength(128);
     harness.emit({ type: "event", event: "agent", payload: { runId: "c-0-0", stream: "lifecycle", data: { phase: "end" } } });
     await next.waitFor((m) => m.type === "done");
     next.send(kMessage);
     await next.waitFor((m) => m.type === "started" && m.clientMsgId === "c");
-    expect(harness.requests).toHaveLength(129);
+    expect(gatewayWork(harness)).toHaveLength(129);
     expect(service.getChatStats().registry.replayBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
   });
 

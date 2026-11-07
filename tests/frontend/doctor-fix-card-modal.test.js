@@ -13,7 +13,10 @@ import {
   DoctorFixCardModal,
   kDoctorFixSessionFilter,
 } from "../../lib/public/js/components/doctor/fix-card-modal.js";
-import { AgentSendModal } from "../../lib/public/js/components/agent-send-modal.js";
+import {
+  AgentSendModal,
+  toSendableSessionFilter,
+} from "../../lib/public/js/components/agent-send-modal.js";
 
 const makeCard = (overrides = {}) => ({
   id: 7,
@@ -63,6 +66,21 @@ describe("frontend/doctor fix-card modal", () => {
       "agent:main:telegram:direct:1050",
       "agent:main:discord:direct:99",
       "agent:main:telegram:group:-5",
+    ]);
+  });
+
+  it("never offers a #/chat starter row, which the send routes would refuse", () => {
+    const rows = [
+      { key: "agent:main:main", starter: true },
+      { key: "agent:main:telegram:direct:1050", replyChannel: "telegram", replyTo: "1050" },
+      { key: "agent:main:cron:abc" },
+    ];
+    expect(rows.filter(toSendableSessionFilter(kDoctorFixSessionFilter)).map((row) => row.key)).toEqual([
+      "agent:main:telegram:direct:1050",
+    ]);
+    expect(rows.filter(toSendableSessionFilter(undefined)).map((row) => row.key)).toEqual([
+      "agent:main:telegram:direct:1050",
+      "agent:main:cron:abc",
     ]);
   });
 

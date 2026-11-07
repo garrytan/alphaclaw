@@ -90,4 +90,20 @@ describe("session-keys display helpers", () => {
       }),
     ).toBe("telegram");
   });
+
+  it("labels Chat sidebar rows from the server label, then the key", async () => {
+    const { getChatSessionLabel } = await import("../../lib/public/js/lib/session-keys.js");
+    expect(getChatSessionLabel({ key: "agent:main:telegram:direct:1", label: "Owner (@bb_owner)" })).toBe(
+      "Owner (@bb_owner)",
+    );
+    expect(getChatSessionLabel({ key: "agent:main:relay-capy-audit-c" })).toBe("@capy-audit-c · relay");
+    expect(getChatSessionLabel({ key: "agent:ops:main" })).toBe("Main");
+    expect(
+      getChatSessionLabel({ key: "agent:main:dashboard:0b8f1c2e-1111-4a2b-9c3d-123456789abc" }),
+    ).toBe("Web chat");
+    expect(getChatSessionLabel({ key: "agent:main:telegram:group:-1001234567890:topic:42" })).toBe(
+      "Topic 42 - -1001234567890",
+    );
+  });
 });
+

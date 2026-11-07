@@ -1623,11 +1623,26 @@ describe("server/routes/system", () => {
 
     expect(res.status).toBe(200);
     expect(deps.clawCmd).toHaveBeenCalledWith(
-      "sessions --json --all-agents",
+      "sessions --json --all-agents --limit all",
       { quiet: true },
     );
     expect(res.body.ok).toBe(true);
-    expect(res.body.sessions).toEqual([
+    // Routing fields (the agent actor's view) stay exactly as before; the
+    // human-only classification is asserted below.
+    const kRoutingFields = [
+      "key", "sessionId", "updatedAt", "agentId", "agentLabel", "channel",
+      "groupName", "topicName", "replyChannel", "replyTo", "replyAccountId", "deliverable",
+    ];
+    const routing = res.body.sessions.map((row) =>
+      Object.fromEntries(kRoutingFields.map((field) => [field, row[field]])),
+    );
+    const byKey = Object.fromEntries(res.body.sessions.map((row) => [row.key, row]));
+    expect(byKey["agent:main:telegram:group:-100555"]).toMatchObject({ kind: "telegram-group", readOnly: true, label: "Telegram group …0555" });
+    expect(byKey["agent:main:telegram:group:-1003709908795:topic:4011"]).toMatchObject({ kind: "telegram-topic", readOnly: true, label: "AlphaClaw · Rosebud" });
+    expect(byKey["agent:main:main"]).toMatchObject({ kind: "direct", readOnly: false, label: "Main", isMain: true });
+    expect(byKey["agent:main:cron:abc"]).toMatchObject({ kind: "cron", readOnly: false });
+    expect(byKey["agent:main:discord:channel:123456"]).toMatchObject({ kind: "other", readOnly: false });
+    expect(routing).toEqual([
       {
         key: "agent:main:telegram:group:-100555",
         sessionId: "bare-group-session",
@@ -2572,7 +2587,65 @@ describe("server/routes/system", () => {
     expect(deps.clawCmd).toHaveBeenLastCalledWith("agent --agent main --message 'hello'", { quiet: true });
   });
 
-  it("names the configured default agent in the starter session and offers none before onboarding", async () => {
+  it("serves the session list from the gateway rows when the chat bridge has them, without a CLI spawn", async () => {
+    const deps = createSystemDeps();
+    const app = express();
+    app.use(express.json());
+    registerSystemRoutes({
+      app,
+      agentSessionsCacheTtlMs: 0,
+      ...deps,
+      listGatewaySessionRows: async () => [
+        {
+          key: "agent:main:telegram:direct:7000210001",
+          sessionId: "s-dm",
+          updatedAt: 30,
+          channel: "telegram",
+          chatType: "direct",
+          displayName: "Owner (@bb_owner) id:7000210001",
+          deliveryContext: { channel: "telegram", to: "telegram:7000210001" },
+          lastInteractionAt: 29,
+          createdAt: 1,
+        },
+        { key: "agent:main:relay-capy-x", sessionId: "s-relay", updatedAt: 20, hasActiveRun: true },
+        // dmScope=main folds a Telegram DM into main: the delivery context wins (d6).
+        { key: "agent:main:main", sessionId: "s-main", updatedAt: 10, isMain: true, deliveryContext: { channel: "telegram" } },
+      ],
+    });
+    const res = await request(app).get("/api/agent/sessions");
+    expect(res.status).toBe(200);
+    expect(deps.clawCmd).not.toHaveBeenCalled();
+    const byKey = Object.fromEntries(res.body.sessions.map((row) => [row.key, row]));
+    expect(byKey["agent:main:telegram:direct:7000210001"]).toMatchObject({
+      kind: "telegram-dm",
+      label: "Owner (@bb_owner)",
+      readOnly: true,
+      lastActivityAt: 29,
+    });
+    expect(byKey["agent:main:relay-capy-x"]).toMatchObject({ kind: "relay", label: "@capy-x · relay", readOnly: true, running: true });
+    expect(byKey["agent:main:main"]).toMatchObject({ kind: "telegram-dm", readOnly: true, isMain: true, label: "Main · Telegram" });
+  });
+
+  it("falls back to the CLI when the gateway session list fails", async () => {
+    const deps = createSystemDeps();
+    deps.clawCmd.mockResolvedValue({ ok: true, stdout: JSON.stringify({ sessions: [{ key: "agent:main:main", sessionId: "m", updatedAt: 1 }] }) });
+    const app = express();
+    app.use(express.json());
+    registerSystemRoutes({
+      app,
+      agentSessionsCacheTtlMs: 0,
+      ...deps,
+      listGatewaySessionRows: async () => {
+        throw new Error("gateway down");
+      },
+    });
+    const res = await request(app).get("/api/agent/sessions");
+    expect(res.status).toBe(200);
+    expect(deps.clawCmd).toHaveBeenCalledWith("sessions --json --all-agents --limit all", { quiet: true });
+    expect(res.body.sessions[0]).toMatchObject({ key: "agent:main:main", kind: "direct" });
+  });
+
+  it("offers every configured agent's main session, default agent first, and none before onboarding", async () => {
     const deps = createSystemDeps();
     deps.fs.readFileSync.mockImplementation((targetPath) => {
       if (targetPath === "/tmp/openclaw/openclaw.json") {
@@ -2590,7 +2663,11 @@ describe("server/routes/system", () => {
     const app = createApp(deps);
 
     const res = await request(app).get("/api/agent/sessions");
-    expect(res.body.sessions.map((row) => [row.key, row.agentId])).toEqual([["agent:ops:main", "ops"]]);
+    expect(res.body.sessions.map((row) => [row.key, row.agentId])).toEqual([
+      ["agent:ops:main", "ops"],
+      ["agent:main:main", "main"],
+    ]);
+    expect(res.body.sessions[0]).toMatchObject({ kind: "direct", label: "Main", isMain: true, starter: true });
 
     deps.isOnboarded.mockReturnValue(false);
     const preOnboarding = await request(app).get("/api/agent/sessions");
@@ -2738,7 +2815,7 @@ describe("server/routes/system", () => {
       ],
     });
     deps.clawCmd.mockImplementation(async (command) => {
-      if (command === "sessions --json --all-agents") {
+      if (command === "sessions --json --all-agents --limit all") {
         return { ok: true, stdout: sessionsPayload };
       }
       return { ok: true, stdout: "sent" };
@@ -2803,7 +2880,7 @@ describe("server/routes/system", () => {
   it("rejects messages for unknown sessions and failed session lookups", async () => {
     const deps = createSystemDeps();
     deps.clawCmd.mockImplementation(async (command) => {
-      if (command === "sessions --json --all-agents") {
+      if (command === "sessions --json --all-agents --limit all") {
         return { ok: true, stdout: JSON.stringify({ sessions: [] }) };
       }
       return { ok: true, stdout: "" };

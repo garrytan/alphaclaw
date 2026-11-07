@@ -3,7 +3,28 @@ const {
   isTelegramTopicSessionKey,
   parseSessionDeliveryRoute,
   getReplyTargetFromSessionKey,
+  classifySessionKey,
+  parseRelaySessionKey,
+  isReadOnlySessionKind,
 } = require("../../lib/server/utils/session-keys");
+
+// Kind from the key alone (the fallback when no session-list row is known).
+const kKindMatrix = [
+  ["agent:main:main", "direct"],
+  ["main", "direct"],
+  ["agent:main:chat-1a2b3c4d", "direct"],
+  ["agent:main:relay-capy-audit-c", "relay"],
+  ["agent:ops:relay-Wintermute.v2", "relay"],
+  ["agent:main:telegram:direct:7000210001", "telegram-dm"],
+  ["agent:main:telegram:default:direct:1050", "telegram-dm"],
+  ["agent:main:telegram:group:-1001234567890", "telegram-group"],
+  ["agent:main:telegram:group:-1009876543210:topic:42", "telegram-topic"],
+  ["agent:main:telegram:group:-1009876543210:topic:42:heartbeat", "telegram-topic"],
+  ["agent:main:cron:nightly-sync", "cron"],
+  ["agent:main:discord:channel:123", "other"],
+  ["agent:main:subagent:abc", "other"],
+  ["", "other"],
+];
 
 // Full matrix from the plan: direct, group root, group+topic, suffixed
 // variants (openclaw emits `…:heartbeat` keys), account-scoped directs
@@ -265,7 +286,26 @@ describe("server/utils/session-keys", () => {
     },
   );
 
+  it("classifies session kinds from the key", () => {
+    for (const [sessionKey, kind] of kKindMatrix) {
+      expect([sessionKey, classifySessionKey(sessionKey)]).toEqual([sessionKey, kind]);
+    }
+    expect(parseRelaySessionKey("agent:main:relay-capy-x")).toEqual({ agentId: "main", peer: "capy-x" });
+    expect(parseRelaySessionKey("agent:main:relay-")).toBeNull();
+    expect(isReadOnlySessionKind("relay")).toBe(true);
+    expect(isReadOnlySessionKind("telegram-topic")).toBe(true);
+    expect(isReadOnlySessionKind("direct")).toBe(false);
+  });
+
   describe("client mirror parity (lib/public/js/lib/session-keys.js)", () => {
+    it("classifies kinds identically", async () => {
+      const clientModule = await import("../../lib/public/js/lib/session-keys.js");
+      for (const [sessionKey] of kKindMatrix) {
+        expect(clientModule.classifySessionKey(sessionKey)).toEqual(classifySessionKey(sessionKey));
+        expect(clientModule.parseRelaySessionKey(sessionKey)).toEqual(parseRelaySessionKey(sessionKey));
+      }
+    });
+
     it("produces identical output for the whole matrix", async () => {
       const clientModule = await import(
         "../../lib/public/js/lib/session-keys.js"
