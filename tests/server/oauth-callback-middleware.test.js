@@ -194,12 +194,12 @@ describe("server/oauth-callback-middleware", () => {
     it("redacts oauth_verifier and oauth_token in the stored request log, like code", async () => {
       await withCallbackApp(async ({ app, calls, loggedRequests }) => {
         const response = await request(app).get(
-          "/oauth/abc123?oauth_token=request-token-fixture&oauth_verifier=verifier-fixture&code=code-fixture&realmId=42",
+          "/oauth/abc123?oauth_token=REQ_TOKEN&oauth_verifier=verifier-fixture&code=code-fixture&realmId=42",
         );
         expect(response.status).toBe(200);
         expect(calls).toHaveLength(1);
         expect(JSON.parse(calls[0].bodyText)).toEqual({
-          oauth_token: "request-token-fixture",
+          oauth_token: "REQ_TOKEN",
           oauth_verifier: "verifier-fixture",
           code: "code-fixture",
           realmId: "42",
