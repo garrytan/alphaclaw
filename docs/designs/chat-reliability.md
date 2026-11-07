@@ -66,6 +66,43 @@ Constants + validators: `lib/server/chat/protocol.js`; browser mirror
   `record.finalized` wins; lifecycle end, stop-confirm timer, stall sweeper,
   RPC rejection, gateway disconnect, and stop-failed all funnel through it).
 
+### Every conversation, live (ALPH-68, d4)
+
+#/chat lists every session the gateway's own `sessions.list` reports for
+configured agents (`chat/session-list.js`, 15 s cache, invalidated by
+`sessions.changed`; the CLI path is only the fallback while the gateway
+socket is down). Each row is classified once — `direct | telegram-dm |
+telegram-group | telegram-topic | relay | cron | other` — from its delivery
+context, with the key as the fallback, and Telegram and relay sessions are
+read-only here: the composer is replaced by a note and `send-service`
+refuses a `message` frame for them with `read_only_session` before any
+`chat.send` (an old bundle can't half-deliver either).
+
+- Browser → server: `watch {sessionKey}` / `unwatch {sessionKey}` (at most
+  `kMaxWatchedSessionsPerSocket` = 8 per socket), `history {sessionKey,
+  reqId, before?}` where `before` is the oldest row's `__openclaw.id` (the
+  server turns it into the gateway's page cursor with one anchor read) or a
+  `history-page:` cursor from the previous older page.
+- Server → browser: `session-event {sessionKey, kind: row|tool-result|chunk|
+  run, …}` for activity in a watched session that no browser run of this
+  bridge owns, `sessions` (the list changed; debounced 1.5 s),
+  `run-status {phase: retrying}` while OpenClaw retries the model, and
+  `history {…, olderCursor?, oldestMessageId?, page?: "older"}`.
+- All four are advertised in `hello.features` (`watch`, `history-cursor`,
+  `sessions`, `run-status`); a bundle that does not see a feature never
+  sends its frames.
+- `chat/session-watch.js` holds ONE `sessions.subscribe` on the shared
+  gateway connection and a `Map<sessionKey, Set<ws>>`. An event for a key
+  nobody watches is dropped before any work, bodies are never retained or
+  logged, `getChatStats().watch` counts forwarded and dropped events, and a
+  gateway reconnect re-subscribes and sends `desync` to watchers so they
+  re-read history.
+- H16 holds: a session with a browser run in flight gets no
+  `session-event` (its own run frames already carry it), and a foreign row
+  never attaches to a browser-started run; `transcript-store` merges foreign
+  rows by the same stable id history uses (`__openclaw.id`, then seq, then
+  the content hash), so the next history read never duplicates them.
+
 ### Error taxonomy
 
 `classifyError` (`chat/errors.js`) → `{code, retryable, message}`; codes:

@@ -22,7 +22,7 @@ describe("frontend/chat markdown safety (H8)", () => {
       'import { renderMarkdownSafe } from "../../lib/safe-markdown.js"',
     );
     expect(markdownSource).toContain(
-      "renderMarkdownSafe(normalizeListMarkers(normalizeMarkdownInput(value)))",
+      "decorateCodeBlocks(renderMarkdownSafe(normalizeMarkdownInput(value)))",
     );
     expect(bubbleSource).toContain("renderMarkdownHtml(message.content)");
   });
@@ -52,5 +52,24 @@ describe("frontend/chat markdown safety (H8 behavior)", () => {
     expect(injected).toContain("&lt;img");
     const safe = renderMarkdownHtml("[ok](https://example.com)");
     expect(safe).toContain("https://example.com");
+  });
+
+  it("keeps tables, ordered lists and quotes, and adds a copy button to code blocks (ALPH-68)", async () => {
+    const { renderMarkdownHtml } = await import(
+      "../../lib/public/js/components/chat/markdown.js"
+    );
+    const out = renderMarkdownHtml(
+      "| col a | col b |\n|---|---|\n| 1 | 2 |\n\n1. one\n2. two\n\n> quote\n\n```\nconst x = 1;\n```",
+    );
+    expect(out).toContain("<table>");
+    expect(out).toContain("<th>col a</th>");
+    expect(out).toContain("<ol>");
+    expect(out).not.toContain("<ul>");
+    expect(out).toContain("<blockquote>");
+    expect(out).toContain('<div class="chat-code-block"><button type="button" class="chat-code-copy"');
+    expect(out).toContain("</pre></div>");
+    const escapedPre = renderMarkdownHtml("<pre>x</pre>");
+    expect(escapedPre).not.toContain("chat-code-copy");
+    expect(escapedPre).toContain("&lt;pre&gt;");
   });
 });

@@ -350,6 +350,107 @@
   white-space: nowrap;
 }
 
+.sidebar-chat-agent-header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.sidebar-chat-agent-header .sidebar-chat-agent-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sidebar-chat-new-session {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-right: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.sidebar-chat-new-session:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.sidebar-chat-new-session-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.sidebar-chat-search {
+  padding: 4px 12px 6px;
+}
+
+.sidebar-chat-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sidebar-chat-session-running {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.sidebar-chat-session-badge {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.sidebar-chat-session-time {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-chat-section-toggle,
+.sidebar-chat-show-more {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin: 0;
+  padding: 5px 16px 5px 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-chat-section-toggle:hover,
+.sidebar-chat-show-more:hover {
+  color: var(--text);
+}
+
 .sidebar-chat-empty {
   padding: 10px 16px 10px 24px;
   color: var(--text-dim);
