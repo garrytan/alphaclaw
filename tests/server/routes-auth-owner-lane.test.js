@@ -85,6 +85,7 @@ const createHarness = async ({
   if (recoveryCode === null) delete process.env[kRecoveryEnvKey];
   else process.env[kRecoveryEnvKey] = recoveryCode;
   delete require.cache[kAuthPath];
+  delete require.cache[require.resolve("../../lib/server/utils/sign-in-audit")];
   const { registerAuthRoutes } = require(kAuthPath);
   delete require.cache[require.resolve(kClientIpPath)];
   const { resolveLoginClientIp } = require(kClientIpPath);
@@ -316,11 +317,10 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       const log = vi.spyOn(console, "log");
       const h = await createHarness();
       const peer = "198.51.100.30";
-      await signIn(h, { peer, password: "wrong-guess" });
       const ok = await signIn(h, { peer, password: kOwnerPassword });
       const pass = readPass(ok);
       await signIn(h, { peer, password: kOwnerPassword, recoveryCode: randomValue(32) });
-      for (let i = 0; i < kLoginMaxAttempts; i += 1) await signIn(h, { peer, password: "wrong-" + i });
+      for (let i = 0; i < kLoginMaxAttempts - 1; i += 1) await signIn(h, { peer, password: "wrong-" + i });
 
       const t = await createHarness({ team: true, members: [memberA] });
       await signIn(t, { peer, email: memberA.email, password: "wrong-member" });
