@@ -23,7 +23,7 @@ import { getHashRouterPath } from "../../lib/public/js/hooks/use-hash-location.j
 // hash route. These tests pin today's hashes, the old -> new redirects (query
 // kept), the sidebar's groups and highlight, and the IA data the shell renders.
 
-const servedRoutes = kRoutes.filter((route) => !route.planned);
+const servedRoutes = kRoutes;
 
 // Every hash the Setup UI serves, with the route id and params it resolves to.
 const kTodaysHashes = [
@@ -117,19 +117,19 @@ describe("route table shape", () => {
     expect(["models", "environment", "team"].map(groupOf)).toEqual(Array(3).fill("settings"));
   });
 
-  it("serves the renamed hashes and leaves Channels and Integrations to PR 3a", () => {
+  it("serves the renamed hashes and the Channels and Integrations pages", () => {
     for (const [id, path] of [
       ["home", "/home"],
       ["health", "/health"],
       ["schedules", "/schedules"],
       ["environment", "/environment"],
+      ["channels", "/channels"],
+      ["integrations", "/integrations"],
     ]) {
       expect(getRoutePath(id)).toBe(path);
-      expect(resolveRoute(path).route?.id, path).toBe(id);
+      expect(resolveRoute(path)).toEqual({ route: getRoute(id), params: {}, redirectTo: "" });
     }
-    for (const path of ["/channels", "/integrations"]) {
-      expect(resolveRoute(path), path).toEqual({ route: null, params: {}, redirectTo: "/home" });
-    }
+    expect(kRoutes.some((route) => "planned" in route)).toBe(false);
   });
 });
 
@@ -291,10 +291,8 @@ describe("sidebar lists and highlight from the route table", () => {
         id: "connect",
         label: "Connect",
         items: [
-          { id: "channels", label: "Channels", path: "/home", anchor: "home-channels" },
-          { id: "integrations", label: "Integrations", path: "/home", anchor: "home-integrations" },
-          { id: "webhooks", label: "Webhooks", path: "/webhooks" },
-          { id: "nodes", label: "Nodes", path: "/nodes" },
+          { id: "channels", label: "Channels", path: "/channels" },
+          { id: "integrations", label: "Integrations", path: "/integrations" },
           { id: "relay", label: "Relay", path: "/relay" },
         ],
       },
@@ -309,7 +307,7 @@ describe("sidebar lists and highlight from the route table", () => {
       },
     ]);
     for (const item of kNavSections.flatMap((section) => section.items)) {
-      if (item.href || item.anchor) continue;
+      if (item.href) continue;
       expect(item.path).toBe(getRoutePath(item.id));
     }
   });
@@ -344,8 +342,12 @@ describe("sidebar lists and highlight from the route table", () => {
     ["/providers", "models"],
     ["/environment", "environment"],
     ["/envars", "environment"],
-    ["/webhooks/gmail", "webhooks"],
-    ["/nodes", "nodes"],
+    ["/webhooks/gmail", "integrations"],
+    ["/webhooks", "integrations"],
+    ["/nodes", "integrations"],
+    ["/nodes/x", "integrations"],
+    ["/channels", "channels"],
+    ["/integrations", "integrations"],
     ["/team", "team"],
     ["/agents/main/tools", "agents"],
     ["/telegram/default", "channels"],

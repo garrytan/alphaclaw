@@ -10,7 +10,9 @@ Old links (`#general`, `#watchdog`, `#cron`, `#envars`) still open the renamed p
 
 | Page     | URL                         | What it helps with |
 | -------- | --------------------------- | ------------------ |
-| Home     | `{{SETUP_UI_URL}}#home`     | Gateway status & restart, channel health (Telegram/Discord/Slack/WhatsApp/Signal), pending chat pairings & device approvals, feature health, Google Workspace connection, OpenAI-compatible API and Agent Administration toggles, repo auto-sync schedule, OpenClaw dashboard launch |
+| Home     | `{{SETUP_UI_URL}}#home`     | Status and next steps — gateway, watchdog, incidents in the last 7 days and 30-day spend at a glance, what needs the owner (pending device approvals, OpenClaw data upgrade, Drift Doctor reminder, prompt-hardening problems, pin drift, workspace sync off), the finish-setting-up checklist, the next scheduled jobs, agents and channels summaries, and This box (versions and update, OpenClaw dashboard launch, hardening state, Back up now, repo auto-sync schedule) |
+| Channels | `{{SETUP_UI_URL}}#channels` | Where people reach your agents — add, edit and delete channel accounts (Telegram/Discord/Slack/WhatsApp/Signal and others), WhatsApp QR linking, chat pairing approvals, device approvals |
+| Integrations | `{{SETUP_UI_URL}}#integrations` | Services and tools this box connects to — Google Workspace accounts, feature health (memory embeddings, audio transcription), OpenAI-compatible API and Agent Administration toggles, links to Webhooks and Nodes |
 | Chat     | `{{SETUP_UI_URL}}#chat`     | Web chat with your agents — one conversation per session, relay conversations included, with run status and history |
 | Schedules | `{{SETUP_UI_URL}}#schedules` | Scheduled jobs — scheduler status, enable/disable, run now, prompt and delivery-routing edits, rolling calendar, run history, trends and per-run usage |
 | Usage    | `{{SETUP_UI_URL}}#usage`    | Token and cost reporting — daily summary plus per-session and per-agent breakdowns and time series |
@@ -19,7 +21,7 @@ Old links (`#general`, `#watchdog`, `#cron`, `#envars`) still open the renamed p
 | Relay    | `{{SETUP_UI_URL}}#relay`    | Agent Relay (self-hosted agent-to-agent messaging) — health, the agents on the relay, relay messages waiting on the owner or failed, the logged message history (bodies shown to signed-in people only) |
 | Models & keys | `{{SETUP_UI_URL}}#models` | Available Models list with primary-model selection, and Provider Authentication — API keys / auth profiles per provider (Anthropic, OpenAI, Gemini, Mistral, Voyage, Groq, Deepgram and others), Codex OAuth, auth-profile ordering |
 | Environment | `{{SETUP_UI_URL}}#environment` | View/edit/add environment variables (saved to `{{ENV_FILE}}`), gateway restart prompt to apply changes |
-| Webhooks | `{{SETUP_UI_URL}}#webhooks` | Webhook endpoints — create flow, transform modules, request history and payload inspection, OAuth callback aliases, Gmail watch delivery |
-| Nodes    | `{{SETUP_UI_URL}}#nodes`    | Worker nodes — Node Setup Wizard and pairing approval, connected-node list, browser attach, exec policy (host, security, ask) and the command allowlist |
+| Webhooks | `{{SETUP_UI_URL}}#webhooks` | (reached from Integrations) Webhook endpoints — create flow, transform modules, request history and payload inspection, OAuth callback aliases, Gmail watch delivery |
+| Nodes    | `{{SETUP_UI_URL}}#nodes`    | (reached from Integrations) Worker nodes — Node Setup Wizard and pairing approval, connected-node list, browser attach, exec policy (host, security, ask) and the command allowlist |
 | Team     | `{{SETUP_UI_URL}}#team`     | Team access (needs OpenClaw 2026.8+) — member accounts, invites, roles, who's online; the enable wizard switches gateway auth to trusted-proxy |
 | Browse   | `{{SETUP_UI_URL}}#browse`   | File browser and editor rooted at `.openclaw` (opened from the sidebar file tree), markdown preview/edit, diff review and git-aware save/sync |

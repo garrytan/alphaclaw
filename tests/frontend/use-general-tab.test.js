@@ -62,7 +62,12 @@ vi.mock("../../lib/public/js/hooks/usePolling.js", () => {
   ];
   let cursor = 0;
   return {
-    usePolling: () => polls[cursor++ % 2],
+    usePolling: (fetcher, _interval, options = {}) => {
+      const poll = polls[cursor++ % 2];
+      poll.fetcher = fetcher;
+      poll.options = options;
+      return poll;
+    },
     __polls: polls,
   };
 });
@@ -125,6 +130,24 @@ describe("frontend/use-general-tab", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe("device approval polling", () => {
+    const devicePollEnabledAfterAutoApprove = async (props) => {
+      api.fetchDevicePairings.mockResolvedValue({ pending: [], cliAutoApproveComplete: true });
+      renderHook(props);
+      await polls[1].fetcher();
+      renderHook(props);
+      return polls[1].options.enabled;
+    };
+
+    it("stops once the CLI auto-approve is done, unless the page keeps it running", async () => {
+      expect(await devicePollEnabledAfterAutoApprove({ statusData: statusWith() })).toBe(false);
+      harness.reset();
+      expect(
+        await devicePollEnabledAfterAutoApprove({ statusData: statusWith(), keepPollingDevices: true }),
+      ).toBe(true);
+    });
   });
 
   describe("OpenAI-compat API toggle vs status sync", () => {
