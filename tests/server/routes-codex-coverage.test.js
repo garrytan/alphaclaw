@@ -56,10 +56,18 @@ const createApp = ({
   return { app, onAuthChanged, upsertCodexProfile };
 };
 
+// The Setup UI's same-origin POST (ALPH-71 L-10).
+const postStart = (app) =>
+  request(app)
+    .post("/auth/codex/start")
+    .set("Host", "box.test")
+    .set("Origin", "http://box.test")
+    .send({});
+
 const startOauthAndGetState = async (app) => {
-  const res = await request(app).get("/auth/codex/start");
-  expect(res.status).toBe(302);
-  const location = new URL(res.headers.location);
+  const res = await postStart(app);
+  expect(res.status).toBe(200);
+  const location = new URL(res.body.url);
   return { location, state: location.searchParams.get("state") };
 };
 
@@ -71,13 +79,13 @@ describe("server/routes/codex coverage", () => {
   describe("/auth/codex/start role gate (4.6/E-C11)", () => {
     it("rejects member identities with 403 and allows admins", async () => {
       const member = createApp({ identityRole: "member" });
-      const denied = await request(member.app).get("/auth/codex/start");
+      const denied = await postStart(member.app);
       expect(denied.status).toBe(403);
 
       const admin = createApp({ identityRole: "admin" });
-      const allowed = await request(admin.app).get("/auth/codex/start");
-      expect(allowed.status).toBe(302);
-      expect(allowed.headers.location).toContain("state=");
+      const allowed = await postStart(admin.app);
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.url).toContain("state=");
     });
   });
 
@@ -116,8 +124,8 @@ describe("server/routes/codex coverage", () => {
     });
   });
 
-  describe("GET /auth/codex/start", () => {
-    it("redirects to the authorization URL with PKCE params", async () => {
+  describe("POST /auth/codex/start", () => {
+    it("answers the authorization URL with PKCE params", async () => {
       const { app } = createApp();
       const { location, state } = await startOauthAndGetState(app);
       expect(location.origin + location.pathname).toBe(CODEX_OAUTH_AUTHORIZE_URL);
@@ -135,7 +143,7 @@ describe("server/routes/codex coverage", () => {
       expect(state).toMatch(/^[0-9a-f]{32}$/);
     });
 
-    it("redirects to setup with an error when PKCE creation fails", async () => {
+    it("answers 500 with the error when PKCE creation fails", async () => {
       const consoleError = vi
         .spyOn(console, "error")
         .mockImplementation(() => {});
@@ -144,12 +152,36 @@ describe("server/routes/codex coverage", () => {
           throw new Error("pkce blew up");
         },
       });
-      const res = await request(app).get("/auth/codex/start");
-      expect(res.status).toBe(302);
-      expect(res.headers.location).toBe(
-        "/setup?codex=error&message=" + encodeURIComponent("pkce blew up"),
-      );
+      const res = await postStart(app);
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ ok: false, error: "pkce blew up" });
       expect(consoleError).toHaveBeenCalled();
+    });
+
+    it("refuses a cross-origin or Origin-less start with 403 origin_mismatch (ALPH-71 L-10)", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const createPkcePair = vi.fn(() => ({ verifier: "v", challenge: "c" }));
+      const { app } = createApp({ createPkcePair });
+      const cross = await request(app)
+        .post("/auth/codex/start")
+        .set("Host", "box.test")
+        .set("Origin", "https://evil.example")
+        .send({});
+      expect(cross.status).toBe(403);
+      expect(cross.body.code).toBe("origin_mismatch");
+      const none = await request(app).post("/auth/codex/start").send({});
+      expect(none.status).toBe(403);
+      expect(none.body.code).toBe("origin_mismatch");
+      expect(createPkcePair).not.toHaveBeenCalled();
+    });
+
+    it("no longer starts a flow on GET, which another site could trigger (ALPH-71 L-10)", async () => {
+      const createPkcePair = vi.fn(() => ({ verifier: "v", challenge: "c" }));
+      const { app } = createApp({ createPkcePair });
+      const res = await request(app).get("/auth/codex/start");
+      expect(res.status).toBe(404);
+      expect(res.headers.location).toBeUndefined();
+      expect(createPkcePair).not.toHaveBeenCalled();
     });
   });
 
@@ -177,6 +209,24 @@ describe("server/routes/codex coverage", () => {
       // The literal closing tag / angle brackets never reach the document.
       expect(res.text).not.toContain("</script><img");
       expect(res.text).toContain("\\u003c");
+    });
+
+    it("posts every callback result to the box's own origin, never '*' (ALPH-71 L-10)", async () => {
+      const { app } = createApp();
+      const pages = [
+        await request(app).get("/auth/codex/callback?error=denied"),
+        await request(app).get("/auth/codex/callback?code=abc"),
+        await request(app).get("/auth/codex/callback?code=abc&state=unknown"),
+      ];
+      const { state } = await startOauthAndGetState(app);
+      global.fetch = vi.fn(async () => buildTokenResponse());
+      pages.push(await request(app).get(`/auth/codex/callback?code=c1&state=${state}`));
+      for (const page of pages) {
+        expect(page.text).toContain("postMessage(");
+        expect(page.text).toContain("}, window.location.origin);");
+        expect(page.text).not.toContain("'*'");
+      }
+      expect(pages[3].text).toContain("codex: 'success'");
     });
 
     it("reports missing state or code", async () => {

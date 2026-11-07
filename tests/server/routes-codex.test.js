@@ -153,9 +153,13 @@ describe("server/routes/codex OAuth exchange", () => {
   };
 
   const startAndGetState = async (app) => {
-    const res = await request(app).get("/auth/codex/start");
-    expect(res.status).toBe(302);
-    return new URL(res.headers.location).searchParams.get("state");
+    const res = await request(app)
+      .post("/auth/codex/start")
+      .set("Host", "box.test")
+      .set("Origin", "http://box.test")
+      .send({});
+    expect(res.status).toBe(200);
+    return new URL(res.body.url).searchParams.get("state");
   };
 
   afterEach(() => {

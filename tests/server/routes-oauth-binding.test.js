@@ -45,15 +45,24 @@ const buildGoogleApp = ({
   return { app, tmpDir };
 };
 
-const startFlow = async (app, { query = "", cookie = "", headers = {} } = {}) => {
-  let req = request(app).get(`/auth/google/start${query}`);
+// The Setup UI's same-origin POST (ALPH-71 L-10); the answer carries the
+// authorize URL instead of a redirect.
+const postStart = (app, { body = {}, cookie = "", headers = {} } = {}) => {
+  let req = request(app)
+    .post("/auth/google/start")
+    .set("Host", "box.test")
+    .set("Origin", "http://box.test");
   if (cookie) req = req.set("Cookie", cookie);
   for (const [name, value] of Object.entries(headers)) {
     req = req.set(name, value);
   }
-  const start = await req;
-  expect(start.status).toBe(302);
-  return new URL(start.headers.location).searchParams.get("state");
+  return req.send(body);
+};
+
+const startFlow = async (app, options = {}) => {
+  const start = await postStart(app, options);
+  expect(start.status).toBe(200);
+  return new URL(start.body.url).searchParams.get("state");
 };
 
 describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () => {
@@ -110,7 +119,7 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     expect(fetchCalls.length).toBe(1); // replayed state never reaches exchange
 
     const member = buildGoogleApp({ identityRole: "member" });
-    const memberStart = await request(member.app).get("/auth/google/start");
+    const memberStart = await postStart(member.app);
     expect(memberStart.status).toBe(403);
     fs.rmSync(admin.tmpDir, { recursive: true, force: true });
     fs.rmSync(member.tmpDir, { recursive: true, force: true });
@@ -118,7 +127,7 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
 
   it("callback query params cannot alter the server-held flow payload (tamper)", async () => {
     const { app, tmpDir } = buildGoogleApp();
-    const state = await startFlow(app, { query: "?services=gmail" });
+    const state = await startFlow(app, { body: { services: "gmail" } });
 
     global.fetch = async (url) => {
       if (String(url).includes("oauth2.googleapis.com/token")) {
@@ -338,7 +347,7 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
   it("a start with an unknown accountId cannot plant it — the callback creates a fresh account (regression)", async () => {
     const { app, tmpDir } = buildGoogleApp();
     const state = await startFlow(app, {
-      query: "?accountId=planted-target&services=gmail",
+      body: { accountId: "planted-target", services: "gmail" },
     });
 
     global.fetch = async (url) => {
@@ -370,7 +379,7 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
 
   it("rejects a consenting Google identity that differs from the flow's email — nothing saved (F095)", async () => {
     const { app, tmpDir } = buildGoogleApp();
-    const state = await startFlow(app, { query: "?email=expected%40example.com&services=gmail" });
+    const state = await startFlow(app, { body: { email: "expected@example.com", services: "gmail" } });
 
     const calls = [];
     global.fetch = async (url) => {
@@ -400,7 +409,7 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
 
   it("verifies identity on every exchange (userinfo is fetched even when the flow carries an email)", async () => {
     const { app, tmpDir } = buildGoogleApp();
-    const state = await startFlow(app, { query: "?email=expected%40example.com&services=gmail" });
+    const state = await startFlow(app, { body: { email: "expected@example.com", services: "gmail" } });
     const calls = [];
     global.fetch = async (url) => {
       calls.push(String(url));
@@ -420,15 +429,45 @@ describe("server/routes OAuth callback binding (E-C11 / PR #114 pattern)", () =>
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("starts only from a same-origin POST: cross-origin, Origin-less and GET starts open no flow (ALPH-71 L-10)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { app, tmpDir } = buildGoogleApp();
+    const cross = await postStart(app, { headers: { Origin: "https://evil.example" } });
+    expect(cross.status).toBe(403);
+    expect(cross.body).toEqual({ error: "Cross-origin request refused", code: "origin_mismatch" });
+    const none = await request(app).post("/auth/google/start").send({});
+    expect(none.status).toBe(403);
+    const get = await request(app).get("/auth/google/start?services=gmail");
+    expect(get.status).toBe(404);
+    expect(get.headers.location).toBeUndefined();
+    const same = await postStart(app, { body: { services: ["gmail"] } });
+    expect(same.status).toBe(200);
+    expect(same.headers["cache-control"]).toBe("no-store");
+    expect(new URL(same.body.url).origin).toBe("https://accounts.google.com");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("posts the callback result to the box's own origin, never '*' (ALPH-71 L-10)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { app, tmpDir } = buildGoogleApp();
+    const state = await startFlow(app, { body: { services: "gmail" } });
+    global.fetch = async () => ({ ok: false, json: async () => ({ error: "stub" }) });
+    const res = await request(app).get(`/auth/google/callback?code=c1&state=${state}`);
+    expect(res.text).toContain("google: 'error'");
+    expect(res.text).toContain("}, window.location.origin);");
+    expect(res.text).not.toContain("'*'");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("a repeated/bracketed `services` query key does not 500 the start route (F209)", async () => {
     const { app, tmpDir } = buildGoogleApp();
-    // startFlow asserts the 302 redirect itself; before the fix `.split` threw
+    // startFlow asserts the 200 answer itself; before the fix `.split` threw
     // on the array Express parses from `services[]=…` and the terminal handler
     // answered 500.
-    const state = await startFlow(app, { query: "?services[]=gmail&services[]=calendar" });
+    const state = await startFlow(app, { body: { services: ["gmail", "calendar"] } });
     expect(state).toMatch(/^[0-9a-f]{32}$/);
-    const nested = await request(app).get("/auth/google/start?services[a]=gmail");
-    expect(nested.status).toBe(302);
+    const nested = await postStart(app, { body: { services: { a: "gmail" } } });
+    expect(nested.status).toBe(200);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });
