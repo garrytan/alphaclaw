@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.204] - 2026-11-07
+## [0.10.206] - 2026-11-07
 
 A gateway crash incident that outlives an AlphaClaw or container restart now closes as recovered once the gateway's readiness check says it is ready again, instead of staying "abandoned" on the Health page.
 
@@ -16,6 +16,20 @@ A gateway crash incident that outlives an AlphaClaw or container restart now clo
 - Safe-mode incidents, and any incident that recorded a safe-mode event, are still marked abandoned at startup: only the process that saw safe mode can record its end.
 - On a gateway whose readiness check never answers ready (no readiness URL, or an OpenClaw build without `/readyz`), a carried incident stays open, and automatic incident reviews wait until it closes.
 - Incidents already marked abandoned before this version keep that status.
+
+The check that a browser request comes from the box's own dashboard now compares scheme and port, not just the host name.
+
+### Security
+- **An http page on the box's host name counted as the https dashboard.** AlphaClaw refuses cookie-authenticated writes, the chat and terminal WebSockets and the OAuth starts from other sites by comparing the request's `Origin` with the host it was sent to. It compared host names only and dropped `:80` and `:443` whatever the scheme, so `http://box.example`, `http://box.example:443` and `https://box.example:80` passed as the https dashboard on `box.example`. Chrome keeps the session cookie off those requests; Firefox and Safari don't by default, so someone who could serve plain http on the box's name (an open Wi-Fi network, for example) could make writes with the owner's session. Now an `Origin` with an explicit port (`:443` on http, `:80` on https) matches only a request sent to that port, and when a proxy in front says the browser came over https (`X-Forwarded-Proto`, `Forwarded: proto=https` or Cloudflare's `CF-Visitor`), an http `Origin` is refused.
+
+### Changed
+- A forwarded `http` refuses nothing, so behind Cloudflare Flexible SSL, or an https edge whose inner proxy reports `http`, the dashboard keeps working; the https signal from the edge is what refuses the downgrade. A proxy that sends `X-Forwarded-Proto: https` for a plain-http page (a hard-coded header, or an inner TLS hop) does refuse that page's http origin. The configured setup URL gets the same downgrade check, so an `http://` setup URL no longer vouches for an http origin when a proxy says https.
+- Only `http` and `https` origins can match the box. The Control UI's connect to the gateway uses the same rule, so a same-host browser on the same scheme and port is vouched for as before.
+- A new real-server test runs AlphaClaw behind nginx, Caddy (with and without `trusted_proxies`), a Cloudflare Flexible SSL edge and a direct connection, and checks each accepts the dashboard's own origin and refuses the downgrades. Its nginx and Caddy cases skip when the binary is not installed.
+
+### Not covered
+- With no proxy saying https, the scheme can't be known. A TLS front that sends none of those headers (nginx without `X-Forwarded-Proto`, some Apache and HAProxy setups) still lets `http://box.example` match, and a page on `http://box.example:8443` still matches a box reached directly on port 8443. Every TLS front tested sets `X-Forwarded-Proto`.
+- nginx's common `proxy_set_header Host $host` drops a custom port, so a dashboard on `https://box.example:8443` behind it is matched only through the configured setup URL, as before this change.
 
 ## [0.10.203] - 2026-11-07
 
