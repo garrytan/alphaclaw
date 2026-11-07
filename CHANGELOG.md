@@ -5,6 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.176] - 2026-11-07
+
+Phase 1a of the Setup UI overhaul (ALPH-69, GST-1697). It adds the design system's tokens and a contrast pass. An axe audit of the 14 Setup UI pages in both themes at 1440x900 and 390x844 went from 729 colour-contrast violations on main to 0.
+
+### Added
+- **`DESIGN.md`** at the repo root records the design system. It covers colour and status tones, the type, spacing and radius scales, layout, the page header rule, building blocks and copy rules. It also records the typography, navigation and General-split decisions that ship in later phases.
+- **Design tokens** in `lib/public/css/theme.css` for both themes. There are five status tones (ok, warn, bad, accent, neutral), each with a foreground, a tint and a border, plus the type scale (12/13/14/16/20/22), spacing (4 to 32), radius (6, 10, pill) and layout measures. `tailwind.config.cjs` exposes them as `text-tone-*`, `bg-tone-*-bg`, `border-tone-*-border`, `text-caption` to `text-title`, `rounded-control`, `rounded-card`, `rounded-pill`, `max-w-content` and `px-gutter`. The type scale is defined but not applied yet; that switch is Phase 1b.
+- **`accent` in Tailwind.** `bg-accent` was a no-op because Tailwind had no accent colour, and the three wizard progress bars relied on an inline style. `bg-accent`, `text-accent` and `border-accent` now work.
+
+### Changed
+- **Badge** renders the five status tones from the tone tokens. The older tone names still work as aliases (success, warning, danger, info, cyan, secondary and subtle). Info and cyan now share the accent tone, and the purple `accent` and indigo `secondary` badges become the cyan accent and neutral tones.
+- **ActionButton** tones all come from token-backed `ac-btn-*` classes. Neutral and warning get their own `ac-btn-neutral` and `ac-btn-warning` classes instead of raw palette classes, and `subtle` stays an alias of neutral. The props are unchanged.
+- **Contrast.** Muted and dim text, the light theme's accent and the light status colours now measure at least 4.5:1 on the page, the sidebar, cards and badge tints. In the dark theme `--text-muted` goes from `#6e7681` to `#9198a1` and `--text-dim` from `#424854` to `#848d97`. In the light theme they go from `#6b7280` to `#57606a` and from `#9ca3af` to `#5f6873`, and `--accent` goes from `#0891b2` to `#0e7490`. The cron calendar's tier colours get light-theme values, and the active pill tab uses the accent tone.
+- The provider key hints on the Envars page underline their links, so a link is not told apart from its sentence by colour alone.
+
+### Tests
+- `tests/frontend/design-tokens.test.js` checks that every token exists in both themes and is exposed to Tailwind. It also computes contrast from `theme.css` and fails if muted or dim text, the accent or a tone foreground drops under 4.5:1 on the page, the sidebar, a card or its tint.
+- `tests/frontend/badge-tones.test.js` covers the five tones, the aliases and the neutral fallback.
+- `tests/frontend/action-button-tones.test.js` covers each tone's class, the subtle alias, the disabled and loading treatment and the unchanged props.
+
 ## [0.10.175] - 2026-11-07
 
 The Relay page now shows every Agent Relay conversation, both sides, searchable and paged, and the bridge answers faster and never twice (ALPH-68 PR2, GST-1696).

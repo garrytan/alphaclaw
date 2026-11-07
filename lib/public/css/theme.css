@@ -7,8 +7,8 @@
   --border: rgba(255, 255, 255, 0.06);
   --border-strong: rgba(255, 255, 255, 0.11);
   --text: #c9d1d9;
-  --text-muted: #6e7681;
-  --text-dim: #424854;
+  --text-muted: #9198a1;
+  --text-dim: #848d97;
   --card-label-bright: #dbe7f6;
   --accent: #63ebff;
   --accent-dim: rgba(99, 235, 255, 0.4);
@@ -50,6 +50,52 @@
   --status-info-muted: #06b6d4;
   --status-info-bg: rgba(8, 51, 68, 0.95);
   --status-info-border: rgba(14, 116, 144, 0.8);
+
+  /* ── Design system tokens (DESIGN.md) ─────────── */
+
+  /* Status tones: Badge, ActionButton, dots and callouts. Each foreground
+     keeps at least 4.5:1 on its own tint over a card. */
+  --tone-ok: #4ade80;
+  --tone-ok-bg: rgba(34, 197, 94, 0.1);
+  --tone-ok-border: rgba(34, 197, 94, 0.4);
+  --tone-warn: #facc15;
+  --tone-warn-bg: rgba(234, 179, 8, 0.1);
+  --tone-warn-border: rgba(234, 179, 8, 0.4);
+  --tone-bad: #fca5a5;
+  --tone-bad-bg: rgba(239, 68, 68, 0.1);
+  --tone-bad-border: rgba(239, 68, 68, 0.45);
+  --tone-accent: #63ebff;
+  --tone-accent-bg: rgba(99, 235, 255, 0.1);
+  --tone-accent-border: rgba(99, 235, 255, 0.4);
+  --tone-neutral: var(--text-muted);
+  --tone-neutral-bg: rgba(148, 163, 184, 0.1);
+  --tone-neutral-border: rgba(255, 255, 255, 0.14);
+
+  /* Type scale */
+  --font-size-caption: 12px;
+  --font-size-small: 13px;
+  --font-size-copy: 14px;
+  --font-size-heading: 16px;
+  --font-size-stat: 20px;
+  --font-size-title: 22px;
+
+  /* Spacing scale (the suffix is the Tailwind unit: p-3 = --space-3) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --radius-pill: 999px;
+
+  /* Layout */
+  --layout-sidebar: 248px;
+  --layout-content-max: 1120px;
+  --layout-gutter: 40px;
 }
 
 /* ── Light theme ─────────────────────────────────── */
@@ -62,11 +108,11 @@
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.15);
   --text: #1f2937;
-  --text-muted: #6b7280;
-  --text-dim: #9ca3af;
+  --text-muted: #57606a;
+  --text-dim: #5f6873;
   --text-bright: #111827;
   --card-label-bright: #1f2937;
-  --accent: #0891b2;
+  --accent: #0e7490;
   --accent-dim: rgba(8, 145, 178, 0.3);
   --accent-link: #0e7490;
   --orange: #c2410c;
@@ -80,22 +126,37 @@
   --field-border-contrast: rgba(0, 0, 0, 0.15);
   --overlay: rgba(0, 0, 0, 0.5);
 
-  --status-error: #dc2626;
-  --status-error-muted: #ef4444;
+  --status-error: #b91c1c;
+  --status-error-muted: #b91c1c;
   --status-error-bg: rgba(254, 226, 226, 0.95);
   --status-error-border: rgba(252, 165, 165, 0.8);
-  --status-warning: #a16207;
-  --status-warning-muted: #854d0e;
+  --status-warning: #854d0e;
+  --status-warning-muted: #713f12;
   --status-warning-bg: rgba(254, 249, 195, 0.95);
   --status-warning-border: rgba(202, 138, 4, 0.5);
-  --status-success: #16a34a;
-  --status-success-muted: #22c55e;
+  --status-success: #15803d;
+  --status-success-muted: #166534;
   --status-success-bg: rgba(220, 252, 231, 0.95);
   --status-success-border: rgba(134, 239, 172, 0.8);
-  --status-info: #0891b2;
-  --status-info-muted: #06b6d4;
+  --status-info: #0c6478;
+  --status-info-muted: #0c6478;
   --status-info-bg: rgba(207, 250, 254, 0.95);
   --status-info-border: rgba(103, 232, 249, 0.8);
+
+  --tone-ok: #166534;
+  --tone-ok-bg: rgba(22, 163, 74, 0.1);
+  --tone-ok-border: rgba(22, 163, 74, 0.4);
+  --tone-warn: #854d0e;
+  --tone-warn-bg: rgba(202, 138, 4, 0.12);
+  --tone-warn-border: rgba(202, 138, 4, 0.45);
+  --tone-bad: #b91c1c;
+  --tone-bad-bg: rgba(220, 38, 38, 0.08);
+  --tone-bad-border: rgba(220, 38, 38, 0.35);
+  --tone-accent: #0c6478;
+  --tone-accent-bg: rgba(8, 145, 178, 0.1);
+  --tone-accent-border: rgba(8, 145, 178, 0.4);
+  --tone-neutral-bg: rgba(0, 0, 0, 0.05);
+  --tone-neutral-border: rgba(0, 0, 0, 0.15);
 }
 
 html, body { height: 100%; }
@@ -296,14 +357,10 @@ textarea:focus {
 
 /* Reusable cyan action buttons */
 .ac-btn-cyan {
-  border: 1px solid var(--accent-dim);
-  background: linear-gradient(
-    180deg,
-    rgba(99, 235, 255, 0.14) 0%,
-    rgba(99, 235, 255, 0.08) 100%
-  );
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px rgba(99, 235, 255, 0.12);
+  border: 1px solid var(--tone-accent-border);
+  background: var(--tone-accent-bg);
+  color: var(--tone-accent);
+  box-shadow: inset 0 0 0 1px var(--tone-accent-bg);
   transition:
     border-color 0.15s ease,
     background 0.15s ease,
@@ -313,16 +370,10 @@ textarea:focus {
 }
 
 .ac-btn-cyan:hover:not(:disabled) {
-  border-color: rgba(99, 235, 255, 0.7);
-  background: linear-gradient(
-    180deg,
-    rgba(99, 235, 255, 0.24) 0%,
-    rgba(99, 235, 255, 0.12) 100%
-  );
-  color: #b9f8ff;
-  box-shadow:
-    inset 0 0 0 1px rgba(99, 235, 255, 0.2),
-    0 0 12px rgba(99, 235, 255, 0.14);
+  border-color: var(--tone-accent);
+  background: linear-gradient(var(--tone-accent-bg), var(--tone-accent-bg)), var(--tone-accent-bg);
+  color: var(--tone-accent);
+  box-shadow: inset 0 0 0 1px var(--tone-accent-border);
 }
 
 .ac-btn-cyan:active:not(:disabled) {
@@ -375,7 +426,7 @@ textarea:focus {
 
 .ac-btn-secondary {
   border: 1px solid var(--panel-border-contrast);
-  color: #d1d5db;
+  color: var(--text);
   background: rgba(255, 255, 255, 0.03);
   transition:
     border-color 0.15s ease,
@@ -386,7 +437,7 @@ textarea:focus {
 
 .ac-btn-secondary:hover:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.35);
-  color: #f3f4f6;
+  color: var(--text-bright);
   background: rgba(255, 255, 255, 0.06);
 }
 
@@ -407,7 +458,7 @@ textarea:focus {
 }
 
 .ac-btn-ghost:hover:not(:disabled) {
-  color: #f3f4f6;
+  color: var(--text-bright);
 }
 
 .ac-btn-ghost:disabled {
@@ -416,9 +467,9 @@ textarea:focus {
 }
 
 .ac-btn-danger {
-  border: 1px solid rgba(239, 68, 68, 0.45);
-  background: rgba(239, 68, 68, 0.08);
-  color: #fca5a5;
+  border: 1px solid var(--tone-bad-border);
+  background: var(--tone-bad-bg);
+  color: var(--tone-bad);
   transition:
     border-color 0.15s ease,
     color 0.15s ease,
@@ -427,9 +478,9 @@ textarea:focus {
 }
 
 .ac-btn-danger:hover:not(:disabled) {
-  border-color: rgba(239, 68, 68, 0.7);
-  background: rgba(239, 68, 68, 0.14);
-  color: #fecaca;
+  border-color: var(--tone-bad);
+  background: linear-gradient(var(--tone-bad-bg), var(--tone-bad-bg)), var(--tone-bad-bg);
+  color: var(--tone-bad);
 }
 
 .ac-btn-danger:active:not(:disabled) {
@@ -439,6 +490,37 @@ textarea:focus {
 .ac-btn-danger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Neutral (alias: subtle) and warning ActionButton tones. Their disabled
+   look comes from ActionButton, so a loading button keeps its own. */
+.ac-btn-neutral {
+  border: 1px solid var(--panel-border-contrast);
+  color: var(--tone-neutral);
+  background: transparent;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.ac-btn-neutral:hover:not(:disabled) {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.ac-btn-warning {
+  border: 1px solid var(--tone-warn-border);
+  background: var(--tone-warn-bg);
+  color: var(--tone-warn);
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.ac-btn-warning:hover:not(:disabled) {
+  border-color: var(--tone-warn);
+  background: linear-gradient(var(--tone-warn-bg), var(--tone-warn-bg)), var(--tone-warn-bg);
 }
 
 .ac-toggle {
@@ -721,14 +803,10 @@ textarea:focus {
 }
 
 .ac-btn-green {
-  border: 1px solid rgba(34, 197, 94, 0.45);
-  background: linear-gradient(
-    180deg,
-    rgba(34, 197, 94, 0.2) 0%,
-    rgba(34, 197, 94, 0.12) 100%
-  );
-  color: #86efac;
-  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.12);
+  border: 1px solid var(--tone-ok-border);
+  background: var(--tone-ok-bg);
+  color: var(--tone-ok);
+  box-shadow: inset 0 0 0 1px var(--tone-ok-bg);
   transition:
     border-color 0.15s ease,
     background 0.15s ease,
@@ -738,16 +816,10 @@ textarea:focus {
 }
 
 .ac-btn-green:hover:not(:disabled) {
-  border-color: rgba(34, 197, 94, 0.7);
-  background: linear-gradient(
-    180deg,
-    rgba(34, 197, 94, 0.28) 0%,
-    rgba(34, 197, 94, 0.16) 100%
-  );
-  color: #bbf7d0;
-  box-shadow:
-    inset 0 0 0 1px rgba(34, 197, 94, 0.2),
-    0 0 12px rgba(34, 197, 94, 0.12);
+  border-color: var(--tone-ok);
+  background: linear-gradient(var(--tone-ok-bg), var(--tone-ok-bg)), var(--tone-ok-bg);
+  color: var(--tone-ok);
+  box-shadow: inset 0 0 0 1px var(--tone-ok-border);
 }
 
 .ac-btn-green:active:not(:disabled) {
@@ -974,59 +1046,13 @@ textarea:focus {
   border-color: rgba(0, 0, 0, 0.35);
 }
 
-[data-theme="light"] .ac-btn-cyan {
-  border: 1px solid var(--accent-dim);
-  background: linear-gradient(180deg, rgba(8, 145, 178, 0.1) 0%, rgba(8, 145, 178, 0.05) 100%);
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.08);
-}
-
-[data-theme="light"] .ac-btn-cyan:hover:not(:disabled) {
-  border-color: rgba(8, 145, 178, 0.6);
-  background: linear-gradient(180deg, rgba(8, 145, 178, 0.16) 0%, rgba(8, 145, 178, 0.08) 100%);
-  color: #065666;
-  box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.15), 0 0 12px rgba(8, 145, 178, 0.1);
-}
-
 [data-theme="light"] .ac-btn-secondary {
-  color: var(--text);
   background: rgba(0, 0, 0, 0.02);
 }
 
 [data-theme="light"] .ac-btn-secondary:hover:not(:disabled) {
   border-color: rgba(0, 0, 0, 0.25);
-  color: var(--text-bright);
   background: rgba(0, 0, 0, 0.04);
-}
-
-[data-theme="light"] .ac-btn-ghost:hover:not(:disabled) {
-  color: var(--text-bright);
-}
-
-[data-theme="light"] .ac-btn-danger {
-  border: 1px solid rgba(220, 38, 38, 0.3);
-  background: rgba(220, 38, 38, 0.06);
-  color: #dc2626;
-}
-
-[data-theme="light"] .ac-btn-danger:hover:not(:disabled) {
-  border-color: rgba(220, 38, 38, 0.5);
-  background: rgba(220, 38, 38, 0.1);
-  color: #b91c1c;
-}
-
-[data-theme="light"] .ac-btn-green {
-  border: 1px solid rgba(22, 163, 74, 0.3);
-  background: linear-gradient(180deg, rgba(22, 163, 74, 0.1) 0%, rgba(22, 163, 74, 0.05) 100%);
-  color: #16a34a;
-  box-shadow: inset 0 0 0 1px rgba(22, 163, 74, 0.08);
-}
-
-[data-theme="light"] .ac-btn-green:hover:not(:disabled) {
-  border-color: rgba(22, 163, 74, 0.5);
-  background: linear-gradient(180deg, rgba(22, 163, 74, 0.16) 0%, rgba(22, 163, 74, 0.08) 100%);
-  color: #15803d;
-  box-shadow: inset 0 0 0 1px rgba(22, 163, 74, 0.15), 0 0 12px rgba(22, 163, 74, 0.08);
 }
 
 [data-theme="light"] .ac-toggle-track {
@@ -1082,7 +1108,7 @@ textarea:focus {
 
 [data-theme="light"] .ac-segmented-control-button.active {
   background: rgba(8, 145, 178, 0.12);
-  color: #0e7490;
+  color: var(--tone-accent);
 }
 
 [data-theme="light"] .ac-segmented-control-dark {

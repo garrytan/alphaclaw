@@ -598,3 +598,30 @@
   white-space: nowrap;
   text-align: right;
 }
+
+/* Light theme: the tier text colours above are pale tints for the dark
+   theme and fall far below 4.5:1 on a light card. */
+[data-theme="light"] .cron-calendar-slot-tier-low {
+  color: var(--tone-accent);
+}
+
+[data-theme="light"] .cron-calendar-slot-tier-unknown,
+[data-theme="light"] .cron-calendar-slot-tier-disabled {
+  color: var(--text-muted);
+}
+
+[data-theme="light"] .cron-calendar-slot-tier-medium {
+  color: #1e40af;
+}
+
+[data-theme="light"] .cron-calendar-slot-tier-high {
+  color: var(--tone-warn);
+}
+
+[data-theme="light"] .cron-calendar-slot-tier-very-high {
+  color: var(--tone-bad);
+}
+
+[data-theme="light"] .cron-calendar-compact-time {
+  opacity: 1;
+}
