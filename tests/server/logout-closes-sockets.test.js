@@ -11,7 +11,8 @@ const os = require("os");
 const path = require("path");
 const express = require("express");
 const request = require("supertest");
-const { WebSocket } = require("ws");
+const httpProxy = require("http-proxy-3");
+const { WebSocket, WebSocketServer } = require("ws");
 
 const { initAuthDb, closeAuthDb, getAuthDb } = require("../../lib/server/db/auth");
 const { createMembersStore } = require("../../lib/server/db/auth/members");
@@ -40,6 +41,7 @@ describe("logout closes open terminal and chat sockets", () => {
   let port;
   let membersStore;
   let writeInput;
+  let echoGateway;
 
   beforeEach(async () => {
     vi.stubEnv("SETUP_PASSWORD", kOwnerPassword);
@@ -64,12 +66,32 @@ describe("logout closes open terminal and chat sockets", () => {
     const gateway = await kit.startGatewayHarness();
     const chatWsService = kit.createService(gateway, { authSessionEvents });
 
+    // The gateway's /openclaw and root sockets: records every frame and
+    // whether its end of each connection closed.
+    echoGateway = { wss: new WebSocketServer({ host: "127.0.0.1", port: 0 }), messages: [], sockets: [] };
+    await new Promise((resolve) => echoGateway.wss.once("listening", resolve));
+    echoGateway.wss.on("connection", (socket, req) => {
+      const record = { url: req.url, closed: false };
+      echoGateway.sockets.push(record);
+      socket.on("close", () => {
+        record.closed = true;
+      });
+      socket.on("error", () => {});
+      socket.on("message", (raw) => {
+        echoGateway.messages.push(String(raw));
+        socket.send(`echo:${raw}`);
+      });
+    });
+    cleanups.push(() => new Promise((resolve) => echoGateway.wss.close(resolve)));
+    const proxy = httpProxy.createProxyServer({ ws: true, changeOrigin: true });
+    proxy.on("error", (err, req, res) => res?.destroy?.());
+
     writeInput = vi.fn();
     const server = http.createServer(app);
     createWatchdogTerminalWsBridge({
       server,
-      proxy: { ws: vi.fn() },
-      getGatewayUrl: () => `http://127.0.0.1:${gateway.port}`,
+      proxy,
+      getGatewayUrl: () => `http://127.0.0.1:${echoGateway.wss.address().port}`,
       isAuthorizedRequest: auth.isAuthorizedRequest,
       isAdminRequest: auth.isAdminRequest,
       watchdogTerminal: {
@@ -126,6 +148,36 @@ describe("logout closes open terminal and chat sockets", () => {
       ws.on("error", reject);
       ws.on("unexpected-response", (req, res) => reject(new Error(`upgrade answered ${res.statusCode}`)));
     });
+
+  // A gateway socket through the proxy, resolved once it echoes a first frame.
+  const openProxied = (pathname, cookie) =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${pathname}`, cookie ? { headers: { cookie } } : {});
+      const socket = { ws, messages: [], closed: null };
+      socket.closedPromise = new Promise((resolveClose) => {
+        ws.on("close", (code) => {
+          socket.closed = { code };
+          resolveClose(socket.closed);
+        });
+      });
+      cleanups.push(() => ws.terminate());
+      ws.on("message", (raw) => {
+        socket.messages.push(String(raw));
+        if (socket.messages.length === 1) resolve(socket);
+      });
+      ws.on("open", () => ws.send(`hello ${pathname}`));
+      ws.on("error", reject);
+      ws.on("unexpected-response", (req, res) => reject(new Error(`upgrade answered ${res.statusCode}`)));
+    });
+
+  const echoes = async (socket, text) => {
+    socket.ws.send(text);
+    for (let i = 0; i < 100; i += 1) {
+      if (socket.messages.includes(`echo:${text}`)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  };
 
   const openTerminal = (cookie) => openSocket("/api/watchdog/terminal/ws", cookie, "session");
   const openChat = (cookie) => openSocket("/api/ws/chat", cookie, "hello");
@@ -190,5 +242,49 @@ describe("logout closes open terminal and chat sockets", () => {
     expect(await answersPing(ownerChat)).toBe(true);
     expect(bobChat.closed).toBeNull();
     expect(ownerChat.closed).toBeNull();
+  });
+  // GST-1806: a proxied gateway socket ends with the session that opened it.
+  // The proxy pipes raw frames, so logout destroys both halves (code 1006).
+  it("closes only the logged-out member's proxied /openclaw socket, and a frame sent after it never reaches the gateway", async () => {
+    const ownerCookie = await loginOwner();
+    const aliceCookie = await loginMember("alice@example.com");
+    const bobCookie = await loginMember("bob@example.com");
+    const alice = await openProxied("/openclaw/alice", aliceCookie);
+    const bob = await openProxied("/openclaw/bob", bobCookie);
+    const owner = await openProxied("/openclaw/owner", ownerCookie);
+
+    alice.ws.pause();
+    const logout = await request(app).post("/api/auth/logout").set("Cookie", aliceCookie).send({});
+    expect(logout.status).toBe(200);
+    alice.ws.send("alice-after-logout");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    alice.ws.resume();
+
+    expect(await closedWithin(alice)).toEqual({ code: 1006 });
+    await vi.waitFor(() =>
+      expect(echoGateway.sockets.find((s) => s.url === "/openclaw/alice")).toEqual({ url: "/openclaw/alice", closed: true }),
+    );
+    expect(echoGateway.messages).not.toContain("alice-after-logout");
+    expect(await echoes(bob, "bob-still-here")).toBe(true);
+    expect(await echoes(owner, "owner-still-here")).toBe(true);
+    expect(bob.closed).toBeNull();
+    expect(owner.closed).toBeNull();
+  });
+
+  it("closes every session's proxied socket on an owner logout and leaves a sessionless gateway client alone", async () => {
+    const ownerCookie = await loginOwner();
+    const memberCookie = await loginMember("member@example.com");
+    const owner = await openProxied("/openclaw/owner", ownerCookie);
+    const member = await openProxied("/openclaw/member", memberCookie);
+    // A client authenticating to the gateway itself (no session cookie).
+    const client = await openProxied("/", null);
+
+    const logout = await request(app).post("/api/auth/logout").set("Cookie", ownerCookie).send({});
+    expect(logout.status).toBe(200);
+
+    expect(await closedWithin(owner)).toEqual({ code: 1006 });
+    expect(await closedWithin(member)).toEqual({ code: 1006 });
+    expect(await echoes(client, "client-still-here")).toBe(true);
+    expect(client.closed).toBeNull();
   });
 });

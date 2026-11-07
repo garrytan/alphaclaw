@@ -152,11 +152,15 @@ const gatewayState = {
   requests: [],
   sink: { bytes: 0, ended: false },
   wsConnections: 0,
+  wsMessages: [],
+  wsSockets: [],
 };
 const resetGatewayState = () => {
   gatewayState.requests = [];
   gatewayState.sink = { bytes: 0, ended: false };
   gatewayState.wsConnections = 0;
+  gatewayState.wsMessages = [];
+  gatewayState.wsSockets = [];
 };
 
 const pathnameOf = (url) => String(url).split(/[?#]/)[0];
@@ -299,10 +303,16 @@ const startFakeGateway = () =>
       // Counted so the traversal case can prove the upgrade never arrived —
       // a rejected handshake and "no connection" are different facts.
       gatewayState.wsConnections += 1;
+      const record = { url: req.url, closed: false };
+      gatewayState.wsSockets.push(record);
+      socket.on("close", () => {
+        record.closed = true;
+      });
       socket.on("error", () => {});
-      socket.on("message", (message) =>
-        socket.send(`echo:${message}:path=${req.url}`),
-      );
+      socket.on("message", (message) => {
+        gatewayState.wsMessages.push(String(message));
+        socket.send(`echo:${message}:path=${req.url}`);
+      });
     });
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve(server));
@@ -1323,5 +1333,42 @@ describe("logout closes open sockets (real process)", () => {
     expect(await closedWithin(chat)).toEqual({ code: 1000, reason: "Logged out" });
     await sleep(1000);
     expect(fs.existsSync(afterMarker)).toBe(false);
+  }, 30000);
+
+  // GST-1806: an open Control UI tunnel is a socket the session opened too.
+  // The proxy pipes raw frames, so logout destroys the pair (no close frame).
+  it("closes a proxied /openclaw socket on logout, and a frame sent after it never reaches the gateway", async () => {
+    resetGatewayState();
+    cookie = await loginForCookie(serverPort);
+    const ws = new WebSocket(`ws://127.0.0.1:${serverPort}/openclaw/ws-echo`, { headers: { cookie } });
+    const closed = new Promise((resolve) => ws.on("close", (code) => resolve({ code })));
+    const echoes = [];
+    ws.on("message", (raw) => echoes.push(String(raw)));
+    ws.on("error", () => {});
+    await new Promise((resolve, reject) => {
+      ws.once("open", resolve);
+      ws.once("unexpected-response", (req, res) => reject(new Error(`upgrade answered ${res.statusCode}`)));
+    });
+    ws.send("before-logout");
+    for (let i = 0; i < 100 && echoes.length === 0; i += 1) await sleep(50);
+    expect(echoes).toEqual(["echo:before-logout:path=/openclaw/ws-echo"]);
+
+    // Paused, the client does not see the server end the socket, so it still
+    // sends: the frame reaches a socket logout already destroyed.
+    ws.pause();
+    const logout = await httpRequest(serverPort, {
+      path: "/api/auth/logout",
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+    }, "{}");
+    expect(logout.status).toBe(200);
+    ws.send("after-logout");
+    await sleep(200);
+    ws.resume();
+
+    expect(await Promise.race([closed, sleep(5000).then(() => "still open")])).toEqual({ code: 1006 });
+    for (let i = 0; i < 100 && !gatewayState.wsSockets[0]?.closed; i += 1) await sleep(50);
+    expect(gatewayState.wsSockets).toEqual([{ url: "/openclaw/ws-echo", closed: true }]);
+    expect(gatewayState.wsMessages).toEqual(["before-logout"]);
   }, 30000);
 });
