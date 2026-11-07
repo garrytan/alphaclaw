@@ -124,6 +124,7 @@ describe("relay conversations (ALPH-68)", () => {
     expect((await request(app).get("/api/relay/conversations?agent=capy-3")).body.conversations.map((item) => item.id)).toEqual(["dm_b"]);
     expect((await request(app).get("/api/relay/conversations?q=deploys")).body.conversations.map((item) => item.id)).toEqual(["dm_a"]);
     expect((await request(app).get("/api/relay/conversations?from=2026-11-06")).body.conversations.map((item) => item.id)).toEqual(["dm_a"]);
+    expect((await request(app).get("/api/relay/conversations?from=2026-11-06&to=2026-11-06")).body.conversations.map((item) => item.id)).toEqual(["dm_a"]);
     const first = (await request(app).get("/api/relay/conversations?limit=1")).body;
     expect(first.conversations.map((item) => item.id)).toEqual(["dm_a"]);
     const next = (await request(app).get("/api/relay/conversations?limit=1&before=" + encodeURIComponent(first.nextBefore))).body;
@@ -143,6 +144,23 @@ describe("relay conversations (ALPH-68)", () => {
       expect.objectContaining({ id: "78", from: "wintermute", text: "pong", relayStatus: "answered", inReplyTo: "77" }),
     ]);
     expect((await request(app).get("/api/relay/conversations/..%2Fx")).status).toBe(400);
+  });
+
+  it("refuses a text search from the agent actor, which never receives the text it would test for", async () => {
+    const app = express();
+    registerRelayRoutes({
+      app,
+      requireAuth: (req, res, next) => {
+        req.alphaclawActor = { type: "agent" };
+        next();
+      },
+      relayService: conversationService(),
+      listSessionRows: async () => [],
+    });
+    const searched = await request(app).get("/api/relay/conversations?q=deploys");
+    expect(searched.status).toBe(400);
+    expect(JSON.stringify(searched.body)).not.toContain("dm_a");
+    expect((await request(app).get("/api/relay/conversations")).status).toBe(200);
   });
 
   it("the agent actor reads conversations as metadata only: no text, no session key", () => {

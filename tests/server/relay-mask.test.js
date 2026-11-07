@@ -61,13 +61,17 @@ describe("relay masker (ALPH-63)", () => {
     expect(mask("nothing secret here")).toBe("nothing secret here");
   });
 
-  it("leaves a plain word alone when a configured value equals it, and still masks real secrets (ALPH-68)", () => {
-    const mask = createRelayMasker({ rootDir, env: { GOG_KEYRING_PASSWORD: "alphaclaw", DB_PASSWORD: "postgres" } });
-    const answer = "Run the alphaclaw CLI from node_modules/alphaclaw; postgres is fine. Token " + kSecrets.gatewayToken + ".";
+  it("leaves the product names alone when the keyring default equals one, and still masks real secrets, plain words included (ALPH-68)", () => {
+    const mask = createRelayMasker({
+      rootDir,
+      env: { GOG_KEYRING_PASSWORD: "alphaclaw", DB_PASSWORD: "postgres", SETUP_PASSWORD: "bluemonkey" },
+    });
+    const answer = "Run the alphaclaw CLI next to OpenClaw from node_modules/alphaclaw. Token " + kSecrets.gatewayToken + ".";
     const text = mask(answer);
-    expect(text).toContain("Run the alphaclaw CLI from node_modules/alphaclaw; postgres is fine.");
+    expect(text).toContain("Run the alphaclaw CLI next to OpenClaw from node_modules/alphaclaw.");
     expect(text).not.toContain(kSecrets.gatewayToken);
     expect(mask("key " + kSecrets.envFile)).toBe("key ***");
+    expect(mask("db postgres, setup bluemonkey")).toBe("db ***, setup ***");
   });
 
   const kDeployOnly = "f".repeat(16) + "0123456789abcdef".repeat(3);

@@ -3,6 +3,7 @@ const os = require("os");
 const path = require("path");
 const { createRelayBridge, findAnswerInHistory, relaySessionKey, kHopLimit, stripHostNotices } = require("../../lib/server/relay/bridge");
 const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
+const { createRelayMasker } = require("../../lib/server/relay/mask");
 
 // A fake relay engine: a workspace event log, messages with metadata, 1:1
 // conversations and the replies the bridge posts.
@@ -646,6 +647,22 @@ describe("relay bridge: the relay masker and a failing sessions.list (ALPH-63)",
     expect(ctx.engine.replies[0].text).toBe("PLAIN=***");
   });
 
+  it("posts an answer that names the product unmasked through the real relay masker, and still masks a real .env secret (ALPH-68)", async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-bridge-mask-"));
+    try {
+      fs.writeFileSync(path.join(rootDir, ".env"), "PLAIN_SETTING=dotenv-only-secret-42\n");
+      ctx = setup({ maskText: createRelayMasker({ rootDir, env: { GOG_KEYRING_PASSWORD: "alphaclaw" } }) });
+      await ctx.tick();
+      ctx.engine.dm("capy-p", "how do I update?");
+      await ctx.tick();
+      await ctx.end(ctx.gateway.sends[0], "Run npm i alphaclaw@latest, then restart OpenClaw. PLAIN_SETTING=dotenv-only-secret-42");
+      expect(ctx.engine.replies).toHaveLength(1);
+      expect(ctx.engine.replies[0].text).toBe("Run npm i alphaclaw@latest, then restart OpenClaw. PLAIN_SETTING=***");
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it("a sessions.list that keeps throwing waits out each message's recovery window, then ends it with outcome_unknown, and reports the failure", async () => {
     ctx = setup();
     await ctx.tick();
@@ -741,12 +758,13 @@ describe("relay bridge: latency and single-finisher fixes (ALPH-68)", () => {
     expect(ctx.engine.replies).toHaveLength(1);
   });
 
-  it("an ambiguous send whose answer is already in an idle session ends on the next pass, not after the 2-minute grace", async () => {
+  it("an ambiguous send that lost its events with the connection ends on the next pass once its answer is in an idle session, not after the 2-minute grace", async () => {
     ctx = setup();
     await ctx.tick();
     const messageId = ctx.engine.dm("capy-t", "slow one");
     ctx.gateway.failNextSend(Object.assign(new Error("OpenClaw chat.send request timed out"), { written: true }));
     await ctx.tick();
+    ctx.bridge.onGatewayDisconnect();
     const { sessionKey } = ctx.store.get(messageId);
     runStartedDespiteTimeout(messageId, sessionKey, null);
     ctx.gateway.active.add(sessionKey);
@@ -759,6 +777,26 @@ describe("relay bridge: latency and single-finisher fixes (ALPH-68)", () => {
     await flush(20);
     expect(ctx.store.get(messageId).state).toBe("answered");
     expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Done after all."]);
+  });
+
+  it("an ambiguous send still tracked on a live connection is left to its lifecycle end, so a pass never posts the text before a tool call", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-t", "slow one");
+    ctx.gateway.failNextSend(Object.assign(new Error("OpenClaw chat.send request timed out"), { written: true }));
+    await ctx.tick();
+    const { sessionKey } = ctx.store.get(messageId);
+    runStartedDespiteTimeout(messageId, sessionKey, "Let me check the logs first.");
+    ctx.nowRef.value += 10000;
+    await ctx.reconcile();
+    await flush(20);
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    expect(ctx.engine.replies).toEqual([]);
+    ctx.bridge.handleGatewayEvent({ event: "agent", payload: { runId: "relay-" + messageId, sessionKey, stream: "assistant", data: { delta: "The logs are clean." } } });
+    ctx.bridge.handleGatewayEvent({ event: "agent", payload: { runId: "relay-" + messageId, sessionKey, stream: "lifecycle", data: { phase: "end" } } });
+    await flush(20);
+    expect(ctx.store.get(messageId).state).toBe("answered");
+    expect(ctx.engine.replies).toHaveLength(1);
   });
 
   it("two reconcile triggers and a lifecycle end racing for one message post exactly one reply", async () => {
