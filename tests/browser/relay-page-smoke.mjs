@@ -86,16 +86,20 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.getByText("wintermute", { exact: false }).first().waitFor();
   await page.getByText("relay-0a1b2c3d", { exact: false }).first().waitFor();
-  assert.doesNotMatch(await page.locator("body").innerText(), /Restart the gateway if it looks wedged/, "a transcript opens only when picked");
-  await page.getByRole("button", { name: /@capy-alph-63/ }).first().click();
+  assert.doesNotMatch(await page.locator("body").innerText(), /Restart the gateway if it looks wedged/, "a relay log opens only when expanded");
+  assert.equal(await page.getByRole("link", { name: /@capy-alph-63/ }).first().getAttribute("href"), "#/chat/" + encodeURIComponent("agent:main:relay-capy-alph-63"), "a row opens its session in Chat");
+  assert.equal(await page.getByRole("button", { name: "Relay log" }).count(), 1, "a session past retention has no relay log");
+  const logToggle = page.getByRole("button", { name: "Relay log" });
+  assert.equal(await logToggle.getAttribute("aria-expanded"), "false");
+  await logToggle.click();
   await page.getByText("Restart the gateway if it looks wedged", { exact: false }).waitFor();
-  assert.equal(await page.getByRole("link", { name: "Open session in Chat" }).getAttribute("href"), "#/chat/" + encodeURIComponent("agent:main:relay-capy-alph-63"));
+  assert.equal(await logToggle.getAttribute("aria-expanded"), "true");
   const text = await page.locator("body").innerText();
   assert.match(text, /@capy-old[\s\S]*session only/, "a relay session past retention is still listed");
   assert.match(text, /169\.254\.0\.21/, "exposure warning names the address");
   assert.match(text, /capy-alph-63/);
   assert.match(text, /run_interrupted|cut off|Interrupted/i);
-  assert.match(text, /Restart the gateway if it looks wedged[\s\S]*awaits approval relay-0a1b2c3d/, "the transcript shows both sides to the signed-in owner");
+  assert.match(text, /Restart the gateway if it looks wedged[\s\S]*awaits approval relay-0a1b2c3d/, "the relay log shows both sides to the signed-in owner");
   assert.match(text, /https:\/\/wintermute\.example\.com\/relay\/mcp/, "connections show the MCP URL");
   assert.match(text, /capy-62a929e44271[\s\S]*wake delivered/);
   assert.match(text, /webhook gone/);
@@ -112,7 +116,7 @@ try {
   }
   if (shots) await page.screenshot({ path: path.join(shots, "relay-page-mobile.png"), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log("PASS: status, agents, needs-you approval, interrupted run, exposure warning, conversation list and transcript with the Chat link, one-time consent code, desktop/mobile layout");
+  console.log("PASS: status, agents, needs-you approval, interrupted run, exposure warning, conversation rows linking to Chat with an expandable relay log, one-time consent code, desktop/mobile layout");
 } finally {
   await browser?.close();
   server.close();
