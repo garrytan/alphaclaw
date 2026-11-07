@@ -14,7 +14,7 @@ const kSetupUiMd = readFileSync(
 );
 
 const tabsSection = () => {
-  const start = kSetupUiMd.indexOf("## Tabs");
+  const start = kSetupUiMd.indexOf("## Pages");
   expect(start).toBeGreaterThan(-1);
   const rest = kSetupUiMd.slice(start);
   const next = rest.indexOf("\n#", 4);
@@ -24,8 +24,10 @@ const tabsSection = () => {
 describe("docs/agent-facing TOOLS.md Tabs table", () => {
   // Items with an `href` are action items (the Claude Code launcher), not hash
   // routes — the table documents tabs the agent can point the user at.
+  // Items with an `anchor` (Channels, Integrations) open their part of Home
+  // until they get their own pages, so they have no hash of their own yet.
   const routed = kNavSections.flatMap((section) =>
-    section.items.filter((item) => !item.href).map((item) => item.id),
+    section.items.filter((item) => !item.href && !item.anchor).map((item) => item.id),
   );
 
   it("lists every hash-routed tab from kNavSections with its {{SETUP_UI_URL}}#<id> link", () => {

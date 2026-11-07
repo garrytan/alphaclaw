@@ -11,6 +11,7 @@ Old links (`#general`, `#watchdog`, `#cron`, `#envars`) still open the renamed p
 | Page     | URL                         | What it helps with |
 | -------- | --------------------------- | ------------------ |
 | Home     | `{{SETUP_UI_URL}}#home`     | Gateway status & restart, channel health (Telegram/Discord/Slack/WhatsApp/Signal), pending chat pairings & device approvals, feature health, Google Workspace connection, OpenAI-compatible API and Agent Administration toggles, repo auto-sync schedule, OpenClaw dashboard launch |
+| Chat     | `{{SETUP_UI_URL}}#chat`     | Web chat with your agents — one conversation per session, relay conversations included, with run status and history |
 | Schedules | `{{SETUP_UI_URL}}#schedules` | Scheduled jobs — scheduler status, enable/disable, run now, prompt and delivery-routing edits, rolling calendar, run history, trends and per-run usage |
 | Usage    | `{{SETUP_UI_URL}}#usage`    | Token and cost reporting — daily summary plus per-session and per-agent breakdowns and time series |
 | Doctor   | `{{SETUP_UI_URL}}#doctor`   | Drift Doctor workspace health scans — finding cards, deterministic environment and model-drift checks, context-injection budget meter, scheduled scans, fixes dispatched to the agent |
