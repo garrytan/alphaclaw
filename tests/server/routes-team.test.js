@@ -271,6 +271,112 @@ describe("server/routes/team (4.5)", () => {
     expect(restartReasons).toContain("team_member_changed");
   });
 
+  it("copy new link (GST-1787): an admin gets a new URL once, the old link stops working and the new one works", async () => {
+    const cookie = await legacyCookie();
+    await enableTeam(cookie);
+    const invite = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", cookie)
+      .send({ role: "member" });
+    const oldToken = invite.body.token;
+    const inviteId = invite.body.invite.id;
+
+    const copied = await request(app)
+      .post(`/api/team/invites/${inviteId}/link`)
+      .set("Cookie", cookie);
+    expect(copied.status).toBe(200);
+    const newToken = new URL(copied.body.url).searchParams.get("invite");
+    expect(newToken).toBeTruthy();
+    expect(newToken).not.toBe(oldToken);
+    expect(copied.body.url).toBe(
+      `https://claw.example.com/login.html?invite=${encodeURIComponent(newToken)}`,
+    );
+    expect(copied.body.token).toBeUndefined();
+    expect(copied.body.invite).toMatchObject({
+      id: inviteId,
+      role: "member",
+      expiresAt: invite.body.invite.expiresAt,
+    });
+    const listed = await request(app).get("/api/team").set("Cookie", cookie);
+    expect(listed.body.invites.map((row) => row.id)).toEqual([inviteId]);
+
+    const stale = await request(app).post("/api/auth/accept-invite").send({
+      token: oldToken,
+      email: "member@example.com",
+      password: "member password",
+    });
+    expect(stale.status).toBe(400);
+    expect(stale.body.code).toBe("invite_invalid");
+    const accept = await request(app).post("/api/auth/accept-invite").send({
+      token: newToken,
+      email: "member@example.com",
+      password: "member password",
+    });
+    expect(accept.status).toBe(200);
+
+    const used = await request(app)
+      .post(`/api/team/invites/${inviteId}/link`)
+      .set("Cookie", cookie);
+    expect(used.status).toBe(404);
+    expect(used.body.code).toBe("invite_not_pending");
+  });
+
+  it("copy new link (GST-1787) writes an audit line without the token or the URL", async () => {
+    const cookie = await legacyCookie();
+    await enableTeam(cookie);
+    const invite = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", cookie)
+      .send({ email: "pinned@example.com", role: "member" });
+    const copied = await request(app)
+      .post(`/api/team/invites/${invite.body.invite.id}/link`)
+      .set("Cookie", cookie);
+    const newToken = new URL(copied.body.url).searchParams.get("invite");
+    const rotated = auditEvents.filter(
+      (event) => event.eventType === "team_invite_link_rotated",
+    );
+    expect(rotated).toHaveLength(1);
+    expect(rotated[0].details).toEqual({
+      inviteId: invite.body.invite.id,
+      role: "member",
+      email: "pinned@example.com",
+      by: "owner",
+    });
+    const serialized = JSON.stringify(auditEvents);
+    expect(serialized).not.toContain(newToken);
+    expect(serialized).not.toContain(invite.body.token);
+    expect(serialized).not.toContain("invite=");
+  });
+
+  it("copy new link (GST-1787) is refused to a member, and the invite's link keeps working", async () => {
+    const adminCookie = await legacyCookie();
+    await enableTeam(adminCookie);
+    const first = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", adminCookie)
+      .send({});
+    const acceptInvite = (token, email, password) =>
+      request(app).post("/api/auth/accept-invite").send({ token, email, password });
+    const accept = await acceptInvite(first.body.token, "member@example.com", "member password");
+    const memberCookie = cookieOf(accept);
+    const second = await request(app)
+      .post("/api/team/invites")
+      .set("Cookie", adminCookie)
+      .send({});
+
+    const attempt = await request(app)
+      .post(`/api/team/invites/${second.body.invite.id}/link`)
+      .set("Cookie", memberCookie);
+    expect(attempt.status).toBe(403);
+    expect(attempt.body.url).toBeUndefined();
+    expect(
+      auditEvents.some((event) => event.eventType === "team_invite_link_rotated"),
+    ).toBe(false);
+
+    const stillValid = await acceptInvite(second.body.token, "second@example.com", "second password");
+    expect(stillValid.status).toBe(200);
+  });
+
   it("disabling a member revokes their session immediately (E-C8)", async () => {
     const adminCookie = await legacyCookie();
     await enableTeam(adminCookie);
