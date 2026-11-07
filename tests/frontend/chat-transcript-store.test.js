@@ -3,6 +3,7 @@ import {
   applyChunk,
   applyTool,
   composeVisibleMessages,
+  keepSlidRows,
   markerCopy,
   mergeHistory,
 } from "../../lib/public/js/components/chat/transcript-store.js";
@@ -388,3 +389,25 @@ describe("frontend/chat transcript-store fix wave PR 9b (F122 confirm gate, F123
     expect(composeVisibleMessages({ messages, outboxItems: [] })).toBe(messages);
   });
 });
+
+describe("keepSlidRows (ALPH-68)", () => {
+  const rowsOf = (from, to) => Array.from({ length: to - from }, (_, i) => ({ id: `r${from + i}`, role: "user", content: `m${from + i}` }));
+
+  it("keeps rows the newest window slid past once older pages are loaded, so no gap opens", () => {
+    const olderRows = rowsOf(0, 200);
+    const previousRows = rowsOf(200, 400);
+    const nextRows = rowsOf(250, 450);
+    const kept = keepSlidRows({ olderRows, previousRows, nextRows });
+    expect(kept.map((row) => row.id)).toEqual(rowsOf(0, 250).map((row) => row.id));
+    const merged = mergeHistory({ rows: nextRows, olderRows: kept });
+    expect(merged.map((row) => row.id)).toEqual(rowsOf(0, 450).map((row) => row.id));
+  });
+
+  it("changes nothing without older pages or when nothing slid", () => {
+    const empty = [];
+    expect(keepSlidRows({ olderRows: empty, previousRows: rowsOf(0, 5), nextRows: rowsOf(3, 8) })).toBe(empty);
+    const olderRows = rowsOf(0, 3);
+    expect(keepSlidRows({ olderRows, previousRows: rowsOf(3, 6), nextRows: rowsOf(3, 7) })).toBe(olderRows);
+  });
+});
+
