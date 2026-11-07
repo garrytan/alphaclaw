@@ -77,6 +77,41 @@ describe("classifyBrowserOrigin (control-ui-mount.js)", () => {
     expect(classify({ host: "box.lan:3000", origin: "https://claw.example.com.evil.dev" })).toBe("cross");
   });
 
+  it("is cross when the Origin's port is the other scheme's default (http on 443, https on 80)", () => {
+    expect(classify({ host: "box.example", origin: "http://box.example:443" }, "")).toBe("cross");
+    expect(classify({ host: "box.example", origin: "https://box.example:80" }, "")).toBe("cross");
+    expect(classify({ host: "box.example:443", origin: "http://box.example:443" }, "")).toBe("cross");
+    expect(classify({ host: "box.example:443", origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example:80", origin: "http://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example:80", origin: "https://box.example" }, "")).toBe("cross");
+    expect(classify({ host: "box.example", origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example", origin: "http://box.example" }, "")).toBe("same");
+  });
+
+  it("is cross for an http Origin when a proxy says the request came over https", () => {
+    const cloudflare = { host: "box.example", "x-forwarded-proto": "https", "cf-visitor": '{"scheme":"https"}' };
+    expect(classify({ ...cloudflare, origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ ...cloudflare, origin: "http://box.example" }, "")).toBe("cross");
+    const innerProxySaysHttp = { host: "box.example", "x-forwarded-proto": "http", "cf-visitor": '{"scheme":"https"}' };
+    expect(classify({ ...innerProxySaysHttp, origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ ...innerProxySaysHttp, origin: "http://box.example" }, "")).toBe("cross");
+    const chain = { host: "box.example", "x-forwarded-proto": "https, http" };
+    expect(classify({ ...chain, origin: "http://box.example" }, "")).toBe("cross");
+  });
+
+  it("lets the Origin's own scheme stand when no proxy says https", () => {
+    expect(classify({ host: "box.example", "x-forwarded-proto": "http", origin: "https://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example", "x-forwarded-proto": "http", origin: "http://box.example" }, "")).toBe("same");
+    expect(classify({ host: "box.example:3000", origin: "http://box.example:3000" }, "")).toBe("same");
+    expect(classify({ host: "box.example:8443", origin: "https://box.example:8443" }, "")).toBe("same");
+    expect(classify({ host: "box.example", "cf-visitor": "not json", origin: "http://box.example" }, "")).toBe("same");
+  });
+
+  it("is cross for an Origin that is not http or https", () => {
+    expect(classify({ host: "box.example", origin: "ftp://box.example" }, "")).toBe("cross");
+    expect(classify({ host: "abcdef", origin: "chrome-extension://abcdef" }, "")).toBe("cross");
+  });
+
   it("is absent with no Origin, unless fetch metadata says the request came from another site", () => {
     expect(classify({ host: "box.lan" })).toBe("absent");
     expect(classify({ host: "box.lan", "sec-fetch-site": "same-origin" })).toBe("absent");
