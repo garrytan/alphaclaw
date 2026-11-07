@@ -116,7 +116,10 @@ describe("server/routes/webhooks", () => {
       getTransformRelativePath("schwab-oauth"),
     );
     const transformSource = fs.readFileSync(transformPath, "utf8");
-    expect(transformSource).toContain("message: message || fallbackMessage");
+    expect(transformSource).not.toContain("data.message");
+    expect(transformSource).not.toContain("data.wakeMode");
+    expect(transformSource).not.toContain("data.name");
+    expect(transformSource).toContain('wakeMode: "now"');
     expect(transformSource).toContain(
       "OAuth callback received (authorization code present)",
     );

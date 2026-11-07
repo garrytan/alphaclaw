@@ -89,7 +89,7 @@ describe("server/oauth-callback-middleware", () => {
       expect(response.status).toBe(200);
       expect(calls).toHaveLength(1);
       expect(calls[0].method).toBe("POST");
-      expect(calls[0].url).toBe("/hooks/schwab-oauth?code=AUTH&state=STATE");
+      expect(calls[0].url).toBe("/hooks/schwab-oauth");
       expect(calls[0].headers.authorization).toBe("Bearer test-webhook-token");
       expect(JSON.parse(calls[0].bodyText)).toEqual({
         code: "AUTH",

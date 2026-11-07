@@ -235,6 +235,22 @@ describe("server/routes/webhooks coverage", () => {
         expect(res.body.webhook.oauthCallbackUrl).toBe("");
       });
     });
+
+    it("lists the header form before the query URL and labels the query URL less safe (ALPH-71 L-7)", async () => {
+      await withWebhookTokenEnv("secret+token", async () => {
+        const fs = createConfigFs();
+        createWebhook({ fs, constants, name: "detail-hook" });
+        const app = createApp({ fs });
+
+        const res = await request(app).get("/api/webhooks/detail-hook");
+        expect(res.status).toBe(200);
+        const keys = Object.keys(res.body.webhook);
+        expect(keys.indexOf("authHeaderValue")).toBeGreaterThan(-1);
+        expect(keys.indexOf("authHeaderValue")).toBeLessThan(keys.indexOf("queryStringUrl"));
+        expect(res.body.webhook.queryStringUrlNote).toMatch(/less safe/i);
+        expect(res.body.webhook.queryStringUrlNote).toContain("POST");
+      });
+    });
   });
 
   describe("POST /api/webhooks", () => {
