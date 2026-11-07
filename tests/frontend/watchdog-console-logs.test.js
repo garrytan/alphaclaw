@@ -198,7 +198,7 @@ describe("frontend/watchdog console card logs pane", () => {
       logsError: new Error("boom"),
     });
     const text = treeText(tree);
-    expect(text).not.toContain("No logs yet.");
+    expect(text).not.toContain("No gateway output yet.");
     expect(text).toContain("Couldn't load logs — retrying automatically.");
     expect(findAllByType(tree, InlineErrorChip).length).toBe(1);
   });
@@ -218,11 +218,11 @@ describe("frontend/watchdog console card logs pane", () => {
 
   it("keeps the genuine empty and loading states without a chip", () => {
     const empty = renderCard({ loadingLogs: false, logs: "", logsError: null });
-    expect(treeText(empty)).toContain("No logs yet.");
+    expect(treeText(empty)).toContain("No gateway output yet.");
     expect(findAllByType(empty, InlineErrorChip).length).toBe(0);
 
     const loading = renderCard({ loadingLogs: true, logs: "", logsError: null });
-    expect(treeText(loading)).toContain("Loading logs...");
+    expect(treeText(loading)).toContain("Loading…");
     expect(findAllByType(loading, InlineErrorChip).length).toBe(0);
   });
 

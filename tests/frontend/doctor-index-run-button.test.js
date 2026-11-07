@@ -120,9 +120,6 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 // Children with their own suites/heavy deps: keep the walk scoped to the
 // header/button behavior under test.
-vi.mock("../../lib/public/js/components/doctor/summary-cards.js", () => ({
-  DoctorSummaryCards: () => null,
-}));
 vi.mock("../../lib/public/js/components/doctor/findings-list.js", () => ({
   DoctorFindingsList: () => null,
 }));
@@ -137,6 +134,8 @@ import * as preactHooks from "preact/hooks";
 import { __pollRegistry } from "../../lib/public/js/hooks/usePolling.js";
 import { startDoctorRun } from "../../lib/public/js/lib/api.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
+import { AsyncSection } from "../../lib/public/js/components/async-section.js";
+import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
 import { DoctorTab } from "../../lib/public/js/components/doctor/index.js";
 import { ContextInjectionPanel } from "../../lib/public/js/components/doctor/context-injection-panel.js";
 
@@ -204,7 +203,7 @@ const runDoctorButton = (tree) =>
   collectNodes(tree).find(
     (vnode) =>
       vnode.type === ActionButton &&
-      vnode.props.idleLabel === "Run Drift Doctor",
+      vnode.props.idleLabel === "Run Doctor",
   );
 
 const seedLoadedState = ({ runInProgress = false } = {}) => {
@@ -303,5 +302,53 @@ describe("frontend/doctor-tab run button", () => {
     renderTab();
     harness.flushEffects();
     expect(cardsSlot().refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("frontend/doctor-tab briefing states (ALPH-69)", () => {
+  const findBy = (tree, predicate) => collectNodes(tree).filter(predicate);
+  const textOf = (node) => {
+    const out = [];
+    const walk = (value) => {
+      if (typeof value === "string" || typeof value === "number") out.push(String(value));
+      else if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value === "object") walk(value.props?.children);
+    };
+    walk(node);
+    return out.join("");
+  };
+
+  it("shows the never-run empty state and headline", () => {
+    statusSlot().data = { status: { lastRunAt: "", runInProgress: false, changeSummary: { changedPaths: [] } } };
+    runsSlot().data = { runs: [] };
+    cardsSlot().data = { cards: [] };
+    const tree = renderTab();
+    const section = findBy(tree, (node) => node.type === AsyncSection)[0];
+    expect(section.props.empty).toBe(true);
+    expect(section.props.emptyTitle).toBe("No findings yet");
+    const headline = findBy(tree, (node) => node.props?.class === "briefing-headline")[0];
+    expect(textOf(headline)).toBe("Doctor has not run yet.");
+  });
+
+  it("names a failed last run in an error chip with Run Doctor again", () => {
+    statusSlot().data = { status: { lastRunAt: "", runInProgress: false, changeSummary: { changedPaths: [] } } };
+    runsSlot().data = { runs: [{ id: 2, status: "failed", error: "agent timed out", statusCounts: {} }] };
+    cardsSlot().data = { cards: [] };
+    renderTab();
+    harness.flushEffects();
+    const tree = renderTab();
+    const chip = findBy(tree, (node) => node.type === InlineErrorChip && node.props.retryLabel === "Run Doctor again")[0];
+    expect(chip.props.headline).toBe("Doctor's last run failed.");
+    expect(chip.props.error).toBe("agent timed out");
+  });
+
+  it("shows a load error, not the empty state, when the runs read fails first", () => {
+    runsSlot().error = new Error("runs down");
+    const tree = renderTab();
+    const section = findBy(tree, (node) => node.type === AsyncSection)[0];
+    expect(section.props.error).toBeTruthy();
+    expect(section.props.errorHeadline).toBe("Couldn't load Doctor's findings.");
+    const headline = findBy(tree, (node) => node.props?.class === "briefing-headline")[0];
+    expect(textOf(headline)).toBe("Couldn't load Doctor's findings.");
   });
 });

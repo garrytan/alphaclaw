@@ -212,6 +212,9 @@ import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chi
 import { SavedToggle } from "../../lib/public/js/components/saved-toggle.js";
 import { ToggleSwitch } from "../../lib/public/js/components/toggle-switch.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";
+import { PaneShell } from "../../lib/public/js/components/pane-shell.js";
+import { EmptyState } from "../../lib/public/js/components/empty-state.js";
+import { CronJobList } from "../../lib/public/js/components/cron-tab/cron-job-list.js";
 
 const harness = preactHooks.__harness;
 const polls = pollingModule.__pollRegistry;
@@ -717,9 +720,9 @@ describe("frontend/cron-tab component region states", () => {
     const section = findAllByType(tree, AsyncSection)[0];
     expect(section.props.error).toBeTruthy();
     const chip = findAllByType(section.rendered, InlineErrorChip)[0];
-    expect(chip.props.headline).toBe("Couldn't load cron jobs.");
+    expect(chip.props.headline).toBe("Couldn't load schedules.");
     expect(collectText(section.rendered).join(" ")).not.toContain(
-      "No cron jobs yet",
+      "No schedules yet",
     );
 
     chip.props.onRetry();
@@ -731,8 +734,8 @@ describe("frontend/cron-tab component region states", () => {
     const section = findAllByType(tree, AsyncSection)[0];
     expect(section.props.loading).toBe(true);
     const renderedText = collectText(section.rendered).join(" ");
-    expect(renderedText).toContain("Loading cron jobs...");
-    expect(renderedText).not.toContain("No cron jobs yet");
+    expect(renderedText).toContain("Loading…");
+    expect(renderedText).not.toContain("No schedules yet");
   });
 
   it("renders the empty state only once jobs have genuinely loaded empty", async () => {
@@ -741,7 +744,7 @@ describe("frontend/cron-tab component region states", () => {
     const section = findAllByType(tree, AsyncSection)[0];
     expect(section.props.loading).toBe(false);
     expect(section.props.error).toBe(null);
-    expect(collectText(section.rendered).join(" ")).toContain("No cron jobs yet");
+    expect(collectText(section.rendered).join(" ")).toContain("No schedules yet");
   });
 
   it("renders runs/usage/trends poll errors as inline rows in the detail pane", async () => {
@@ -837,5 +840,87 @@ describe("frontend/cron-tab component save + toggle wiring", () => {
       "Couldn't confirm disable — showing the server's current state.",
     );
     expect(showToast).not.toHaveBeenCalled();
+  });
+});
+
+describe("frontend/cron-tab Schedules pane (ALPH-69)", () => {
+  it("sits on PaneShell with a list pane and the overview when no job is open", async () => {
+    const agents = [{ id: "main", name: "Main" }];
+    polls.ensureSlot(kJobsPoll).data = { ok: true, jobs: [makeJob()] };
+    const tree = await settleComponent({ jobId: "", agents });
+    const shell = findAllByType(tree, PaneShell)[0];
+    expect(shell.props.wide).toBe(true);
+    const panes = collectNodes(tree).find((node) => node.props?.class === "schedules-panes");
+    expect(panes.props["data-view"]).toBe("list");
+    expect(findAllByType(tree, CronJobList)[0].props.agents).toBe(agents);
+    expect(collectNodes(tree).some((node) => node.props?.class === "schedules-back")).toBe(false);
+  });
+
+  it("opens a job as the detail view with a Back control to the list", async () => {
+    polls.ensureSlot(kJobsPoll).data = { ok: true, jobs: [makeJob()] };
+    const onSetLocation = vi.fn();
+    const tree = await settleComponent({ jobId: "job-1", onSetLocation });
+    const panes = collectNodes(tree).find((node) => node.props?.class === "schedules-panes");
+    expect(panes.props["data-view"]).toBe("detail");
+    const back = collectNodes(tree).find((node) => node.props?.class === "schedules-back");
+    expect(collectText(back).join("")).toContain("All schedules");
+    back.props.onclick();
+    expect(onSetLocation).toHaveBeenCalled();
+  });
+
+  it("uses EmptyState with the spec's copy when there are no schedules", async () => {
+    polls.ensureSlot(kJobsPoll).data = { ok: true, jobs: [] };
+    const tree = await settleComponent({ jobId: "" });
+    const empty = findAllByType(tree, EmptyState)[0];
+    expect(empty.props.title).toBe("No schedules yet");
+    expect(empty.props.body).toBe("Agents add schedules when you ask them to run something on a timetable.");
+  });
+});
+
+describe("frontend/cron-tab Schedules scroll positions", () => {
+  it("opens each job at its top and Back restores the list position, even after switching jobs", async () => {
+    polls.ensureSlot(kJobsPoll).data = {
+      ok: true,
+      jobs: [makeJob(), makeJob({ id: "job-2", name: "Job Two" })],
+    };
+    const body = { scrollTop: 0 };
+    // The list pane's ref lives on the raw vnode (vnode.ref), not in props.
+    const findRef = (node) => {
+      if (node == null || typeof node !== "object") return null;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = findRef(child);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (node.props?.class === "schedules-list-pane") return node.ref;
+      return findRef(node.props?.children);
+    };
+    const attach = (tree, props) => {
+      harness.beginRender();
+      polls.beginRender();
+      findRef(CronTab(props)).current = { closest: () => body };
+      return findAllByType(tree, CronJobList)[0];
+    };
+    const onSetLocation = vi.fn();
+
+    let tree = await settleComponent({ jobId: "", onSetLocation });
+    let list = attach(tree, { jobId: "", onSetLocation });
+    body.scrollTop = 150;
+    list.props.onSelectJob("job-1");
+    tree = await settleComponent({ jobId: "job-1", onSetLocation });
+    expect(body.scrollTop).toBe(0);
+
+    body.scrollTop = 300;
+    list = attach(tree, { jobId: "job-1", onSetLocation });
+    list.props.onSelectJob("job-2");
+    tree = await settleComponent({ jobId: "job-2", onSetLocation });
+    expect(body.scrollTop).toBe(0);
+
+    attach(tree, { jobId: "job-2", onSetLocation });
+    collectNodes(tree).find((node) => node.props?.class === "schedules-back").props.onclick();
+    await settleComponent({ jobId: "", onSetLocation });
+    expect(body.scrollTop).toBe(150);
   });
 });
