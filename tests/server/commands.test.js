@@ -219,6 +219,31 @@ describe("server/commands", () => {
     expect(logSpy).toHaveBeenCalledWith("[alphaclaw] Running: gog auth list");
   });
 
+  it("gives gog an allowlisted environment, never the setup password or platform tokens", async () => {
+    vi.stubEnv("SETUP_PASSWORD", "not-a-real-value");
+    vi.stubEnv("RAILWAY_TOKEN", "not-a-real-value");
+    vi.stubEnv("GOG_ACCOUNT", "ops@example.com");
+    try {
+      const execMock = vi.fn((cmd, opts, callback) => {
+        callback(null, "ok\n", "");
+      });
+      const { createCommands } = loadCommandsModule({ execMock });
+      await createCommands({ gatewayEnv: () => ({}) }).gogCmd("auth list", { quiet: true });
+
+      const { env } = execMock.mock.calls[0][1];
+      expect(env).not.toHaveProperty("SETUP_PASSWORD");
+      expect(env).not.toHaveProperty("RAILWAY_TOKEN");
+      expect(env).toMatchObject({
+        PATH: process.env.PATH,
+        GOG_ACCOUNT: "ops@example.com",
+        XDG_CONFIG_HOME: OPENCLAW_DIR,
+        GOG_KEYRING_PASSWORD,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("logs gog command failures when not quiet", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const execMock = vi.fn((cmd, opts, callback) => {

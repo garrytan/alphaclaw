@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.200] - 2026-11-07
+
+gog gets only the environment it needs (GST-1813, ALPH-73).
+
+### Security
+- **gog children no longer get AlphaClaw's whole environment.** The three places AlphaClaw runs the `gog` CLI (the Google commands, `gog gmail watch serve` and the account listing) passed `...process.env`, so every gog child carried `SETUP_PASSWORD`, the platform tokens and the provider keys. They now share one allowlist (`lib/server/gog-env.js`): the CLI basics (`PATH`, `HOME`, locale, `TMPDIR`), proxy and CA settings, gog's own `GOG_*` settings, the managed `XDG_CONFIG_HOME` and `GOG_KEYRING_PASSWORD`. gog v0.11.0 takes the keyring password only from its environment or a TTY prompt, so that value still rides gog's environ; keeping it out needs gog support or the separate-uid work (the accepted M-1 residual). A test on each spawn site checks that the setup password and a platform token are absent and the gog settings present.
+
 ## [0.10.199] - 2026-11-07
 
 git-sync's overflow sentence is stable (GST-1820, ALPH-73).
