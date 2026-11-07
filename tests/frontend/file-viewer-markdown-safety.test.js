@@ -68,6 +68,20 @@ describe("frontend/file-viewer markdown preview safety (GST-1743)", () => {
     expect(html).not.toContain("title: notes");
   });
 
+  it("escapes text that follows an inline raw-block tag", async () => {
+    const renderPreview = await loadPreviewPath();
+    for (const source of [
+      "<kbd> <img src=x onerror=alert(1) ",
+      "para\n\n<code> <i onmouseover=alert(1) x",
+      "<pre> <svg onload=alert(1) ",
+      "<script> <img src=x onerror=alert(1) ",
+    ]) {
+      const html = renderPreview(source);
+      expect(html).not.toMatch(/<(img|i|svg)\b/i);
+      expect(html).toMatch(/&lt;(img|i|svg) /);
+    }
+  });
+
   it("keeps a hostile link title inside its escaped attribute", async () => {
     const renderPreview = await loadPreviewPath();
     const html = renderPreview(`[u](https://example.com 'x" onmouseover="alert(1)')`);
