@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.196] - 2026-11-07
+
+Deployment secrets, the small PR of the M-1/L-8 design (ALPH-73, option iii): the agent can no longer replace `SETUP_PASSWORD` or the platform tokens through `.env`, and relay messages mask them. M-1 and L-8 themselves are accepted residual risks until the gateway and agent run as a separate uid.
+
+### Security
+- **Five deployment secrets are deployment-only.** `ALPHACLAW_MANAGED_UPDATE_TOKEN`, `RAILWAY_TOKEN`, `RAILWAY_API_TOKEN`, `VERCEL_TOKEN` and `NPM_TOKEN` join `kDeploymentOnlyEnvKeys`: boot and reload never take them from `.env` and log a notice naming the key, never the value. The Environment page and `PUT`/`PATCH /api/env` refuse them with "deployment-only … Set it in the deployment environment", onboarding imports skip them, and the Add box names where to set them (`GET /api/env` now lists `deploymentOnlyKeys`).
+- **The deployment value of `SETUP_PASSWORD` and `GOG_KEYRING_PASSWORD` wins over `.env`.** A supported install can keep them in `.env` (the shipped template has a `SETUP_PASSWORD=` line, and the README documents a hand-edited `GOG_KEYRING_PASSWORD`), so they are not deployment-only: a host install that filled the line in keeps booting. When the deployment environment sets one of them (empty does not count), boot and reload ignore the `.env` line and log "Ignoring <KEY> in .env: the deployment environment sets it" once per key. Before, a `.env` value overrode the deployment's at the next boot, so the agent could change the Setup UI password. `GOG_KEYRING_PASSWORD` still defaults to `alphaclaw`.
+- **Relay masking covers the deployment secrets by key.** `relay/mask.js` adds the values of the seven keys from the deployment environment recorded at boot and from `process.env`, whatever env its caller passed (the keyring default stays unmasked). They are not added to `buildSecretReplacements`.
+
+### Docs
+- README: the deployment-only paragraph lists the five tokens, a "Deployment value wins" paragraph covers the two passwords, a preload caveat says a value injected by `node --env-file`, `-r dotenv/config` or `--import` counts as the deployment environment, and a new "Deployment secrets and the agent" section records M-1 and L-8 as accepted residuals: the agent runs as AlphaClaw's uid, so it can read the server's and PID 1's `/proc/<pid>/environ` and reach the server's memory through Node's inspector (SIGUSR1). `env.template` keeps its `SETUP_PASSWORD=` line, with a comment that the deployment value wins.
+
+### Not changed
+- The `gog` children still get `GOG_KEYRING_PASSWORD` in their environment: the pinned gog 0.11.0 reads the file-keyring password only from that variable or a terminal prompt.
+
+### Tests
+- `tests/bin/deployment-only-env.test.js`: real `bin/alphaclaw.js` boots (with the host-path guard variables) and reloads for the seven secrets, each new case failing on the previous main except the host-install regression guard. `relay-mask`: each deployment secret masked from `process.env` and from the recorded deployment environment. `routes-system` and `envars-component` cover the deployment-only list and the Add-box message.
+
 ## [0.10.195] - 2026-11-07
 
 Secrets and auth fixes from the ALPH-71 audit (M-3, L-2, L-6, GST-1743): the agent cannot mint an admin or remove a member without an operator confirm, and logging out really logs out. M-1 (deployment secrets out of every process environment) moved to its own, later PR. L-8 (applying system and launcher keys on an .env reload only when AlphaClaw wrote them) moved to a separate design issue; env reload is unchanged.

@@ -170,3 +170,107 @@ describe("deployment-only authority through CLI boot and runtime reload", () => 
     expect(`${result.stdout}${result.stderr}`).not.toContain("\0");
   });
 });
+
+describe("deployment secrets through CLI boot and runtime reload (ALPH-73)", () => {
+  const kWinsKeys = ["SETUP_PASSWORD", "GOG_KEYRING_PASSWORD"];
+  const kOnlyKeys = ["ALPHACLAW_MANAGED_UPDATE_TOKEN", "RAILWAY_TOKEN", "RAILWAY_API_TOKEN", "VERCEL_TOKEN", "NPM_TOKEN"];
+  const kAllKeys = [...kWinsKeys, ...kOnlyKeys];
+  const word = (side, key) => `${side}-side-${key.toLowerCase().replace(/_/g, "-")}`;
+  const lines = (keys, side) => keys.map((key) => `${key}=${side ? word(side, key) : ""}`).join("\n");
+  const values = (keys, side) => Object.fromEntries(keys.map((key) => [key, word(side, key)]));
+  let root;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-env-secrets-"));
+    fs.mkdirSync(path.join(root, "home"));
+  });
+
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const boot = ({ deployment = {}, fileText, reloadText = null }) => {
+    const capture = path.join(root, "capture.json");
+    const preload = path.join(root, "capture.cjs");
+    fs.writeFileSync(path.join(root, ".env"), fileText);
+    fs.writeFileSync(preload, `
+      const fs = require("fs");
+      const keys = ${JSON.stringify(kAllKeys)};
+      const snapshot = () => Object.fromEntries(keys.map(key => [key, process.env[key] ?? null]));
+      process.on("exit", () => {
+        const boot = snapshot();
+        const { reloadEnv } = require(${JSON.stringify(envPath)});
+        const reloadText = ${JSON.stringify(reloadText)};
+        if (reloadText !== null) fs.writeFileSync(${JSON.stringify(path.join(root, ".env"))}, reloadText);
+        reloadEnv();
+        fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ boot, reloaded: snapshot() }));
+      });
+    `);
+    const result = spawnSync(process.execPath, ["--require", preload, binPath, "git-sync"], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: path.join(root, "home"),
+        ALPHACLAW_ROOT_DIR: root,
+        ALPHACLAW_GIT_SHIM_PATH: path.join(root, "shims", "git"),
+        ALPHACLAW_OPENCLAW_WRAPPER_PATH: path.join(root, "shims", "openclaw"),
+        ALPHACLAW_PROFILE_SNIPPET_PATH: path.join(root, "shims", "profile.sh"),
+        ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL: "true",
+        ...deployment,
+      },
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toContain("Missing --message for git-sync");
+    return { output: `${result.stdout}${result.stderr}`, captured: JSON.parse(fs.readFileSync(capture, "utf8")) };
+  };
+
+  it("keeps the deployment SETUP_PASSWORD and GOG_KEYRING_PASSWORD at boot over different .env values, naming the keys only", () => {
+    const deployment = values(kWinsKeys, "deployment");
+    const { output, captured } = boot({ deployment, fileText: lines(kWinsKeys, "file") });
+    expect(captured.boot).toMatchObject(deployment);
+    for (const key of kWinsKeys) {
+      expect(output.split("\n").filter((line) => line.includes(`Ignoring ${key} in .env`))).toHaveLength(1);
+    }
+    expect(output).not.toContain("file-side");
+    expect(output).not.toContain("deployment-side");
+  });
+
+  it("keeps the deployment SETUP_PASSWORD on reload when .env is changed to another value", () => {
+    const deployment = values(kWinsKeys, "deployment");
+    const { output, captured } = boot({ deployment, fileText: lines(kWinsKeys, ""), reloadText: lines(kWinsKeys, "reload") });
+    expect(captured.boot).toMatchObject(deployment);
+    expect(captured.reloaded).toMatchObject(deployment);
+    expect(output).not.toContain("reload-side");
+  });
+
+  it("still takes SETUP_PASSWORD and GOG_KEYRING_PASSWORD from .env when the deployment does not set them (host installs)", () => {
+    const fromFile = values(kWinsKeys, "file");
+    const { output, captured } = boot({ fileText: lines(kWinsKeys, "file") });
+    expect(captured.boot).toMatchObject(fromFile);
+    expect(captured.reloaded).toMatchObject(fromFile);
+    expect(output).not.toContain("Ignoring SETUP_PASSWORD");
+  });
+
+  it("never applies the managed update token or the platform tokens from .env, at boot or on reload, naming the keys only", () => {
+    const { output, captured } = boot({ fileText: lines(kOnlyKeys, "file"), reloadText: lines(kOnlyKeys, "reload") });
+    const unset = Object.fromEntries(kOnlyKeys.map((key) => [key, null]));
+    expect(captured.boot).toMatchObject(unset);
+    expect(captured.reloaded).toMatchObject(unset);
+    for (const key of kOnlyKeys) {
+      expect(output.split("\n").filter((line) => line.includes(`deployment-only setting ${key} in .env`))).toHaveLength(1);
+    }
+    expect(output).not.toContain("file-side");
+    expect(output).not.toContain("reload-side");
+  });
+
+  it("keeps the deployment values of the managed update token and the platform tokens over .env", () => {
+    const deployment = values(kOnlyKeys, "deployment");
+    const { captured } = boot({ deployment, fileText: lines(kOnlyKeys, "file"), reloadText: lines(kOnlyKeys, "reload") });
+    expect(captured.boot).toMatchObject(deployment);
+    expect(captured.reloaded).toMatchObject(deployment);
+  });
+
+  it("the shipped env.template says the deployment SETUP_PASSWORD wins over its line", () => {
+    const template = fs.readFileSync(path.resolve(__dirname, "../../lib/setup/env.template"), "utf8");
+    expect(template).toMatch(/# Set SETUP_PASSWORD in the deployment environment[^]*When the deployment sets it, this\n# line is ignored/);
+  });
+});
