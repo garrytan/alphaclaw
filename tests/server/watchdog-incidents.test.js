@@ -661,6 +661,132 @@ describe("boot abandonment", () => {
   });
 });
 
+describe("boot carry-over after an AlphaClaw or container restart", () => {
+  const healthyProbe = () => ({
+    eventType: "health_check",
+    source: "health_timer",
+    status: "ok",
+    details: { ok: true },
+  });
+  const startupGraceProbe = () => ({
+    eventType: "health_check",
+    source: "health_timer",
+    status: "ok",
+    details: { skipped: true, startupGraceActive: true },
+  });
+
+  const crashLoopBeforeRestart = () => {
+    const tracker = createTracker();
+    const insert = wrapped(tracker);
+    insert(crashEvent());
+    insert({ eventType: "restart", source: "exit_event", status: "backoff" });
+    insert(crashEvent({ correlationId: "c3" }));
+    insert({ eventType: "crash_loop", source: "exit_event", status: "failed" });
+    return tracker.getActiveIncidentId();
+  };
+
+  it("closes a crash-loop incident as recovered, naming the restart, once the new process sees the gateway ready", () => {
+    initContext();
+    const incidentId = crashLoopBeforeRestart();
+
+    // The container restarts: a fresh process and tracker.
+    const bootTracker = createTracker();
+    const insert = wrapped(bootTracker);
+    expect(bootTracker.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([incidentId]);
+    expect(db.getIncidentById(incidentId).status).toBe("open");
+
+    // The relaunched gateway inside its startup grace proves nothing yet.
+    insert(startupGraceProbe());
+    expect(db.getIncidentById(incidentId).status).toBe("open");
+
+    insert(healthyProbe());
+    expect(bootTracker.getActiveIncidentId()).toBe(null);
+    const incident = db.getIncidentById(incidentId);
+    expect(incident.status).toBe("resolved");
+    expect(incident.summary.outcome).toBe("recovered");
+    expect(incident.summary.recoveredAfterRestart).toBe("shutdown");
+    expect(incident.summary.trigger).toBe("gateway_crash");
+    expect(incident.summary.severity).toBe("critical");
+    expect(incident.summary.eventCounts).toMatchObject({ crash: 2, crash_loop: 1 });
+    expect(db.listIncidents()).toHaveLength(1);
+  });
+
+  it("keeps the incident open, never recovered, while the gateway never comes back", () => {
+    initContext();
+    const incidentId = crashLoopBeforeRestart();
+
+    const bootTracker = createTracker();
+    const insert = wrapped(bootTracker);
+    bootTracker.carryOverOnBoot({ bootCause: "unclean_exit" });
+    insert(startupGraceProbe());
+    insert(crashEvent({ correlationId: "c4" }));
+    insert({ eventType: "crash_loop", source: "exit_event", status: "failed" });
+    insert({
+      eventType: "health_check",
+      source: "health_timer",
+      status: "failed",
+      details: { reason: "connect ECONNREFUSED" },
+    });
+
+    expect(bootTracker.getActiveIncidentId()).toBe(incidentId);
+    const incidents = db.listIncidents();
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].status).toBe("open");
+    expect(incidents[0].summary).toBe(null);
+  });
+
+  it("warms the rescue session on the first crash after the restart, as a fresh incident would", () => {
+    initContext();
+    crashLoopBeforeRestart();
+    const activity = [];
+    const bootTracker = createTracker({ onIncidentActivity: (entry) => activity.push(entry.kind) });
+    const insert = wrapped(bootTracker);
+    bootTracker.carryOverOnBoot({ bootCause: "shutdown" });
+    expect(activity).toEqual([]);
+    insert(crashEvent({ correlationId: "c5" }));
+    insert(crashEvent({ correlationId: "c6" }));
+    expect(activity).toEqual(["open"]);
+  });
+
+  it("still abandons a safe-mode incident, whose end only the previous process could see", () => {
+    initContext();
+    const tracker = createTracker();
+    wrapped(tracker)({
+      eventType: "safe_mode",
+      source: "health_timer",
+      status: "failed",
+      details: { suppressed: ["telegram"] },
+    });
+    const incidentId = tracker.getActiveIncidentId();
+
+    const bootTracker = createTracker();
+    expect(bootTracker.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([incidentId]);
+    expect(bootTracker.getActiveIncidentId()).toBe(null);
+    expect(db.getIncidentById(incidentId).status).toBe("abandoned");
+  });
+
+  it("is a no-op with nothing open and falls back to abandoning on DB errors", () => {
+    initContext();
+    expect(createTracker().carryOverOnBoot({ bootCause: "shutdown" })).toEqual([]);
+    const abandoned = [];
+    const failing = createWatchdogIncidentTracker({
+      db: {
+        getOpenIncident: () => {
+          throw new Error("locked");
+        },
+        abandonOpenIncidents: () => {
+          abandoned.push(true);
+          return [7];
+        },
+      },
+      logger: { error: () => {}, info: () => {} },
+    });
+    expect(failing.carryOverOnBoot({ bootCause: "shutdown" })).toEqual([7]);
+    expect(failing.getActiveIncidentId()).toBe(null);
+    expect(abandoned).toHaveLength(1);
+  });
+});
+
 describe("incident queries", () => {
   it("listIncidents paginates by id cursor and clamps limit", () => {
     initContext();

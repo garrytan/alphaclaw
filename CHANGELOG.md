@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.999] - 2026-11-07
+
+A gateway crash incident that outlives an AlphaClaw or container restart now closes as recovered once the gateway is ready again, instead of staying "abandoned" on the Health page.
+
+### Fixed
+- **A crash incident stayed "abandoned" after a restart brought the gateway back.** When AlphaClaw started, it marked any incident the previous process had left open as abandoned and recorded no outcome. So a crash loop that ended because the operator restarted the container showed on Health as "abandoned" for good, and an incident review could only ever see an outage with no ending. The new process now keeps that incident open and closes it at the first health check that finds the gateway ready, as "recovered in …, after AlphaClaw or its container restarted" (or "after an AlphaClaw update", or "after an unexpected AlphaClaw or container restart"). If the gateway never comes back, the incident stays open; it is never marked recovered. A crash in the new process before the gateway is ready adds to the same incident instead of opening a second one. The incident review is told which restart ended the incident.
+
+### Not covered
+- Safe-mode incidents are still marked abandoned at startup: only the process that saw safe mode can record its end.
+- Incidents already marked abandoned before this version keep that status.
+
 ## [0.10.202] - 2026-11-07
 
 A setup password or platform token written in `.env` no longer reaches the OpenClaw gateway or its workers.
