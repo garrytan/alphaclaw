@@ -7,13 +7,17 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.202] - 2026-11-07
 
-A setup password or platform token written in `.env` no longer reaches OpenClaw's processes.
+A setup password or platform token written in `.env` no longer reaches the OpenClaw gateway or its workers.
 
 ### Security
-- **OpenClaw's own `.env` load put AlphaClaw's secrets back into its workers.** AlphaClaw leaves its deployment secrets out of the environment it gives OpenClaw, but OpenClaw reads `<state dir>/.env` at startup (AlphaClaw links it to its own `.env`) and adds every key its process doesn't already have. So on a host install with `SETUP_PASSWORD` (or a platform token) in `.env`, the gateway's workers carried the value in their environment. AlphaClaw now passes every key it withholds as an empty value, and OpenClaw never overrides a key that is already set. The values never reach the gateway or its workers; the keys appear empty. A live test boots the pinned OpenClaw with secrets in `.env` and checks every one of its processes.
+- **OpenClaw's own `.env` load put AlphaClaw's secrets back into its workers.** AlphaClaw leaves its deployment secrets out of the environment it gives OpenClaw. But OpenClaw reads `<state dir>/.env` at startup (AlphaClaw links it to its own `.env`) and adds every key its process doesn't already have. So on a host install with `SETUP_PASSWORD` or a platform token in `.env`, the gateway's workers carried the value in their environment. AlphaClaw now passes a fixed set of secrets as empty values, and OpenClaw never overrides a key that is already set. The values no longer reach the gateway or the workers it spawns. A live test boots the pinned OpenClaw with secrets in `.env` and checks every one of its processes.
 
 ### Changed
-- `gatewayEnv()` returns a fixed set of withheld secrets as `""` instead of leaving them out: `SETUP_PASSWORD`, `GOG_KEYRING_PASSWORD`, the platform tokens, `ALPHACLAW_MANAGED_UPDATE_TOKEN`, the Claude Code routine token and URL, and the env-filter controls. Other withheld keys are still left out. The set is fixed, so saving an unrelated `.env` key still needs no gateway restart.
+- `gatewayEnv()` returns these keys as `""` instead of leaving them out: `SETUP_PASSWORD`, `GOG_KEYRING_PASSWORD`, `RAILWAY_TOKEN`, `RAILWAY_API_TOKEN`, `VERCEL_TOKEN`, `NPM_TOKEN`, `ALPHACLAW_MANAGED_UPDATE_TOKEN`, the Claude Code routine token and URL, and the env-filter controls. The set is fixed, so saving an unrelated `.env` key still needs no gateway restart.
+- Agent shells see those keys as empty rather than unset. If an install kept `GOG_KEYRING_PASSWORD` only in a hand-edited `.env`, the agent's own `gog` commands no longer pick it up through OpenClaw. AlphaClaw's Google features run gog themselves and are unaffected.
+
+### Not covered
+- Other keys AlphaClaw withholds by prefix (other `ALPHACLAW_*` settings, `npm_config__auth*`) are still left out rather than blanked, so a value written for one in `.env` can still reach the gateway through OpenClaw's load. A command the agent runs that restarts the `openclaw` CLI loads `.env` again, with OpenClaw's own exec filter deciding what it keeps.
 
 ## [0.10.201] - 2026-11-07
 
