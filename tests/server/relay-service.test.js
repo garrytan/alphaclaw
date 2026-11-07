@@ -203,3 +203,101 @@ describe("relay builtin sidecars (ALPH-63 /ship round 2)", () => {
     expect(buildRelayBuiltinSidecars({ config: readRelayConfig({ env: { ALPHACLAW_RELAY: "off" } }), paths: relayPaths("/data"), target: "linux-x64" })).toEqual([]);
   });
 });
+
+describe("relay service: brain archive (ALPH-68 PR3)", () => {
+  it("a gbrain that never answers never holds the relay or the bridge; the status reports the archive", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-svc-archive-"));
+    const hang = () => new Promise(() => {});
+    const runner = { listSources: vi.fn(hang), putPage: hang, getPage: hang, readWriteRequest: hang, commitPush: hang };
+    const service = createRelayService({
+      env: {},
+      rootDir: root,
+      getSupervisor: () => ({ start: vi.fn(), getStatus: () => ({ status: "running" }) }),
+      readDefaultAgentLabel: () => "Wintermute",
+      fetchImpl: createEngineFetch(),
+      ensureBinary: async () => ({ downloaded: false }),
+      listAddresses: () => [],
+      setTimer: () => ({ unref() {} }),
+      clearTimer: () => {},
+      logger: quiet,
+      brainArchiveOptions: { runner },
+    });
+    try {
+      expect(service.getStatus().archive).toMatchObject({ enabled: true, phase: "waiting" });
+      await service._internal.run();
+      void service._internal.state.archive._internal.tick();
+      expect(runner.listSources).toHaveBeenCalledTimes(1);
+      const status = service.getStatus();
+      expect(status).toMatchObject({ phase: "ready", bridge: { running: true }, archive: { enabled: true, phase: "checking" } });
+      expect(service.retryArchive()).toEqual({ retried: 0 });
+    } finally {
+      service.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a box that is not set up (no relay source, or no gbrain wrapper) keeps the relay and the bridge running and writes nothing", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-svc-archive-unset-"));
+    const runner = {
+      listSources: vi.fn(async () => ({ exitCode: 0, json: { sources: [{ id: "default", local_path: "/b", federated: false }] }, stdout: "", stderr: "" })),
+      putPage: vi.fn(),
+      getPage: vi.fn(),
+      readWriteRequest: vi.fn(),
+      commitPush: vi.fn(),
+    };
+    const noWrapper = { accessSync: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } };
+    const make = (brainArchiveOptions) =>
+      createRelayService({
+        env: {},
+        rootDir: root,
+        getSupervisor: () => ({ start: vi.fn(), getStatus: () => ({ status: "running" }) }),
+        readDefaultAgentLabel: () => "Wintermute",
+        fetchImpl: createEngineFetch(),
+        ensureBinary: async () => ({ downloaded: false }),
+        listAddresses: () => [],
+        setTimer: () => ({ unref() {} }),
+        clearTimer: () => {},
+        logger: quiet,
+        brainArchiveOptions,
+      });
+    for (const [options, code] of [[{ runner }, "source_missing"], [{ fsModule: noWrapper }, "gbrain_missing"]]) {
+      const service = make(options);
+      try {
+        await service._internal.run();
+        await service._internal.state.archive._internal.tick();
+        expect(service.getStatus()).toMatchObject({ phase: "ready", bridge: { running: true }, archive: { enabled: true, phase: "unavailable", code } });
+      } finally {
+        service.stop();
+      }
+    }
+    expect(runner.listSources).toHaveBeenCalled();
+    for (const fn of [runner.putPage, runner.getPage, runner.readWriteRequest, runner.commitPush]) expect(fn).not.toHaveBeenCalled();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("ALPHACLAW_RELAY_BRAIN=off: the archive is off and never runs gbrain", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "relay-svc-archive-off-"));
+    const runner = { listSources: vi.fn() };
+    const service = createRelayService({
+      env: { ALPHACLAW_RELAY_BRAIN: "off" },
+      rootDir: root,
+      getSupervisor: () => ({ start: vi.fn(), getStatus: () => ({ status: "running" }) }),
+      fetchImpl: createEngineFetch(),
+      ensureBinary: async () => ({ downloaded: false }),
+      listAddresses: () => [],
+      setTimer: () => ({ unref() {} }),
+      clearTimer: () => {},
+      logger: quiet,
+      brainArchiveOptions: { runner },
+    });
+    try {
+      await service._internal.run();
+      await service._internal.state.archive._internal.tick();
+      expect(runner.listSources).not.toHaveBeenCalled();
+      expect(service.getStatus().archive).toEqual({ enabled: false, phase: "off", code: null });
+    } finally {
+      service.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
