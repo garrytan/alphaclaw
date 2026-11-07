@@ -16,6 +16,7 @@ Design tokens from the /design-consultation (ALPH-69, GST-1697). Nine colour val
 - **Completed-step connectors** use `--accent-dim` #3f93a8 in light (1.43 to 3.15:1), so a finished step reads as a state.
 - **Light gateway dot** goes to #15803d (2.94 to 4.47:1 on the sidebar).
 - **DESIGN.md** gains the direction (cyan means act here, one solid button per page, status always carries a word, mono only for what an operator could paste into a terminal, motion limits) and records that JetBrains Mono is self-hosted and interface text stays on the system sans stack.
+
 ## [0.10.180] - 2026-11-07
 
 Security hotfix for a stored XSS in the Setup UI's Browse file viewer (GST-1743, found by the ALPH-71 CSO audit).
