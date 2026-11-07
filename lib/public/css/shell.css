@@ -380,6 +380,9 @@
 .app-statusbar a:hover { color: var(--accent); }
 
 .statusbar-left, .statusbar-right { display: flex; align-items: center; gap: 16px; margin-left: 2px; }
+.statusbar-left { min-width: 0; }
+.statusbar-left > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statusbar-right { flex: none; }
 
 .mobile-topbar {
   display: none;
