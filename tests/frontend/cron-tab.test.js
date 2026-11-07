@@ -876,3 +876,51 @@ describe("frontend/cron-tab Schedules pane (ALPH-69)", () => {
     expect(empty.props.body).toBe("Agents add schedules when you ask them to run something on a timetable.");
   });
 });
+
+describe("frontend/cron-tab Schedules scroll positions", () => {
+  it("opens each job at its top and Back restores the list position, even after switching jobs", async () => {
+    polls.ensureSlot(kJobsPoll).data = {
+      ok: true,
+      jobs: [makeJob(), makeJob({ id: "job-2", name: "Job Two" })],
+    };
+    const body = { scrollTop: 0 };
+    // The list pane's ref lives on the raw vnode (vnode.ref), not in props.
+    const findRef = (node) => {
+      if (node == null || typeof node !== "object") return null;
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = findRef(child);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (node.props?.class === "schedules-list-pane") return node.ref;
+      return findRef(node.props?.children);
+    };
+    const attach = (tree, props) => {
+      harness.beginRender();
+      polls.beginRender();
+      findRef(CronTab(props)).current = { closest: () => body };
+      return findAllByType(tree, CronJobList)[0];
+    };
+    const onSetLocation = vi.fn();
+
+    let tree = await settleComponent({ jobId: "", onSetLocation });
+    let list = attach(tree, { jobId: "", onSetLocation });
+    body.scrollTop = 150;
+    list.props.onSelectJob("job-1");
+    tree = await settleComponent({ jobId: "job-1", onSetLocation });
+    expect(body.scrollTop).toBe(0);
+
+    body.scrollTop = 300;
+    list = attach(tree, { jobId: "job-1", onSetLocation });
+    list.props.onSelectJob("job-2");
+    tree = await settleComponent({ jobId: "job-2", onSetLocation });
+    expect(body.scrollTop).toBe(0);
+
+    attach(tree, { jobId: "job-2", onSetLocation });
+    collectNodes(tree).find((node) => node.props?.class === "schedules-back").props.onclick();
+    await settleComponent({ jobId: "", onSetLocation });
+    expect(body.scrollTop).toBe(150);
+  });
+});

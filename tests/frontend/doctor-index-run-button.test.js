@@ -351,5 +351,7 @@ describe("frontend/doctor-tab briefing states (ALPH-69)", () => {
     const section = findBy(tree, (node) => node.type === AsyncSection)[0];
     expect(section.props.error).toBeTruthy();
     expect(section.props.errorHeadline).toBe("Couldn't load Doctor's findings.");
+    const headline = findBy(tree, (node) => node.props?.class === "briefing-headline")[0];
+    expect(textOf(headline)).toBe("Couldn't load Doctor's findings.");
   });
 });

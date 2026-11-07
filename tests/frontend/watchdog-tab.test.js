@@ -518,6 +518,53 @@ describe("frontend/health briefing (ALPH-69 slot map)", () => {
     expect(collectText(headline).join("")).toBe("Healthy. No incidents today.");
   });
 
+  it("does not report a live state when the snapshot is stale or AlphaClaw is offline", () => {
+    gatewayShellStore.publish({ hasStatus: true, statusFreshness: { mode: "stale" } });
+    let tree = renderTab({ watchdogStatus: {} });
+    let headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("Gateway status is out of date. Showing the last known status.");
+    harness.reset();
+    gatewayShellStore.publish({ hasStatus: true, connectivityMode: "offline", statusFreshness: { mode: "fresh" } });
+    tree = renderTab({ watchdogStatus: {} });
+    headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");
+    expect(collectText(headline).join("")).toBe("AlphaClaw is not answering. Showing the last known status.");
+  });
+
+  it("keeps the phone's More menu open for a click in Repair's confirm dialog, so a failure stays visible", () => {
+    const actionsOf = (tree) => findAllByType(tree, RoutePageHeader)[0].props.actions;
+    const moreOf = (tree) => collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more");
+    const toggleOf = (tree) =>
+      collectNodes(actionsOf(tree)).find((node) => node.props?.class === "health-more-toggle");
+    let tree = renderTab({ watchdogStatus: {} });
+    toggleOf(tree).props.onclick();
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("true");
+    const listeners = {};
+    const previousWindow = globalThis.window;
+    globalThis.window = {
+      addEventListener: (type, fn) => {
+        listeners[type] = fn;
+      },
+      removeEventListener: () => {},
+    };
+    try {
+      for (const effect of harness.effects) {
+        try {
+          effect();
+        } catch {}
+      }
+    } finally {
+      globalThis.window = previousWindow;
+    }
+    const inDialog = { closest: (selector) => (selector.includes("role=dialog") ? {} : null) };
+    listeners.click({ target: inDialog });
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("true");
+    listeners.click({ target: { closest: () => null } });
+    tree = renderTab({ watchdogStatus: {} });
+    expect(moreOf(tree).props["data-open"]).toBe("false");
+  });
+
   it("leads with the headline sentence", () => {
     const tree = renderTab({ watchdogStatus: {} });
     const headline = collectNodes(tree).find((node) => node.props?.class === "briefing-headline");

@@ -131,3 +131,52 @@ describe("frontend/health headline model (manual repair)", () => {
     ).toEqual({ tone: "accent", text: "Repairing the gateway." });
   });
 });
+
+describe("frontend/health headline model (snapshot that is not live)", () => {
+  const healthyInput = {
+    watchdogStatus: { phase: "healthy" },
+    narrative: { phase: "healthy", headline: "x", tone: "neutral" },
+    chipKey: "running",
+    incidentsToday: { count: 0, recovered: 0 },
+  };
+  const downInput = {
+    watchdogStatus: { phase: "awaiting_repair_recovery" },
+    narrative: { phase: "awaiting_repair_recovery", headline: "x", tone: "danger" },
+    chipKey: "down",
+  };
+
+  it("does not report Healthy while AlphaClaw is offline", () => {
+    expect(buildHealthHeadline({ ...healthyInput, chipKey: "offline", connectivityMode: "offline" })).toEqual({
+      tone: "neutral",
+      text: "AlphaClaw is not answering. Showing the last known status.",
+    });
+    expect(buildHealthHeadline({ ...healthyInput, connectivityMode: "alphaclaw_restarting" }).text).toBe(
+      "AlphaClaw is restarting. Showing the last known status.",
+    );
+  });
+
+  it("does not report Healthy from a stale snapshot", () => {
+    expect(buildHealthHeadline({ ...healthyInput, chipKey: "connecting", stale: true })).toEqual({
+      tone: "neutral",
+      text: "Gateway status is out of date. Showing the last known status.",
+    });
+  });
+
+  it("does not report Down from a stale snapshot", () => {
+    expect(buildHealthHeadline({ ...downInput, stale: true }).text).toBe(
+      "Gateway status is out of date. Showing the last known status.",
+    );
+  });
+
+  it("does not report a live state while reconnecting", () => {
+    expect(buildHealthHeadline({ ...healthyInput, connectivityMode: "reconnecting" }).text).toBe(
+      "Reconnecting to AlphaClaw. Showing the last known status.",
+    );
+  });
+
+  it("puts this tab's own restart before the connection", () => {
+    expect(buildHealthHeadline({ ...healthyInput, connectivityMode: "offline", restarting: true }).text).toBe(
+      "Restarting the gateway.",
+    );
+  });
+});

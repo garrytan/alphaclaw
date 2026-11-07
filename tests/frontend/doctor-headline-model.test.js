@@ -59,4 +59,10 @@ describe("frontend/doctor headline model", () => {
       "Doctor is running.",
     );
   });
+
+  it("states a failed first runs read instead of Loading…", () => {
+    expect(buildDoctorHeadline({ runs: null, loadError: new Error("runs down") })).toBe(
+      "Couldn't load Doctor's findings.",
+    );
+  });
 });
