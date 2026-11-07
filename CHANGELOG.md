@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.202] - 2026-11-07
+
+The OpenClaw 2026.10.9 gateway no longer keeps about 20 extra worker threads on machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB, so the gateway's memory grew by gigabytes over a day on a 32-CPU host.
+
+### Fixed
+- **Gateway memory on many-CPU hosts with OpenClaw before 2026.10.10.** These versions size the session-history, transcript-search and SQLite worker pools from the CPU count, up to 8 threads per lane on a 32-CPU host, and the history and search lanes never release their threads while the gateway is busy. OpenClaw 2026.10.10 fixed the sizes at 2 (openclaw#169110). AlphaClaw's gateway preload now makes just those two size calculations see 5 CPUs, which gives the same pool sizes as 2026.10.10. Everything else in the gateway, such as default agent concurrency and shared compute permits, still sees the real CPU count. The preload reads the version of the OpenClaw package it launches and does nothing for 2026.10.10 or later, for OpenClaw CLI commands other than `gateway run`, for AlphaClaw's own server, or when `ALPHACLAW_GATEWAY_MEMORY_TELEMETRY=off`.
+
+### Tests
+- New `gateway-memory-worker-pool-cap` tests run a respawning `gateway run` fixture with OpenClaw 2026.10.9's pool-sizing module on a simulated 32-CPU host and check the pool sizes against 2026.10.10's. The 2026.10.9 case fails on the previous main.
+
 ## [0.10.201] - 2026-11-07
 
 The Google Workspace CLI (gog) now gets only the environment it needs.
