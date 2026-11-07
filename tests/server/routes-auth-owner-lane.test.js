@@ -49,11 +49,14 @@ const createMembersStore = (list, { checkDelayMs = 0 } = {}) => {
     const member = find(email);
     return member && password === member.password ? toModel(member) : null;
   });
-  return {
+  const store = {
+    // A test sets checkHook to hold every check open, or to throw mid-check.
+    checkHook: null,
     verifyMemberPassword,
     verifyMemberPasswordAsync: async (args) => {
       const member = verifyMemberPassword(args);
       if (checkDelayMs) await new Promise((resolve) => setTimeout(resolve, checkDelayMs));
+      if (store.checkHook) await store.checkHook(args);
       return member;
     },
     getMemberByEmail: (email) => toModel(find(email)),
@@ -66,6 +69,7 @@ const createMembersStore = (list, { checkDelayMs = 0 } = {}) => {
     acceptInvite: vi.fn(() => ({ ok: false, code: "invite_invalid" })),
     burnDecoyVerification: vi.fn(),
   };
+  return store;
 };
 
 const credentialsOf = (member) => ({ email: member.email, password: member.password });
@@ -127,7 +131,7 @@ const createHarness = async ({
     const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
   });
   servers.push(server);
-  return { server, store, membersStore };
+  return { server, store, membersStore, loginThrottle };
 };
 
 const signIn = (h, { peer = kOwnerPeer, xff, password, email, recoveryCode, pass, cookie } = {}) => {
@@ -182,6 +186,8 @@ const resetPasswordChecks = (h) => {
   compareSpy.mockClear();
   h.membersStore.verifyMemberPassword.mockClear();
 };
+
+const heldSlots = (h) => h.loginThrottle.listHolds().reduce((sum, [, count]) => sum + count, 0);
 
 const auditLines = (...spies) =>
   spies
@@ -622,6 +628,88 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
       const res = await signIn(h, { password: kOwnerPassword, recoveryCode: kRecoveryCode, pass });
       expect(res.status).toBe(200);
       expect(readSession(res)).toMatch(/^setup_token=/);
+    });
+
+    it("a password check that throws mid-request answers 500, counts as a failure and leaves no hold", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      const peer = "198.51.100.110";
+      h.membersStore.checkHook = () => {
+        throw new Error("store went away");
+      };
+      const statuses = [(await signIn(h, { peer, email: memberA.email, password: "guess-0" })).status];
+      h.membersStore.checkHook = null;
+      for (let i = 1; i < kLoginMaxAttempts; i += 1) {
+        statuses.push((await signIn(h, { peer, email: memberA.email, password: "guess-" + i })).status);
+      }
+      expect(statuses).toEqual([500, ...Array(kLoginMaxAttempts - 2).fill(401), 429]);
+      expect(heldSlots(h)).toBe(0);
+    });
+
+    it("holds stay while their checks are pending, even past a minute, and the bound holds when they finish", async () => {
+      let clock = Date.now();
+      vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const h = await createHarness({ team: true, members: [memberA] });
+      let finishChecks;
+      const pending = new Promise((resolve) => {
+        finishChecks = resolve;
+      });
+      h.membersStore.checkHook = () => pending;
+      resetPasswordChecks(h);
+      const attempt = (i) => signIn(h, { peer: attackerPeer(i), email: memberA.email, password: "guess-" + i });
+      const first = Array.from({ length: kLoginGlobalMaxAttempts }, (_, i) => attempt(i).then((res) => res));
+      await vi.waitFor(() => expect(passwordChecks(h)).toBe(kLoginGlobalMaxAttempts));
+      clock += 61 * 1000;
+      let answered = 0;
+      const second = Array.from({ length: kLoginGlobalMaxAttempts }, (_, i) =>
+        attempt(100 + i).then((res) => {
+          answered += 1;
+          return res;
+        }),
+      );
+      try {
+        for (let tries = 0; tries < 500 && answered < second.length && passwordChecks(h) <= kLoginGlobalMaxAttempts; tries += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(passwordChecks(h)).toBe(kLoginGlobalMaxAttempts);
+        expect(answered).toBe(second.length);
+      } finally {
+        finishChecks();
+      }
+      expect((await Promise.all(second)).every((res) => res.status === 429)).toBe(true);
+      expect((await Promise.all(first)).filter((res) => res.status === 200)).toHaveLength(0);
+      expect((await attempt(200)).status).toBe(429);
+      expect(passwordChecks(h)).toBe(kLoginGlobalMaxAttempts);
+      expect(heldSlots(h)).toBe(0);
+    });
+
+    it("six invite accepts sent at once from one address: the sixth is refused", async () => {
+      const h = await createHarness({ team: true });
+      h.membersStore.acceptInvite.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve({ ok: false, code: "invite_invalid" }), 50)),
+      );
+      const results = await Promise.all(
+        Array.from({ length: kLoginMaxAttempts + 1 }, (_, i) =>
+          request(h.server)
+            .post("/api/auth/accept-invite")
+            .set("x-test-peer", "198.51.100.120")
+            .send({ token: randomValue(), password: "long-enough-" + i }),
+        ),
+      );
+      expect(results.map((res) => res.status).sort()).toEqual([...Array(kLoginMaxAttempts).fill(400), 429]);
+      expect(heldSlots(h)).toBe(0);
+    });
+
+    it("a password, email, code or token that is not a string gets a normal answer, never a 500, and leaves no hold", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      const odd = { toString: 1 };
+      const send = (path, body) => request(h.server).post(path).set("x-test-peer", "198.51.100.121").send(body);
+      expect((await send("/api/auth/login", { password: odd })).status).toBe(401);
+      expect((await send("/api/auth/login", { email: memberA.email, password: odd })).status).toBe(401);
+      expect((await send("/api/auth/login", { email: odd, password: "guess" })).status).toBe(401);
+      expect((await send("/api/auth/login", { email: memberA.email, password: odd, recoveryCode: odd })).status).toBe(401);
+      expect((await send("/api/auth/accept-invite", { token: odd, password: "long-enough-guess" })).status).toBe(400);
+      expect((await send("/api/auth/accept-invite", { token: "t", password: odd })).status).toBe(400);
+      expect(heldSlots(h)).toBe(0);
     });
 
     it("rejects a short or repetitive code at boot with a warning that names only the key", async () => {

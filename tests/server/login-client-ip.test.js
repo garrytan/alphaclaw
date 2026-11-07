@@ -89,10 +89,11 @@ describe("server/login-client-ip", () => {
       "64:FF9B::C633:6407",
       "0064:ff9b:0000:0000:0000:0000:c633:6407",
       "64:ff9b:1::198.51.100.7",
-      "64:ff9b:1:abcd::c633:6407",
     ]) {
       expect(loginLimiterKey(notation), notation).toBe("198.51.100.7");
     }
+    expect(loginLimiterKey("64:ff9b:1:102:3:400::")).toBe("64:ff9b:1:102::/64");
+    expect(loginLimiterKey("64:ff9b:1:abcd::c633:6407")).toBe("64:ff9b:1:abcd::/64");
     for (const prefix of ["::ffff:", "64:ff9b::", "64:ff9b:1::"]) {
       expect(loginLimiterKey(prefix + "198.51.100.7")).not.toBe(loginLimiterKey(prefix + "198.51.100.8"));
       expect(loginLimiterKey(prefix + "198.51.100.7")).not.toBe(loginLimiterKey(prefix + "203.0.113.7"));
