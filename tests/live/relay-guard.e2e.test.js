@@ -244,6 +244,8 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       fs.writeFileSync(path.join(workspace, "data", "cache.db"), "db-secret-5521\n");
       fs.rmSync(path.join(workspace, "node_modules"), { force: true });
       fs.symlinkSync(path.join(outside, "pkg"), path.join(workspace, "node_modules"));
+      // A missing name whose look-alike exists: OpenClaw's read would open the look-alike.
+      fs.writeFileSync(path.join(workspace, "owner\u2019s.txt"), "variant-leak-5521\n");
       const cases = [
         ["read", { path: "data/.env</arg_value>>>" }],
         ["read", { path: "data/cache.db</arg_value>>" }],
@@ -259,8 +261,10 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
         ["read", { path: "data/.env\u200b" }],
         ["read", { path: "file://" + path.join(workspace, "data", ".env") }],
         ["read", { path: "./node_modules/../leak.txt" }],
+        ["read", { path: "owner's.txt" }],
+        ["ls", { path: "missing-folder" }],
       ];
-      const leaks = ["outside-leak-5521", "env-secret-5521", "db-secret-5521", "leak.txt"];
+      const leaks = ["outside-leak-5521", "env-secret-5521", "db-secret-5521", "leak.txt", "variant-leak-5521"];
       for (const [toolName, args] of cases) {
         const answer = await runTurn(relay, toolName, args);
         const label = toolName + " " + JSON.stringify(args);

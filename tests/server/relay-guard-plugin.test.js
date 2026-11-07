@@ -338,8 +338,12 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
         expect(blocked(call(tool, params)), tool + " " + JSON.stringify(params)).toBe(true);
       }
     }
-    for (const plain of ["notes/status.md", "AGENTS.md", "notes", "notes/", path.join(root.workspace, "notes", "status.md"), "notes/%2e%2e", "notes/missing.md"]) {
+    for (const plain of ["notes/status.md", "AGENTS.md", "notes", "notes/", path.join(root.workspace, "notes", "status.md")]) {
       expect(call("read", { path: plain }), "read " + plain).toEqual({});
+    }
+    for (const missing of ["notes/%2e%2e", "notes/missing.md", "missing/status.md"]) {
+      expect(blocked(call("read", { path: missing })), "read " + missing).toBe(true);
+      expect(blocked(call("ls", { path: missing })), "ls " + missing).toBe(true);
     }
     expect(call("ls", {})).toEqual({});
     expect(call("ls", { path: "." })).toEqual({});
@@ -377,6 +381,35 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
       expect(blocked(call("read", { path: raw })), "read " + raw + " opens " + opened(raw)).toBe(true);
     }
     expect(refusedRewrites).toBeGreaterThanOrEqual(10);
+  });
+
+  // gpt-6.1-sol on #336 (c0b4dcc0): when the exact read path is missing,
+  // OpenClaw opens a look-alike name instead (path-utils.ts
+  // collectReadPathVariants), after the hook.
+  it("refuses a missing read path whose look-alike name OpenClaw would open instead", () => {
+    fs.symlinkSync(path.join(root.workspace, "data", ".env"), path.join(root.workspace, "owner\u2019s.txt"));
+    expect(blocked(call("read", { path: "owner's.txt" }))).toBe(true);
+    fs.writeFileSync(path.join(root.workspace, "cafe\u0301.md"), "nfd\n");
+    expect(blocked(call("read", { path: "caf\u00e9.md" }))).toBe(true);
+    fs.writeFileSync(path.join(root.workspace, "Screen Shot 1 at 10.00.00\u202fAM.png"), "png");
+    expect(blocked(call("read", { path: "Screen Shot 1 at 10.00.00 AM.png" }))).toBe(true);
+  });
+
+  it("refuses a name with a look-alike beside it, even when the exact name exists", () => {
+    fs.writeFileSync(path.join(root.workspace, "owner's.txt"), "benign\n");
+    expect(call("read", { path: "owner's.txt" })).toEqual({});
+    fs.symlinkSync(path.join(root.workspace, "data", ".env"), path.join(root.workspace, "owner\u2018s.txt"));
+    expect(blocked(call("read", { path: "owner's.txt" }))).toBe(true);
+    expect(blocked(call("ls", { path: "owner's.txt" }))).toBe(true);
+  });
+
+  it("walks into a symlinked folder that stays inside the workspace when grep or glob checks a tree", () => {
+    fs.symlinkSync(path.join(root.workspace, "data"), path.join(root.workspace, "notes", "link"));
+    expect(blocked(call("grep", { pattern: "SECRET", path: "notes" }))).toBe(true);
+    fs.rmSync(path.join(root.workspace, "notes", "link"));
+    fs.mkdirSync(path.join(root.workspace, "loop"));
+    fs.symlinkSync(path.join(root.workspace, "loop"), path.join(root.workspace, "loop", "self"));
+    expect(call("grep", { pattern: "x", path: "loop" })).toEqual({});
   });
 
   it("a relay call whose agent workspace cannot be resolved is denied, never allowed", () => {
