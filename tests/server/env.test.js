@@ -511,6 +511,9 @@ describe("server/env reload of system and launcher keys (ALPH-71 L-8)", { retry:
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    delete require.cache[require.resolve(envModulePath)];
+    delete require.cache[require.resolve(constantsModulePath)];
+    delete require.cache[require.resolve(sharedModulePath)];
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -544,6 +547,99 @@ describe("server/env reload of system and launcher keys (ALPH-71 L-8)", { retry:
     env.reloadEnv();
     expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBe("/srv/operator-picked");
     expect(process.env.SETUP_PASSWORD).toBeUndefined();
+  });
+
+  // An operator's save is AlphaClaw's write even when the file already held
+  // the value: an outside edit sets /synthetic/b while the runtime has
+  // /synthetic/a, then the operator saves /synthetic/b through AlphaClaw.
+  const createEnvRoutesApp = (env, actor = null) => {
+    const express = require("express");
+    const { registerEnvRoutes } = require("../../lib/server/routes/env");
+    const app = express();
+    app.use(express.json());
+    app.use((req, res, next) => {
+      if (actor) req.alphaclawActor = actor;
+      next();
+    });
+    registerEnvRoutes({
+      app,
+      readEnvFile: env.readEnvFile,
+      writeEnvFile: env.writeEnvFile,
+      recordOperatorEnvSave: env.recordOperatorEnvSave,
+      reloadEnv: env.reloadEnv,
+      kKnownVars: [],
+      kKnownKeys: new Set(),
+      syncChannelConfig: async () => {},
+      isOnboarded: () => false,
+      restartRequiredState: { markRequired: () => {}, hasReason: () => false },
+    });
+    return app;
+  };
+
+  const holdOutsideEdit = (env, envFile) => {
+    env.updateEnvFile(() => [{ key: "CLAUDE_CODE_LOCAL_CWD", value: "/synthetic/a" }]);
+    env.reloadEnv();
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBe("/synthetic/a");
+    fs.writeFileSync(envFile, "CLAUDE_CODE_LOCAL_CWD=/synthetic/b\n");
+    env.reloadEnv();
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBe("/synthetic/a");
+  };
+
+  it("applies a held launcher key once the operator saves the same value through Envars", async () => {
+    const request = require("supertest");
+    const envFile = path.join(tmpDir, ".env");
+    fs.writeFileSync(envFile, "");
+    const env = loadEnvModule(tmpDir);
+    holdOutsideEdit(env, envFile);
+
+    const res = await request(createEnvRoutesApp(env)).patch("/api/env").send({ key: "CLAUDE_CODE_LOCAL_CWD", value: "/synthetic/b" });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(true);
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBe("/synthetic/b");
+  });
+
+  it("keeps a held launcher key held when the agent saves the same value", async () => {
+    const request = require("supertest");
+    const envFile = path.join(tmpDir, ".env");
+    fs.writeFileSync(envFile, "");
+    const env = loadEnvModule(tmpDir);
+    holdOutsideEdit(env, envFile);
+
+    const res = await request(createEnvRoutesApp(env, { type: "agent" })).patch("/api/env").send({ key: "CLAUDE_CODE_LOCAL_CWD", value: "/synthetic/b" });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+    expect(process.env.CLAUDE_CODE_LOCAL_CWD).toBe("/synthetic/a");
+  });
+
+  it("applies WATCHDOG_AUTO_REPAIR when the operator saves the value an outside edit already put in .env", () => {
+    const envFile = path.join(tmpDir, ".env");
+    fs.writeFileSync(envFile, "");
+    const env = loadEnvModule(tmpDir);
+    const { createWatchdog } = require("../../lib/server/watchdog");
+    const watchdog = createWatchdog({
+      clawCmd: vi.fn(),
+      launchGatewayProcess: vi.fn(),
+      insertWatchdogEvent: vi.fn(),
+      notifier: { notify: vi.fn(async () => ({ ok: true })) },
+      readEnvFile: env.readEnvFile,
+      writeEnvFile: env.writeEnvFile,
+      updateEnvFile: env.updateEnvFile,
+      recordOperatorEnvSave: env.recordOperatorEnvSave,
+      reloadEnv: env.reloadEnv,
+      resolveSetupUrl: () => "",
+    });
+    try {
+      expect(watchdog.updateSettings({ autoRepair: true }).autoRepair).toBe(true);
+      expect(process.env.WATCHDOG_AUTO_REPAIR).toBe("true");
+      fs.writeFileSync(envFile, "WATCHDOG_AUTO_REPAIR=false\n");
+      env.reloadEnv();
+      expect(process.env.WATCHDOG_AUTO_REPAIR).toBe("true");
+
+      expect(watchdog.updateSettings({ autoRepair: false }).autoRepair).toBe(false);
+      expect(process.env.WATCHDOG_AUTO_REPAIR).toBe("false");
+    } finally {
+      watchdog.stop();
+    }
   });
 });
 

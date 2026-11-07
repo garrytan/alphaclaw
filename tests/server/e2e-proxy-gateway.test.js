@@ -1244,3 +1244,84 @@ describe("gateway proxy real-process e2e (ALPHACLAW_CONTROL_UI_MOUNT=legacy)", (
     });
   }
 });
+
+// Logout closes the sockets the session opened (ALPH-73 round 5). The
+// terminal and chat sockets are authorized only at upgrade; this proves
+// lib/server.js wires logout to both socket servers, against a real shell:
+// input the terminal forwards before logout runs, and input sent after
+// logout never reaches it. Its own child, because logout ends every owner
+// session and the other describes share one cookie.
+describe("logout closes open sockets (real process)", () => {
+  let tmpDir = null;
+  let server = null;
+  let serverPort = 0;
+  let cookie = "";
+
+  beforeAll(async () => {
+    const root = createServerRoot("ac-logout-sockets-e2e-");
+    tmpDir = root.tmpDir;
+    serverPort = await acquirePort();
+    server = spawnServerChild({ rootDir: root.rootDir, port: serverPort });
+    await waitForHealthy(serverPort, server);
+    cookie = await loginForCookie(serverPort);
+  }, 25000);
+
+  afterAll(async () => {
+    const exitResult = await stopServerChild(server);
+    await removeTmpDir(tmpDir);
+    if (exitResult && exitResult !== "timeout") {
+      expect(exitResult.code).toBe(0);
+    }
+  }, 20000);
+
+  const openSocket = (pathname, firstType) =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${serverPort}${pathname}`, { headers: { cookie } });
+      const guard = setTimeout(() => reject(new Error(`no ${firstType} on ${pathname} within 10s`)), 10000);
+      const socket = { ws };
+      socket.closed = new Promise((resolveClose) => {
+        ws.on("close", (code, reason) => resolveClose({ code, reason: String(reason) }));
+      });
+      ws.on("message", (raw) => {
+        if (JSON.parse(String(raw)).type !== firstType) return;
+        clearTimeout(guard);
+        resolve(socket);
+      });
+      ws.on("error", (err) => {
+        clearTimeout(guard);
+        reject(err);
+      });
+    });
+
+  const closedWithin = (socket, ms = 5000) =>
+    Promise.race([socket.closed, sleep(ms).then(() => "still open")]);
+
+  it("closes the terminal and chat sockets on logout, and terminal input sent after it never runs", async () => {
+    const beforeMarker = path.join(tmpDir, "terminal-before-logout");
+    const afterMarker = path.join(tmpDir, "terminal-after-logout");
+    const terminal = await openSocket("/api/watchdog/terminal/ws", "session");
+    const chat = await openSocket("/api/ws/chat", "hello");
+
+    terminal.ws.send(JSON.stringify({ type: "input", data: `touch '${beforeMarker}'\n` }));
+    for (let i = 0; i < 100 && !fs.existsSync(beforeMarker); i += 1) await sleep(100);
+    expect(fs.existsSync(beforeMarker)).toBe(true);
+
+    // Paused, the client does not read the server's close frame, so it still
+    // sends: the input reaches a socket the server is already closing.
+    terminal.ws.pause();
+    const logout = await httpRequest(serverPort, {
+      path: "/api/auth/logout",
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+    }, "{}");
+    expect(logout.status).toBe(200);
+    terminal.ws.send(JSON.stringify({ type: "input", data: `touch '${afterMarker}'\n` }));
+    await sleep(200);
+    terminal.ws.resume();
+
+    expect(await closedWithin(terminal)).toEqual({ code: 1000, reason: "Logged out" });
+    expect(await closedWithin(chat)).toEqual({ code: 1000, reason: "Logged out" });
+    await sleep(1000);
+    expect(fs.existsSync(afterMarker)).toBe(false);
+  }, 30000);
+});
