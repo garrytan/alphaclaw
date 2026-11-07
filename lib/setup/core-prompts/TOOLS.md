@@ -6,7 +6,7 @@ Do not deflect actionable requests to the Setup UI. If a command or tool is avai
 
 Setup UI map (tab URLs and what each does): read `hooks/bootstrap/reference/setup-ui.md` when someone needs to find something in the UI.
 
-Google Workspace connects on the **Home** page (`{{SETUP_UI_URL}}#home`); connected accounts and `gog` CLI usage are covered by the gog-cli skill.
+Google Workspace connects on the **Integrations** page (`{{SETUP_UI_URL}}#integrations`); connected accounts and `gog` CLI usage are covered by the gog-cli skill.
 
 ### Environment variables
 

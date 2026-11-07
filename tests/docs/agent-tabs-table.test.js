@@ -24,10 +24,8 @@ const tabsSection = () => {
 describe("docs/agent-facing TOOLS.md Tabs table", () => {
   // Items with an `href` are action items (the Claude Code launcher), not hash
   // routes — the table documents tabs the agent can point the user at.
-  // Items with an `anchor` (Channels, Integrations) open their part of Home
-  // until they get their own pages, so they have no hash of their own yet.
   const routed = kNavSections.flatMap((section) =>
-    section.items.filter((item) => !item.href && !item.anchor).map((item) => item.id),
+    section.items.filter((item) => !item.href).map((item) => item.id),
   );
 
   it("lists every hash-routed tab from kNavSections with its {{SETUP_UI_URL}}#<id> link", () => {
@@ -37,8 +35,9 @@ describe("docs/agent-facing TOOLS.md Tabs table", () => {
   });
 
   // Routes the app serves outside the nav registry: the beta-gated Dashboards
-  // item and the file browser (`#browse/<path>`, reached from the sidebar tree).
-  const kNonNavRoutes = new Set(["dashboards", "browse"]);
+  // item, the file browser (`#browse/<path>`, reached from the sidebar tree),
+  // and Webhooks and Nodes (reached from Integrations since ALPH-69 PR 3a).
+  const kNonNavRoutes = new Set(["dashboards", "browse", "webhooks", "nodes"]);
 
   it("names no tab the nav registry does not route (beyond the non-nav routes)", () => {
     const linked = [...tabsSection().matchAll(/\{\{SETUP_UI_URL\}\}#([a-z-]+)/g)].map((m) => m[1]);

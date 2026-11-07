@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.999] - 2026-11-07
+
+Setup UI phase 3a (ALPH-69). Home is rebuilt as a status page with next steps, and Channels and Integrations become pages of their own. No server, restart, watchdog, gateway or relay behaviour changes.
+
+### Changed
+- **Home.** A one-line headline (for example "Your box is running. 2 things need you.") sits above a four-cell status strip for the gateway, the watchdog, incidents in the last 7 days and spend in the last 30 days, each linking to its page. Below it are Attention (numbered rows for pending device approvals, the OpenClaw data upgrade, the Drift Doctor reminder, prompt-hardening problems, pin drift and workspace sync turned off, where only the first row's action is a solid button), Finish setting up, Coming up (the next five scheduled jobs), Agents, a Channels summary with the relay, and This box (versions and the update button, the OpenClaw dashboard launch, the hardening state, Back up now and the auto-sync schedule). The Gateway card leaves Home; restart and repair stay on Health.
+- **Channels** (`#/channels`). Channel accounts, the WhatsApp QR flow, chat pairing approvals and device approvals, with Add channel as the page's solid button.
+- **Integrations** (`#/integrations`). Google Workspace, feature health, the OpenAI-compatible API and Agent Administration toggles, and link rows to Webhooks and Nodes with their counts.
+- **Sidebar.** Connect lists Channels, Integrations and Relay. Webhooks and Nodes highlight Integrations, and Telegram highlights Channels. The Home section anchors and their scroll are gone.
+- Home reads no new endpoint. Its strip and Coming up use the existing incidents, usage summary and cron jobs reads, and its Channels card the relay status read.
+- The agent-facing Setup UI map, TOOLS.md, the admin skill, README and DESIGN.md describe the new pages.
+
 ## [0.10.190] - 2026-11-07
 
 Setup UI phase 2b (ALPH-69). The sidebar follows the new IA, four pages get plain names, a status chip shows the gateway on every page, and every page opens with one title and a purpose line. Page bodies are unchanged.
