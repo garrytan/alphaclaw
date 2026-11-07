@@ -45,7 +45,8 @@ kept there instead of in the deployment environment included). The same uid
 can also read AlphaClaw's memory where ptrace is permitted, the handoff file
 in the milliseconds before AlphaClaw consumes it, the environment of a
 container init that did not go through AlphaClaw's entrypoint (a template
-image with `ENTRYPOINT ["tini", "--"]`), and children that need a value by
+image with `ENTRYPOINT ["tini", "--"]`) or whose start command is not the
+exec form `alphaclaw start` (a shell-form `sh -c` start; the entrypoint warns), and children that need a value by
 design (gog runs with `GOG_KEYRING_PASSWORD`). Those are filesystem- and
 uid-level concerns (sandboxing, a separate uid for the gateway), and this
 feature does not claim to close them. The auth layer still

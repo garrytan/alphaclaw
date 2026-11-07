@@ -3,6 +3,19 @@ const {
 } = require("../../lib/server/doctor/sanitize");
 
 describe("server/doctor/sanitize", () => {
+  afterEach(() => require("../../lib/server/deployment-secrets").resetDeploymentSecretsForTests());
+
+  // M-1 moved the deployment secrets out of process.env, so the env scan
+  // alone stopped masking them in Doctor cards (/ship round 2 on #342).
+  it("redacts the captured deployment secrets, which no env holds any more", () => {
+    const deploymentSecrets = require("../../lib/server/deployment-secrets");
+    const env = { SETUP_PASSWORD: "fake-setup-pass-41", RAILWAY_TOKEN: "fake-railway-token-41" };
+    deploymentSecrets.captureDeploymentSecrets(env);
+    expect(env).toEqual({});
+    const { sanitize } = createDoctorTextSanitizer({ env: {} });
+    expect(sanitize("card says fake-setup-pass-41 and fake-railway-token-41")).toBe("card says [redacted] and [redacted]");
+  });
+
   it("redacts secret-shaped env values from card text", () => {
     const { sanitize } = createDoctorTextSanitizer({
       env: {

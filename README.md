@@ -116,7 +116,7 @@ ENTRYPOINT ["node", "/app/node_modules/@chrysb/alphaclaw/bin/container-entrypoin
 CMD ["alphaclaw", "start"]
 ```
 
-The entrypoint moves the deployment secrets (`SETUP_PASSWORD`, `GOG_KEYRING_PASSWORD`, `ALPHACLAW_MANAGED_UPDATE_TOKEN` and the platform deploy tokens) into a 0600 handoff file before it execs tini, so PID 1's environment never holds them; AlphaClaw reads and deletes the file at boot. An image that keeps `ENTRYPOINT ["/usr/bin/tini", "--"]` still works, but its PID 1 keeps the secrets in `/proc/1/environ`, readable by anything running as the same user.
+The entrypoint moves the deployment secrets (`SETUP_PASSWORD`, `GOG_KEYRING_PASSWORD`, `ALPHACLAW_MANAGED_UPDATE_TOKEN` and the platform deploy tokens) into a 0600 handoff file before it execs tini, so PID 1's environment never holds them; AlphaClaw reads and deletes the file at boot. An image that keeps `ENTRYPOINT ["/usr/bin/tini", "--"]` still works, but its PID 1 keeps the secrets in `/proc/1/environ`, readable by anything running as the same user. The entrypoint hands off only when the program tini runs is `alphaclaw` itself (the exec form `CMD ["alphaclaw", "start"]`); a shell-form start (`sh -c "alphaclaw start"`) or any other command keeps the secrets in the environment as before, and the entrypoint prints one warning saying so.
 
 The reference [`Dockerfile`](Dockerfile) is this recipe with two additions:
 it installs AlphaClaw from an `npm pack` tarball of the checkout (so

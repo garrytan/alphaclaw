@@ -109,6 +109,7 @@ const createApp = ({ confirmService = null, rewriteInviteBody = true } = {}) => 
           }),
   );
   app.patch("/api/team/members/:id", requireAdmin, echo); // team.members.update
+  app.delete("/api/team/members/:id", requireAdmin, echo); // team.members.remove
   // Error hygiene fixtures at manifest paths (safe + write tiers).
   app.get("/api/status", (_req, res) =>
     res.status(500).json({ ok: false, error: kRawServerError, code: "status_failed", hint: "See Watchdog." }),
@@ -263,6 +264,13 @@ describe("agent-admin team authority changes need an operator confirm (CSO ALPH-
     const rename = await withBearer(request(app).patch("/api/team/members/m1").send({ displayName: "Ada" }));
     expect(rename.status).toBe(200);
     expect(rename.body.echoed).toEqual({ displayName: "Ada" });
+  });
+
+  it("gates removing a member, which can remove another admin", async () => {
+    const { app } = createApp();
+    const res = await withBearer(request(app).delete("/api/team/members/m1"));
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("dangerous_op_requires_confirmation");
   });
 });
 

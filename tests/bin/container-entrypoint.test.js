@@ -42,13 +42,32 @@ describe("bin/container-entrypoint.js", () => {
     expect(report.mode).toBe(0o600);
   });
 
-  it("recognizes AlphaClaw behind a shell-form start command or a node launch", () => {
+  it("hands off only when the program the init runs is alphaclaw, as the image's CMD does", () => {
     if (process.platform !== "linux") return;
-    const shellProbe = writeProbe("alphaclaw");
-    const nodeProbe = writeProbe("alphaclaw.js");
+    const init = writeProbe("init");
+    const result = spawnSync(process.execPath, [entrypoint, init, "--", "alphaclaw", "start"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, SETUP_PASSWORD: "fake-setup-pass-9" },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(result.stdout.trim());
+    expect(report.args).toEqual(["--", "alphaclaw", "start"]);
+    expect(report.environ).toEqual(["ALPHACLAW_DEPLOYMENT_SECRETS_FILE", "PATH"]);
+    expect(report.handoff).toEqual({ SETUP_PASSWORD: "fake-setup-pass-9" });
+    expect(result.stderr).toBe("");
+  });
+
+  // /ship round 2 on #342: matching any word named alphaclaw handed off for
+  // `grep alphaclaw` (secrets stripped, a handoff nobody consumes) and spent
+  // the one-shot handoff on `alphaclaw --version && alphaclaw start`.
+  it("keeps a shell-form or unrelated start command's environment, with one warning and no handoff", () => {
+    if (process.platform !== "linux") return;
+    const init = writeProbe("init");
     for (const argv of [
-      ["/bin/sh", "-c", shellProbe + " start --port 3000"],
-      [process.execPath, nodeProbe, "start"],
+      [init, "--", "/bin/sh", "-c", "alphaclaw start --port 3000"],
+      [init, "--", "grep", "alphaclaw", "notes.txt"],
+      [init, "--", "/bin/sh", "-c", "alphaclaw --version && alphaclaw start"],
+      [init, "alphaclaw"],
     ]) {
       const result = spawnSync(process.execPath, [entrypoint, ...argv], {
         encoding: "utf8",
@@ -56,9 +75,10 @@ describe("bin/container-entrypoint.js", () => {
       });
       expect(result.status, result.stderr).toBe(0);
       const report = JSON.parse(result.stdout.trim());
-      expect(report.environ).not.toContain("SETUP_PASSWORD");
-      expect(report.handoff).toEqual({ SETUP_PASSWORD: "fake-setup-pass-9" });
-      expect(report.mode).toBe(0o600);
+      expect(report.environ, argv.join(" ")).toEqual(["PATH", "SETUP_PASSWORD"]);
+      expect(report.handoff).toBeNull();
+      expect(result.stderr).toContain("the deployment secrets stay in this container's environment");
+      expect(result.stderr).not.toContain("fake-setup-pass-9");
     }
   });
 
