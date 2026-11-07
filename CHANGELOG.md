@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.999] - 2026-11-07
+
+The model check no longer calls a built-in provider misconfigured when its `models.providers` entry leaves out `baseUrl`. OpenClaw fills in that provider's own base URL, so a working Google setup showed as an error, and the error led someone to delete the box's Google provider block.
+
+### Fixed
+- **Check models called a working built-in provider misconfigured.** A `models.providers.google` block with an `api` and an `apiKey` but no `baseUrl` showed "models.providers.google has no usable baseUrl", while a real turn through it replied. OpenClaw (2026.10.9) accepts an entry without a `baseUrl` for its built-in providers and sends requests to the base URL that provider's plugin declares. The check now follows the same rule. It takes the base URL, and the API when the entry names none, from the plugin manifests shipped in the pinned OpenClaw package. When that API is one AlphaClaw tests, the test request goes to that base URL. A built-in provider whose plugin declares no base URL is reported as not checked. An entry without a `baseUrl` for any other provider id is still an error, and the reason now says OpenClaw fills one in only for its built-in providers. The check still never writes config.
+
+### Not covered
+- Google's own API (`google-generative-ai`) is still one AlphaClaw does not send a test request on, so the box's Google model now shows as not checked rather than misconfigured. It is still not tested.
+- Built-in providers whose plugin sets the base URL in code rather than in its manifest (for example Ollama, LM Studio and MiniMax) are reported as not checked when their entry has no `baseUrl`.
+
 ## [0.10.206] - 2026-11-07
 
 A gateway crash incident that outlives an AlphaClaw or container restart now closes as recovered once the gateway's readiness check says it is ready again, instead of staying "abandoned" on the Health page.

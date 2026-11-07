@@ -221,3 +221,100 @@ describe("server/model-check run", () => {
     expect(byRef(run)["meta/muse-wonder-1.0"]).toMatchObject({ status: "not_checked", severity: "info" });
   });
 });
+
+// The box's models.providers.google block (OpenClaw 2026.10.9), key order as
+// stored, key redacted: no baseUrl key at all. OpenClaw accepts it because
+// google is one of its built-in providers and fills in the Google plugin's
+// base URL; a real turn through it replies.
+const boxGoogleBlock = () =>
+  JSON.parse(
+    '{"apiKey":"${GEMINI_API_KEY}","api":"google-generative-ai","models":[{"id":"gemini-3.1-pro-preview","name":"Gemini 3.1 Pro","reasoning":true,"contextWindow":1048576,"contextTokens":1048576,"maxTokens":65536,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}]}',
+  );
+
+describe("server/model-check built-in providers without a baseUrl", () => {
+  const kGoogleKey = "test-gemini-key-000000000000";
+  const kOpenaiKey = "test-openai-key-000000000000";
+  const makeFetch = () => {
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, auth: init.headers.Authorization || null, body: init.body ? JSON.parse(init.body) : null });
+      return { status: 200, text: async () => "{}" };
+    };
+    return { calls, fetchImpl };
+  };
+
+  it("does not call the box's Google block misconfigured, and resolves Google's built-in base URL from the pinned OpenClaw", async () => {
+    const config = {
+      models: { providers: { google: boxGoogleBlock() } },
+      agents: {
+        defaults: {
+          models: { "google/gemini-3.1-pro-preview": { alias: "gemini" } },
+          modelPolicy: { allow: ["google/gemini-3.1-pro-preview"] },
+        },
+      },
+    };
+    const before = JSON.stringify(config);
+    const { calls, fetchImpl } = makeFetch();
+    const check = createModelCheck({
+      readConfig: () => config,
+      getEnv: () => ({ GEMINI_API_KEY: kGoogleKey }),
+      listProfiles: () => [
+        { id: "google:default", provider: "google", type: "api_key", key: kGoogleKey },
+        { id: "google-vertex:default", provider: "google-vertex", type: "api_key", key: "test-vertex-key-0000" },
+      ],
+      listOpenclawModels: async () => [{ key: "google/gemini-3.1-pro-preview", input: "text+image", contextWindow: 1048576, available: true }],
+      fetchImpl,
+    });
+    const result = await check.checkRef("google/gemini-3.1-pro-preview");
+    expect(result).toMatchObject({
+      custom: true,
+      api: "google-generative-ai",
+      openclaw: "available",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      aliases: ["gemini"],
+      severity: "info",
+    });
+    expect(result.status).not.toBe("misconfigured");
+    expect(result.reason).toBe("AlphaClaw does not test the google-generative-ai API.");
+    expect(calls).toEqual([]);
+    expect(JSON.stringify(config)).toBe(before);
+    expect(JSON.stringify(result)).not.toContain(kGoogleKey);
+  });
+
+  it("probes a built-in provider whose entry has no baseUrl on the base URL and API OpenClaw fills in", async () => {
+    const providerDefaults = new Map([["openai", { baseUrl: "https://api.openai.com/v1", api: "openai-responses" }]]);
+    const config = { models: { providers: { OpenAI: { apiKey: "${OPENAI_KEY}", models: [{ id: "gpt-6-sol" }] } } } };
+    expect(resolveProviderConnection({ config, provider: "OpenAI", env: { OPENAI_KEY: kOpenaiKey }, providerDefaults })).toMatchObject({
+      probe: true,
+      api: "openai-responses",
+      baseUrl: "https://api.openai.com/v1",
+    });
+    const { calls, fetchImpl } = makeFetch();
+    const result = await createModelCheck({
+      readConfig: () => config,
+      getEnv: () => ({ OPENAI_KEY: kOpenaiKey }),
+      readProviderDefaults: () => providerDefaults,
+      fetchImpl,
+    }).checkRef("OpenAI/gpt-6-sol");
+    expect(result).toMatchObject({ status: "ok", severity: "ok", api: "openai-responses", baseUrl: "https://api.openai.com/v1", endpoint: "https://api.openai.com/v1/responses" });
+    expect(calls).toEqual([{ url: "https://api.openai.com/v1/responses", auth: `Bearer ${kOpenaiKey}`, body: expect.objectContaining({ model: "gpt-6-sol", max_output_tokens: 16 }) }]);
+  });
+
+  it("leaves a built-in provider whose base URL AlphaClaw cannot see unchecked, not misconfigured", async () => {
+    const config = { models: { providers: { deepseek: { api: "openai-completions", apiKey: "k", models: [{ id: "deepseek-v4-pro" }] } } } };
+    const { calls, fetchImpl } = makeFetch();
+    const result = await createModelCheck({ readConfig: () => config, readProviderDefaults: () => new Map(), fetchImpl }).checkRef("deepseek/deepseek-v4-pro");
+    expect(result).toMatchObject({ status: "not_checked", severity: "info" });
+    expect(result.reason).toBe("OpenClaw supplies the base URL for its built-in deepseek provider, and AlphaClaw does not know it, so no test request was sent.");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps a provider OpenClaw has no built-in base URL for misconfigured, even on the Google API", async () => {
+    const config = { models: { providers: { "my-gemini": boxGoogleBlock() } } };
+    const result = await createModelCheck({ readConfig: () => config, getEnv: () => ({ GEMINI_API_KEY: kGoogleKey }) }).checkRef("my-gemini/gemini-3.1-pro-preview");
+    expect(result).toMatchObject({ status: "misconfigured", severity: "error" });
+    expect(result.reason).toBe("models.providers.my-gemini has no baseUrl, and OpenClaw fills one in only for its built-in providers.");
+    expect(result.fix).toBe("Set models.providers.my-gemini.baseUrl to the provider's API root.");
+  });
+});
+
