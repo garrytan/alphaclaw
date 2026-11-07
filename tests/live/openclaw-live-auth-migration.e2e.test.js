@@ -109,8 +109,8 @@ describeLive("live: pinned auth connect, runtime read, gateway activation and re
     registerCodexRoutes({ app, authProfiles: ap, createPkcePair: () => ({ verifier: "synthetic-verifier", challenge: "synthetic-challenge" }),
       parseCodexAuthorizationInput: (input) => Object.fromEntries(new URL(input).searchParams), getCodexAccountId: () => "synthetic-account" });
     require("../../lib/server/routes/models").registerModelRoutes({ app, authProfiles: ap, readEnvFile: () => [], modelCatalogCache: { markStale() {} } });
-    const start = await request(app).get("/auth/codex/start");
-    const oauthState = new URL(start.headers.location).searchParams.get("state");
+    const start = await request(app).post("/auth/codex/start").set("Host", "box.test").set("Origin", "http://box.test").send({});
+    const oauthState = new URL(start.body.url).searchParams.get("state");
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600 }) });
     try {
       const exchange = await request(app).post("/api/codex/exchange").send({ input: `http://localhost/callback?code=synthetic-code&state=${oauthState}` });
