@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.197] - 2026-11-07
+
+Sockets end with the session (ALPH-73 follow-ups GST-1806 and GST-1800). #342 closed the terminal and chat sockets on logout; an open Control UI tunnel and the admin actions that end a member's sessions still left sockets working.
+
+### Security
+- **Logout closes proxied gateway sockets (GST-1806).** A WebSocket upgrade forwarded to the gateway (`/openclaw` and the other gateway paths) is now tracked with the session that opened it, read from the cookie before the proxy strips it, and logout ends it by the same rule as the terminal and chat sockets: every one on an owner logout, that member's on a member logout. The proxy pipes raw frames, so no close frame can be inserted between the gateway's; the client socket and its gateway socket are both destroyed (the client sees 1006), and a gateway socket that answers after logout is destroyed when it does. An upgrade that carries no valid session cookie (a client authenticating to the gateway itself, such as `openclaw node run` or a remote CLI) has no session to end and is left alone. Proxying, the origin rules and the `/openclaw` mount are unchanged.
+- **Team admin changes close the sockets of the sessions they end (GST-1800).** A role change, disable or removal rotates the member's token secret, and team-off rotates every member's; each now emits the logout event for that member (`onSessionsEnded` on the team routes, wired to the same emitter as logout), so the member's terminal, chat and proxied gateway sockets close. Team-off ends member sessions only, the owner's admin member account included; the owner's shared-password sessions keep working and their sockets stay open. Arming the legacy-login lockdown when team is enabled refuses every existing shared-password session, so it emits `legacy_lockdown`, which closes the sockets owner sessions opened and no member's. A failure to close sockets is logged and never fails the admin action.
+
+### Tests
+- `tests/server/team-changes-close-sockets.test.js` (real auth and team routes, upgrade bridge and chat service on real sockets): a member's terminal and chat sockets close when an admin demotes, disables or removes them, every member's on team-off, the owner's on the lockdown, and nobody else's; a throwing hook still applies the change.
+- `logout-closes-sockets` now proxies through a real http-proxy-3 to a stub gateway: a member logout closes only that member's `/openclaw` socket and a frame sent after it never reaches the gateway; an owner logout closes every session's and leaves a sessionless root client open. A real-process `e2e-proxy-gateway` case proves the same for an owner cookie through `lib/server.js`.
+
 ## [0.10.195] - 2026-11-07
 
 Secrets and auth fixes from the ALPH-71 audit (M-3, L-2, L-6, GST-1743): the agent cannot mint an admin or remove a member without an operator confirm, and logging out really logs out. M-1 (deployment secrets out of every process environment) moved to its own, later PR. L-8 (applying system and launcher keys on an .env reload only when AlphaClaw wrote them) moved to a separate design issue; env reload is unchanged.
