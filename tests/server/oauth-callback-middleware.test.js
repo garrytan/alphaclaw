@@ -42,6 +42,7 @@ const createApp = ({
   gatewayUrl,
   getOauthCallbackById = () => null,
   markOauthCallbackUsed = () => {},
+  insertRequest = () => {},
 }) => {
   const app = express();
   app.use(["/hooks", "/webhook"], express.raw({ type: "*/*", limit: "5mb" }));
@@ -49,7 +50,7 @@ const createApp = ({
   app.use(express.json({ limit: "5mb" }));
   const webhookMiddleware = createWebhookMiddleware({
     gatewayUrl,
-    insertRequest: () => {},
+    insertRequest,
     maxPayloadBytes: 64 * 1024,
   });
   const oauthCallbackMiddleware = createOauthCallbackMiddleware({
@@ -152,14 +153,16 @@ describe("server/oauth-callback-middleware", () => {
   describe("provider callback params", () => {
     const withCallbackApp = async (run) => {
       const { server, calls, gatewayUrl } = await createGatewaySpyServer();
+      const loggedRequests = [];
       vi.stubEnv("WEBHOOK_TOKEN", "test-webhook-token");
       const app = createApp({
         gatewayUrl,
         getOauthCallbackById: (id) =>
           id === "abc123" ? { callbackId: "abc123", hookName: "provider-oauth" } : null,
+        insertRequest: (entry) => loggedRequests.push(entry),
       });
       try {
-        await run({ app, calls });
+        await run({ app, calls, loggedRequests });
       } finally {
         vi.unstubAllEnvs();
         await new Promise((resolve) => server.close(resolve));
@@ -185,6 +188,29 @@ describe("server/oauth-callback-middleware", () => {
         expect(response.status).toBe(200);
         expect(calls).toHaveLength(1);
         expect(JSON.parse(calls[0].bodyText)).toEqual(Object.fromEntries(query));
+      });
+    });
+
+    it("redacts oauth_verifier and oauth_token in the stored request log, like code", async () => {
+      await withCallbackApp(async ({ app, calls, loggedRequests }) => {
+        const response = await request(app).get(
+          "/oauth/abc123?oauth_token=request-token-fixture&oauth_verifier=verifier-fixture&code=code-fixture&realmId=42",
+        );
+        expect(response.status).toBe(200);
+        expect(calls).toHaveLength(1);
+        expect(JSON.parse(calls[0].bodyText)).toEqual({
+          oauth_token: "request-token-fixture",
+          oauth_verifier: "verifier-fixture",
+          code: "code-fixture",
+          realmId: "42",
+        });
+        expect(loggedRequests).toHaveLength(1);
+        expect(JSON.parse(loggedRequests[0].payload)).toEqual({
+          oauth_token: "[REDACTED]",
+          oauth_verifier: "[REDACTED]",
+          code: "[REDACTED]",
+          realmId: "42",
+        });
       });
     });
 
