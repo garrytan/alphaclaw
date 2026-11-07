@@ -55,6 +55,17 @@ const fixtures = {
     { id: "9", messageId: "244494280000000001", from: "wintermute", to: "capy-alph-63", kind: "dm", conversationId: "c1", threadId: "244494274208129024", createdAt: iso(980_000), relayStatus: "answered", relayCode: null, text: "Restarting the gateway needs Garry's yes. I asked him in Telegram; that change awaits approval relay-0a1b2c3d." },
     { id: "8", messageId: "244494274208129024", from: "capy-alph-63", to: "wintermute", kind: "dm", conversationId: "c1", threadId: null, createdAt: iso(1_000_000), relayStatus: null, relayCode: null, text: "What does the watchdog say about last night's restart? Restart the gateway if it looks wedged." },
   ] }),
+  "/api/relay/conversations?limit=50": () => ({ ok: true, agentName: "wintermute", nextBefore: null, searchScanned: null, conversations: [
+    { id: "c1", participants: ["wintermute", "capy-alph-63"], peer: "capy-alph-63", messageCount: 2, lastMessageAt: iso(980_000), lastFrom: "wintermute",
+      lastText: "Restarting the gateway needs Garry's yes.", lastStatus: "answered", lastCode: null, sessionKey: "agent:main:relay-capy-alph-63", sessionOnly: false },
+    { id: "session:agent:main:relay-capy-old", participants: ["wintermute", "capy-old"], peer: "capy-old", messageCount: null, lastMessageAt: iso(90 * 86_400_000),
+      lastFrom: null, lastText: "", lastStatus: null, lastCode: null, sessionKey: "agent:main:relay-capy-old", sessionOnly: true },
+  ] }),
+  "/api/relay/conversations/c1": () => ({ ok: true, id: "c1", agentName: "wintermute", participants: ["capy-alph-63", "wintermute"], sessionKey: "agent:main:relay-capy-alph-63", nextBefore: null, messages: [
+    { id: "244494274208129024", from: "capy-alph-63", text: "What does the watchdog say about last night's restart? Restart the gateway if it looks wedged.", createdAt: iso(1_000_000), threadId: null, relayStatus: null, relayCode: null, inReplyTo: null,
+      bridge: { state: "answered", code: null, hop: 0, sessionKey: "agent:main:relay-capy-alph-63", receivedAt: iso(1_000_000), endedAt: iso(980_000) } },
+    { id: "244494280000000001", from: "wintermute", text: "Restarting the gateway needs Garry's yes. I asked him in Telegram; that change awaits approval relay-0a1b2c3d.", createdAt: iso(980_000), threadId: "244494274208129024", relayStatus: "answered", relayCode: null, inReplyTo: "244494274208129024", bridge: null },
+  ] }),
 };
 const server = http.createServer((req, res) => {
   const fixture = fixtures[req.url];
@@ -75,13 +86,16 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.getByText("wintermute", { exact: false }).first().waitFor();
   await page.getByText("relay-0a1b2c3d", { exact: false }).first().waitFor();
-  assert.doesNotMatch(await page.locator("body").innerText(), /Restart the gateway if it looks wedged/, "message text starts collapsed");
-  await page.getByRole("button", { name: "Show message" }).last().click();
+  assert.doesNotMatch(await page.locator("body").innerText(), /Restart the gateway if it looks wedged/, "a transcript opens only when picked");
+  await page.getByRole("button", { name: /@capy-alph-63/ }).first().click();
+  await page.getByText("Restart the gateway if it looks wedged", { exact: false }).waitFor();
+  assert.equal(await page.getByRole("link", { name: "Open session in Chat" }).getAttribute("href"), "#/chat/" + encodeURIComponent("agent:main:relay-capy-alph-63"));
   const text = await page.locator("body").innerText();
+  assert.match(text, /@capy-old[\s\S]*session only/, "a relay session past retention is still listed");
   assert.match(text, /169\.254\.0\.21/, "exposure warning names the address");
   assert.match(text, /capy-alph-63/);
   assert.match(text, /run_interrupted|cut off|Interrupted/i);
-  assert.match(text, /Restart the gateway if it looks wedged/, "the audit log shows message text to the signed-in owner");
+  assert.match(text, /Restart the gateway if it looks wedged[\s\S]*awaits approval relay-0a1b2c3d/, "the transcript shows both sides to the signed-in owner");
   assert.match(text, /https:\/\/wintermute\.example\.com\/relay\/mcp/, "connections show the MCP URL");
   assert.match(text, /capy-62a929e44271[\s\S]*wake delivered/);
   assert.match(text, /webhook gone/);
@@ -98,7 +112,7 @@ try {
   }
   if (shots) await page.screenshot({ path: path.join(shots, "relay-page-mobile.png"), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log("PASS: status, agents, needs-you approval, interrupted run, exposure warning, audit log text, one-time consent code, desktop/mobile layout");
+  console.log("PASS: status, agents, needs-you approval, interrupted run, exposure warning, conversation list and transcript with the Chat link, one-time consent code, desktop/mobile layout");
 } finally {
   await browser?.close();
   server.close();

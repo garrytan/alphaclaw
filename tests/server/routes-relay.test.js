@@ -29,11 +29,11 @@ const appWith = (relayService) => {
 };
 
 describe("relay routes", () => {
-  it("status carries the roster and sizes and never a key or token", async () => {
+  it("status carries the roster and sizes, shows the box agent online while the relay is ready, and never a key or token", async () => {
     const res = await request(appWith(createRelayService())).get("/api/relay/status");
     expect(res.status).toBe(200);
     expect(res.body.agents).toEqual([
-      { name: "wintermute", online: false, lastSeen: "2026-11-06T10:00:00Z", createdAt: null },
+      { name: "wintermute", online: true, lastSeen: "2026-11-06T10:00:00Z", createdAt: null },
       { name: "capy-1", online: true, lastSeen: null, createdAt: null },
     ]);
     expect(res.body.dbBytes).toEqual({ engine: 4096, bridge: 1024 });
@@ -73,3 +73,111 @@ describe("relay routes", () => {
     expect(redacted).toEqual({ ok: true, bodiesHidden: true, messages: [{ id: "1", from: "a", textChars: 12 }] });
   });
 });
+
+
+describe("relay conversations (ALPH-68)", () => {
+  const conversationService = () => {
+    const service = createRelayService();
+    service.resolveAgentId = () => "main";
+    service.engine.conversations = async () => [
+      { id: "dm_a", type: "1:1", participants: ["wintermute", "capy-1"], message_count: 2, last_message: { text: "pong", agent_name: "wintermute", created_at: "2026-11-06T10:00:05Z" } },
+      { id: "dm_b", type: "1:1", participants: ["capy-2", "capy-3"], message_count: 1, last_message: { text: "between peers", agent_name: "capy-2", created_at: "2026-11-05T09:00:00Z" } },
+    ];
+    service.engine.consoleMessages = async (key, query) => {
+      const rows = [
+        { id: "901", message_id: "77", agent_name: "capy-1", conversation_id: "dm_a", text: "ping about deploys", metadata: { target_agent: "wintermute" }, created_at: "2026-11-06T10:00:00Z" },
+        { id: "800", message_id: "66", agent_name: "capy-2", conversation_id: "dm_b", text: "between peers", metadata: {}, created_at: "2026-11-05T09:00:00Z" },
+      ];
+      return rows.filter((row) => !query.conversation_id || row.conversation_id === query.conversation_id).slice(0, query.limit);
+    };
+    service.engine.thread = async (key, id) =>
+      id === "77"
+        ? { replies: [{ id: "78", agent_name: "wintermute", thread_id: "77", text: "pong", metadata: { relay_status: "answered", relay_in_reply_to: "77" }, created_at: "2026-11-06T10:00:05Z" }] }
+        : { replies: [] };
+    const baseStore = service.getStore();
+    const bridgeRow = { messageId: "77", sender: "capy-1", conversationId: "dm_a", state: "answered", code: null, hop: 0, sessionKey: "agent:main:relay-capy-1", receivedAt: 1, endedAt: 2 };
+    service.getStore = () => ({ ...baseStore, listByConversation: (id) => (id === "dm_a" ? [bridgeRow] : []), latestPerConversation: () => [bridgeRow] });
+    return service;
+  };
+  const appWithSessions = (service, sessions) => {
+    const app = express();
+    registerRelayRoutes({ app, requireAuth: (req, res, next) => next(), relayService: service, listSessionRows: async () => sessions });
+    return app;
+  };
+
+  it("lists conversations by agent pair, newest first, with the bridge status and the box's relay session", async () => {
+    const res = await request(appWithSessions(conversationService(), [
+      { key: "agent:main:relay-capy-old", updatedAt: Date.parse("2026-10-01T00:00:00Z") },
+      { key: "agent:main:relay-capy-1", updatedAt: Date.parse("2026-11-06T10:00:05Z") },
+      { key: "agent:main:main", updatedAt: 5 },
+    ])).get("/api/relay/conversations");
+    expect(res.status).toBe(200);
+    expect(res.body.conversations.map((item) => item.id)).toEqual(["dm_a", "dm_b", "session:agent:main:relay-capy-old"]);
+    expect(res.body.conversations[0]).toMatchObject({ peer: "capy-1", messageCount: 2, lastStatus: "answered", sessionKey: "agent:main:relay-capy-1", lastText: "pong" });
+    expect(res.body.conversations[1]).toMatchObject({ participants: ["capy-2", "capy-3"], peer: null, sessionKey: null });
+    expect(res.body.conversations[2]).toMatchObject({ sessionOnly: true, peer: "capy-old", sessionKey: "agent:main:relay-capy-old" });
+    expect(JSON.stringify(res.body)).not.toMatch(/rk_live|at_live/);
+  });
+
+  it("filters by agent, text and date, pages with a cursor, and validates its inputs", async () => {
+    const app = appWithSessions(conversationService(), []);
+    expect((await request(app).get("/api/relay/conversations?agent=capy-3")).body.conversations.map((item) => item.id)).toEqual(["dm_b"]);
+    expect((await request(app).get("/api/relay/conversations?q=deploys")).body.conversations.map((item) => item.id)).toEqual(["dm_a"]);
+    expect((await request(app).get("/api/relay/conversations?from=2026-11-06")).body.conversations.map((item) => item.id)).toEqual(["dm_a"]);
+    expect((await request(app).get("/api/relay/conversations?from=2026-11-06&to=2026-11-06")).body.conversations.map((item) => item.id)).toEqual(["dm_a"]);
+    const first = (await request(app).get("/api/relay/conversations?limit=1")).body;
+    expect(first.conversations.map((item) => item.id)).toEqual(["dm_a"]);
+    const next = (await request(app).get("/api/relay/conversations?limit=1&before=" + encodeURIComponent(first.nextBefore))).body;
+    expect(next.conversations.map((item) => item.id)).toEqual(["dm_b"]);
+    expect((await request(app).get("/api/relay/conversations?agent=bad%20name")).status).toBe(400);
+    expect((await request(app).get("/api/relay/conversations?from=yesterday")).status).toBe(400);
+    expect((await request(appWith(createRelayService({ ready: false }))).get("/api/relay/conversations")).body.code).toBe("provisioning_pending");
+  });
+
+  it("returns one conversation's transcript, both sides, oldest first, with relay status and bridge state", async () => {
+    const app = appWithSessions(conversationService(), []);
+    const res = await request(app).get("/api/relay/conversations/dm_a");
+    expect(res.status).toBe(200);
+    expect(res.body.sessionKey).toBe("agent:main:relay-capy-1");
+    expect(res.body.messages).toEqual([
+      expect.objectContaining({ id: "77", from: "capy-1", text: "ping about deploys", bridge: expect.objectContaining({ state: "answered" }) }),
+      expect.objectContaining({ id: "78", from: "wintermute", text: "pong", relayStatus: "answered", inReplyTo: "77" }),
+    ]);
+    expect((await request(app).get("/api/relay/conversations/..%2Fx")).status).toBe(400);
+  });
+
+  it("refuses a text search from the agent actor, which never receives the text it would test for", async () => {
+    const app = express();
+    registerRelayRoutes({
+      app,
+      requireAuth: (req, res, next) => {
+        req.alphaclawActor = { type: "agent" };
+        next();
+      },
+      relayService: conversationService(),
+      listSessionRows: async () => [],
+    });
+    const searched = await request(app).get("/api/relay/conversations?q=deploys");
+    expect(searched.status).toBe(400);
+    expect(JSON.stringify(searched.body)).not.toContain("dm_a");
+    expect((await request(app).get("/api/relay/conversations")).status).toBe(200);
+  });
+
+  it("the agent actor reads conversations as metadata only: no text, no session key", () => {
+    const list = findOp("GET", "/api/relay/conversations");
+    const one = findOp("GET", "/api/relay/conversations/dm_a");
+    expect(list?.tier).toBe("safe");
+    expect(one?.tier).toBe("safe");
+    const redactedList = list.redactResponse({ ok: true, conversations: [{ id: "dm_a", participants: ["a", "b"], lastText: "secret plans", sessionKey: "agent:main:relay-b", lastStatus: "answered" }] });
+    expect(redactedList.conversations).toEqual([{ id: "dm_a", participants: ["a", "b"], lastStatus: "answered", lastTextChars: 12 }]);
+    const redactedOne = one.redactResponse({
+      ok: true,
+      sessionKey: "agent:main:relay-b",
+      messages: [{ id: "1", from: "a", text: "secret plans", bridge: { state: "answered", code: null, hop: 0, sessionKey: "agent:main:relay-b", receivedAt: null, endedAt: null } }],
+    });
+    expect(redactedOne).not.toHaveProperty("sessionKey");
+    expect(JSON.stringify(redactedOne)).not.toMatch(/secret plans|relay-b/);
+    expect(redactedOne.messages[0].textChars).toBe(12);
+  });
+});
+
