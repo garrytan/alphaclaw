@@ -245,7 +245,10 @@ describe("frontend/home tab", () => {
     mockState(
       quietState({
         openclawPin: { state: "diverged", installed: "2026.10.8", pinned: "2026.10.9" },
-        doctorStatus: { stale: true, changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 2 } },
+        doctorStatus: {
+          stale: true,
+          changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 2, reviewedChangedFilesCount: 2 },
+        },
         devicePending: [{ id: "d1", clientMode: "webchat" }],
         syncCron: {
           enabled: true,
@@ -373,7 +376,7 @@ describe("frontend/home moved cards", () => {
 
   const kStaleDoctor = (hardeningState) => ({
     stale: true,
-    changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 2 },
+    changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 2, reviewedChangedFilesCount: 2 },
     bootstrapContext: hardeningState ? { hardening: { state: hardeningState } } : undefined,
   });
   const doctorRow = (tree) => collectNodes(tree).find((vnode) => vnode.props?.["data-attention"] === "doctor");
@@ -391,6 +394,39 @@ describe("frontend/home moved cards", () => {
       expect(onSwitchTab).toHaveBeenCalledWith("doctor");
     },
   );
+
+  it("a stale Doctor whose reviewed files did not change raises no Attention row, whatever else churned", () => {
+    mockState(
+      quietState({
+        doctorStatus: {
+          stale: true,
+          changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 18924, reviewedChangedFilesCount: 0 },
+        },
+      }),
+    );
+    const tree = render();
+    expect(doctorRow(tree)).toBeUndefined();
+    const text = textOf(tree).join(" ");
+    expect(text).toContain("Your box is running. Nothing needs you.");
+    expect(text).not.toContain("18924");
+  });
+
+  it("the Doctor reminder counts only the files Drift Doctor reviews and asks for a run", () => {
+    mockState(
+      quietState({
+        doctorStatus: {
+          stale: true,
+          changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 18924, reviewedChangedFilesCount: 3 },
+        },
+      }),
+    );
+    const text = textOf(doctorRow(render())).join(" ");
+    expect(text).toContain(
+      "Drift Doctor last ran over a week ago. Since then, 3 of the files it reviews (prompt files, skills and README) changed. Run Drift Doctor to check them.",
+    );
+    expect(text).not.toContain("18924");
+    expect(text).not.toContain("18,924");
+  });
 
   it("the Doctor reminder's Dismiss calls onDismissDoctorWarning, and a dismissal hides it", () => {
     const onDismissDoctorWarning = vi.fn();

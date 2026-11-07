@@ -621,6 +621,88 @@ describe("server/doctor-service", () => {
     expect(status.changeSummary.workspaceLimited).toBe(false);
   });
 
+  describe("drift counted against the files Drift Doctor reviews", () => {
+    const buildStaleDriftService = (workspaceRoot) => {
+      const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reviewed-drift-db-"));
+      const doctorDb = loadManagedDoctorDb();
+      doctorDb.initDoctorDb({ rootDir: dbRoot });
+      const backdate = (run) => ({
+        ...run,
+        startedAt: "2000-01-01T00:00:00.000Z",
+        completedAt: "2000-01-01T00:00:00.000Z",
+      });
+      const { createDoctorService } = loadDoctorService();
+      return () =>
+        createDoctorService({
+          clawCmd: vi.fn(),
+          listDoctorRuns: ({ limit } = {}) => doctorDb.listDoctorRuns({ limit }).map(backdate),
+          listDoctorRunSummaries: ({ limit } = {}) =>
+            doctorDb.listDoctorRunSummaries({ limit }).map(backdate),
+          listDoctorCards: doctorDb.listDoctorCards,
+          getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
+          setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
+          createDoctorRun: doctorDb.createDoctorRun,
+          completeDoctorRun: doctorDb.completeDoctorRun,
+          insertDoctorCards: doctorDb.insertDoctorCards,
+          getDoctorRun: doctorDb.getDoctorRun,
+          getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
+          getDoctorCard: doctorDb.getDoctorCard,
+          updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
+          workspaceRoot,
+          managedRoot: workspaceRoot,
+          computeSnapshotAsync: fastComputeSnapshotAsync,
+        });
+    };
+    const writeFile = (root, relativePath, content) => {
+      fs.mkdirSync(path.dirname(path.join(root, relativePath)), { recursive: true });
+      fs.writeFileSync(path.join(root, relativePath), content, "utf8");
+    };
+    const churnBrainAndLogs = (root) => {
+      for (let index = 0; index < 400; index += 1) {
+        writeFile(root, `brain/people/person-${index}.md`, `# Person ${index}\nMet on a call.\n`);
+        writeFile(root, `logs/run-${index}.log`, `run ${index} finished\n`);
+      }
+      writeFile(root, "memory/2026-11-06.md", "Talked about the launch.\n");
+    };
+    const statusAfterChanges = async (workspaceRoot, change) => {
+      writeFile(workspaceRoot, "AGENTS.md", "# Guidance\n");
+      writeFile(workspaceRoot, "skills/research/SKILL.md", "---\nname: research\n---\n");
+      const buildService = buildStaleDriftService(workspaceRoot);
+      await buildService().importDoctorResult({
+        rawOutput: JSON.stringify({ summary: "Baseline findings", cards: [] }),
+      });
+      change(workspaceRoot);
+      const service = buildService();
+      service.buildStatus();
+      await service.awaitWorkspaceSnapshotRefresh();
+      return service.buildStatus();
+    };
+
+    it("counts only changed reviewed files when brain pages and logs churned too", async () => {
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reviewed-drift-"));
+      const status = await statusAfterChanges(workspaceRoot, (root) => {
+        churnBrainAndLogs(root);
+        writeFile(root, "AGENTS.md", `# Guidance\n${repeatText(600)}\n`);
+        writeFile(root, "skills/research/SKILL.md", "---\nname: research\ndescription: Look things up\n---\n");
+        writeFile(root, "hooks/bootstrap/AGENTS.md", "# AlphaClaw rules\n");
+      });
+
+      expect(status.stale).toBe(true);
+      expect(status.changeSummary.changedFilesCount).toBe(804);
+      expect(status.changeSummary.reviewedChangedFilesCount).toBe(3);
+      expect(status.changeSummary.hasMeaningfulChanges).toBe(true);
+    });
+
+    it("counts no reviewed files when only brain pages, logs and memory notes changed", async () => {
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-reviewed-drift-churn-"));
+      const status = await statusAfterChanges(workspaceRoot, churnBrainAndLogs);
+
+      expect(status.stale).toBe(true);
+      expect(status.changeSummary.changedFilesCount).toBe(801);
+      expect(status.changeSummary.reviewedChangedFilesCount).toBe(0);
+    });
+  });
+
   it("uses the persisted initial baseline before the first completed run", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-initial-baseline-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-initial-baseline-db-"));
