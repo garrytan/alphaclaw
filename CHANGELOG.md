@@ -17,6 +17,8 @@ A gateway crash incident that outlives an AlphaClaw or container restart now clo
 - On a gateway whose readiness check never answers ready (no readiness URL, or an OpenClaw build without `/readyz`), a carried incident stays open, and automatic incident reviews wait until it closes.
 - Incidents already marked abandoned before this version keep that status.
 
+## [0.10.204] - 2026-11-07
+
 The check that a browser request comes from the box's own dashboard now compares scheme and port, not just the host name.
 
 ### Security
