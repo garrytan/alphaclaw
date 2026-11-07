@@ -102,12 +102,12 @@ describe("frontend/models-tab authentication-required badge", () => {
     expect(chips).toHaveLength(1);
     expect(chips[0].props.tone).toBe("warning");
     // Supplementary detail names where to fix it.
-    expect(chips[0].props.text).toContain("Providers");
+    expect(chips[0].props.text).toContain("Provider keys");
     // The old bare label is gone.
     expect(collectText(tree).join(" ")).not.toContain("Needs auth");
   });
 
-  it("a model whose provider HAS auth renders the Set primary control instead of the badge", () => {
+  it("a model whose provider HAS auth renders the Make default control instead of the badge", () => {
     useModels.mockReturnValue({
       ...kModelsBase,
       configuredModels: { "openai-codex/gpt-5.6-sol": {} },
@@ -121,6 +121,6 @@ describe("frontend/models-tab authentication-required badge", () => {
         (chip) => chip.props.label === "Authentication required",
       ),
     ).toHaveLength(0);
-    expect(collectText(tree).join(" ")).toContain("Set primary");
+    expect(collectText(tree).join(" ")).toContain("Make default");
   });
 });

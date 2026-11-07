@@ -220,7 +220,7 @@ describe("frontend/models-tab provider auth card codex section", () => {
     expect(chips[0].props.onRetry).toBe(kBaseProps.onRefreshCodex);
     const text = collectText(tree).join(" ");
     expect(text).toContain("status endpoint down");
-    expect(text).toContain("Connected");
+    expect(text).toContain("Signed in");
     expect(text).not.toContain("Not connected");
   });
 
