@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.185] - 2026-11-07
+## [0.10.188] - 2026-11-07
 
 Follow-up to 0.10.184 (ALPH-71 L-9): the `/oauth/<id>` alias forwards provider callback params again and strips only the fields that steer the agent run.
 
