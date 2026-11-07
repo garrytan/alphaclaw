@@ -6,7 +6,7 @@ describe("relay guard plugin entry (openclaw.json)", () => {
   const desired = buildRelayGuardEntry({ rootDir });
   const quiet = { log: () => {} };
 
-  it("loads AlphaClaw's bundled relay-guard plugin, owner-marked, with the root and log dirs, while the relay is on", () => {
+  it("loads AlphaClaw's bundled relay-guard plugin, owner-marked, with the root dir, while the relay is on", () => {
     expect(resolveDesiredRelayGuardEntry({ env: {}, rootDir })).toEqual(desired);
     expect(resolveDesiredRelayGuardEntry({ env: { ALPHACLAW_RELAY: "off" }, rootDir })).toBeNull();
     const cfg = { plugins: { allow: ["usage-tracker"], load: { paths: ["/old/node_modules/alphaclaw/lib/plugin/relay-guard"] }, entries: {} } };
@@ -14,7 +14,7 @@ describe("relay guard plugin entry (openclaw.json)", () => {
     expect(cfg.plugins.allow).toEqual(["usage-tracker", "relay-guard"]);
     expect(cfg.plugins.load.paths).toEqual([kRelayGuardPluginPath]);
     expect(kRelayGuardPluginPath).toBe(path.resolve(__dirname, "../../lib/plugin/relay-guard"));
-    expect(cfg.plugins.entries["relay-guard"]).toEqual({ enabled: true, config: { _alphaclawManaged: "relay", rootDir, logDirs: [path.join(rootDir, "logs")] } });
+    expect(cfg.plugins.entries["relay-guard"]).toEqual({ enabled: true, config: { _alphaclawManaged: "relay", rootDir } });
     expect(applyRelayGuardEntry(cfg, desired, quiet)).toEqual({ changed: false, conflict: false });
   });
 
