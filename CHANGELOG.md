@@ -17,7 +17,7 @@ Phase 0 of the Setup UI overhaul (ALPH-69, GST-1697). It fixes five small UI def
 - **Phone status bar**: the version text in the bottom status bar wrapped to two lines on a 390 px screen and overflowed its 24 px bar. It now stays on one line and truncates with an ellipsis.
 
 ### Changed
-- The "?" info tooltips (for example next to the gateway status) can be reached with Tab and announce their text.
+- The "?" info tooltips (for example next to the gateway status) can be reached with Tab and announce their text. Pressing Enter or Space on the one inside the Gmail watch row no longer opens the webhook page.
 
 ### Tests
 - `tests/frontend/app-navigation.test.js`: `/relay` selects the relay nav item.
