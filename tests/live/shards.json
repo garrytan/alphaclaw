@@ -30,6 +30,7 @@
       "files": [
         "tests/live/agent-delete.e2e.test.js",
         "tests/live/boot-native-maintenance-once.e2e.test.js",
+        "tests/live/gateway-dotenv-secrets.e2e.test.js",
         "tests/live/gateway-restart-ladder.e2e.test.js",
         "tests/live/gateway-restart-loop.e2e.test.js",
         "tests/live/openclaw-live-agents-roster.e2e.test.js",
