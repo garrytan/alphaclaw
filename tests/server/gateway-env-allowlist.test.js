@@ -43,10 +43,27 @@ describe("gatewayEnv() applies the child-env allowlist (TODOS P1)", () => {
       },
       () => {
         const env = gatewayEnv();
-        expect(env).not.toHaveProperty("SETUP_PASSWORD");
-        expect(env).not.toHaveProperty("GOG_KEYRING_PASSWORD");
-        expect(env).not.toHaveProperty("ALPHACLAW_MANAGED_UPDATE_TOKEN");
-        expect(env).not.toHaveProperty("RAILWAY_TOKEN");
+        expect(env.SETUP_PASSWORD).toBe("");
+        expect(env.GOG_KEYRING_PASSWORD).toBe("");
+        expect(env.ALPHACLAW_MANAGED_UPDATE_TOKEN).toBe("");
+        expect(env.RAILWAY_TOKEN).toBe("");
+        expect(JSON.stringify(env)).not.toMatch(/top-secret|kr-secret|"mut"|"rw"/);
+      },
+    );
+  });
+
+  it("sends each withheld secret as an empty value, so OpenClaw's own .env load cannot add it back", () => {
+    withEnv(
+      { CLAUDE_CODE_ROUTINE_TOKEN: "routine-secret", ALPHACLAW_SETUP_URL: "https://box.example", RANDOM_LEAK: "x" },
+      () => {
+        const env = gatewayEnv();
+        expect(env.CLAUDE_CODE_ROUTINE_TOKEN).toBe("");
+        expect(env).not.toHaveProperty("ALPHACLAW_SETUP_URL");
+        expect(env.SETUP_PASSWORD).toBe("");
+        expect(env.NPM_TOKEN).toBe("");
+        expect(env.ALPHACLAW_MANAGED_UPDATE_TOKEN).toBe("");
+        expect(env.ALPHACLAW_ROOT_DIR).toBe(process.env.ALPHACLAW_ROOT_DIR);
+        expect(env).not.toHaveProperty("RANDOM_LEAK");
       },
     );
   });
@@ -71,7 +88,7 @@ describe("gatewayEnv() applies the child-env allowlist (TODOS P1)", () => {
       { ALPHACLAW_GATEWAY_ENV_UNRESTRICTED: "1", SETUP_PASSWORD: "s", RANDOM_LEAK: "x" },
       () => {
         const env = gatewayEnv();
-        expect(env).not.toHaveProperty("SETUP_PASSWORD");
+        expect(env.SETUP_PASSWORD).toBe("");
         expect(env).not.toHaveProperty("RANDOM_LEAK");
       },
     );

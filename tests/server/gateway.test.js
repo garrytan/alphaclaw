@@ -273,8 +273,8 @@ describe("server/gateway restart behavior", () => {
       // the operator's claude.ai account; the gateway/agent must never inherit
       // the token OR the routine URL it points at.
       const env = gateway.gatewayEnv();
-      expect(env).not.toHaveProperty("CLAUDE_CODE_ROUTINE_TOKEN");
-      expect(env).not.toHaveProperty("CLAUDE_CODE_ROUTINE_URL");
+      expect(env.CLAUDE_CODE_ROUTINE_TOKEN).toBe("");
+      expect(env.CLAUDE_CODE_ROUTINE_URL).toBe("");
     } finally {
       if (prevToken === undefined) delete process.env.CLAUDE_CODE_ROUTINE_TOKEN;
       else process.env.CLAUDE_CODE_ROUTINE_TOKEN = prevToken;
