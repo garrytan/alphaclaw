@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.182] - 2026-11-07
+
+Relays in Chat (ALPH-69). Chat is where a relay conversation is read. The Relay page lists conversations as links into Chat, with each conversation's relay log beside it, and the Chat sidebar groups each agent's conversations into the operator's own chats, Relays and Channels.
+
+### Changed
+- **Relay page conversations link to Chat.** Each row keeps the peer, the status, the message count, a last-message preview and the time, and opens `#/chat/<session key>` on click, Enter or Space. The search, agent and date filters stay. The inline transcript pane and its "Open session in Chat" button are gone.
+- **Relay log beside each row.** A small Relay log button next to the row's link expands a read-only list of the conversation's relay messages under it, with sender, time, status and text, and Load earlier for older pages. It is the wire record, so it also shows what never reaches the box's session, such as the other agent's answers to messages this box sent and messages the bridge refused or rate-limited. One row expands at a time, and a log is fetched only while its row is open. A conversation between two other agents has no session on this box, so its relay log is its only view. A session past the retention period has no relay log.
+- **Chat sidebar sections.** Inside each agent, the operator's own chats stay on top. Two new collapsible sections follow. Relays has one row per peer conversation, labelled with the peer, a status dot (filled while a run is going, hollow when idle) and the last activity. Channels holds Telegram DMs, groups and topics and other channel conversations (Discord, Slack, WhatsApp), each labelled by its source. Scheduled and Other keep their place, and a scheduled run that delivers to a channel stays in Scheduled. Main stays with the operator's chats even when a channel delivers into it.
+- **Deep links reveal their conversation.** Opening `#/chat/<key>` from the Relay page, a reload or a pasted link opens the conversation's agent group and section, shows it even past the first 30 rows, selects it and scrolls it into view. A link opened before the session list loads is revealed again once the list puts the row in its real place. The operator can collapse the section again afterwards, and a section toggle never jumps the list. Old `#/relay` links still open the Relay page, and session keys stay URL-encoded the same way.
+
+### Tests
+- `tests/frontend/relay-conversations-links.test.js` covers the row links to `#/chat/<key>`, Space activation, the removed transcript pane, the Relay log button beside the link and its expanded read-only log, rows with no session, the kept filters, list-only polling while no row is open and the old `#/relay` route.
+- `tests/frontend/relay-conversations-hook.test.js` covers loading more conversations, an older page dropped after a filter change, the error path, one expanded log at a time, no log for a session past retention, and Load earlier with a page dropped after the row changed.
+- `tests/frontend/chat-sidebar-sections.test.js` covers the section classifier on real session-key shapes (a channel-delivered cron run stays Scheduled), the sidebar grouping, the relay and channel row labels, deep-link selection expanding Relays and its agent group, a cold deep link past row 30, and the spent scroll target.
+- `tests/browser/relay-page-smoke.mjs` follows the new Relay page, checking the row link's `#/chat/` href and the Relay log expanding its messages.
+
 ## [0.10.181] - 2026-11-07
 
 Design tokens from the /design-consultation (ALPH-69, GST-1697). Nine colour values in `theme.css` move to meet the contrast floors DESIGN.md already states, and DESIGN.md records the "Instrument panel" direction and Garry's font decision. No component code changes.
