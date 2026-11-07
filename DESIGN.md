@@ -179,11 +179,11 @@ No entrance animations, no skeleton shimmer longer than the request, and settled
 | Content max width 1,120 px, left-aligned | `--layout-content-max` | `max-w-content` |
 | Content gutters 40 px (16 px on phones) | `--layout-gutter` | `px-gutter` |
 
-A status strip (2 to 4 cells, label, value, one mono detail line) is the first row on Home and Health. On Home its cells follow the path a message takes through the box, gateway first, so a fault reads in the place it happens. Pages use a 1 or 2 column card grid inside the content column; the common split is 3:2 with the work on the left and summaries on the right. Two columns from 1,024 px wide, one column below. Phones (390 px) get one column, 40 px minimum tap targets and no horizontal scroll. The current shell still uses a 220 px sidebar and a 672 px column; the layout tokens are applied in the screen passes (PR 3a to 3d).
+A status strip (2 to 4 cells, label, value, one mono detail line) is the first row on Home and Health. On Home its cells follow the path a message takes through the box, gateway first, so a fault reads in the place it happens. Pages use a 1 or 2 column card grid inside the content column; the common split is 3:2 with the work on the left and summaries on the right. Two columns from 1,024 px wide, one column below. Phones (390 px) get one column, 40 px minimum tap targets and no horizontal scroll. The sidebar is 248 px since PR 2b. The page column stays 672 px (the `max-w-2xl` wrapper) until each screen pass moves its page onto the content tokens (PR 3a to 3d).
 
 ## Page header rule
 
-Every page starts with `PageHeader` (`components/page-header.js`). It holds an h1 with the page name, one line saying what the page is for, and the page's primary action on the right. Secondary actions go in the card they act on, not in the header. Sub-navigation inside a page uses Tabs under the header.
+Every page starts with `RoutePageHeader` (`components/page-header.js`). It holds the page's one h1 with the page name and one line saying what the page is for, both read from the route table (`title` and `purpose` in `lib/routes.js`), and the page's primary action on the right. An Agent page shows the agent's name as its h1. Secondary actions go in the card they act on, not in the header. Sub-navigation inside a page uses Tabs under the header. Plain `PageHeader` stays the title row of a section or dialog and renders an h2. The browser tab title is the page title plus ' · AlphaClaw'.
 
 ## Building blocks
 
@@ -193,7 +193,8 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 |---|---|---|
 | ActionButton | `components/action-button.js` | The one button. One solid accent button per page at most, the page's primary action in the PageHeader; every other primary-looking action uses the tinted primary tone. Sizes still use `rounded-lg`/`rounded-xl` today and move to `rounded-control` in a screen pass. Tones are primary (accent), secondary, success (ok), danger (bad), warning (warn), neutral and ghost; `subtle` is an alias of neutral. Sizes sm, md and lg. Every button has a `type`. |
 | Badge | `components/badge.js` | Status label in one of the five tones. Accepts the tone names `ok`, `warn`, `bad`, `accent`, `neutral` and the older names (`success`, `warning`, `danger`, `info`, `cyan`, `secondary`, `subtle`) as aliases; an unknown tone renders neutral. |
-| PageHeader | `components/page-header.js` | Title, purpose line and primary action (see above). |
+| RoutePageHeader | `components/page-header.js` | A page's h1, purpose line and primary action (see above). `PageHeader` is the section and dialog title row. |
+| StatusChip | `components/status-chip.js` | The global gateway status under the wordmark and in the phone top bar, linking to Health. Running is a filled green dot, Starting and Restarting an accent ring that pulses only while the operation runs, Degraded a half-filled warn dot, Down a red dot with the word in the bad tone, and Connecting… and Offline a grey ring. It reads the status stream the shell already holds and never fetches. |
 | Card | planned (PR 3a) | Header with a title and an actions slot, then a body. Today use `bg-surface border border-border rounded-xl p-4`. |
 | StatusStrip | planned (PR 3a) | A row of 2 to 4 status cells (label, value, tone). |
 | EmptyState | planned (PR 3b) | A title, one sentence and one action. |
@@ -224,7 +225,9 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 
 ## Navigation names (decision 2, ships in PR 2b)
 
-The sidebar regroups into Home, Chat, Agents, Operate (Health, Doctor, Schedules, Usage), Connect (Channels, Integrations, Relay) and Settings (Models & keys, Environment, Team). The renames are General to Home, Watchdog to Health, Cron to Schedules and Envars to Environment. Old hash links (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) redirect to the new ones and keep their query string.
+The sidebar regroups into Home, Chat, Agents, Operate (Health, Doctor, Schedules, Usage), Connect (Channels, Integrations, Relay) and Settings (Models & keys, Environment, Team). The renames are General to Home, Watchdog to Health, Cron to Schedules and Envars to Environment. Old hash links (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) redirect to the new ones in place, so Back never lands on the redirect, and keep their query string and job id.
+
+The shell since PR 2b has the wolf mark and the mono wordmark, the status chip on the next line, the Menu, Browse and Chat mode tabs, then the groups. Groups are always open with no chevrons. Rows are 32 px on desktop and 40 px in the phone drawer, with a 16 px icon. The active row has the `--bg-active` fill, a 2 px accent bar on its left edge and bright text. The sidebar foot holds the version line in mono and a ⋯ menu with Docs, Discord, GitHub, the theme and Log out, and the bottom statusbar is gone. A member sees only Schedules, Usage and Team. Until PR 3a gives Channels and Integrations their own pages, those two rows open their part of Home, and Webhooks and Nodes keep their own rows under Connect so neither page loses its way in.
 
 ## General card disposition (decision 3, ships in PR 3a)
 

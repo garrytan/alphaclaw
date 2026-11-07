@@ -2,7 +2,7 @@
 
 | Code | Meaning | What to do |
 | ---- | ------- | ---------- |
-| `agent_admin_disabled` | The feature is off | Tell the operator to enable it (Setup UI → General). Do not fall back to other credentials. |
+| `agent_admin_disabled` | The feature is off | Tell the operator to enable it (Setup UI → Home). Do not fall back to other credentials. |
 | `agent_admin_unavailable` | Flag on but token missing | Tell the operator to check server logs; a mint failure occurred. |
 | `route_not_found` (HTTP 404) | No such route | Fix the path; check `alphaclaw admin manifest`. |
 | `method_not_allowed` (HTTP 405) | Route exists for other methods | Use a method from `allow`. |
@@ -14,9 +14,9 @@
 | `confirm_backlog_full` (HTTP 429) | Ten confirmations already pending | Wait for them to be redeemed or expire; do not spam new requests. |
 | `dangerous_op_requires_confirmation` (HTTP 403) | Confirm flow unavailable on this install | Dashboard-only here; hand it to the operator. |
 | `config_unreadable` (HTTP 503/409) | AlphaClaw refused to rewrite a config file it cannot parse (openclaw.json / alphaclaw.json — JSON5 or a torn write) | Do NOT retry in a loop; tell the operator which file, they fix or restore it, then retry. |
-| `no_admin_targets` | No admin channel configured | Ask the operator to set one (Setup UI → Watchdog → Settings → Update notifications) before dangerous ops. |
+| `no_admin_targets` | No admin channel configured | Ask the operator to set one (Setup UI → Health → Settings → Update notifications) before dangerous ops. |
 | `restart_required` in a response | Change applied, not yet live | Tell the user a gateway restart is needed. |
-| `server_unreachable` / `timeout` | Server not responding | The gateway may be mid-restart; check the Watchdog tab and retry shortly. |
+| `server_unreachable` / `timeout` | Server not responding | The gateway may be mid-restart; check the Health page and retry shortly. |
 
 ## Long-running operations
 

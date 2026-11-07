@@ -373,7 +373,7 @@ describe("frontend/restart-progress-card", () => {
     ],
     [
       { code: "stop_failed", message: "x", recovery: { status: "expired", reason: null } },
-      "Couldn't confirm the old gateway stopped, so your changes are not live yet. Automatic recovery stopped tracking this restart — the Watchdog tab shows the gateway's current state.",
+      "Couldn't confirm the old gateway stopped, so your changes are not live yet. Automatic recovery stopped tracking this restart — the Health page shows the gateway's current state.",
       true,
     ],
     [

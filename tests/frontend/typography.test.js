@@ -105,8 +105,12 @@ describe("frontend/typography (ALPH-69 phase 1b)", () => {
     expect(read("lib/public/js/components/sidebar.js")).toContain('<span class="ac-wordmark"><span style="color: var(--accent)">alpha</span>claw</span>');
   });
 
-  it("keeps the status bar's version line from widening the phone layout", () => {
-    expect(ruleBody(shell, ".app-statusbar")).toContain("min-width: 0;");
+  it("keeps the sidebar foot's version line inside the sidebar, in mono", () => {
+    const version = ruleBody(shell, ".sidebar-version");
+    expect(version).toContain("min-width: 0;");
+    expect(version).toContain("overflow: hidden;");
+    expect(version).toContain("font-family: var(--font-mono);");
+    expect(version).toContain("font-size: var(--font-size-caption);");
   });
 
   it("keeps the file tree, the editor and git hashes and paths in mono", () => {

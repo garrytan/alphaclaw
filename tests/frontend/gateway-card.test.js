@@ -618,7 +618,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
     globalThis.window = { location: { hash: "" } };
     try {
       findButton(renderGateway({}), "View logs").props.onClick();
-      expect(globalThis.window.location.hash).toBe("/watchdog");
+      expect(globalThis.window.location.hash).toBe("/health");
     } finally {
       globalThis.window = previous;
     }

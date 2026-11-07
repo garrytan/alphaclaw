@@ -52,7 +52,8 @@ vi.mock("../../lib/public/js/components/update-modal.js", () => ({
   UpdateModal: () => null,
 }));
 vi.mock("../../lib/public/js/components/theme-toggle.js", () => ({
-  ThemeToggle: () => null,
+  kThemeOptions: [],
+  useThemePreference: () => ["dark", () => {}],
 }));
 
 import * as preactHooks from "preact/hooks";
@@ -138,14 +139,18 @@ describe("frontend/sidebar external nav items", () => {
     const onSelectNavItem = vi.fn();
     const tree = renderSidebar({ onExternalNavClick, onSelectNavItem });
 
-    const internal = collectNodes(tree).find(
-      (vnode) =>
-        vnode.type === "a" && vnode.props.href === undefined && vnode.props.onclick,
-    );
+    const internal = findAnchorByHref(tree, "#/health");
     expect(internal).toBeTruthy();
-    internal.props.onclick();
-    expect(onSelectNavItem).toHaveBeenCalledTimes(1);
+    const plainClick = { button: 0, preventDefault: vi.fn() };
+    internal.props.onclick(plainClick);
+    expect(plainClick.preventDefault).toHaveBeenCalledTimes(1);
+    expect(onSelectNavItem).toHaveBeenCalledWith({ id: "health", label: "Health", path: "/health" });
     expect(onExternalNavClick).not.toHaveBeenCalled();
+    // A modifier click keeps the real href (open in a new tab).
+    const newTabClick = { button: 0, metaKey: true, preventDefault: vi.fn() };
+    internal.props.onclick(newTabClick);
+    expect(newTabClick.preventDefault).not.toHaveBeenCalled();
+    expect(onSelectNavItem).toHaveBeenCalledTimes(1);
   });
 });
 

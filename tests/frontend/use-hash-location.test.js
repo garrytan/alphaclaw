@@ -33,6 +33,7 @@ vi.mock("preact/hooks", () => {
 
 import * as preactHooks from "preact/hooks";
 import { kDefaultUiTab } from "../../lib/public/js/lib/app-navigation.js";
+import { resolveRoute } from "../../lib/public/js/lib/routes.js";
 import {
   getHashRouterPath,
   getHashRouterQuery,
@@ -155,5 +156,24 @@ describe("frontend/hooks use-hash-location (fix wave F138/F140)", () => {
     setLocation("/cron");
     expect(win.location.hash).toBe(before);
     expect(win.location.replace).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["#/watchdog?incident=x", "#/health?incident=x"],
+    ["#watchdog?incident=5", "#/health?incident=5"],
+    ["#/general", "#/home"],
+    ["#/cron/nightly", "#/schedules/nightly"],
+    ["#envars", "#/environment"],
+  ])("an old link %s lands on %s in place, so Back skips the redirect", (oldHash, newHash) => {
+    win.location.hash = oldHash;
+    harness.reset();
+    harness.beginRender();
+    const [location, setLocation] = useHashLocation();
+    const query = getHashRouterQuery();
+    const { redirectTo } = resolveRoute(query ? `${location}?${query}` : location);
+    setLocation(redirectTo, { replace: true });
+    expect(win.location.replace).toHaveBeenCalledTimes(1);
+    expect(win.location.replace).toHaveBeenCalledWith(newHash);
+    expect(win.location.hash).toBe(newHash);
   });
 });

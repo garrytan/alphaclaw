@@ -146,7 +146,7 @@ describe("frontend/global-restart-banner (demoted)", () => {
     ).toEqual([]);
 
     const viewLink = findAllByType(tree, "a").find(
-      (vnode) => vnode.props.href === "#/general",
+      (vnode) => vnode.props.href === "#/home",
     );
     expect(viewLink).toBeTruthy();
     expect(collectText(viewLink).join(" ")).toContain("view");
@@ -175,7 +175,7 @@ describe("frontend/global-restart-banner (demoted)", () => {
     expect(text).toContain("Restarting: starting OpenClaw");
     expect(text).not.toMatch(/step \d+\/\d+/);
     expect(
-      findAllByType(tree, "a").find((vnode) => vnode.props.href === "#/general"),
+      findAllByType(tree, "a").find((vnode) => vnode.props.href === "#/home"),
     ).toBeTruthy();
     expect(findAllByType(tree, ActionButton)).toEqual([]);
     expect(
@@ -196,7 +196,7 @@ describe("frontend/global-restart-banner (demoted)", () => {
     const tree = renderBanner({ visible: false });
     expect(treeText(tree)).toContain("Gateway restart failed");
     expect(
-      findAllByType(tree, "a").find((vnode) => vnode.props.href === "#/general"),
+      findAllByType(tree, "a").find((vnode) => vnode.props.href === "#/home"),
     ).toBeTruthy();
   });
 
