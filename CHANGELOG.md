@@ -16,13 +16,13 @@ The Relay page now shows every Agent Relay conversation, both sides, searchable 
 
 ### Fixed
 - **One finisher per message.** Every path that posts a relay reply first claims the message with an atomic state move, and reconcile runs one at a time, so a lifecycle end and a reconcile pass can no longer both post a reply.
-- **A slow send no longer waits out the grace.** The bridge registers the run id (`relay-<message id>`, OpenClaw's idempotency key) before the send, so a send that timed out still ends at its run's lifecycle end. A message whose send was ambiguous and whose idle session already holds the answer ends within about 5 s instead of after 2 minutes. A row that a gateway restart moved to reconciling keeps the whole grace.
+- **A slow send no longer waits out the grace.** The bridge registers the run id (`relay-<message id>`, OpenClaw's idempotency key) before the send, so a send that timed out still ends at its run's lifecycle end instead of after the 2-minute grace. A row that a gateway restart moved to reconciling, an ambiguous send included, keeps the whole grace from the disconnect, so a reply never carries the text before a tool call.
 - OpenClaw's verbose host notices (`🧭 New session: …`, `🧹 Auto-compaction complete…`) are stripped from the start of an answer, so box session ids never reach a peer.
-- Relay replies no longer turn "alphaclaw" into `***`. `GOG_KEYRING_PASSWORD` defaults to the product's name, so the masker no longer collects plain-word values (letters only, at most 12). Real keys and tokens are still masked.
+- Relay replies no longer turn "alphaclaw" into `***`. `GOG_KEYRING_PASSWORD` defaults to the product's name, so the masker skips that variable while it holds that default. Every other collected value is still masked, plain words included.
 
 ### Tests
-- Bridge: the ALPH-64 timeline (ack after the send timeout, run end 8 s later, one reply), an early end for an ambiguous send, two reconcile triggers racing a lifecycle end posting exactly one reply, host-notice stripping, and the store's claim.
-- Routes: listing, filters, paging, the retention-gap row, the transcript merge of replies and bridge state, and the agent's metadata-only view. Masker: a configured value equal to a common word leaves text alone. Browser smoke: the conversation list, transcript and Chat link at 1100 and 390 px.
+- Bridge: the ALPH-64 timeline (ack after the send timeout, run end 8 s later, one reply), an ambiguous send left to its lifecycle end and kept for the whole grace after a restart, two reconcile triggers racing a lifecycle end posting exactly one reply, host-notice stripping, and the store's claim.
+- Routes: listing, filters, paging, the retention-gap row, the transcript merge of replies and bridge state, and the agent's metadata-only view. Masker: the keyring default leaves text alone, through the real masker and the bridge, while plain-word secrets, the same value under another key and a `.env` secret are masked. The agent actor's text search is refused. Browser smoke: the conversation list, transcript and Chat link at 1100 and 390 px.
 
 ## [0.10.172] - 2026-11-07
 

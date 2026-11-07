@@ -61,7 +61,7 @@ describe("relay masker (ALPH-63)", () => {
     expect(mask("nothing secret here")).toBe("nothing secret here");
   });
 
-  it("leaves the product names alone when the keyring default equals one, and still masks real secrets, plain words included (ALPH-68)", () => {
+  it("leaves the keyring password's published default alone, and still masks real secrets, plain words included (ALPH-68)", () => {
     const mask = createRelayMasker({
       rootDir,
       env: { GOG_KEYRING_PASSWORD: "alphaclaw", DB_PASSWORD: "postgres", SETUP_PASSWORD: "bluemonkey" },
@@ -72,6 +72,10 @@ describe("relay masker (ALPH-63)", () => {
     expect(text).not.toContain(kSecrets.gatewayToken);
     expect(mask("key " + kSecrets.envFile)).toBe("key ***");
     expect(mask("db postgres, setup bluemonkey")).toBe("db ***, setup ***");
+    const sameValueElsewhere = createRelayMasker({ rootDir, env: { GOG_KEYRING_PASSWORD: "alphaclaw", ADMIN_PASSWORD: "alphaclaw" } });
+    expect(sameValueElsewhere("the alphaclaw CLI")).toBe("the *** CLI");
+    fs.appendFileSync(path.join(rootDir, ".env"), "GOG_KEYRING_PASSWORD=custom-keyring-pass\n");
+    expect(createRelayMasker({ rootDir, env: {} })("pass custom-keyring-pass")).toBe("pass ***");
   });
 
   const kDeployOnly = "f".repeat(16) + "0123456789abcdef".repeat(3);

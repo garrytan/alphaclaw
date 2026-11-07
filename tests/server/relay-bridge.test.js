@@ -758,7 +758,7 @@ describe("relay bridge: latency and single-finisher fixes (ALPH-68)", () => {
     expect(ctx.engine.replies).toHaveLength(1);
   });
 
-  it("an ambiguous send that lost its events with the connection ends on the next pass once its answer is in an idle session, not after the 2-minute grace", async () => {
+  it("an ambiguous send that lost its events with a gateway restart keeps the whole grace from the disconnect, so a pass never posts the text before a tool call", async () => {
     ctx = setup();
     await ctx.tick();
     const messageId = ctx.engine.dm("capy-t", "slow one");
@@ -768,15 +768,18 @@ describe("relay bridge: latency and single-finisher fixes (ALPH-68)", () => {
     const { sessionKey } = ctx.store.get(messageId);
     runStartedDespiteTimeout(messageId, sessionKey, null);
     ctx.gateway.active.add(sessionKey);
-    ctx.nowRef.value += 10000;
+    ctx.gateway.answer({ sessionKey }, "Let me check the logs first.");
+    ctx.nowRef.value += 60 * 1000;
     await ctx.reconcile();
+    await flush(20);
     expect(ctx.store.get(messageId).state).toBe("reconciling");
-    ctx.gateway.answer({ sessionKey }, "Done after all.");
-    ctx.nowRef.value += 5000;
+    expect(ctx.engine.replies).toEqual([]);
+    ctx.gateway.answer({ sessionKey }, "The logs are clean.");
+    ctx.nowRef.value += 2 * 60 * 1000;
     await ctx.reconcile();
     await flush(20);
     expect(ctx.store.get(messageId).state).toBe("answered");
-    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Done after all."]);
+    expect(ctx.engine.replies).toHaveLength(1);
   });
 
   it("an ambiguous send still tracked on a live connection is left to its lifecycle end, so a pass never posts the text before a tool call", async () => {
