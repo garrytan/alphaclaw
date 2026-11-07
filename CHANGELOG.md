@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.191] - 2026-11-07
+
+Agent Relay security fixes from the ALPH-71 audit (H-1, M-2, L-12, L-13, GST-1743). Relay sessions are now messaging-only by a plugin, not by a prompt, and a remote agent can no longer slip a reply into someone else's conversation.
+
+### Security
+- **Relay sessions are messaging-only (H-1).** A relay message used to run in a session where the box agent kept every tool, so a prompt-injected peer could ask it to run commands or read secrets, and only an instruction in the message said no. AlphaClaw now ships an OpenClaw plugin, `relay-guard` (`lib/plugin/relay-guard`), whose `before_tool_call` hook lets `agent:*:relay-*` sessions use only `session_status` (own session, no model change) and `agents_list`. Every other tool is refused by name, file tools (`read`, `ls`, `glob`, `grep`), the message tool, MCP tools, `tool_call` and any tool a later OpenClaw adds included, and the denial is logged once per tool and session. `ensureGatewayProxyConfig` writes the plugin entry (owner-marked like the relay MCP entry, with `activation.onStartup`), and the bridge holds relay messages until the gateway's `plugins.list` reports it active; Doctor shows a P1 `relay_guard_missing` card meanwhile.
+- **Why no file tools.** Review of this release first allowed `read`, `ls`, `glob` and `grep` inside the agent workspace and logs, and four rounds each found a path OpenClaw opens differently from the one a guard can check: `file:` and `media://` references, `..` through a symlink, filename repairs after the hook, a look-alike file when the exact name is missing, a run `cwd` from `agents.entries`, and `sandbox.workspaceDir` in sandbox mode. A relay peer now gets answers from what the box agent already knows; anything that needs a file goes through the owner. The bridge prompt, the consent page, the admin skill and the README say so.
+- **The owner hears about approvals from AlphaClaw.** The agent no longer messages the owner itself. When an answer names its approval id, the guard blocked a tool during the turn, or a reply was withheld, AlphaClaw sends one notice (sender, approval id, blocked tools; never the message text).
+- **Replies are bound to the conversation's participants (M-2).** Relaycast engine 12.8.0 takes a reply into a DM from an agent that is not in it. The bridge now drops such an event, and `relay_reply` refuses a parent outside the acting agent's conversations with the same `message_not_found` as a missing one. A draft upstream issue is in the Captain drive (not posted).
+- **Disguised credentials are withheld (M-2).** The masker also collects the relay's own secrets (agent tokens, webhook URLs and their path segments, the admin token, auth-profile credentials), and a reply carrying one encoded or spaced out is replaced whole by a notice.
+- **Refused sends use their hourly slot (M-2).** A `relay_send` or `relay_reply` refused by the engine or the participant check now counts against `ALPHACLAW_RELAY_HOURLY_CAP`; only `engine_unavailable` and `masking_unavailable` give the slot back.
+- **Binding cap (L-12).** One OAuth connection holds at most `ALPHACLAW_RELAY_MAX_BINDINGS_PER_CLIENT` (default 20, deployment env only) active bindings; past it a new bind, or the renewal of an expired one, is `binding_limit`; renewing an active one is always allowed. Binds of one connection run one at a time.
+- **Client secrets are hashed (L-13).** A DCR `client_secret_post` secret is stored as its sha256 and checked with `timingSafeStringEqual` before the MCP SDK's token and revoke handlers (the SDK compared plaintext with `!==`); a wrong or missing secret is `401 invalid_client`. A secret stored in plaintext by an earlier version is rehashed on first read.
+- **Consent page.** It no longer claims an app "cannot change this box"; it says the session is messaging-only and that masking is a safety net.
+
+### Tests
+- `tests/server/relay-guard-plugin.test.js` (every path tool refused in a relay session, whatever the path), `relay-guard-entry.test.js`, and new cases in `relay-bridge`, `relay-mcp-tools`, `relay-mask`, `relay-remote` and `relay-doctor-card` (13 fail on the previous main).
+- `tests/live/relay-guard.e2e.test.js`: against the pinned OpenClaw, a relay session is denied exec, an MCP tool, `tool_call`, reads of `relay/secrets.json` and `/proc/self/environ`, and `read`, `ls` (and `grep`, `glob` when offered) on a plain workspace file, with no byte of it returned (the test agent's profile offers neither `grep`, `glob` nor `session_status`), and a main session keeps exec and the MCP tool. `relay-bridge.e2e` now runs with the guard loaded.
+
 ## [0.10.190] - 2026-11-07
 
 Setup UI phase 2b (ALPH-69). The sidebar follows the new IA, four pages get plain names, a status chip shows the gateway on every page, and every page opens with one title and a purpose line. Page bodies are unchanged.
