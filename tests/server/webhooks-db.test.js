@@ -362,8 +362,8 @@ describe("server/webhooks-db", () => {
       insertRow(insertRequest, `busy-${index % busyHooks}`, index);
     }
     const quiet = getRequests("quiet", { limit: 200 });
-    expect(quiet).toHaveLength(25);
-    expect(JSON.parse(quiet[0].payload).index).toBe(29);
+    const keptIndexes = quiet.map((row) => JSON.parse(row.payload).index).sort((a, b) => a - b);
+    expect(keptIndexes).toEqual(Array.from({ length: 25 }, (_, index) => index + 5));
     const database = new DatabaseSync(currentDbPath, { readOnly: true });
     const { count } = database.prepare("SELECT COUNT(*) AS count FROM webhook_requests").get();
     database.close();
