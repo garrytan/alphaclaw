@@ -164,8 +164,8 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
           .post("/hooks/gmail")
           .set("content-type", "application/json")
           .send(JSON.stringify(body));
-      const realNow = Date.now();
-      const nowSpy = vi.spyOn(Date, "now");
+      const realNow = performance.now();
+      const nowSpy = vi.spyOn(performance, "now");
 
       try {
         nowSpy.mockReturnValue(realNow);
@@ -281,7 +281,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       );
 
       try {
-        const res = await request(app).get("/hooks/no-parser?a=1&b=2");
+        const res = await request(app).post("/hooks/no-parser?a=1&b=2");
         expect(res.status).toBe(200);
         expect(JSON.parse(calls[0].bodyText)).toEqual({ a: "1", b: "2" });
         expect(calls[0].headers["content-type"]).toBe("application/json");
@@ -295,7 +295,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       const app = createHookApp({ gatewayUrl });
 
       try {
-        const res = await request(app).get("/hooks/custom?a=1&a=2&a=3&b=solo");
+        const res = await request(app).post("/hooks/custom?a=1&a=2&a=3&b=solo");
         expect(res.status).toBe(200);
         expect(JSON.parse(calls[0].bodyText)).toEqual({
           a: ["1", "2", "3"],
@@ -326,7 +326,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       });
 
       try {
-        const res = await request(app).get("/hooks/real-hook");
+        const res = await request(app).post("/hooks/real-hook");
         expect(res.status).toBe(200);
         await vi.waitFor(() => expect(logged).toHaveLength(1));
         expect(logged[0].hookName).toBe("real-hook");
@@ -385,7 +385,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       });
 
       try {
-        const res = await request(app).get("/hooks/lazy");
+        const res = await request(app).post("/hooks/lazy");
         expect(res.status).toBe(200);
         expect(calls).toHaveLength(1);
       } finally {
@@ -438,7 +438,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       });
 
       try {
-        const res = await request(app).get("/hooks/big-response");
+        const res = await request(app).post("/hooks/big-response");
         expect(res.status).toBe(200);
         expect(res.text).toBe("0123456789" + "A".repeat(40) + "tail-chunk");
         await vi.waitFor(() => expect(logged).toHaveLength(1));
@@ -464,7 +464,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
       });
 
       try {
-        const res = await request(app).get("/hooks/logfail");
+        const res = await request(app).post("/hooks/logfail");
         expect(res.status).toBe(200);
         await vi.waitFor(() =>
           expect(consoleError).toHaveBeenCalledWith(
@@ -507,7 +507,7 @@ describe("server/webhook-middleware coverage", { retry: 1 }, () => {
         },
       });
 
-      const res = await request(app).get("/hooks/down");
+      const res = await request(app).post("/hooks/down");
       expect(res.status).toBe(502);
       expect(res.body).toEqual({ error: "Gateway unavailable" });
     });

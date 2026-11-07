@@ -202,6 +202,15 @@ describe("server/routes/nodes coverage", { retry: 1 }, () => {
       expect(res.body).toEqual({ ok: false, error: "Invalid node id" });
     });
 
+    it("rejects a node id that starts with a dash (ALPH-71 L-14)", async () => {
+      const clawCmd = vi.fn(async () => ({ ok: true, stdout: "", stderr: "" }));
+      const app = createApp({ clawCmd });
+      const res = await request(app).post("/api/nodes/--help/approve");
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ ok: false, error: "Invalid node id" });
+      expect(clawCmd).not.toHaveBeenCalled();
+    });
+
     it("returns stderr when approval fails", async () => {
       const clawCmd = vi.fn(async () => ({ ok: false, stderr: "denied" }));
       const app = createApp({ clawCmd });
