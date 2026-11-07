@@ -20,7 +20,7 @@ Versions follow this repository's `package.json` release counter.
 - "Retrying the model…" while OpenClaw retries, and the offline banner shows as soon as the browser goes offline.
 
 ### Behavior changes
-- Telegram and relay sessions are read-only in #/chat (decision A1): the composer is replaced by a note (with an **Open Relay** link for relay), and the bridge refuses a `message` frame for them with `read_only_session` before any `chat.send`, so an old bundle cannot half-deliver either.
+- Telegram and relay sessions are read-only in #/chat (decision A1): the composer is replaced by a note (with an **Open Relay** link for relay), and the bridge refuses a `message` frame for them with `read_only_session` before any `chat.send`, so an old bundle cannot half-deliver either. An agent's own Main turns read-only from a Telegram delivery context only when `session.dmScope` is `main` (OpenClaw's default); under `per-channel-peer` and the other scopes it stays writable, even after a forum-topic turn ran under the main key.
 - Picking a session on a phone closes the sidebar drawer.
 - The agent actor's `/api/agent/sessions` view is cut to the 12 routing fields; labels and activity stay human-only.
 

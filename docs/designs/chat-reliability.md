@@ -76,7 +76,13 @@ telegram-group | telegram-topic | relay | cron | other` — from its delivery
 context, with the key as the fallback, and Telegram and relay sessions are
 read-only here: the composer is replaced by a note and `send-service`
 refuses a `message` frame for them with `read_only_session` before any
-`chat.send` (an old bundle can't half-deliver either).
+`chat.send` (an old bundle can't half-deliver either). An agent's own main
+key (`agent:<id>:main`) turns read-only from its delivery context only when
+the configured `session.dmScope` is `main` (OpenClaw's default): under any
+other scope, Telegram forum-topic turns that run under the bare main key
+(2026.10.9) leave the operator's Main writable. A cold list cache is read
+before a send is judged (3 s deadline, then the key), and a retry of an
+already submitted message settles through dedupe, never as a refusal.
 
 - Browser → server: `watch {sessionKey}` / `unwatch {sessionKey}` (at most
   `kMaxWatchedSessionsPerSocket` = 8 per socket), `history {sessionKey,
