@@ -1,6 +1,6 @@
 const { createChatBridgeTestKit, waitUntil } = require("./helpers/chat-gateway-harness");
 const { buildHistoryMessages, parseRelayEnvelope } = require("../../lib/server/chat/history");
-const { classifySessionRow, createSessionListCache, resolveSessionPolicy } = require("../../lib/server/chat/session-list");
+const { classifySessionRow, createSessionListCache, readDmScope, resolveSessionPolicy } = require("../../lib/server/chat/session-list");
 const { createSessionWatch } = require("../../lib/server/chat/session-watch");
 const systemDomain = require("../../lib/server/admin-manifest/domains/system");
 
@@ -81,6 +81,23 @@ describe("chat session list (ALPH-68)", () => {
     });
     expect(classifySessionRow({ key: "agent:main:chat-1a2b", label: "Planning" })).toMatchObject({ kind: "direct", label: "Planning", readOnly: false });
     expect(classifySessionRow({ key: "agent:main:main", deliveryContext: { channel: "webchat" } })).toMatchObject({ kind: "direct", readOnly: false, label: "Main" });
+  });
+
+  it("keeps an agent's own main key writable under any dmScope but main, whatever its delivery context says", () => {
+    const topicTurnOnMain = {
+      key: "agent:main:main",
+      channel: "telegram",
+      deliveryContext: { channel: "telegram", to: "telegram:-1009876543210", threadId: 42 },
+      origin: { chatType: "group", threadId: 42 },
+    };
+    const dmScope = readDmScope({ session: { dmScope: "per-channel-peer" } });
+    expect(dmScope).toBe("per-channel-peer");
+    expect(classifySessionRow(topicTurnOnMain, { dmScope })).toMatchObject({ kind: "direct", readOnly: false, isMain: true, label: "Main" });
+    expect(resolveSessionPolicy(topicTurnOnMain, "agent:main:main", { dmScope })).toEqual({ readOnly: false, kind: "direct" });
+    expect(classifySessionRow({ ...topicTurnOnMain, key: "agent:ops:main" }, { dmScope: "per-peer" })).toMatchObject({ readOnly: false });
+    expect(readDmScope({})).toBe("main");
+    expect(resolveSessionPolicy(topicTurnOnMain, "agent:main:main", { dmScope: readDmScope({}) })).toMatchObject({ readOnly: true });
+    expect(classifySessionRow({ key: "agent:main:telegram:direct:7000210001" }, { dmScope })).toMatchObject({ kind: "telegram-dm", readOnly: true });
   });
 
   it("refuses sends into read-only sessions from the cached row, else the key", () => {
@@ -339,6 +356,23 @@ describe("chat bridge session watching (ALPH-68, d4)", () => {
     const failed = await browser.waitFor((m) => m.type === "send-failed");
     expect(failed).toMatchObject({ code: "read_only_session", retryable: false, notSubmitted: true });
     expect(harness.requests.some((r) => r.method === "chat.send")).toBe(false);
+  });
+
+  it("sends into Main on a per-channel-peer box even when a Telegram topic turn last ran under the main key", async () => {
+    const { kit, harness, browser } = await setup({ config: { session: { dmScope: "per-channel-peer" } } });
+    const previous = harness.onRequest;
+    harness.onRequest = (frame) => {
+      if (frame.method === "sessions.list") {
+        harness.respond(frame.id, {
+          sessions: [{ key: "agent:main:main", channel: "telegram", deliveryContext: { channel: "telegram", threadId: 42 }, origin: { chatType: "group", threadId: 42 } }],
+        });
+        return;
+      }
+      previous(frame);
+    };
+    await kit.startRun({ harness, browser, sessionKey: "agent:main:main", runId: "r-main" });
+    expect(browser.messages.some((m) => m.type === "send-failed")).toBe(false);
+    expect(harness.requests.filter((r) => r.method === "chat.send")).toHaveLength(1);
   });
 
   it("settles a retry of an already submitted message through dedupe, even after its session turned read-only", async () => {
