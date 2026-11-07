@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // component in the tree runs, so the reads its cards make and the buttons it
 // draws can be counted without a DOM.
 const fetchedUrls = new Set();
+const refreshed = [];
+let visibleInterval = null;
 const readFixtures = new Map();
 let shellFixture = {};
 
@@ -26,7 +28,20 @@ vi.mock("../../lib/public/js/lib/api/http.js", async (importOriginal) => ({
 vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({
   useCachedFetch: (key, fetcher, { enabled = true } = {}) => {
     if (enabled) Promise.resolve().then(() => fetcher()).catch(() => {});
-    return { data: readFixtures.get(key) ?? null, error: null, loading: false, refresh: async () => null };
+    return {
+      data: readFixtures.get(key) ?? null,
+      error: null,
+      loading: false,
+      refresh: async (options) => {
+        refreshed.push([key, options]);
+        return null;
+      },
+    };
+  },
+}));
+vi.mock("../../lib/public/js/hooks/use-visible-interval.js", () => ({
+  useVisibleInterval: (callback, intervalMs, options = {}) => {
+    visibleInterval = { callback, intervalMs, options };
   },
 }));
 vi.mock("../../lib/public/js/hooks/usePolling.js", () => ({
@@ -44,7 +59,7 @@ vi.mock("../../lib/public/js/components/general/use-general-tab.js", async (impo
   return { useGeneralTab: vi.fn(actual.useGeneralTab) };
 });
 
-import { HomeTab } from "../../lib/public/js/components/home/index.js";
+import { HomeTab, kHomeReadKeys } from "../../lib/public/js/components/home/index.js";
 import { Gateway } from "../../lib/public/js/components/gateway.js";
 import { BackupsCard } from "../../lib/public/js/components/general/backups-card.js";
 import { WhatsNextCard } from "../../lib/public/js/components/general/whats-next-card.js";
@@ -161,6 +176,8 @@ const kAllowedHomeReads = new Set([
 beforeEach(async () => {
   fetchedUrls.clear();
   readFixtures.clear();
+  refreshed.length = 0;
+  visibleInterval = null;
   shellFixture = kRunningShell;
   const actual = await vi.importActual("../../lib/public/js/components/general/use-general-tab.js");
   useGeneralTab.mockImplementation(actual.useGeneralTab);
@@ -179,6 +196,17 @@ describe("frontend/home tab", () => {
     ]) {
       expect(urls).toContain(url);
     }
+  });
+
+  it("refreshes incidents, spend, schedules and relay about once a minute, forcing past a failed read", async () => {
+    render();
+    expect(visibleInterval.intervalMs).toBe(60_000);
+    expect(visibleInterval.options).toMatchObject({ enabled: true });
+    await visibleInterval.callback();
+    expect(refreshed.map(([key]) => key).sort()).toEqual(
+      [kHomeReadKeys.incidents, kHomeReadKeys.usage, kHomeReadKeys.cron, kHomeReadKeys.relay].sort(),
+    );
+    expect(refreshed.every(([, options]) => options?.force === true)).toBe(true);
   });
 
   it("renders no Gateway card", () => {
@@ -218,6 +246,13 @@ describe("frontend/home tab", () => {
     expect(solid).toHaveLength(1);
     expect(collectNodes(rows[0]).includes(solid[0])).toBe(true);
     expect(textOf(tree).join(" ")).toContain("Your box is running. 4 things need you.");
+  });
+
+  it("with several devices waiting only the first Approve is solid", () => {
+    mockState(quietState({ devicePending: [{ id: "d1", clientMode: "cli" }, { id: "d2", clientMode: "webchat" }] }));
+    const tree = render();
+    expect(byType(tree, DevicePairings)[0].props.approveTone).toBe("solid");
+    expect(solidButtons(tree)).toHaveLength(1);
   });
 
   it("the devices row's Approve is the solid button when it leads", () => {
@@ -281,6 +316,36 @@ describe("frontend/home moved cards", () => {
     const button = collectNodes(rows[0]).find((vnode) => vnode.props?.idleLabel === "Open Drift Doctor");
     button.props.onClick();
     expect(onSwitchTab).toHaveBeenCalledWith("doctor?focus=context");
+  });
+
+  const kStaleDoctor = (hardeningState) => ({
+    stale: true,
+    changeSummary: { hasMeaningfulChanges: true, changedFilesCount: 2 },
+    bootstrapContext: hardeningState ? { hardening: { state: hardeningState } } : undefined,
+  });
+  const doctorRow = (tree) => collectNodes(tree).find((vnode) => vnode.props?.["data-attention"] === "doctor");
+  const buttonIn = (row, label) => collectNodes(row).find((vnode) => vnode.props?.idleLabel === label);
+
+  it.each([[null], ["injected"]])(
+    "with healthy hardening (%s) the Doctor reminder returns and opens plain #/doctor",
+    (hardeningState) => {
+      const onSwitchTab = vi.fn();
+      mockState(quietState({ doctorStatus: kStaleDoctor(hardeningState) }));
+      const tree = render({ onSwitchTab });
+      const rows = collectNodes(tree).filter((vnode) => vnode.props?.["data-attention"]);
+      expect(rows.map((row) => row.props["data-attention"])).toEqual(["doctor"]);
+      buttonIn(rows[0], "Open Drift Doctor").props.onClick();
+      expect(onSwitchTab).toHaveBeenCalledWith("doctor");
+    },
+  );
+
+  it("the Doctor reminder's Dismiss calls onDismissDoctorWarning, and a dismissal hides it", () => {
+    const onDismissDoctorWarning = vi.fn();
+    mockState(quietState({ doctorStatus: kStaleDoctor("injected") }));
+    buttonIn(doctorRow(render({ onDismissDoctorWarning })), "Dismiss for 1 week").props.onClick();
+    expect(onDismissDoctorWarning).toHaveBeenCalledTimes(1);
+    const dismissed = render({ doctorWarningDismissedUntilMs: Date.now() + 60_000 });
+    expect(doctorRow(dismissed)).toBeUndefined();
   });
 
   it("shows the empty states for agents, channels and schedules", () => {

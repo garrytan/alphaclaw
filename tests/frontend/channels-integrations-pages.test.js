@@ -18,13 +18,13 @@ vi.mock("../../lib/public/js/components/channel-login-modal.js", () => ({
 }));
 vi.mock("../../lib/public/js/components/general/use-general-tab.js", () => ({ useGeneralTab: vi.fn() }));
 vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({ useCachedFetch: vi.fn() }));
-vi.mock("../../lib/public/js/components/nodes-tab/connected-nodes/user-connected-nodes.js", () => ({
-  useConnectedNodes: vi.fn(),
+vi.mock("../../lib/public/js/hooks/usePolling.js", () => ({
+  usePolling: vi.fn(() => ({ data: null, error: null, refresh: async () => null, isPolling: false })),
 }));
 
 import { useGeneralTab } from "../../lib/public/js/components/general/use-general-tab.js";
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
-import { useConnectedNodes } from "../../lib/public/js/components/nodes-tab/connected-nodes/user-connected-nodes.js";
+import { usePolling } from "../../lib/public/js/hooks/usePolling.js";
 import {
   ChannelPairingsSection,
   ChannelsRoute,
@@ -77,7 +77,6 @@ const mockState = (state = {}) =>
 beforeEach(() => {
   mockState();
   useCachedFetch.mockReturnValue({ data: null, error: null, loading: false, refresh: async () => null });
-  useConnectedNodes.mockReturnValue({ nodes: [], pending: [], loading: false });
 });
 
 describe("frontend/channels page", () => {
@@ -114,6 +113,11 @@ describe("frontend/channels page", () => {
     expect(textOf(whatsapp).join(" ")).toContain("WhatsApp needs to be linked");
   });
 
+  it("keeps polling device approvals while the page is open", () => {
+    ChannelsRoute({});
+    expect(useGeneralTab.mock.calls.at(-1)[0]).toMatchObject({ isActive: true, keepPollingDevices: true });
+  });
+
   it("lists pending devices, or says none are waiting", () => {
     const withDevices = DeviceApprovalsCard({ pending: [{ id: "d1" }] });
     expect(byType(withDevices, DevicePairings)[0].props).toMatchObject({ embedded: true, approveTone: "secondary" });
@@ -132,9 +136,14 @@ describe("frontend/integrations page", () => {
     expect(byType(tree, AgentAdminPanel)[0].props.agentAdmin).toEqual({ enabled: true });
   });
 
+  const reads = (byKey) =>
+    useCachedFetch.mockImplementation((key) => ({ data: null, error: null, loading: false, ...(byKey[key] || {}) }));
+
   it("links through to Webhooks and Nodes with their counts", () => {
-    useCachedFetch.mockReturnValue({ data: { webhooks: [{}, {}, {}] }, error: null, loading: false });
-    useConnectedNodes.mockReturnValue({ nodes: [{ connected: true }, { connected: false }], pending: [], loading: false });
+    reads({
+      "/api/webhooks": { data: { webhooks: [{}, {}, {}] } },
+      "/api/nodes": { data: { nodes: [{ connected: true }, { connected: false }] } },
+    });
     const rows = byType(IntegrationsRoute({}), IntegrationLinkRow).map((row) => row.props);
     expect(rows).toEqual([
       { href: "#/webhooks", title: "Webhooks", detail: "3 hooks" },
@@ -142,8 +151,21 @@ describe("frontend/integrations page", () => {
     ]);
   });
 
+  it("reads nodes once on mount instead of polling them", () => {
+    reads({});
+    IntegrationsRoute({});
+    expect(useCachedFetch.mock.calls.filter(([key]) => key === "/api/nodes")).toHaveLength(1);
+    expect(usePolling.mock.calls.filter(([, , options]) => options?.cacheKey === "/api/nodes")).toEqual([]);
+  });
+
+  it("says the nodes read failed rather than 0 connected", () => {
+    reads({ "/api/nodes": { error: new Error("spawn failed") } });
+    const nodes = byType(IntegrationsRoute({}), IntegrationLinkRow).find((row) => row.props.title === "Nodes");
+    expect(nodes.props.detail).toBe("Couldn't load nodes");
+  });
+
   it("shows a dash while the counts load", () => {
-    useConnectedNodes.mockReturnValue({ nodes: [], pending: [], loading: true });
+    reads({});
     const rows = byType(IntegrationsRoute({}), IntegrationLinkRow).map((row) => row.props.detail);
     expect(rows).toEqual(["—", "—"]);
   });

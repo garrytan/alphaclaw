@@ -163,6 +163,20 @@ describe("frontend/home status strip", () => {
     expect(summarizeRecentIncidents(page.slice(0, 49), nowMs).countLabel).toBe("49");
   });
 
+  it("spend's last 7 days is today and the 6 days before it", () => {
+    const usage = {
+      totals: { totalCost: 3, turnCount: 3 },
+      daily: [
+        { date: "2026-11-07", totalCost: 1 },
+        { date: "2026-11-01", totalCost: 1 },
+        { date: "2026-10-31", totalCost: 1 },
+      ],
+    };
+    expect(cell(buildStripCells({ chip: kRunning, usage: { data: usage }, nowMs }), "spend").detail).toBe(
+      "$2.00 last 7 days · 3 turns",
+    );
+  });
+
   it("spend cell: loaded, loading, error, gateway down", () => {
     expect(cell(loaded(), "spend")).toMatchObject({ value: "$76.73", detail: "$19.55 last 7 days · 967 turns" });
     expect(cell(buildStripCells({ chip: kRunning }), "spend")).toMatchObject({ value: "—", loading: true });
@@ -217,6 +231,16 @@ describe("frontend/home cards", () => {
       { key: "telegram", label: "Telegram", detail: "1 bot bound to main · 2 paired senders", href: "#/telegram/default", tone: "ok" },
       { key: "discord", label: "Discord", detail: "1 bot bound to Scout · 1 waiting to pair", href: "#/channels", tone: "warn" },
     ]);
+  });
+
+  it("Telegram links its one account by id, and Channels when there are several", () => {
+    const telegram = (accounts) =>
+      buildChannelRows({
+        accounts: [{ channel: "telegram", accounts }],
+        channels: { telegram: { status: "paired", paired: 1 } },
+      })[0];
+    expect(telegram([{ id: "ops bot" }]).href).toBe("#/telegram/ops%20bot");
+    expect(telegram([{ id: "default" }, { id: "ops" }]).href).toBe("#/channels");
   });
 
   it("Relay reads its phase and peers", () => {

@@ -72,6 +72,17 @@ describe("sidebar items", () => {
     globalThis.document = originalDocument;
   });
 
+  it.each([
+    ["/telegram/ops", "/channels"],
+    ["/webhooks/github", "/integrations"],
+    ["/nodes", "/integrations"],
+  ])("Back from %s goes to its parent page %s", (location, expected) => {
+    const setLocation = vi.fn();
+    const { actions } = useBrowseNavigation({ location, setLocation });
+    actions.exitSubScreen();
+    expect(setLocation).toHaveBeenCalledWith(expected);
+  });
+
   it("routes a page item and closes the phone drawer", () => {
     const setLocation = vi.fn();
     const onCloseMobileSidebar = vi.fn();
