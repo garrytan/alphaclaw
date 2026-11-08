@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.215] - 2026-11-08
+
+The Health page now estimates how many days are left until the disk that holds OpenClaw's state is full, so a disk that fills slowly over a week shows up before it becomes an emergency.
+
+### Added
+- **Days until the disk is full, on Health.** The Resources section shows an estimate such as "Full in about 7 days at the current rate", next to the low-space warning when there is one. It comes from the disk's free space, sampled once an hour over the last 7 days and fitted to a straight line: days to full is the free space left divided by the rate it falls. It reads "not enough data yet" until the samples cover a day. After that, nothing is shown unless free space fell by at least 1 GB across the samples and would run out within a year. It follows free space rather than the space used, so a ZFS or btrfs pool shared with other datasets, whose reported size shrinks as the others write, still shows it filling. The same estimate is in `GET /api/watchdog/resources` as `diskSpace.volumes[].fillEstimate`.
+- **The hourly samples survive restarts.** They are saved to `.alphaclaw/disk-fill-history.json` in the OpenClaw state directory, written only when an hourly sample is added, and read back when AlphaClaw starts. They start over when the disk's reported size jumps by more than 5% from one reading to the next, or since the last save across a restart (a resize). A size that drifts gradually, as on a shared ZFS or btrfs pool, keeps them however far it drifts. If the file cannot be written, the log says so once, and again only after a later save has worked.
+
+### Changed
+- **The low-space warning on Health says what is true now.** Under the warning line (free space below 10% of the disk or 20 GB, whichever is smaller) it says so. Above the line, it says the disk is filling fast, with the time to full at the last hour's rate, only while that rate would fill the disk within 6 hours. Otherwise, while the warning is still open because free space has not yet climbed far enough above the line to clear it, it says how much is free and that the disk is not filling fast.
+
+### Fixed
+- **A save that runs out of disk space no longer leaves a temp file behind.** AlphaClaw writes its config and state files to a temp file and renames it into place. When writing that temp file failed part way, for example with the disk full, the partial temp file stayed next to the real one and took more of an already full disk. It is now removed before the error is reported. The real file is untouched either way.
+
+### Tests
+- New `disk-space-fill-estimate` and `watchdog-disk-fill` tests cover the estimate (filling, not enough data, not filling, a shrinking disk, a resized disk, a size that drifts under 5%, a pool whose size falls with its free space, samples saved once an hour and read back, an older saved file starting over, one log line when saving fails) and each wording of the warning on Health, including a disk that is recovering above the warning line. A new `safe-file` test covers a save that fails part way through.
+
 ## [0.10.214] - 2026-11-08
 
 The memory watchdog's early restart for a fast leak now counts the memory every other process in the container already uses, and a reading or two below the memory budget's line no longer restarts its 15-minute wait.
