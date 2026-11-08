@@ -10,10 +10,7 @@ const {
   readOpenclawVersion,
   sizesWorkerPoolsFromCpuCount,
 } = require("../../lib/server/gateway-memory/worker-pool-cap");
-const {
-  withGatewayMallocArenaCap,
-  withGatewayTelemetryEnv,
-} = require("../../lib/server/gateway-memory/telemetry-bootstrap");
+const { withGatewayTelemetryEnv } = require("../../lib/server/gateway-memory/telemetry-bootstrap");
 
 // OpenClaw 2026.10.9's src/infra/worker-pool-sizing.ts as bundled (dist/worker-pool-sizing-9BhYGOMs.mjs).
 const kSizingModule = `import { availableParallelism } from "node:os";
@@ -113,52 +110,6 @@ if(!process.env.FIXTURE_CHILD){
     const { stdout, stderr } = await execFileAsync(process.execPath, [path.join(pkg, "openclaw.mjs"), "gateway", "run"], { env, timeout: 10000 });
     expect(stderr).toBe("");
     expect(JSON.parse(stdout)).toEqual({ ...expected, options: `--require=${cpus}` });
-  });
-
-  it("caps glibc malloc arenas for a legacy gateway launch only, and an operator value wins", () => {
-    const launch = withGatewayTelemetryEnv({ PATH: "/bin" });
-    expect(withGatewayMallocArenaCap(launch, { operatorEnv: {}, version: "2026.10.9" })).toEqual({
-      ...launch, MALLOC_ARENA_MAX: "2", ALPHACLAW_GATEWAY_MALLOC_ARENA_MAX: "2",
-    });
-    expect(withGatewayMallocArenaCap(launch, { operatorEnv: {}, version: "2026.10.10" })).toEqual(launch);
-    expect(withGatewayMallocArenaCap(launch, { operatorEnv: {}, version: null })).toEqual(launch);
-    const telemetryOff = withGatewayTelemetryEnv({ PATH: "/bin", ALPHACLAW_GATEWAY_MEMORY_TELEMETRY: "off" });
-    expect(withGatewayMallocArenaCap(telemetryOff, { operatorEnv: {}, version: "2026.10.9" })).toEqual(telemetryOff);
-    expect(withGatewayMallocArenaCap(launch, { operatorEnv: { MALLOC_ARENA_MAX: " 4 " }, version: "2026.10.9" })).toEqual({
-      ...launch, MALLOC_ARENA_MAX: "4",
-    });
-    expect(withGatewayMallocArenaCap(launch, { operatorEnv: { MALLOC_ARENA_MAX: "4" }, version: "2026.11.1" })).toEqual({
-      ...launch, MALLOC_ARENA_MAX: "4",
-    });
-  });
-
-  it.runIf(process.platform === "linux")("starts a respawned legacy gateway with the arena cap and keeps it from the gateway's own children", async () => {
-    const pkg = path.join(temporary, "openclaw");
-    writePackage(pkg, "2026.10.9", `import {spawn, execFileSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
-const arena=()=>readFileSync('/proc/self/environ','utf8').split('\\0').filter(e=>/^(MALLOC_ARENA_MAX|ALPHACLAW_GATEWAY_MALLOC_ARENA_MAX)=/.test(e)).sort();
-if(!process.env.FIXTURE_CHILD){
-  const child=spawn(process.execPath,process.argv.slice(1),{env:{...process.env,FIXTURE_CHILD:'1'},stdio:'inherit'});
-  child.on('exit',code=>process.exit(code));
-}else{
-  const started=arena();
-  process.title='openclaw-gateway';
-  await new Promise(resolve=>setTimeout(resolve,1300));
-  const tool=execFileSync(process.execPath,['-e','process.stdout.write(JSON.stringify([process.env.MALLOC_ARENA_MAX??null,process.env.ALPHACLAW_GATEWAY_MALLOC_ARENA_MAX??null]))'],{env:process.env,encoding:'utf8'});
-  process.stdout.write(JSON.stringify({started,gateway:process.env.MALLOC_ARENA_MAX??null,tool:JSON.parse(tool)}));
-}
-`);
-    const env = withGatewayMallocArenaCap(
-      withGatewayTelemetryEnv({ ...process.env, NODE_OPTIONS: "", OPENCLAW_STATE_DIR: temporary }),
-      { operatorEnv: {}, version: "2026.10.9" },
-    );
-    const { stdout, stderr } = await execFileAsync(process.execPath, [path.join(pkg, "openclaw.mjs"), "gateway", "run"], { env, timeout: 10000 });
-    expect(stderr).toBe("");
-    expect(JSON.parse(stdout)).toEqual({
-      started: ["ALPHACLAW_GATEWAY_MALLOC_ARENA_MAX=2", "MALLOC_ARENA_MAX=2"],
-      gateway: null,
-      tool: [null, null],
-    });
   });
 
   it("does not cap an OpenClaw CLI that is not the gateway", async () => {

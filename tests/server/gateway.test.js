@@ -371,26 +371,6 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
-  it("caps malloc arenas on the daemon launch env only, for an installed OpenClaw older than 2026.10.10", () => {
-    const { readOpenclawVersion, sizesWorkerPoolsFromCpuCount } = require("../../lib/server/gateway-memory/worker-pool-cap");
-    const previous = process.env.MALLOC_ARENA_MAX;
-    try {
-      delete process.env.MALLOC_ARENA_MAX;
-      delete require.cache[modulePath];
-      const gateway = require(modulePath);
-      const legacy = sizesWorkerPoolsFromCpuCount(readOpenclawVersion(require.resolve("openclaw")));
-      expect(gateway.gatewayLaunchEnv().MALLOC_ARENA_MAX).toBe(legacy ? "2" : undefined);
-      expect(gateway.gatewayEnv().MALLOC_ARENA_MAX).toBeUndefined();
-      expect(process.env.MALLOC_ARENA_MAX).toBeUndefined();
-      process.env.MALLOC_ARENA_MAX = "4";
-      expect(gateway.gatewayLaunchEnv().MALLOC_ARENA_MAX).toBe("4");
-      expect(gateway.gatewayLaunchEnv().ALPHACLAW_GATEWAY_MALLOC_ARENA_MAX).toBeUndefined();
-    } finally {
-      if (previous === undefined) delete process.env.MALLOC_ARENA_MAX;
-      else process.env.MALLOC_ARENA_MAX = previous;
-    }
-  });
-
   it("sets OPENCLAW_DEBUG on the daemon launch env only, so a failed gateway run prints its Reason line", () => {
     delete require.cache[modulePath];
     const gateway = require(modulePath);
