@@ -80,6 +80,37 @@ describe("disk-space days-to-full estimate", () => {
     expect(monitor.getSnapshot().volumes[0].fillEstimate.status).toBe("not_enough_data");
   });
 
+  it("reads filling when free space falls while the reported size falls with it (a pool shared with other datasets)", () => {
+    const observe72Hours = (sizeAt) => {
+      const monitor = createDiskSpaceMonitor();
+      for (let minute = 0; minute <= 72 * 60; minute += 15) {
+        const hour = minute / 60;
+        monitor.observe([reading(360 - 0.5 * hour, sizeAt(hour))], kStartMs + minute * 60_000);
+      }
+      return monitor.getSnapshot().volumes[0];
+    };
+    const pooled = observe72Hours((hour) => 1000 - 0.5 * hour);
+    expect(pooled.sizeBytes / kGb).toBeGreaterThan(1000 * 0.95);
+    expect(pooled.fillEstimate.status).toBe("filling");
+    expect(pooled.fillEstimate.daysToFull).toBeCloseTo(324 / 12, 0);
+    expect(pooled.fillEstimate.growthBytesPerDay / kGb).toBeCloseTo(12, 1);
+
+    const fixed = observe72Hours(() => 1000);
+    expect(fixed.fillEstimate).toEqual(pooled.fillEstimate);
+
+    const pooledPastFivePercent = observe72Hours((hour) => 400 - 0.5 * hour);
+    expect(pooledPastFivePercent.sizeBytes / kGb).toBeLessThan(400 * 0.95);
+    expect(pooledPastFivePercent.fillEstimate).toEqual(pooled.fillEstimate);
+  });
+
+  it("starts over from a saved file that recorded used bytes instead of free space", () => {
+    const usedOnly = { state: { sizeBytes: 200 * kGb, samples: [{ atMs: kStartMs, usedBytes: 150 * kGb }, { atMs: kStartMs + kDay, usedBytes: 160 * kGb }] } };
+    const monitor = createDiskSpaceMonitor({ fillHistory: usedOnly });
+    monitor.observe([reading(30)], kStartMs + kDay + kHour);
+    expect(monitor.getFillHistory().state.samples).toEqual([{ atMs: kStartMs + kDay + kHour, freeBytes: 30 * kGb }]);
+    expect(monitor.getSnapshot().volumes[0].fillEstimate.status).toBe("not_enough_data");
+  });
+
   it("the tracker saves the samples only when an hourly sample is added or they start over, not every minute", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "disk-fill-writes-"));
     const fillHistoryPath = path.join(dir, ".alphaclaw", "disk-fill-history.json");
@@ -164,7 +195,7 @@ describe("disk-space days-to-full estimate", () => {
   });
 
   it("estimateFill answers zero days for a disk that is already full while still filling", () => {
-    const samples = [{ atMs: 0, usedBytes: 0 }, { atMs: kDay, usedBytes: 5 * kGb }];
+    const samples = [{ atMs: 0, freeBytes: 5 * kGb }, { atMs: kDay, freeBytes: 0 }];
     expect(estimateFill(samples, 0)).toMatchObject({ status: "filling", daysToFull: 0 });
   });
 
