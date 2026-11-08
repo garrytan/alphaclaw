@@ -605,6 +605,51 @@ describe("server/doctor-fix-runner heartbeat", () => {
   });
 });
 
+describe("server/doctor-fix-runner retained capture (ALPH-69)", () => {
+  const runWith = async ({ chunks, exit = 0, onCaptureRetained }) => {
+    const runStream = {
+      runStreamed: vi.fn(async ({ onOutput }) => {
+        for (const [text, stream] of chunks) onOutput(text, stream);
+        return { ok: exit === 0, code: exit, tail: "" };
+      }),
+    };
+    const run = createDoctorFixRunner({
+      openclawDir: mkOpenclawDir(),
+      doctorGuard: passthroughGuard(),
+      runStream,
+      gatewayEnv: () => kGatewayEnv,
+      notifier: { notify: vi.fn() },
+      logger: kSilentLogger,
+      getOpenclawVersion: () => "2026.10.9",
+      onCaptureRetained,
+    });
+    return run({ source: "repair" });
+  };
+
+  it("reports the capture Doctor retained with the installed version, on success and on failure", async () => {
+    const onCaptureRetained = vi.fn();
+    const line = "Pre-repair state retained for manual recovery at /data/.openclaw.update-captures/doctor-9f/manifest.json.\n";
+    await runWith({ chunks: [[line, "stdout"], ["Doctor complete\n", "stdout"]], onCaptureRetained });
+    await runWith({ chunks: [[line, "stdout"], ["Failing check x: boom\n", "stdout"]], exit: 1, onCaptureRetained });
+    expect(onCaptureRetained.mock.calls).toEqual([
+      [{ manifestPath: "/data/.openclaw.update-captures/doctor-9f/manifest.json", openclawVersion: "2026.10.9", source: "repair" }],
+      [{ manifestPath: "/data/.openclaw.update-captures/doctor-9f/manifest.json", openclawVersion: "2026.10.9", source: "repair" }],
+    ]);
+  });
+
+  it("reports nothing when Doctor retained no capture, and a failing callback never fails the run", async () => {
+    const onCaptureRetained = vi.fn();
+    await runWith({ chunks: [["Doctor complete\n", "stdout"]], onCaptureRetained });
+    expect(onCaptureRetained).not.toHaveBeenCalled();
+    const result = await runWith({
+      chunks: [["Pre-repair state retained for manual recovery at /data/.openclaw.update-captures/doctor-1/manifest.json.\n", "stdout"]],
+      onCaptureRetained: () => { throw new Error("disk gone"); },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.report.captureManifest).toBe("/data/.openclaw.update-captures/doctor-1/manifest.json");
+  });
+});
+
 describe("server/doctor-fix-runner disk refusal (ALPH-23)", () => {
   const refusal = {
     verdict: "refuse",

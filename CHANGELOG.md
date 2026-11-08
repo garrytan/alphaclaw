@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.999] - 2026-11-08
+
+The copy of OpenClaw's state taken just before an OpenClaw upgrade is now kept until the new version has started cleanly, and it stays until a later upgrade replaces it. Before, the 30-minute cleanup kept OpenClaw's Doctor state copies (about 5 GB each on a large box) only by count and age: the newest 3 and anything under 7 days. Doctor seals one on every container start and every repair, so after a week of restarts the only way back to the previous OpenClaw version could be deleted, while repair copies piled up.
+
+### Changed
+- **OpenClaw state copies follow the OpenClaw version.** AlphaClaw now remembers the OpenClaw version of the last gateway start that reached ready, read when that gateway was launched. When a Doctor run reports a retained copy while the installed OpenClaw differs from that version, the copy is held as the one from before the upgrade. Later copies taken during the same upgrade, whether before or after the new version first starts, are not. The cleanup never removes the held copy or the newest copy, keeps the newest `ALPHACLAW_UPDATE_CAPTURE_KEEP` others (default 1), and removes the rest only once the installed OpenClaw has started cleanly. The held copy is released when the next upgrade records its own.
+- **Downgrades.** Going back from B to A holds the copy of B's state taken before the downgrade, since that is the only way back to B. The copy of A's state from before B is then an ordinary copy under the keep count. If AlphaClaw never saw the Doctor line for a version change, the first clean start of the new version holds the newest copy sealed before that launch.
+- **Nothing is removed when AlphaClaw can't tell.** Copies sealed before AlphaClaw kept this record keep the old rule (newest 3 plus anything under 7 days). While the record can't be read or saved, or the installed version is unknown, no copy is removed; a failed save is retried on every cleanup. Each removed copy is logged with its name and size, and `GET /api/box/disk` shows each copy's verdict and the record. Back up now archives keep the old rule.
+
+### Tests
+- New `update-capture-retention` tests use real capture folders (OpenClaw's marker, a sealed manifest) and the real cleanup: an upgrade whose first launch fails and is repaired before it is ever ready, a first rollout with older copies including a 4-day-old pre-upgrade copy, a downgrade with and without the Doctor line, a repair after the clean start, a restart on the same version, the next upgrade, a record that can't be saved or read, and the archives' rule. Gateway, launch-ready and Doctor runner tests cover the version read at launch and the reported copy.
+
 ## [0.10.212] - 2026-11-08
 
 An operator can now lock chosen environment keys, such as a plugin's kill switch, so the gateway reads them only from the deployment environment and the agent cannot change them.

@@ -24,7 +24,7 @@ const makeStore = ({ stateDir = makeStateDir(), now } = {}) =>
     ...(now ? { now } : {}),
   });
 
-const makeClear = ({ restartRequiredState, probes = [ready], isLaunchCurrent = () => true, nowMs = { value: 10_000 }, readyTimeoutMs = 60_000 }) => {
+const makeClear = ({ restartRequiredState, probes = [ready], isLaunchCurrent = () => true, nowMs = { value: 10_000 }, readyTimeoutMs = 60_000, onVerifiedReady = null }) => {
   const probeReadiness = vi.fn(async () => (probes.length > 1 ? probes.shift() : probes[0]));
   const insertEvent = vi.fn();
   const clear = createRestartRequiredLaunchClear({
@@ -38,6 +38,7 @@ const makeClear = ({ restartRequiredState, probes = [ready], isLaunchCurrent = (
     },
     now: () => nowMs.value,
     readyTimeoutMs,
+    onVerifiedReady,
   });
   return { clear, probeReadiness, insertEvent };
 };
@@ -134,5 +135,22 @@ describe("server/restart-required-launch-clear", () => {
     expect(clear.onGatewayLaunch({ generation: 1, launchedAt: 1_000, supervision: "managed" })).toBeNull();
     await first;
     expect(restartRequiredState.markAppliedByLaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a verified healthy start with the OpenClaw version read at spawn, and nothing for a launch that never got there", async () => {
+    const restartRequiredState = { markAppliedByLaunch: vi.fn(() => null) };
+    const onVerifiedReady = vi.fn();
+    const { clear } = makeClear({ restartRequiredState, probes: [starting, ready], onVerifiedReady });
+    await clear.onGatewayLaunch({ generation: 1, launchedAt: 2_000, supervision: "managed", openclawVersion: "2026.10.8" });
+    expect(onVerifiedReady).toHaveBeenCalledWith({ generation: 1, launchedAt: 2_000, openclawVersion: "2026.10.8" });
+
+    const neverReady = vi.fn();
+    const { clear: slow } = makeClear({ restartRequiredState, probes: [starting], readyTimeoutMs: 3_000, onVerifiedReady: neverReady });
+    expect(await slow.onGatewayLaunch({ generation: 1, launchedAt: 2_000, supervision: "managed", openclawVersion: "2026.10.9" })).toEqual({ skipped: "not_ready" });
+    const replaced = vi.fn();
+    const { clear: gone } = makeClear({ restartRequiredState, probes: [ready], isLaunchCurrent: () => false, onVerifiedReady: replaced });
+    expect(await gone.onGatewayLaunch({ generation: 1, launchedAt: 2_000, supervision: "managed", openclawVersion: "2026.10.9" })).toEqual({ skipped: "superseded" });
+    expect(neverReady).not.toHaveBeenCalled();
+    expect(replaced).not.toHaveBeenCalled();
   });
 });

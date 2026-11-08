@@ -1834,6 +1834,31 @@ describe("server/gateway restart behavior", () => {
   });
 
   describe("gateway process lifecycle", () => {
+    it("carries the OpenClaw version read at spawn on the launch notice, not the one installed when it reports listening", async () => {
+      const child = createChild();
+      childProcess.spawn = vi.fn(() => child);
+      childProcess.execSync = vi.fn(() => "{}");
+      fs.existsSync = vi.fn(() => false);
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      let installed = "2026.10.8";
+      gateway.setGatewayLaunchVersionReader(() => installed);
+      const launchHandler = vi.fn();
+      gateway.setGatewayLaunchHandler(launchHandler);
+      try {
+        expect(await gateway.launchGatewayProcess()).toBe(child);
+        installed = "2026.10.9";
+        const onStdout = child.stdout.on.mock.calls.find((c) => c[0] === "data")[1];
+        onStdout(Buffer.from("Gateway listening on ws://127.0.0.1:18789\n"));
+        expect(launchHandler).toHaveBeenCalledWith(expect.objectContaining({ openclawVersion: "2026.10.8", supervision: "managed" }));
+      } finally {
+        gateway.setGatewayLaunchHandler(null);
+        gateway.setGatewayLaunchVersionReader(null);
+      }
+    });
+
     it("streams managed gateway output, signals launch, and reports exits", async () => {
       const child = createChild();
       childProcess.spawn = vi.fn(() => child);

@@ -127,8 +127,9 @@ describe("copy retention", () => {
     expect(fs.existsSync(heldArchive)).toBe(true);
     expect(fs.existsSync(operatorCopy)).toBe(true);
     expect(fs.readdirSync(captures).sort()).toEqual(["doctor-a", "doctor-b", "doctor-c", "operator-copy"]);
-    expect(logger.log).toHaveBeenCalledTimes(1);
+    expect(logger.log).toHaveBeenCalledTimes(2);
     expect(logger.log.mock.calls[0][0]).toMatch(/retention sweep: keep newest 3 and anything under 7 days; 3 due, removed 2/);
+    expect(logger.log.mock.calls[1][0]).toMatch(/^\[alphaclaw\] retention sweep: removed OpenClaw capture update-old \(\d+ MB\)$/);
     expect(getLastRetentionSweep()).toBe(result);
   });
 
