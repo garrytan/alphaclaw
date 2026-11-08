@@ -1007,6 +1007,20 @@ describe("regular compaction spikes (GST-1829)", () => {
       criticalGates: { slope: true, floor: true, heap: true } });
   });
 
+  it("the floor timer starts over after a sampler outage or a dip below 90%", () => {
+    const config = { startupGraceMs: 0 };
+    const gapped = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 25, rssAt: (i) => (i >= 10 && i < 15 ? null : overBudget(i)), capAt: () => budget,
+    });
+    expect(gapped.snapshot.criticalGates.floor).toBe(false);
+    expect(gapped.snapshot.restartAuthority).toBeNull();
+    const dipped = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 21, rssAt: (i) => (i === 10 ? mb(880) : overBudget(i)), capAt: () => budget,
+    });
+    expect(dipped.snapshot.criticalGates.floor).toBe(false);
+    expect(dipped.snapshot.budgetFloorHoldsAtMs).toBe(kStartMs + 11 * kTickMs + 15 * 60_000);
+  });
+
   it("a heap near its V8 limit still counts at once", () => {
     const { snapshot } = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
       ticks: 5, rssAt: overBudget, capAt: (i) => ({ ...budget, heap: { status: "fresh", atMs: kStartMs + i * kTickMs,

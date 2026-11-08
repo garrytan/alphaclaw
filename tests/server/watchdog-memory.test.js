@@ -50,6 +50,7 @@ const createHarness = ({
   // Most cases pin the per-transition notification; the one-message-per-
   // episode hold (ALPH-22) has its own cases below.
   memoryNoticeHoldMs = 0,
+  monitorConfig = kMonitorConfig,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
@@ -70,7 +71,7 @@ const createHarness = ({
     sleepImpl: () => Promise.resolve(),
     readMemorySample,
     readMemorySettings: readMemorySettings || (() => settings),
-    memoryMonitorConfig: kMonitorConfig,
+    memoryMonitorConfig: monitorConfig,
     memoryNoticeHoldMs,
     restartGatewayForMitigation,
     ...(readProcStartTicks ? { readProcStartTicks } : {}),
@@ -1864,6 +1865,34 @@ describe("restart authority in the watchdog (ALPH-22)", () => {
     expect(skipped).toHaveLength(1);
     expect(skipped[0].details).toMatchObject({ reason: "not_near_limit" });
     expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_restart")).toBe(false);
+  });
+
+  it("a critical worker over the operator budget says when the budget restart comes, then restarts on it (GST-1829)", async () => {
+    const restart = vi.fn(async () => ({ ok: true }));
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true, budgetMb: 400 },
+      restartGatewayForMitigation: restart,
+      monitorConfig: { ...kMonitorConfig, floorSustainMs: 15 * kTickMs },
+    });
+    launchGateway(harness);
+    const sampleAt = (i) => ({
+      rssBytes: (365 + 2 * i) * kMb,
+      cgroupUsedBytes: (365 + 2 * i) * kMb,
+      containerLimitBytes: 100 * 1024 * kMb,
+      heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 750 * kMb, limitBytes: 1000 * kMb },
+    });
+    await driveTicks(harness, { ticks: 8, sampleAt });
+    const pending = harness.watchdog.getMemoryTrend();
+    expect(pending).toMatchObject({ state: "critical", restartAuthority: null });
+    expect(Number.isFinite(pending.budgetFloorHoldsAtMs)).toBe(true);
+    expect(restart).not.toHaveBeenCalled();
+    expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_skipped")).toBe(false);
+    const critical = notifications(harness.notifier).find((m) => m.includes("If it stays there until"));
+    expect(critical).toContain(new Date(pending.budgetFloorHoldsAtMs).toISOString());
+    expect(notifications(harness.notifier).some((m) => m.includes("will not restart the gateway"))).toBe(false);
+    await driveTicks(harness, { ticks: 12, sampleAt, startTick: 8 });
+    expect(harness.watchdog.getMemoryTrend().restartAuthority).toBe("operator_budget");
+    expect(restart).toHaveBeenCalledTimes(1);
   });
 });
 
