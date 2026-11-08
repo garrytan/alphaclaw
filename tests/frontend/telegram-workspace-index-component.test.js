@@ -67,6 +67,7 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 import { TelegramWorkspace } from "../../lib/public/js/components/telegram-workspace/index.js";
 import { ManageTelegramWorkspace } from "../../lib/public/js/components/telegram-workspace/manage.js";
+import { WizardProgress } from "../../lib/public/js/components/wizard-progress.js";
 import * as api from "../../lib/public/js/lib/telegram-api.js";
 import * as preactHooks from "preact/hooks";
 
@@ -242,5 +243,16 @@ describe("frontend/telegram-workspace index component", () => {
 
     expect(harness.slots[kWorkspaceConfigSlot].configured).toBe(false);
     expect(harness.slots[kStepSlot]).toBe(0);
+  });
+
+  it("shows the shared step indicator once while the workspace is not set up", () => {
+    harness.slots[kStepSlot] = 2;
+    harness.slots[kWorkspaceConfigSlot] = { ready: true, configured: false, groups: [] };
+    const tree = renderWorkspace();
+    const indicators = collectNodes(tree).filter((vnode) => vnode.type === WizardProgress);
+    expect(indicators).toHaveLength(1);
+    expect(indicators[0].props.current).toBe(2);
+    expect(indicators[0].props.steps).toHaveLength(5);
+    expect(renderToText(tree)).toContain("Step 3 of 5");
   });
 });

@@ -51,6 +51,8 @@ import * as preactHooks from "preact/hooks";
 import { triggerWatchdogRepair } from "../../lib/public/js/lib/api.js";
 import {
   Gateway,
+  SetupGatewayCard,
+  reportsGatewayProblem,
   buildReasonsSummary,
   dotClassFor,
   kStaleRestartGuardText,
@@ -1046,5 +1048,47 @@ describe("frontend/gateway card (a finished restart vs a stale status frame)", (
     const text = treeText(renderGateway({}));
     expect(text).toContain("Starting");
     expect(text).toContain("Restarting gateway");
+  });
+});
+
+describe("frontend/gateway card on the setup screen", () => {
+  beforeEach(() => {
+    harness.reset();
+    gatewayShellStore.reset();
+  });
+
+  const renderSetupSlot = () => {
+    harness.beginRender();
+    return expandTree(SetupGatewayCard());
+  };
+
+  it("shows nothing above the wizard on a new box with no gateway status yet", () => {
+    expect(renderSetupSlot()).toBeNull();
+  });
+
+  it("shows nothing while the gateway only says it is not set up yet", () => {
+    publishShell({ statusState: makeServerState({ configExists: false }) });
+    expect(renderSetupSlot()).toBeNull();
+  });
+
+  it.each(kStateFixtures.map((fixture) => [fixture.name, fixture.state, fixture.dot.color]))(
+    "counts only a red or yellow dot as a problem (%s)",
+    (_name, state, color) => {
+      expect(reportsGatewayProblem(state)).toBe(color === "red" || color === "yellow");
+    },
+  );
+
+  it("shows the reported problem with Restart and Repair still blocked until setup completes", () => {
+    const down = kStateFixtures.find((fixture) => fixture.name === "down").state;
+    publishShell({ statusState: down });
+    const tree = renderSetupSlot();
+    expect(tree).not.toBeNull();
+    const text = treeText(tree);
+    expect(text).toContain(kGatewayStateCatalog.down.label);
+    expect(text).not.toContain("Setup required");
+    const startButton = findButton(tree, "Start") || findButton(tree, "Restart");
+    expect(startButton.props.disabled).toBe(true);
+    expect(startButton.props.title).toBe("Complete setup first.");
+    expect(findButton(tree, "Repair").props.disabled).toBe(true);
   });
 });
