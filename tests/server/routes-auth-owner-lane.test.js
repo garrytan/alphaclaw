@@ -932,6 +932,45 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
     });
   });
 
+  describe("a recovery-code success takes back only its own count", () => {
+    it("a member who knows the code cannot keep guessing an admin's password by signing in to their own account in between", async () => {
+      const h = await createHarness({ team: true, members: [memberA, memberB] });
+      const statuses = [];
+      let peer = 0;
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        for (let i = 0; i < kLoginMaxAttempts - 1; i += 1) {
+          const res = await signIn(h, { peer: attackerPeer(peer++), email: memberA.email, password: "wrong-" + cycle + "-" + i, recoveryCode: kRecoveryCode });
+          statuses.push(res.status);
+        }
+        const own = await signIn(h, { peer: attackerPeer(peer++), ...credentialsOf(memberB), recoveryCode: kRecoveryCode });
+        statuses.push(own.status);
+      }
+      expect(statuses.slice(0, kLoginMaxAttempts)).toEqual([...Array(kLoginMaxAttempts - 1).fill(401), 200]);
+      expect(statuses[kLoginMaxAttempts]).toBe(429);
+    });
+
+    it("a recovery-code attempt turned away by a full hash gate does not count against the recovery bucket", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      const release = stalledHashes(h);
+      const t = tracker();
+      try {
+        for (let i = 0; i < kHashGateSlots - kHashGateReservedSlots + kHashGateQueueLimit; i += 1) {
+          t.send(signIn(h, { peer: attackerPeer(i), email: memberA.email, password: "wrong-" + i }));
+        }
+        await vi.waitFor(() => expect(gateStats().queued).toBe(kHashGateQueueLimit));
+        for (let i = 0; i < kLoginMaxAttempts; i += 1) {
+          const res = await signIn(h, { peer: attackerPeer(100 + i), ...credentialsOf(memberA), recoveryCode: kRecoveryCode });
+          expect(res.status).toBe(429);
+        }
+      } finally {
+        release();
+        await Promise.all(t.sent);
+      }
+      const res = await signIn(h, { peer: attackerPeer(200), ...credentialsOf(memberA), recoveryCode: kRecoveryCode });
+      expect(res.status).toBe(200);
+    });
+  });
+
   describe("known-browser passes (F3, F4)", () => {
     it("is an HttpOnly, SameSite=Strict cookie scoped to /api/auth", async () => {
       const h = await createHarness();

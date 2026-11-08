@@ -1,6 +1,10 @@
+const path = require("path");
+const { spawnSync } = require("child_process");
+
 const kModulePath = "../../lib/server/login-client-ip";
 const kTrustProxyHopsEnvKey = "TRUST_PROXY_HOPS";
 const loadResolver = () => {
+  delete require.cache[require.resolve("../../lib/server/constants")];
   delete require.cache[require.resolve(kModulePath)];
   return require(kModulePath).resolveLoginClientIp;
 };
@@ -16,6 +20,35 @@ afterEach(() => {
 });
 
 const fakeRequest = ({ peer, ip }) => ({ socket: { remoteAddress: peer }, ip });
+
+// Boots the way bin/alphaclaw.js does: constants.js (and Express's trust
+// proxy) is read before .env is loaded, then the .env overlay lands in
+// process.env and the sign-in limiter is required. Returns the limiter's key
+// for a public peer that sends a forged X-Forwarded-For.
+const keyAfterEnvFileLoad = (envFileText) => {
+  const root = path.join(__dirname, "..", "..", "lib", "server");
+  const script = `
+    const express = require("express");
+    const { kTrustProxyHops } = require(${JSON.stringify(path.join(root, "constants.js"))});
+    const { parseEnvFileContent } = require(${JSON.stringify(path.join(root, "utils", "env-file-format.js"))});
+    const { resolveEnvFileOverlay } = require(${JSON.stringify(path.join(root, "deployment-only-env.js"))});
+    const entries = parseEnvFileContent(${JSON.stringify(envFileText)}).map(({ key, value }) => ({ key, value }));
+    for (const [key, value] of resolveEnvFileOverlay(entries)) process.env[key] = value;
+    const { resolveLoginClientIp } = require(${JSON.stringify(path.join(root, "login-client-ip.js"))});
+    const app = express();
+    app.set("trust proxy", kTrustProxyHops);
+    const req = Object.create(app.request);
+    req.app = app;
+    req.headers = { "x-forwarded-for": "203.0.113.9" };
+    req.socket = req.connection = { remoteAddress: "198.51.100.7" };
+    process.stdout.write(resolveLoginClientIp(req));
+  `;
+  const env = { ...process.env };
+  delete env[kTrustProxyHopsEnvKey];
+  const run = spawnSync(process.execPath, ["-e", script], { env, encoding: "utf8" });
+  expect(run.status, run.stderr).toBe(0);
+  return run.stdout;
+};
 
 describe("server/login-client-ip", () => {
   it("uses the socket address and ignores a forged X-Forwarded-For when the peer is public", () => {
@@ -59,6 +92,12 @@ describe("server/login-client-ip", () => {
     expect(loadResolver()(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }))).toBe("203.0.113.9");
   });
 
+  it("a TRUST_PROXY_HOPS set only in .env does not make the limiter trust a forged X-Forwarded-For", () => {
+    expect(keyAfterEnvFileLoad("TRUST_PROXY_HOPS=0\n")).toBe("198.51.100.7");
+    expect(keyAfterEnvFileLoad("TRUST_PROXY_HOPS=2\n")).toBe("198.51.100.7");
+    expect(keyAfterEnvFileLoad("")).toBe("198.51.100.7");
+  });
+
   it("an explicitly set TRUST_PROXY_HOPS trusts the declared proxy chain from a public peer", () => {
     process.env[kTrustProxyHopsEnvKey] = "1";
     const declared = loadResolver();
@@ -79,11 +118,18 @@ describe("server/login-client-ip", () => {
     expect(loginLimiterKey("2001:db8:aa:bb::1")).toBe("2001:db8:aa:bb::/64");
     expect(loginLimiterKey("2001:0db8:00aa:00bb:ffff:1:2:3")).toBe("2001:db8:aa:bb::/64");
     expect(loginLimiterKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
-    expect(loginLimiterKey("::1")).toBe("0:0:0:0::/64");
+    expect(loginLimiterKey("::1")).toBe("0:0:0:0:0:0:0:1");
     expect(loginLimiterKey("64:ff9b:2::192.0.2.1")).toBe("64:ff9b:2:0::/64");
     expect(loginLimiterKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
     expect(loginLimiterKey("198.51.100.7")).toBe("198.51.100.7");
     expect(loginLimiterKey("unknown")).toBe("unknown");
+  });
+
+  it("keys addresses inside ::/64 one by one instead of as one network", () => {
+    const { loginLimiterKey } = require(kModulePath);
+    const keys = ["::", "::1", "::192.0.2.1", "::192.0.2.2", "::1:2"].map(loginLimiterKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(loginLimiterKey("::192.0.2.1")).toBe(loginLimiterKey("0:0:0:0:0:0:c000:201"));
   });
 
   it("keys an IPv4-mapped or NAT64 address on its embedded IPv4", () => {
