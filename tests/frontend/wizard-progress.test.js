@@ -124,6 +124,13 @@ describe("frontend/wizard step indicator", () => {
     expect(progressBar(tree).props["aria-valuetext"]).toBe("Getting started: Pick a path");
     expect(segmentClasses(tree)).toEqual(["ac-wizard-progress-segment", "ac-wizard-progress-segment"]);
   });
+
+  it("with no steps never claims a step count", () => {
+    const tree = render(WizardProgress({ steps: [], current: 0, title: "Loading" }));
+    expect(textOf(tree)).not.toContain("of 0");
+    expect(textOf(tree)).toContain("Getting started");
+    expect(progressBar(tree).props["aria-valuenow"]).toBe("0");
+  });
 });
 
 describe("frontend/setup wizard header", () => {

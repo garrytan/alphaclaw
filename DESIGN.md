@@ -205,7 +205,8 @@ Use these before writing new markup. The ones marked "planned" land in the PR na
 | SegmentedControl | `components/segmented-control.js` | Picks one value (range, mode). Each option is a `type="button"` with `aria-pressed`. Use Tabs instead when the choice swaps what the page shows. |
 | ToggleSwitch | `components/toggle-switch.js` | On and off settings. |
 | InfoTooltip | `components/info-tooltip.js` | Extra explanation behind a focusable "?". Renders nothing without text. Never put it inside another control; make the row's action a sibling button. |
-| WizardShell and WizardProgress | `components/wizard-shell.js`, planned (PR 3d) | Multi-step flows share one shell and one step indicator. |
+| WizardShell | `components/wizard-shell.js` | Multi-step flows share one shell (dialog semantics, focus trap, footer). |
+| WizardProgress | `components/wizard-progress.js` | The one step indicator for the setup, Gmail and Telegram wizards: "Step n of m", the step title as an h2, and a segmented bar with `role="progressbar"` and `aria-valuetext`. |
 
 ## Keyboard and focus
 

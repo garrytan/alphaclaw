@@ -696,6 +696,18 @@ describe("frontend/gateway card (server-state matrix)", () => {
     }
   });
 
+  it("during setup the card offers no other gateway actions, even when the gateway reports a problem", () => {
+    const state = makeServerState({
+      watchdog: { ...kHealthyWatchdog, safeMode: true, suppressedChannels: ["telegram"] },
+    });
+    publishShell({ statusState: state });
+    const tree = renderGateway({ setupRequired: true });
+    const labels = findAllByType(tree, ActionButton).map((vnode) => vnode.props.idleLabel);
+    expect(labels).not.toContain("Resume channels");
+    expect(labels).not.toContain("View logs");
+    expect(findButton(tree, "Restart").props.disabled).toBe(true);
+  });
+
   it("setupRequired disables both controls without the stale guard copy", () => {
     publishShell({ statusState: makeServerState({}) });
     const tree = renderGateway({ setupRequired: true });
