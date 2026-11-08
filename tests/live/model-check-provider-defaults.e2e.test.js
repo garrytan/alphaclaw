@@ -7,16 +7,13 @@
 //
 // lib/server/model-check/openclaw-provider-defaults.js keeps OpenClaw's list
 // of built-in provider ids (src/config/model-provider-overlay-ids.ts, not
-// exported by the package) and reads the base URLs from the bundled plugin
-// manifests. A pin bump that changes either fails here.
+// exported by the package); the check reports such an entry as not checked
+// and never probes it. A pin bump that changes the list fails here.
 const fs = require("fs");
 const path = require("path");
 
 const { kLiveEnabled, mkTemp, runCliJson, repoOpenclawBin, scrubTestRunnerEnv } = require("./live-helpers");
-const {
-  kOpenclawBuiltInProviderIds,
-  readOpenclawProviderDefaults,
-} = require("../../lib/server/model-check/openclaw-provider-defaults");
+const { kOpenclawBuiltInProviderIds } = require("../../lib/server/model-check/openclaw-provider-defaults");
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 const kDistDir = path.dirname(require.resolve("openclaw"));
@@ -71,36 +68,5 @@ describeLive("model check vs OpenClaw's built-in providers (live, pinned dist)",
     const custom = validate({ "my-gemini": kBoxGoogleBlock });
     expect(custom.valid).toBe(false);
     expect(custom.issues).toEqual([expect.objectContaining({ path: "models.providers.my-gemini.baseUrl" })]);
-  });
-
-  it("reads the base URL and API OpenClaw's own provider discovery fills in", async () => {
-    const defaults = readOpenclawProviderDefaults();
-    expect(defaults.get("google")).toMatchObject({ baseUrl: "https://generativelanguage.googleapis.com/v1beta", api: "google-generative-ai" });
-    expect(defaults.get("opencode-go").models.get("qwen3.8-max")).toEqual({ api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go" });
-    for (const id of defaults.keys()) expect(kOpenclawBuiltInProviderIds.has(id)).toBe(true);
-    const compared = [];
-    for (const pluginDir of fs.readdirSync(path.join(kDistDir, "extensions"))) {
-      let manifest;
-      try {
-        manifest = JSON.parse(fs.readFileSync(path.join(kDistDir, "extensions", pluginDir, "openclaw.plugin.json"), "utf8"));
-      } catch {
-        continue;
-      }
-      if (!manifest.providerCatalogEntry) continue;
-      const discovery = (await import(path.join(kDistDir, "extensions", pluginDir, manifest.providerCatalogEntry))).default;
-      if (!discovery?.staticCatalog?.run) continue;
-      const { providers = {} } = (await discovery.staticCatalog.run({ config: {}, env: {} })) || {};
-      for (const [id, provider] of Object.entries(providers)) {
-        if (!defaults.has(id)) continue;
-        const { baseUrl, api, models } = defaults.get(id);
-        expect({ id, baseUrl: provider.baseUrl, api: provider.api }).toEqual({ id, baseUrl, api });
-        const routes = (provider.models || [])
-          .filter((model) => model.api || model.baseUrl)
-          .map((model) => [model.id, { api: model.api || null, baseUrl: model.baseUrl || null }]);
-        expect({ id, routes: new Map(routes) }).toEqual({ id, routes: models });
-        compared.push(id);
-      }
-    }
-    expect(compared).toContain("google");
   });
 });
