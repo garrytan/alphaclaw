@@ -33,10 +33,23 @@ describe("Relay page headline", () => {
   });
 
   it("does not count conversations it could not load or is still loading", () => {
-    expect(buildRelayHeadline({ status: ready, listError: new Error("500"), conversations: [answered("a")] })).toBe(
+    expect(buildRelayHeadline({ status: ready, listError: new Error("500"), conversations: [] })).toBe(
       "Relay is ready, but its conversations didn't load.",
     );
     expect(buildRelayHeadline({ status: ready, listLoading: true })).toBe("Relay is ready.");
+  });
+
+  it("counts the rows still on the page after a refresh fails, and says they may be out of date", () => {
+    const rows = [answered("a"), { id: "b", lastStatus: "dispatched" }];
+    expect(buildRelayHeadline({ status: ready, listError: new Error("502"), conversations: rows })).toBe(
+      "Relay is ready. Two conversations, one waiting. The last refresh failed, so this may be out of date.",
+    );
+    expect(buildRelayHeadline({ status: ready, listError: new Error("502"), conversations: rows, hasMore: true })).toBe(
+      "Relay is ready. More than 2 conversations; one of the newest 2 waiting. The last refresh failed, so this may be out of date.",
+    );
+    expect(buildRelayHeadline({ status: ready, listError: new Error("502"), conversations: rows, filtered: true })).toBe(
+      "Relay is ready. Showing the conversations that match your filters. The last refresh failed, so this may be out of date.",
+    );
   });
 
   it("does not count a filtered list as every conversation", () => {

@@ -31,6 +31,8 @@ vi.mock("../../lib/public/js/lib/api.js", async (importOriginal) => ({
 
 import { openRelayConsentWindow } from "../../lib/public/js/lib/api.js";
 import { RelayTab } from "../../lib/public/js/components/relay-tab/index.js";
+import { RelayConnections } from "../../lib/public/js/components/relay-tab/connections.js";
+import { ConfirmDialog } from "../../lib/public/js/components/confirm-dialog.js";
 import { getRoute } from "../../lib/public/js/lib/routes.js";
 
 const expandTree = (node) => {
@@ -78,6 +80,8 @@ const kStatus = {
   archive: { enabled: false },
 };
 
+const relaySessionKey = (peer) => `agent:main:relay-${peer}`;
+
 const kConversations = [
   {
     id: "conv-1",
@@ -89,7 +93,7 @@ const kConversations = [
     lastText: "pong: disk is at 41%",
     lastStatus: "answered",
     lastCode: null,
-    sessionKey: "agent:main:relay-capy-ops",
+    sessionKey: relaySessionKey("capy-ops"),
     sessionOnly: false,
   },
   {
@@ -102,7 +106,7 @@ const kConversations = [
     lastText: "ping",
     lastStatus: "dispatched",
     lastCode: null,
-    sessionKey: "agent:main:relay-hermes",
+    sessionKey: relaySessionKey("hermes"),
     sessionOnly: false,
   },
 ];
@@ -159,8 +163,8 @@ describe("Relay page briefing layout", () => {
   it("opens each conversation with this box in its own Chat session", () => {
     const links = collectNodes(render()).filter((node) => node.type === "a" && collectText(node).includes("Open in Chat"));
     expect(links.map((node) => [collectText(node).match(/@[a-z-]+/)[0], node.props.href])).toEqual([
-      ["@capy-ops", "#/chat/" + encodeURIComponent("agent:main:relay-capy-ops")],
-      ["@hermes", "#/chat/" + encodeURIComponent("agent:main:relay-hermes")],
+      ["@capy-ops", "#/chat/" + encodeURIComponent(relaySessionKey("capy-ops"))],
+      ["@hermes", "#/chat/" + encodeURIComponent(relaySessionKey("hermes"))],
     ]);
   });
 
@@ -216,6 +220,47 @@ describe("Relay page briefing layout", () => {
     expect(headings(tree)).not.toContain("Engine");
     expect(headings(tree)).not.toContain("Agents");
     expect(collectText(tree)).toContain("Request failed (403)");
+  });
+
+  it("keeps the loaded conversations and Load more under the error when a refresh fails", () => {
+    kPolled.set("/api/relay/conversations", { agentName: "wintermute", conversations: kConversations, nextBefore: "cursor-1" });
+    kErrors.set("/api/relay/conversations", new Error("Request failed (502)"));
+    const tree = render();
+    const nodes = collectNodes(tree);
+    const error = nodes.find((node) => node.type === "p" && collectText(node) === "Request failed (502)");
+    const rows = nodes.filter((node) => node.type === "a" && hasClass(node, "relay-conv-link"));
+    expect(error).toBeTruthy();
+    expect(rows).toHaveLength(2);
+    expect(nodes.indexOf(error)).toBeLessThan(nodes.indexOf(rows[0]));
+    expect(nodes.some((node) => node.type === "button" && collectText(node).includes("Load more conversations"))).toBe(true);
+    expect(headlineOf(tree)).toBe(
+      "Relay is ready. More than 2 conversations; one of the newest 2 waiting. The last refresh failed, so this may be out of date.",
+    );
+  });
+
+  it("shows only the error when a conversations read fails before any rows loaded", () => {
+    kPolled.delete("/api/relay/conversations");
+    kErrors.set("/api/relay/conversations", new Error("Request failed (502)"));
+    const tree = render();
+    const text = collectText(tree);
+    expect(text).toContain("Request failed (502)");
+    expect(text).not.toContain("No relay conversations yet.");
+    expect(text).not.toContain("Load more conversations");
+    expect(headlineOf(tree)).toBe("Relay is ready, but its conversations didn't load.");
+  });
+
+  it("keeps an open Revoke confirm open, in the same place, when remote access becomes unavailable", () => {
+    const connections = { pending: { kind: "client", id: "c1", name: "Capy" }, setPending: vi.fn(), busy: false, confirm: vi.fn() };
+    const dialogIndex = (remote) => {
+      const children = [RelayConnections({ remote, error: null, connections })].flat();
+      return children.findIndex((child) => child?.type === ConfirmDialog && child.props.visible === true);
+    };
+    const shown = dialogIndex(kRemote);
+    const hidden = dialogIndex({ enabled: false, unavailable: "provisioning_pending" });
+    expect(shown).toBeGreaterThanOrEqual(0);
+    expect(hidden).toBe(shown);
+    const closed = expandTree(RelayConnections({ remote: { enabled: false, unavailable: "provisioning_pending" }, error: null, connections: { ...connections, pending: null } }));
+    expect(headings(closed)).toEqual([]);
   });
 
   it("reads at the content width like the other briefing pages", () => {
