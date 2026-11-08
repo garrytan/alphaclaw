@@ -75,7 +75,8 @@ describeLive("model check vs OpenClaw's built-in providers (live, pinned dist)",
 
   it("reads the base URL and API OpenClaw's own provider discovery fills in", async () => {
     const defaults = readOpenclawProviderDefaults();
-    expect(defaults.get("google")).toEqual({ baseUrl: "https://generativelanguage.googleapis.com/v1beta", api: "google-generative-ai" });
+    expect(defaults.get("google")).toMatchObject({ baseUrl: "https://generativelanguage.googleapis.com/v1beta", api: "google-generative-ai" });
+    expect(defaults.get("opencode-go").models.get("qwen3.8-max")).toEqual({ api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go" });
     for (const id of defaults.keys()) expect(kOpenclawBuiltInProviderIds.has(id)).toBe(true);
     const compared = [];
     for (const pluginDir of fs.readdirSync(path.join(kDistDir, "extensions"))) {
@@ -91,7 +92,12 @@ describeLive("model check vs OpenClaw's built-in providers (live, pinned dist)",
       const { providers = {} } = (await discovery.staticCatalog.run({ config: {}, env: {} })) || {};
       for (const [id, provider] of Object.entries(providers)) {
         if (!defaults.has(id)) continue;
-        expect({ id, baseUrl: provider.baseUrl, api: provider.api }).toEqual({ id, ...defaults.get(id) });
+        const { baseUrl, api, models } = defaults.get(id);
+        expect({ id, baseUrl: provider.baseUrl, api: provider.api }).toEqual({ id, baseUrl, api });
+        const routes = (provider.models || [])
+          .filter((model) => model.api || model.baseUrl)
+          .map((model) => [model.id, { api: model.api || null, baseUrl: model.baseUrl || null }]);
+        expect({ id, routes: new Map(routes) }).toEqual({ id, routes: models });
         compared.push(id);
       }
     }

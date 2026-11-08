@@ -318,3 +318,97 @@ describe("server/model-check built-in providers without a baseUrl", () => {
   });
 });
 
+
+// What the pinned OpenClaw would do with these overlays, read from its
+// bundled plugin manifests (no readProviderDefaults override): the manifest
+// fallback must never send a credential to a host, or in a form, OpenClaw
+// itself would not use.
+describe("server/model-check manifest fallback limits", () => {
+  const recordFetch = () => {
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, authorization: init.headers.Authorization || null, apiKey: init.headers["x-api-key"] || null });
+      return { status: 200, text: async () => "{}" };
+    };
+    return { calls, fetchImpl };
+  };
+  const checkOne = async ({ config, ref, profiles = [], env = {} }) => {
+    const { calls, fetchImpl } = recordFetch();
+    const result = await createModelCheck({ readConfig: () => config, getEnv: () => env, listProfiles: () => profiles, fetchImpl }).checkRef(ref);
+    return { result, calls };
+  };
+
+  it("never probes GitHub Copilot on the manifest's host, whose real host depends on the GitHub account", async () => {
+    const kCopilotKey = "test-copilot-key-0000000000";
+    const profiles = [{ id: "github-copilot:default", provider: "github-copilot", type: "api_key", key: kCopilotKey }];
+    for (const entry of [{ params: { githubDomain: "acme.ghe.com" } }, { api: "openai-responses" }]) {
+      const config = { models: { providers: { "github-copilot": { ...entry, models: [{ id: "gpt-6-sol" }] } } } };
+      const { result, calls } = await checkOne({ config, ref: "github-copilot/gpt-6-sol", profiles });
+      expect(result).toMatchObject({ status: "not_checked", severity: "info" });
+      expect(result.baseUrl).toBeUndefined();
+      expect(result.reason).toBe("The GitHub Copilot host depends on the GitHub account, and only OpenClaw looks it up, so no test request was sent.");
+      expect(calls).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain(kCopilotKey);
+    }
+  });
+
+  it("uses the API and base URL the manifest gives one model, and the provider-wide ones for the rest", async () => {
+    const kOpencodeKey = "test-opencode-key-0000000000";
+    const config = { models: { providers: { "opencode-go": { apiKey: kOpencodeKey } } } };
+    const qwen = await checkOne({ config, ref: "opencode-go/qwen3.8-max" });
+    expect(qwen.result).toMatchObject({ status: "ok", api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go" });
+    expect(qwen.calls).toEqual([{ url: "https://opencode.ai/zen/go/v1/messages", authorization: null, apiKey: kOpencodeKey }]);
+    const luna = await checkOne({ config, ref: "opencode-go/gpt-5.6-luna" });
+    expect(luna.result).toMatchObject({ status: "ok", api: "openai-responses", baseUrl: "https://opencode.ai/zen/go/v1" });
+    expect(luna.calls).toEqual([{ url: "https://opencode.ai/zen/go/v1/responses", authorization: `Bearer ${kOpencodeKey}`, apiKey: null }]);
+    const other = await checkOne({ config, ref: "opencode-go/some-other-model" });
+    expect(other.result).toMatchObject({ api: "openai-completions", baseUrl: "https://opencode.ai/zen/go/v1" });
+    expect(other.calls.map((call) => call.url)).toEqual(["https://opencode.ai/zen/go/v1/chat/completions"]);
+  });
+
+  it("leaves a model unchecked when the entry lists it and the manifest gives it a route of its own", async () => {
+    const config = { models: { providers: { "opencode-go": { apiKey: "test-opencode-key", models: [{ id: "qwen3.8-max" }] } } } };
+    const { result, calls } = await checkOne({ config, ref: "opencode-go/qwen3.8-max" });
+    expect(result).toMatchObject({ status: "not_checked", severity: "info" });
+    expect(result.reason).toBe("OpenClaw's catalog gives qwen3.8-max its own API or base URL, and this entry also lists it, so AlphaClaw cannot tell which one OpenClaw uses and sent no test request.");
+    expect(calls).toEqual([]);
+  });
+
+  it("does not send a sign-in or subscription token as an API key on the manifest's base URL", async () => {
+    const kSetupToken = "sk-ant-oat01-test-000000000000";
+    const cases = [
+      { entry: { apiKey: kSetupToken }, profiles: [] },
+      { entry: {}, profiles: [{ id: "anthropic:manual", provider: "anthropic", type: "token", token: "test-anthropic-token-0000" }] },
+      { entry: {}, profiles: [{ id: "anthropic:default", provider: "anthropic", type: "oauth", access: "test-anthropic-access-0000" }] },
+      { entry: { apiKey: "test-anthropic-api-key-0000" }, profiles: [{ id: "anthropic:manual", provider: "anthropic", type: "token", token: "test-anthropic-token-0000" }] },
+    ];
+    for (const { entry, profiles } of cases) {
+      const config = { models: { providers: { anthropic: { ...entry, models: [{ id: "claude-opus-5-5" }] } } } };
+      const { result, calls } = await checkOne({ config, ref: "anthropic/claude-opus-5-5", profiles });
+      expect(result).toMatchObject({ status: "not_checked", severity: "info" });
+      expect(result.reason).toBe("The credential for anthropic is a sign-in or subscription token, which OpenClaw sends its own way, so no test request was sent.");
+      expect(calls).toEqual([]);
+    }
+    const plain = await checkOne({ config: { models: { providers: { anthropic: { apiKey: "test-anthropic-api-key-0000" } } } }, ref: "anthropic/claude-opus-5-5" });
+    expect(plain.calls).toEqual([{ url: "https://api.anthropic.com/v1/messages", authorization: null, apiKey: "test-anthropic-api-key-0000" }]);
+  });
+
+  it("keeps probing an entry that sets its own baseUrl, on that URL and with the token as configured", async () => {
+    const kSetupToken = "sk-ant-oat01-test-000000000000";
+    const config = {
+      models: {
+        providers: {
+          anthropic: { baseUrl: "https://proxy.example.test", api: "anthropic-messages", apiKey: kSetupToken },
+          openai: { baseUrl: "https://gateway.example.test/v1", api: "openai-completions", apiKey: "test-openai-key-0000" },
+        },
+      },
+    };
+    const ant = await checkOne({ config, ref: "anthropic/claude-opus-5-5" });
+    expect(ant.result).toMatchObject({ status: "ok", api: "anthropic-messages", baseUrl: "https://proxy.example.test" });
+    expect(ant.calls).toEqual([{ url: "https://proxy.example.test/v1/messages", authorization: null, apiKey: kSetupToken }]);
+    const oai = await checkOne({ config, ref: "openai/gpt-6-sol" });
+    expect(oai.result).toMatchObject({ status: "ok", api: "openai-completions", baseUrl: "https://gateway.example.test/v1" });
+    expect(oai.calls).toEqual([{ url: "https://gateway.example.test/v1/chat/completions", authorization: "Bearer test-openai-key-0000", apiKey: null }]);
+  });
+});
+
