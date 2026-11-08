@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.217] - 2026-11-08
+
+AlphaClaw no longer deletes another writer's temporary file when saving a config or state file fails.
+
+### Fixed
+- **A failed save only removes the temporary file it created.** AlphaClaw saves its config and state files by writing a temporary file next to the real one (`<file>.<pid>.tmp`) and renaming it into place. When a file of that name already existed, for example one left by an earlier process with the same pid (common in containers, where the server often gets the same pid on every start) or one another writer was using, AlphaClaw wrote over it, and if the save then failed it deleted that file. The temporary file is now always created fresh, and a save that fails removes it only when this save created it. A name that is already taken is left untouched and the save moves on to a randomized name instead, so a stale leftover no longer blocks or breaks saving. Content that is not text or bytes is refused before any temporary file is touched. Every caller saves the same way as before.
+
+### Tests
+- New `safe-file` tests cover a read-only temporary file left by another writer (it survives and the save still succeeds), a temporary-file name that is always taken (the save fails with `EEXIST` and deletes nothing), a failed write or rename that removes only the temporary file this save created, content that is not text or bytes (another writer's temporary file survives), and the normal save replacing the file with a new inode. The onboarding route tests' fake rename now carries the written bytes and mode to the final path but not the temporary file's exclusive-create flag, as a real rename does.
+
 ## [0.10.216] - 2026-11-08
 
 The Relay page now opens with one sentence saying whether Relay is ready and how many conversations are waiting, and lists conversations, agents and engine details as plain rows. Every control on the page works as before.

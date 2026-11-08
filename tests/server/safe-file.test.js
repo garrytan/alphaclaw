@@ -204,6 +204,127 @@ describe("server/utils/safe-file", () => {
       // Exactly one write, straight to the final path — no .tmp indirection.
       expect(writes).toEqual([[target, "mock-content"]]);
     });
+
+    describe("temp files it did not create", () => {
+      const pidTempPath = (target) => `${target}.${process.pid}.tmp`;
+      const listTemps = () =>
+        fs.readdirSync(tempDir).filter((name) => name.endsWith(".tmp")).sort();
+
+      it("keeps another writer's read-only <target>.<pid>.tmp intact and still saves", () => {
+        const target = path.join(tempDir, "config.json");
+        fs.writeFileSync(target, "original");
+        const foreign = pidTempPath(target);
+        fs.writeFileSync(foreign, "another writer's bytes", { mode: 0o444 });
+        let saveError = null;
+        try {
+          writeFileAtomic(target, "new");
+        } catch (error) {
+          saveError = error;
+        }
+        expect(fs.existsSync(foreign)).toBe(true);
+        expect(fs.readFileSync(foreign, "utf8")).toBe("another writer's bytes");
+        expect(saveError).toBeNull();
+        expect(fs.readFileSync(target, "utf8")).toBe("new");
+        expect(listTemps()).toEqual([path.basename(foreign)]);
+      });
+
+      it("leaves a temp file untouched and surfaces EEXIST when every temp name is taken", () => {
+        const target = path.join(tempDir, "config.json");
+        fs.writeFileSync(target, "original");
+        const foreign = pidTempPath(target);
+        fs.writeFileSync(foreign, "theirs");
+        const unlinked = [];
+        const eexist = () =>
+          Object.assign(new Error("EEXIST: file already exists"), { code: "EEXIST" });
+        const fsModule = {
+          ...fs,
+          openSync: (p, flags, mode) => {
+            if (String(p).endsWith(".tmp")) throw eexist();
+            return fs.openSync(p, flags, mode);
+          },
+          writeFileSync: (p, content, options) => {
+            if (String(p).endsWith(".tmp")) throw eexist();
+            return fs.writeFileSync(p, content, options);
+          },
+          unlinkSync: (p) => {
+            unlinked.push(p);
+            fs.unlinkSync(p);
+          },
+        };
+        for (const options of [{}, { mode: 0o600 }]) {
+          expect(() => writeFileAtomic(target, "new", { fsModule, ...options })).toThrow(
+            expect.objectContaining({ code: "EEXIST" }),
+          );
+        }
+        expect(unlinked).toEqual([]);
+        expect(fs.readFileSync(foreign, "utf8")).toBe("theirs");
+        expect(fs.readFileSync(target, "utf8")).toBe("original");
+      });
+
+      it("removes the temp file it created when the write or the rename fails", () => {
+        const target = path.join(tempDir, "config.json");
+        fs.writeFileSync(target, "original");
+        const foreign = pidTempPath(target);
+        fs.writeFileSync(foreign, "theirs");
+        const enospc = Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+        const failingWrite = {
+          ...fs,
+          writeFileSync: (p, content, options) => {
+            if (p === target) return fs.writeFileSync(p, content, options);
+            fs.writeFileSync(p, String(content).slice(0, 2), options);
+            throw enospc;
+          },
+        };
+        const failingRename = {
+          ...fs,
+          renameSync: () => {
+            throw Object.assign(new Error("EXDEV"), { code: "EXDEV" });
+          },
+        };
+        for (const options of [{}, { mode: 0o600 }]) {
+          expect(() =>
+            writeFileAtomic(target, "new content", { fsModule: failingWrite, ...options }),
+          ).toThrow(enospc);
+          expect(() =>
+            writeFileAtomic(target, "new content", { fsModule: failingRename, ...options }),
+          ).toThrow("EXDEV");
+        }
+        expect(listTemps()).toEqual([path.basename(foreign)]);
+        expect(fs.readFileSync(foreign, "utf8")).toBe("theirs");
+        expect(fs.readFileSync(target, "utf8")).toBe("original");
+      });
+
+      it("keeps another writer's temp file when the content is not a string or Buffer", () => {
+        const target = path.join(tempDir, "config.json");
+        fs.writeFileSync(target, "original");
+        const foreign = pidTempPath(target);
+        fs.writeFileSync(foreign, "theirs");
+        for (const options of [{}, { mode: 0o600 }]) {
+          expect(() => writeFileAtomic(target, { not: "bytes" }, options)).toThrow(
+            expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }),
+          );
+          expect(() => writeFileAtomic(target, 42, options)).toThrow(
+            expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }),
+          );
+          expect(() => writeFileAtomic(target, undefined, options)).toThrow(
+            expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }),
+          );
+        }
+        expect(listTemps()).toEqual([path.basename(foreign)]);
+        expect(fs.readFileSync(foreign, "utf8")).toBe("theirs");
+        expect(fs.readFileSync(target, "utf8")).toBe("original");
+      });
+
+      it("replaces the target with a fresh inode and leaves no temp file of its own", () => {
+        const target = path.join(tempDir, "config.json");
+        fs.writeFileSync(target, "original");
+        const before = fs.statSync(target).ino;
+        writeFileAtomic(target, "new");
+        expect(fs.readFileSync(target, "utf8")).toBe("new");
+        expect(fs.statSync(target).ino).not.toBe(before);
+        expect(listTemps()).toEqual([]);
+      });
+    });
   });
 
   describe("withFileLockSync", () => {
