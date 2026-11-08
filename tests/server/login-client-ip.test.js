@@ -185,4 +185,22 @@ describe("server/login-client-ip", () => {
     expect(resolveLoginClientIp(fakeRequest({ peer: "", ip: "203.0.113.9" }))).toBe("unknown");
     expect(resolveLoginClientIp({})).toBe("unknown");
   });
+
+  it("resolves every spelling of an IPv4-mapped address to its IPv4, so one client gets one block", () => {
+    const resolveLoginClientIp = loadResolver();
+    const { loginLimiterKey } = require(kModulePath);
+    for (const spelling of [
+      "::ffff:198.51.100.7",
+      "::ffff:c633:6407",
+      "::FFFF:C633:6407",
+      "0:0:0:0:0:ffff:c633:6407",
+      "0:0:0:0:0:FFFF:198.51.100.7",
+    ]) {
+      expect(resolveLoginClientIp(fakeRequest({ peer: spelling, ip: "203.0.113.9" })), spelling).toBe("198.51.100.7");
+      expect(resolveLoginClientIp(fakeRequest({ peer: "10.0.0.2", ip: spelling })), spelling).toBe("198.51.100.7");
+      expect(loginLimiterKey(resolveLoginClientIp(fakeRequest({ peer: "10.0.0.2", ip: spelling }))), spelling).toBe("198.51.100.7");
+    }
+    expect(resolveLoginClientIp(fakeRequest({ peer: "::ffff:a00:2", ip: "203.0.113.9" }))).toBe("203.0.113.9");
+    expect(resolveLoginClientIp(fakeRequest({ peer: "64:ff9b::198.51.100.7", ip: "203.0.113.9" }))).toBe("64:ff9b::198.51.100.7");
+  });
 });
