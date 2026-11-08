@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.999] - 2026-11-08
+## [0.10.217] - 2026-11-08
 
 AlphaClaw no longer deletes another writer's temporary file when saving a config or state file fails.
 
