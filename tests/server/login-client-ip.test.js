@@ -49,6 +49,16 @@ describe("server/login-client-ip", () => {
     }
   });
 
+  it("a TRUST_PROXY_HOPS that is not a whole number counts as not set", () => {
+    for (const value of ["yes", "-1", "1.5"]) {
+      process.env[kTrustProxyHopsEnvKey] = value;
+      const resolve = loadResolver();
+      expect(resolve(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" })), value).toBe("198.51.100.7");
+    }
+    process.env[kTrustProxyHopsEnvKey] = "2";
+    expect(loadResolver()(fakeRequest({ peer: "198.51.100.7", ip: "203.0.113.9" }))).toBe("203.0.113.9");
+  });
+
   it("an explicitly set TRUST_PROXY_HOPS trusts the declared proxy chain from a public peer", () => {
     process.env[kTrustProxyHopsEnvKey] = "1";
     const declared = loadResolver();

@@ -891,6 +891,47 @@ describe("sign-in: owner lane past the shared login bucket", { timeout: 30000 },
     });
   });
 
+  describe("a success clears only the lock its own count set", () => {
+    it("24 wrong sign-ins and a correct 25th leave the box-wide bucket open, with the 24 still counted", async () => {
+      const h = await createHarness();
+      for (let i = 0; i < kLoginGlobalMaxAttempts - 1; i += 1) {
+        expect((await signIn(h, { peer: attackerPeer(i), password: "wrong-" + i })).status).toBe(401);
+      }
+      expect((await signIn(h, { peer: attackerPeer(100), password: kOwnerPassword })).status).toBe(200);
+      expect((await signIn(h, { peer: attackerPeer(101), password: kOwnerPassword })).status).toBe(200);
+      expect((await signIn(h, { peer: attackerPeer(102), password: "wrong-last" })).status).toBe(429);
+    });
+
+    it("25 wrong sign-ins lock the box-wide bucket, and a correct pass-lane sign-in leaves that lock for the next shared-lane attempt", async () => {
+      const h = await createHarness();
+      const pass = readPass(await signIn(h, { password: kOwnerPassword }));
+      for (let i = 0; i < kLoginGlobalMaxAttempts; i += 1) await signIn(h, { peer: attackerPeer(i), password: "wrong-" + i });
+      expect((await signIn(h, { password: kOwnerPassword, pass })).status).toBe(200);
+      expect((await signIn(h, { peer: attackerPeer(200), password: kOwnerPassword })).status).toBe(429);
+    });
+
+    it("a correct sign-in still in its check does not lift the address lock that later wrong attempts from that address set", async () => {
+      const h = await createHarness({ team: true, members: [memberA] });
+      const peer = "198.51.100.140";
+      const release = stalledHashes(h, { except: (args) => args?.password !== memberA.password });
+      const t = tracker();
+      try {
+        t.send(signIn(h, { peer, ...credentialsOf(memberA) }));
+        await vi.waitFor(() => expect(h.membersStore.hashes.inFlight).toBe(1));
+        const wrong = [];
+        for (let i = 0; i < kLoginMaxAttempts; i += 1) {
+          wrong.push((await signIn(h, { peer, email: memberA.email, password: "wrong-" + i })).status);
+        }
+        expect(wrong).toEqual([...Array(kLoginMaxAttempts - 2).fill(401), 429, 429]);
+      } finally {
+        release();
+        await Promise.all(t.sent);
+      }
+      expect(t.answered[0].status).toBe(200);
+      expect((await signIn(h, { peer, ...credentialsOf(memberA) })).status).toBe(429);
+    });
+  });
+
   describe("known-browser passes (F3, F4)", () => {
     it("is an HttpOnly, SameSite=Strict cookie scoped to /api/auth", async () => {
       const h = await createHarness();

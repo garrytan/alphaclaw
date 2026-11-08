@@ -52,6 +52,19 @@ describe("server/utils/sign-in-audit", () => {
     expect(lines(warn)).toContain(`[auth] sign-in suppressed ip="198.51.100.42" count=${12 - kSignInAuditLinesPerMinute} window=60s`);
   });
 
+  it("caps failure lines per IPv6 /64, like the limiter, and its summary names the /64", () => {
+    const { logSignInAttempt, kSignInAuditLinesPerMinute } = loadAudit();
+    for (let i = 0; i < 40; i += 1) {
+      logSignInAttempt({ req: fakeRequest, ip: "2001:db8:aa:bb::" + (i + 1).toString(16), actor: "member", outcome: "failed", lane: "shared" });
+    }
+    expect(lines(warn)).toHaveLength(kSignInAuditLinesPerMinute);
+    expect(lines(warn)[0]).toContain('ip="2001:db8:aa:bb::1"');
+    clock += 60_000;
+    logSignInAttempt({ req: fakeRequest, ip: "198.51.100.44", actor: "owner", outcome: "ok", lane: "shared" });
+    expect(lines(warn)).toHaveLength(kSignInAuditLinesPerMinute + 1);
+    expect(lines(warn).at(-1)).toBe(`[auth] sign-in suppressed ip="2001:db8:aa:bb::/64" count=${40 - kSignInAuditLinesPerMinute} window=60s`);
+  });
+
   it("keeps at most the address cap in memory", () => {
     const { logSignInAttempt, kSignInAuditMaxAddresses, signInAuditTrackedAddresses } = loadAudit();
     for (let i = 0; i < kSignInAuditMaxAddresses + 50; i += 1) {
