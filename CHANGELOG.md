@@ -10,10 +10,10 @@ Versions follow this repository's `package.json` release counter.
 An operator can now lock chosen environment keys, such as a plugin's kill switch, so the gateway reads them only from the deployment environment and the agent cannot change them.
 
 ### Added
-- **`ALPHACLAW_GATEWAY_LOCKED_ENV`.** This deployment-only setting takes a comma- or space-separated list of env keys, for example `WM_GUARDS_DISABLE,WM_GUARDS_MODE` for a guard plugin's off switch and mode. The listed keys become deployment-only: the Environment page, `env.patch` and AlphaClaw's `.env` loading refuse them. The OpenClaw gateway and CLI children get the deployment value, or an empty value when the deployment does not set the key. Before this, a plugin setting outside the gateway allowlist was dropped from the deployment environment, and OpenClaw then loaded it from the agent-writable `.env`, so an agent could turn its own guard off and restart. The list is read once at boot.
+- **`ALPHACLAW_GATEWAY_LOCKED_ENV`.** This deployment-only setting takes a comma- or space-separated list of env keys, for example `WM_GUARDS_DISABLE,WM_GUARDS_MODE` for a guard plugin's off switch and mode. The listed keys become deployment-only: the Environment page, `env.patch` and AlphaClaw's `.env` loading refuse them. The OpenClaw gateway and CLI children get the deployment value, or an empty value when the deployment does not set the key. Give each locked key an explicit value in the deployment, for example `WM_GUARDS_DISABLE=0`: OpenClaw fills an empty value from openclaw.json's `env` block, so AlphaClaw logs a warning naming each locked key left unset. The lock covers the env keys only, not the plugin's enablement or config in openclaw.json. Before this, a plugin setting outside the gateway allowlist was dropped from the deployment environment, and OpenClaw then loaded it from the agent-writable `.env`, so an agent could turn its own guard off and restart. The list is read once at boot.
 
 ### Tests
-- New `gateway-locked-env` tests cover parsing, the `.env` overlay, the gateway child env (deployment value passes, an unset key goes as empty, the list itself never reaches the child) and `PATCH /api/env` refusing a locked key.
+- New `gateway-locked-env` tests cover parsing, the `.env` overlay, the gateway child env (deployment value passes, an unset key goes as empty, the list itself never reaches the child) and `PATCH /api/env` refusing a locked key, plus the one-time warning for a locked key the deployment leaves unset or blank.
 
 ## [0.10.210] - 2026-11-07
 

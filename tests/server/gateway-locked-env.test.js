@@ -72,6 +72,25 @@ describe("ALPHACLAW_GATEWAY_LOCKED_ENV", () => {
     expect(child.ALPHACLAW_GATEWAY_LOCKED_ENV).toBe("");
   });
 
+  it("warns once that a locked key the deployment leaves unset or blank can still come from openclaw.json env", () => {
+    const { policy } = loadWithDeploymentEnv("WM_GUARDS_DISABLE,WM_GUARDS_MODE");
+    policy.resetGatewayEnvPolicyForTests();
+    const logger = quietLogger();
+    policy.filterGatewayChildEnv({ WM_GUARDS_MODE: "  " }, { logger, hatch: noHatch });
+    policy.filterGatewayChildEnv({ WM_GUARDS_MODE: "  " }, { logger, hatch: noHatch });
+    const warnings = logger.log.mock.calls.map(([line]) => line).filter((line) => line.includes("openclaw.json"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("WM_GUARDS_DISABLE, WM_GUARDS_MODE");
+  });
+
+  it("does not warn when the deployment sets every locked key", () => {
+    const { policy } = loadWithDeploymentEnv("WM_GUARDS_DISABLE");
+    policy.resetGatewayEnvPolicyForTests();
+    const logger = quietLogger();
+    policy.filterGatewayChildEnv({ WM_GUARDS_DISABLE: "0" }, { logger, hatch: noHatch });
+    expect(logger.log.mock.calls.some(([line]) => line.includes("openclaw.json"))).toBe(false);
+  });
+
   it("changes nothing when the deployment does not set it", () => {
     const { policy, deploymentOnly } = loadWithDeploymentEnv(undefined);
     expect(deploymentOnly.kGatewayLockedEnvKeys).toEqual([]);
