@@ -1944,3 +1944,209 @@ div.home-strip-link:hover { background: none; }
   .provider-key-form-actions > button { flex: 1 1 auto; width: 100%; }
 }
 
+
+/* ── Relay (a Briefing page) ─────────────── */
+
+.relay-lead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.relay-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.relay-facts:empty { display: none; }
+
+.relay-fact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--font-size-copy);
+}
+
+.relay-fact > .status-chip-dot { margin-top: 6px; }
+
+.relay-fact-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.relay-fact-detail {
+  font-size: var(--font-size-small);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.relay-word { font-size: inherit; }
+
+.relay-handle {
+  font-family: var(--font-mono);
+  color: var(--text-bright);
+  overflow-wrap: anywhere;
+}
+
+.relay-subtitle {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--font-size-copy);
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.relay-rows { border-top: 1px solid var(--border); }
+
+.relay-rows > li { border-bottom: 1px solid var(--border); }
+
+.relay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-height: 40px;
+  padding: var(--space-2) 0;
+  font-size: var(--font-size-copy);
+}
+
+.relay-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+  margin-left: auto;
+  font-size: var(--font-size-small);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.relay-row-action {
+  min-height: 32px;
+  font-size: var(--font-size-small);
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.relay-row-action:hover { color: var(--text); }
+
+.relay-conv {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.relay-conv-link {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+  min-width: 0;
+  min-height: 48px;
+  padding: var(--space-2);
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.relay-conv-link.is-link:hover,
+.relay-conv-link.is-link:focus-visible { background: var(--bg-hover); }
+
+.relay-conv-main {
+  display: flex;
+  flex: 1 1 16rem;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.relay-conv-preview {
+  overflow: hidden;
+  font-size: var(--font-size-small);
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.relay-conv-open {
+  font-weight: 500;
+  color: var(--accent-link);
+  white-space: nowrap;
+}
+
+.relay-conv-note {
+  flex-basis: 100%;
+  font-size: var(--font-size-small);
+  color: var(--text-muted);
+}
+
+.relay-log-toggle {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: var(--font-size-caption);
+  color: var(--text-muted);
+}
+
+.relay-log-toggle:hover { color: var(--text); background: var(--bg-hover); }
+
+.relay-kv { border-top: 1px solid var(--border); }
+
+.relay-kv-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-4);
+  min-height: 40px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-size-copy);
+}
+
+.relay-kv-row > dt { color: var(--text-muted); }
+
+.relay-kv-row > dd {
+  min-width: 0;
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.relay-more { display: none; }
+
+@media (max-width: 767px) {
+  .relay .ac-page-header-actions {
+    width: 100%;
+  }
+
+  .relay .relay-allow {
+    flex: 1 1 auto;
+    height: 40px;
+  }
+
+  .relay .relay-refresh-wide { display: none; }
+
+  .relay .relay-more { display: inline-flex; }
+
+  .relay .relay-more .brand-menu-trigger {
+    width: 40px;
+    height: 40px;
+  }
+
+  .relay-row-meta { margin-left: 0; }
+
+  .relay-kv-row > dd { text-align: left; }
+
+  .relay-row-action,
+  .relay-log-toggle { min-height: 40px; }
+
+  .relay .briefing-section-actions button { height: 40px; }
+}
