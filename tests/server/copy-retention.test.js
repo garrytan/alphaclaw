@@ -13,12 +13,6 @@ const { createDiskReader } = require("../../lib/server/box-status/disk");
 
 const kDay = 24 * 60 * 60 * 1000;
 const kNow = Date.parse("2026-10-25T12:00:00Z");
-const kHealthyBoot = {
-  boot: { version: "2026.10.9", readyAtMs: kNow - 60_000 },
-  firstHealthyStart: { version: "2026.10.9", firstHealthyAtMs: kNow - 60_000 },
-  readInstalledVersion: () => "2026.10.9",
-};
-const kKeepThreeCaptures = { ALPHACLAW_UPDATE_CAPTURE_KEEP: "3" };
 
 describe("copy retention", () => {
   let root;
@@ -100,7 +94,7 @@ describe("copy retention", () => {
     capture("unsealed", 90, { partial: true });
     capture("unpublished", 90, { manifest: false });
     capture("bad name!", 90);
-    const plan = planRetention({ backupsDir: null, stateDir, env: kKeepThreeCaptures, nowMs: kNow, ...kHealthyBoot });
+    const plan = planRetention({ backupsDir: null, stateDir, env: {}, nowMs: kNow });
     const verdicts = Object.fromEntries(plan.families[0].entries.map((entry) => [entry.name, entry.reason ? entry.verdict + ":" + entry.reason : entry.verdict]));
     expect(verdicts).toEqual({
       "doctor-a": "kept_newest",
@@ -123,7 +117,7 @@ describe("copy retention", () => {
     const oldCapture = capture("update-old", 40);
     const operatorCopy = capture("operator-copy", 90, { marker: null });
 
-    const result = sweepRetainedCopies({ backupsDir, stateDir, env: kKeepThreeCaptures, nowMs: kNow, readOpen: () => new Set([heldArchive]), logger, ...kHealthyBoot });
+    const result = sweepRetainedCopies({ backupsDir, stateDir, env: {}, nowMs: kNow, readOpen: () => new Set([heldArchive]), logger });
     expect(result).toMatchObject({ due: 3, removed: 2, held: 1, failed: 0, unverified: 0, policy: { keep: 3, days: 7 } });
     expect(result.byFamily.alphaclaw_backups.removed).toBe(1);
     expect(result.byFamily.openclaw_update_captures.removed).toBe(1);
@@ -133,9 +127,8 @@ describe("copy retention", () => {
     expect(fs.existsSync(heldArchive)).toBe(true);
     expect(fs.existsSync(operatorCopy)).toBe(true);
     expect(fs.readdirSync(captures).sort()).toEqual(["doctor-a", "doctor-b", "doctor-c", "operator-copy"]);
-    expect(logger.log).toHaveBeenCalledTimes(2);
-    expect(logger.log.mock.calls[0][0]).toMatch(/^\[alphaclaw\] retention sweep: removed OpenClaw update capture update-old \(\d+ MB, \d+ bytes\)$/);
-    expect(logger.log.mock.calls[1][0]).toMatch(/retention sweep: keep newest 3 and anything under 7 days; 3 due, removed 2/);
+    expect(logger.log).toHaveBeenCalledTimes(1);
+    expect(logger.log.mock.calls[0][0]).toMatch(/retention sweep: keep newest 3 and anything under 7 days; 3 due, removed 2/);
     expect(getLastRetentionSweep()).toBe(result);
   });
 
@@ -191,7 +184,7 @@ describe("copy retention", () => {
     expect(items["2026-09-01T10-00-00.000Z-openclaw-backup.tar.gz"]).toBe("due");
     expect(items["2026-10-20T10-00-00.000Z-openclaw-backup.tar.gz"]).toBe("kept_newest");
     expect(items["hand-made.tar.gz"]).toBe("not_managed:name");
-    expect(groups.openclaw_update_captures.retention).toMatchObject({ keep: 1, days: null, due: 0, lastSweep: { removed: 0 } });
+    expect(groups.openclaw_update_captures.retention).toMatchObject({ keep: 3, days: 7, due: 0, lastSweep: { removed: 0 } });
     expect(groups.openclaw_update_captures.items[0].retention).toBe("kept_newest");
     expect(groups.config_backups.retention).toBeUndefined();
   });

@@ -84,7 +84,7 @@ describe("frontend/watchdog resources card: days until the disk is full", () => 
   });
 
   it("says the disk is filling fast, not under the warning line, when the last hour's growth opened the warning", () => {
-    const fast = volume({ state: "low", trigger: "eta", freeBytes: 60 * kGiB, etaMs: 4.2 * 3_600_000 });
+    const fast = volume({ state: "low", trigger: "eta", currentTier: "low", freeBytes: 60 * kGiB, etaMs: 4.2 * 3_600_000 });
     const tree = renderCard({ volumes: [fast] });
     const text = treeText(tree);
     expect(text).toContain("Disk filling fast");
@@ -93,18 +93,38 @@ describe("frontend/watchdog resources card: days until the disk is full", () => 
     expect(text).not.toContain("Disk space low");
     expect(badges(tree).map((badge) => badge.props.tone)).toEqual(["warning"]);
 
-    const critical = buildDiskSpaceModel({ volumes: [volume({ state: "critical", trigger: "eta", freeBytes: 60 * kGiB, etaMs: 40 * 60_000 })] });
+    const critical = buildDiskSpaceModel({ volumes: [volume({ state: "critical", trigger: "eta", currentTier: "critical", freeBytes: 60 * kGiB, etaMs: 40 * 60_000 })] });
     expect(critical.warning).toEqual({
       tone: "danger",
       label: "Disk filling fast",
       text: "60.0 GB free and filling fast: full in less than an hour at the last hour's rate",
     });
-    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", freeBytes: 60 * kGiB, etaMs: 70 * 60_000 })] }).warning.text)
+    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", trigger: "eta", currentTier: "low", freeBytes: 60 * kGiB, etaMs: 70 * 60_000 })] }).warning.text)
       .toBe("60.0 GB free and filling fast: full in about 1 hour at the last hour's rate");
-    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", freeBytes: 60 * kGiB, etaMs: null })] }).warning.text)
+    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", trigger: "eta", currentTier: "low", freeBytes: 60 * kGiB, etaMs: null })] }).warning.text)
       .toBe("60.0 GB free and filling fast");
     expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", trigger: "eta", etaMs: 3 * 3_600_000 })] }).warning)
       .toMatchObject({ label: "Disk space low", text: "14.0 GB free, under the 20.0 GB warning line" });
+  });
+
+  it("claims neither low space nor fast filling while a recovering disk sits between the warning line and the clear line", () => {
+    const recovering = (overrides) => buildDiskSpaceModel({ volumes: [volume({ state: "low", currentTier: "ok", freeBytes: 22 * kGiB, etaMs: null, ...overrides })] });
+    for (const trigger of ["level", "eta"]) {
+      expect(recovering({ trigger }).warning).toEqual({
+        tone: "warning",
+        label: "Disk warning still open",
+        text: "22.0 GB free, above the 20.0 GB warning line and not filling fast",
+      });
+    }
+    expect(recovering({ trigger: "level", state: "critical" }).warning).toMatchObject({ tone: "danger", label: "Disk warning still open" });
+    expect(recovering({ trigger: "level", currentTier: "low", etaMs: 5 * 3_600_000 }).warning).toMatchObject({
+      label: "Disk filling fast",
+      text: "22.0 GB free and filling fast: full in about 5 hours at the last hour's rate",
+    });
+    const tree = renderCard({ volumes: [volume({ state: "low", trigger: "level", currentTier: "ok", freeBytes: 22 * kGiB })] });
+    expect(treeText(tree)).toContain("Disk warning still open");
+    expect(treeText(tree)).not.toContain("Disk filling fast");
+    expect(treeText(tree)).not.toContain("under the");
   });
 
   it("says not enough data yet before there is a trend", () => {

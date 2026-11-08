@@ -115,6 +115,41 @@ describe("disk-space days-to-full estimate", () => {
     }
   });
 
+  it("logs one warning when saving the samples fails, and again only after a save has succeeded", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "disk-fill-save-fail-"));
+    const fillHistoryPath = path.join(dir, ".alphaclaw", "disk-fill-history.json");
+    let failing = true;
+    const flakyFs = { ...fs, renameSync: (from, to) => { if (failing && to === fillHistoryPath) throw new Error("EACCES: permission denied"); return fs.renameSync(from, to); } };
+    const logger = { warn: vi.fn(), log: vi.fn() };
+    let nowMs = kStartMs;
+    try {
+      const tracker = createDiskSpaceTracker({
+        stateDir: "/data/.openclaw",
+        env: {},
+        readVolumes: () => [reading(40)],
+        runCensus: async () => null,
+        nowFn: () => nowMs,
+        fillHistoryPath,
+        fsModule: flakyFs,
+        logger,
+      });
+      const tickAt = async (minute) => { nowMs = kStartMs + minute * 60_000; await tracker.tick(); };
+      for (let minute = 0; minute <= 150; minute += 1) await tickAt(minute);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn.mock.calls[0][0]).toMatch(/^\[alphaclaw\] disk space: could not save the days-to-full samples to .*disk-fill-history\.json: EACCES: permission denied/);
+      expect(fs.existsSync(fillHistoryPath)).toBe(false);
+
+      failing = false;
+      await tickAt(151);
+      expect(JSON.parse(fs.readFileSync(fillHistoryPath, "utf8")).state.samples).toHaveLength(3);
+      failing = true;
+      for (let minute = 152; minute <= 240; minute += 1) await tickAt(minute);
+      expect(logger.warn).toHaveBeenCalledTimes(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resumes from saved samples, dropping malformed ones", () => {
     const first = createDiskSpaceMonitor();
     observeHourly(first, (hour) => 40 - hour * 0.1, 30);
