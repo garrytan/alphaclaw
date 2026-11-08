@@ -77,6 +77,39 @@ it("strips a locked key from OPENCLAW_SERVICE_MANAGED_ENV_KEYS, so OpenClaw's .e
     expect(child.OPENCLAW_SERVICE_MANAGED_ENV_KEYS).toBe("OTHER_KEY");
   });
 
+it("always sends a filtered managed list and blank systemd hints when keys are locked, lowercase list key included", () => {
+    const { policy } = loadWithDeploymentEnv("WM_GUARDS_DISABLE");
+    const child = policy.blankDeniedGatewayEnvKeys(
+      policy.filterGatewayChildEnv(
+        { WM_GUARDS_DISABLE: "0", OPENCLAW_SYSTEMD_UNIT: "x.service" },
+        { logger: quietLogger(), hatch: noHatch },
+      ),
+    );
+    expect(child.WM_GUARDS_DISABLE).toBe("0");
+    expect(child.OPENCLAW_SERVICE_MANAGED_ENV_KEYS).toBe("");
+    expect(child.openclaw_service_managed_env_keys).toBe("");
+    for (const key of ["OPENCLAW_SYSTEMD_UNIT", "INVOCATION_ID", "SYSTEMD_EXEC_PID", "JOURNAL_STREAM"]) {
+      expect(child).toHaveProperty(key, "");
+    }
+  });
+
+  it("passes the systemd hints and managed list through unchanged when nothing is locked", () => {
+    const { policy } = loadWithDeploymentEnv(undefined);
+    const source = {
+      OPENCLAW_SYSTEMD_UNIT: "openclaw.service",
+      INVOCATION_ID: "abc123",
+      SYSTEMD_EXEC_PID: "42",
+      JOURNAL_STREAM: "8:1234",
+      OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "WM_GUARDS_DISABLE",
+    };
+    const filtered = policy.filterGatewayChildEnv(source, { logger: quietLogger(), hatch: noHatch });
+    const child = policy.blankDeniedGatewayEnvKeys(filtered);
+    for (const key of Object.keys(source)) expect(child[key]).toBe(filtered[key]);
+    expect(child.OPENCLAW_SYSTEMD_UNIT).toBe("openclaw.service");
+    expect(child.OPENCLAW_SERVICE_MANAGED_ENV_KEYS).toBe("WM_GUARDS_DISABLE");
+    expect(child).not.toHaveProperty("openclaw_service_managed_env_keys");
+  });
+
   it("never passes the list itself to the gateway child", () => {
     const { policy } = loadWithDeploymentEnv("WM_GUARDS_DISABLE");
     const child = policy.blankDeniedGatewayEnvKeys(
