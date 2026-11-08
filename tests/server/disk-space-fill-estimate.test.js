@@ -63,6 +63,58 @@ describe("disk-space days-to-full estimate", () => {
     expect(monitor.getSnapshot().volumes[0].fillEstimate.status).toBe("not_enough_data");
   });
 
+  it("keeps its samples while the reported disk size drifts by up to 5%, and starts over past that", () => {
+    const monitor = createDiskSpaceMonitor();
+    const drift = [200, 203, 198.5, 196, 204, 201];
+    for (let minute = 0; minute <= 30 * 60; minute += 1) {
+      const atMs = kStartMs + minute * 60_000;
+      monitor.observe([reading(40 - (minute / 60) * 0.1, drift[minute % drift.length])], atMs);
+    }
+    expect(monitor.getFillHistory().state.samples).toHaveLength(31);
+    expect(monitor.getFillHistory().state.sizeBytes).toBe(200 * kGb);
+    expect(monitor.getSnapshot().volumes[0].fillEstimate.status).toBe("filling");
+
+    monitor.observe([reading(37, 189)], kStartMs + 31 * kHour);
+    expect(monitor.getFillHistory().state).toMatchObject({ sizeBytes: 189 * kGb });
+    expect(monitor.getFillHistory().state.samples).toHaveLength(1);
+    expect(monitor.getSnapshot().volumes[0].fillEstimate.status).toBe("not_enough_data");
+  });
+
+  it("the tracker saves the samples only when an hourly sample is added or they start over, not every minute", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "disk-fill-writes-"));
+    const fillHistoryPath = path.join(dir, ".alphaclaw", "disk-fill-history.json");
+    const writes = [];
+    const countingFs = { ...fs, renameSync: (from, to) => { if (to === fillHistoryPath) writes.push(nowMs); return fs.renameSync(from, to); } };
+    let nowMs = kStartMs;
+    let sizeGb = 200;
+    try {
+      const tracker = createDiskSpaceTracker({
+        stateDir: "/data/.openclaw",
+        env: {},
+        readVolumes: () => [reading(40, sizeGb)],
+        runCensus: async () => null,
+        nowFn: () => nowMs,
+        fillHistoryPath,
+        fsModule: countingFs,
+      });
+      for (let minute = 0; minute <= 180; minute += 1) {
+        nowMs = kStartMs + minute * 60_000;
+        sizeGb = minute % 2 ? 201 : 199;
+        await tracker.tick();
+      }
+      expect(writes.map((atMs) => (atMs - kStartMs) / 60_000)).toEqual([0, 60, 120, 180]);
+      expect(JSON.parse(fs.readFileSync(fillHistoryPath, "utf8")).state.samples).toHaveLength(4);
+
+      nowMs += 60_000;
+      sizeGb = 230;
+      await tracker.tick();
+      expect(writes).toHaveLength(5);
+      expect(JSON.parse(fs.readFileSync(fillHistoryPath, "utf8")).state).toMatchObject({ sizeBytes: 230 * kGb, samples: [{ atMs: nowMs }] });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resumes from saved samples, dropping malformed ones", () => {
     const first = createDiskSpaceMonitor();
     observeHourly(first, (hour) => 40 - hour * 0.1, 30);

@@ -13,7 +13,11 @@ const { createDiskReader } = require("../../lib/server/box-status/disk");
 
 const kDay = 24 * 60 * 60 * 1000;
 const kNow = Date.parse("2026-10-25T12:00:00Z");
-const kHealthyBoot = { boot: { version: "2026.10.9", readyAtMs: kNow - 60_000 }, readInstalledVersion: () => "2026.10.9" };
+const kHealthyBoot = {
+  boot: { version: "2026.10.9", readyAtMs: kNow - 60_000 },
+  firstHealthyStart: { version: "2026.10.9", firstHealthyAtMs: kNow - 60_000 },
+  readInstalledVersion: () => "2026.10.9",
+};
 const kKeepThreeCaptures = { ALPHACLAW_UPDATE_CAPTURE_KEEP: "3" };
 
 describe("copy retention", () => {

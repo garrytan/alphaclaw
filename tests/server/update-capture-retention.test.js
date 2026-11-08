@@ -1,12 +1,18 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+
+const kRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "capture-retention-root-")));
+process.env.ALPHACLAW_ROOT_DIR = kRoot;
+const kRecordPath = path.join(kRoot, ".openclaw", ".alphaclaw", "capture-retention.json");
+
 const {
   planRetention,
   resolveCaptureKeep,
   sweepRetainedCopies,
   noteHealthyGatewayBoot,
   getHealthyGatewayBoot,
+  readFirstHealthyStart,
   kCaptureMarker,
   kCaptureMarkerContent,
 } = require("../../lib/server/copy-retention");
@@ -16,6 +22,12 @@ const kDay = 24 * 60 * 60 * 1000;
 const kNow = Date.parse("2026-11-08T12:00:00Z");
 const kVersion = "2026.10.9";
 const installed = (version = kVersion) => () => version;
+const firstStartOf = (boot) => (boot ? { version: boot.version, firstHealthyAtMs: boot.readyAtMs } : null);
+
+afterAll(() => {
+  delete process.env.ALPHACLAW_ROOT_DIR;
+  fs.rmSync(kRoot, { recursive: true, force: true });
+});
 
 describe("OpenClaw update capture retention", () => {
   let root;
@@ -49,7 +61,11 @@ describe("OpenClaw update capture retention", () => {
     return Object.fromEntries(family.entries.map((entry) => [entry.name, entry.verdict]));
   };
   const sweep = (options = {}) =>
-    sweepRetainedCopies({ backupsDir, stateDir, env: {}, nowMs: kNow, readOpen: () => new Set(), logger, ...options });
+    sweepRetainedCopies({
+      backupsDir, stateDir, env: {}, nowMs: kNow, readOpen: () => new Set(), logger,
+      ...(options.boot ? { firstHealthyStart: firstStartOf(options.boot) } : {}),
+      ...options,
+    });
   const healthyBootAfterNewest = { version: kVersion, readyAtMs: Date.parse("2026-11-07T09:05:00Z") };
 
   beforeEach(() => {
@@ -63,7 +79,8 @@ describe("OpenClaw update capture retention", () => {
     logger = { log: vi.fn() };
   });
   afterEach(() => {
-    noteHealthyGatewayBoot({ version: null, readyAtMs: null });
+    noteHealthyGatewayBoot({ version: null, readyAt: null });
+    fs.rmSync(kRecordPath, { force: true });
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -121,9 +138,12 @@ describe("OpenClaw update capture retention", () => {
     expect(bytes[0]).toBeGreaterThanOrEqual(32 * 1024);
     expect(bytes[1]).toBeGreaterThanOrEqual(64 * 1024);
     expect(bytes[0] + bytes[1]).toBe(result.freedBytes);
-    expect(lines[2]).toMatch(/2 due, removed 2 .*; update captures keep newest 1 after a healthy gateway boot$/);
+    expect(lines[2]).toMatch(/2 due, removed 2 .*; update captures keep newest 1 and the last one before this OpenClaw version's first healthy start$/);
 
-    const allOld = planRetention({ stateDir, env: {}, nowMs: kNow + 400 * kDay, boot: healthyBootAfterNewest, readInstalledVersion: installed() });
+    const allOld = planRetention({
+      stateDir, env: {}, nowMs: kNow + 400 * kDay, boot: healthyBootAfterNewest, readInstalledVersion: installed(),
+      firstHealthyStart: firstStartOf(healthyBootAfterNewest),
+    });
     expect(captureVerdicts(allOld)).toEqual({ "doctor-nov07": "kept_newest" });
   });
 
@@ -179,25 +199,131 @@ describe("OpenClaw update capture retention", () => {
     const readyAtMs = Date.parse("2026-11-07T09:05:00Z");
     let nowMs = readyAtMs - 3000;
     const probes = [{ ok: false, kind: "unready", reason: "starting" }, { ok: true, kind: "ready" }];
-    const seen = [];
     const clear = createRestartRequiredLaunchClear({
       restartRequiredState: { markAppliedByLaunch: () => null },
       isLaunchCurrent: () => true,
       probeReadiness: async () => probes.shift() ?? { ok: true, kind: "ready" },
       sleep: async (ms) => { nowMs += ms; },
       now: () => nowMs,
-      onLaunchReady: (ready) => {
-        seen.push(ready);
-        noteHealthyGatewayBoot({ version: kVersion, readyAtMs: ready.readyAt });
-      },
+      readInstalledVersion: installed(),
+      onLaunchReady: noteHealthyGatewayBoot,
     });
     expect(getHealthyGatewayBoot()).toBe(null);
     await clear.onGatewayLaunch({ generation: 3, launchedAt: readyAtMs - 5000, supervision: "managed" });
-    expect(seen).toEqual([{ generation: 3, launchedAt: readyAtMs - 5000, readyAt: readyAtMs - 2000 }]);
     expect(getHealthyGatewayBoot()).toEqual({ version: kVersion, readyAtMs: readyAtMs - 2000 });
+    expect(readFirstHealthyStart()).toEqual({ version: kVersion, firstHealthyAtMs: readyAtMs - 2000 });
 
     sweep({ readInstalledVersion: installed() });
     expect(fs.readdirSync(captures)).toEqual(["doctor-nov07"]);
+  });
+
+  it("credits a healthy start to the OpenClaw version installed at launch, never one installed while it got ready", async () => {
+    auditCaptures();
+    const readyAtMs = Date.parse("2026-11-07T09:05:00Z");
+    let nowMs = readyAtMs - 3000;
+    let installedNow = kVersion;
+    const probes = [{ ok: false, kind: "unready", reason: "starting" }, { ok: true, kind: "ready" }];
+    const seen = [];
+    const clear = createRestartRequiredLaunchClear({
+      restartRequiredState: { markAppliedByLaunch: () => null },
+      isLaunchCurrent: () => true,
+      probeReadiness: async () => probes.shift() ?? { ok: true, kind: "ready" },
+      sleep: async (ms) => { nowMs += ms; installedNow = "2026.10.10"; },
+      now: () => nowMs,
+      readInstalledVersion: () => installedNow,
+      onLaunchReady: (ready) => { seen.push(ready); noteHealthyGatewayBoot(ready); },
+    });
+    await clear.onGatewayLaunch({ generation: 4, launchedAt: readyAtMs - 5000, supervision: "managed" });
+    expect(seen).toEqual([{ generation: 4, launchedAt: readyAtMs - 5000, readyAt: readyAtMs - 2000, version: kVersion }]);
+    expect(getHealthyGatewayBoot()).toEqual({ version: kVersion, readyAtMs: readyAtMs - 2000 });
+    expect(readFirstHealthyStart()?.version).toBe(kVersion);
+
+    const plan = planRetention({ stateDir, env: {}, nowMs: kNow, readInstalledVersion: () => installedNow });
+    expect(plan.families[0].gate).toBe("waiting_for_boot_on_installed_version");
+    expect(sweep({ readInstalledVersion: () => installedNow })).toMatchObject({ due: 0, removed: 0 });
+    expect(fs.readdirSync(captures)).toHaveLength(3);
+  });
+
+  describe("the capture taken before an upgrade", () => {
+    const kOld = "2026.10.6";
+    const kNext = "2026.10.10";
+    const upgradeStart = Date.parse("2026-11-01T09:05:00Z");
+    const repairStart = Date.parse("2026-11-07T09:05:00Z");
+    const threeCaptures = () => {
+      capture("doctor-old", Date.parse("2026-10-20T09:00:00Z"));
+      capture("doctor-upgrade", Date.parse("2026-11-01T09:00:00Z"));
+      capture("doctor-repair", Date.parse("2026-11-07T09:00:00Z"));
+    };
+
+    it("keeps the upgrade capture beside a newer repair capture, and removes only the older one", () => {
+      threeCaptures();
+      const options = {
+        boot: { version: kVersion, readyAtMs: repairStart },
+        firstHealthyStart: { version: kVersion, firstHealthyAtMs: upgradeStart },
+        readInstalledVersion: installed(),
+      };
+      const plan = planRetention({ stateDir, env: {}, nowMs: kNow, ...options });
+      expect(captureVerdicts(plan)).toEqual({
+        "doctor-repair": "kept_newest",
+        "doctor-upgrade": "kept_before_upgrade",
+        "doctor-old": "due",
+      });
+      expect(plan.families[0]).toMatchObject({ gate: "open", firstHealthyStart: { version: kVersion, firstHealthyAtMs: upgradeStart } });
+      expect(sweep(options)).toMatchObject({ due: 1, removed: 1 });
+      expect(fs.readdirSync(captures).sort()).toEqual(["doctor-repair", "doctor-upgrade"]);
+    });
+
+    it("removes nothing while the saved first healthy start is missing, malformed or for another version", () => {
+      threeCaptures();
+      const boot = { version: kVersion, readyAtMs: repairStart };
+      for (const firstHealthyStart of [null, { version: kOld, firstHealthyAtMs: upgradeStart }]) {
+        const plan = planRetention({ stateDir, env: {}, nowMs: kNow, boot, firstHealthyStart, readInstalledVersion: installed() });
+        expect(plan.families[0].gate).toBe("waiting_for_first_healthy_start_record");
+        expect(Object.values(captureVerdicts(plan)).filter((verdict) => verdict === "due")).toEqual([]);
+      }
+      fs.mkdirSync(path.dirname(kRecordPath), { recursive: true });
+      for (const junk of ["not json", "{}", JSON.stringify({ version: kVersion, firstHealthyAtMs: "soon" })]) {
+        fs.writeFileSync(kRecordPath, junk);
+        expect(readFirstHealthyStart()).toBe(null);
+        expect(sweep({ boot, firstHealthyStart: undefined, readInstalledVersion: installed() })).toMatchObject({ due: 0, removed: 0 });
+      }
+      expect(fs.readdirSync(captures)).toHaveLength(3);
+      noteHealthyGatewayBoot({ version: kVersion, readyAt: repairStart });
+      expect(readFirstHealthyStart()).toEqual({ version: kVersion, firstHealthyAtMs: repairStart });
+    });
+
+    it("still protects it after AlphaClaw restarts on the same version, and releases it at the next version's first healthy start", () => {
+      threeCaptures();
+      noteHealthyGatewayBoot({ version: kVersion, readyAt: upgradeStart });
+      expect(JSON.parse(fs.readFileSync(kRecordPath, "utf8"))).toEqual({ version: kVersion, firstHealthyAtMs: upgradeStart });
+
+      delete require.cache[require.resolve("../../lib/server/copy-retention")];
+      const restarted = require("../../lib/server/copy-retention");
+      expect(restarted.getHealthyGatewayBoot()).toBe(null);
+      restarted.noteHealthyGatewayBoot({ version: kVersion, readyAt: repairStart });
+      expect(restarted.readFirstHealthyStart()).toEqual({ version: kVersion, firstHealthyAtMs: upgradeStart });
+      const options = { backupsDir, stateDir, env: {}, nowMs: kNow, readOpen: () => new Set(), logger };
+      expect(restarted.sweepRetainedCopies({ ...options, readInstalledVersion: installed() })).toMatchObject({ removed: 1 });
+      expect(fs.readdirSync(captures).sort()).toEqual(["doctor-repair", "doctor-upgrade"]);
+
+      capture("doctor-next-upgrade", Date.parse("2026-11-08T09:00:00Z"));
+      expect(restarted.sweepRetainedCopies({ ...options, readInstalledVersion: installed(kNext) })).toMatchObject({ due: 0, removed: 0 });
+      restarted.noteHealthyGatewayBoot({ version: kNext, readyAt: Date.parse("2026-11-08T09:05:00Z") });
+      expect(restarted.readFirstHealthyStart()).toEqual({ version: kNext, firstHealthyAtMs: Date.parse("2026-11-08T09:05:00Z") });
+      expect(restarted.sweepRetainedCopies({ ...options, readInstalledVersion: installed(kNext) })).toMatchObject({ removed: 2 });
+      expect(fs.readdirSync(captures)).toEqual(["doctor-next-upgrade"]);
+      restarted.noteHealthyGatewayBoot({ version: null, readyAt: null });
+    });
+  });
+
+  it("server.js hands each verified ready, with the version installed at launch, to the capture gate", () => {
+    const source = fs.readFileSync(path.join(__dirname, "..", "..", "lib", "server.js"), "utf8");
+    expect(source).toMatch(/const \{[^}]*\bnoteHealthyGatewayBoot\b[^}]*\} = require\("\.\/server\/copy-retention"\);/);
+    const wiring = source.slice(source.indexOf("createRestartRequiredLaunchClear({"));
+    const block = wiring.slice(0, wiring.indexOf("});"));
+    expect(block).toContain("onLaunchReady: noteHealthyGatewayBoot,");
+    expect(block).toContain("readInstalledVersion: () => openclawRuntime.getInfo().installedVersion,");
+    expect(source).toMatch(/setGatewayLaunchHandler\(\(payload\) => \{[^}]*restartRequiredLaunchClear\.onGatewayLaunch\(payload\)/);
   });
 
   it("records no healthy boot for an adopted gateway, a launch that never gets ready, or one replaced first", async () => {

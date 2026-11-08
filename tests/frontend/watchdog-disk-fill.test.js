@@ -83,6 +83,30 @@ describe("frontend/watchdog resources card: days until the disk is full", () => 
     expect(badges(tree)).toHaveLength(0);
   });
 
+  it("says the disk is filling fast, not under the warning line, when the last hour's growth opened the warning", () => {
+    const fast = volume({ state: "low", trigger: "eta", freeBytes: 60 * kGiB, etaMs: 4.2 * 3_600_000 });
+    const tree = renderCard({ volumes: [fast] });
+    const text = treeText(tree);
+    expect(text).toContain("Disk filling fast");
+    expect(text).toContain("60.0 GB free and filling fast: full in about 4 hours at the last hour's rate");
+    expect(text).not.toContain("warning line");
+    expect(text).not.toContain("Disk space low");
+    expect(badges(tree).map((badge) => badge.props.tone)).toEqual(["warning"]);
+
+    const critical = buildDiskSpaceModel({ volumes: [volume({ state: "critical", trigger: "eta", freeBytes: 60 * kGiB, etaMs: 40 * 60_000 })] });
+    expect(critical.warning).toEqual({
+      tone: "danger",
+      label: "Disk filling fast",
+      text: "60.0 GB free and filling fast: full in less than an hour at the last hour's rate",
+    });
+    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", freeBytes: 60 * kGiB, etaMs: 70 * 60_000 })] }).warning.text)
+      .toBe("60.0 GB free and filling fast: full in about 1 hour at the last hour's rate");
+    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", freeBytes: 60 * kGiB, etaMs: null })] }).warning.text)
+      .toBe("60.0 GB free and filling fast");
+    expect(buildDiskSpaceModel({ volumes: [volume({ state: "low", trigger: "eta", etaMs: 3 * 3_600_000 })] }).warning)
+      .toMatchObject({ label: "Disk space low", text: "14.0 GB free, under the 20.0 GB warning line" });
+  });
+
   it("says not enough data yet before there is a trend", () => {
     const model = buildDiskSpaceModel({ volumes: [volume({ fillEstimate: { status: "not_enough_data", daysToFull: null } })] });
     expect(model).toEqual({ warning: null, fill: "Days until the disk is full: not enough data yet", filling: false });
