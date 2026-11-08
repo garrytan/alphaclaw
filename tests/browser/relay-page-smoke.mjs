@@ -87,6 +87,9 @@ try {
   await page.getByText("wintermute", { exact: false }).first().waitFor();
   await page.getByText("relay-0a1b2c3d", { exact: false }).first().waitFor();
   assert.doesNotMatch(await page.locator("body").innerText(), /Restart the gateway if it looks wedged/, "a relay log opens only when expanded");
+  await page.getByText("Relay is ready. Two conversations, all answered.", { exact: true }).waitFor();
+  assert.equal(await page.locator(".ac-btn-solid").count(), 1, "one solid button on the page");
+  assert.equal(await page.locator(".ac-btn-solid").innerText(), "Allow a new connection");
   assert.equal(await page.getByRole("link", { name: /@capy-alph-63/ }).first().getAttribute("href"), "#/chat/" + encodeURIComponent("agent:main:relay-capy-alph-63"), "a row opens its session in Chat");
   assert.equal(await page.getByRole("button", { name: "Relay log" }).count(), 1, "a session past retention has no relay log");
   const logToggle = page.getByRole("button", { name: "Relay log" });
@@ -116,7 +119,7 @@ try {
   }
   if (shots) await page.screenshot({ path: path.join(shots, "relay-page-mobile.png"), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log("PASS: status, agents, needs-you approval, interrupted run, exposure warning, conversation rows linking to Chat with an expandable relay log, one-time consent code, desktop/mobile layout");
+  console.log("PASS: headline, one solid button, status, agents, needs-you approval, interrupted run, exposure warning, conversation rows linking to Chat with an expandable relay log, one-time consent code, desktop/mobile layout");
 } finally {
   await browser?.close();
   server.close();
