@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.211] - 2026-11-08
+
+A regular OpenClaw compaction no longer looks like a memory leak to the watchdog. On OpenClaw 2026.10.9 a compaction parses the session's whole transcript into the gateway's main heap. On Garry's box one 575 MB Telegram session lifted the gateway by up to 1.4 GB for the 2-3 minutes each summary took, and RSS then needed about 15 minutes to settle. The watchdog read the afternoon's compactions as growth twice (16:40 and 17:44), warning the owner both times. It did not restart the gateway that day, but a replay of the 17:32 compaction with the heap reading stale restarted it in the middle of a turn on the previous release.
+
+### Fixed
+- **No memory restart for a compaction.** Memory at 90% of the memory budget (`watchdog.memory.budgetMb`, or by default 75% of the container or host memory) now counts toward a critical verdict and a restart only once it has stayed there for 15 minutes. That is longer than a compaction and its memory tail. A V8 heap near its limit, or the gateway worker filling the container, still counts at once.
+- **A fast leak is still restarted before the container fills.** When the worker's last five minutes of growth would fill the container (or the host, without a container limit) within 5 minutes, the memory budget counts at once instead of waiting the 15 minutes. A compaction that close to filling the container skips the wait too, because a restart beats an out-of-memory kill there. The wait also starts over after the memory reading has been missing for five samples in a row.
+- **The memory notice says when a budget restart is due.** While the worker is over the budget and the 15 minutes are running, the critical notice names the time the watchdog will restart the gateway, instead of saying it will not restart it.
+- **No growth warning while memory settles.** The trend check no longer latches "rising steadily" while the worker sits at or below 90% of its own peak from the last 30 minutes, which is the same drop that already clears an episode. A real leak climbs past its peak and latches then.
+
+### Tests
+- New `gateway-memory-compaction-replay` tests replay the box's Nov 8 worker RSS through the real watchdog tick. The day is built from the box's 10-minute RSS log, with the gateway's own 30-second samples verbatim for 17:25-17:47. The replay runs with heap telemetry fresh and with it stale during the 17:32 compaction. Both cases fail on the previous main. The replay latched warnings after 17:08, and with stale telemetry it restarted the gateway at 17:34. A leak on top of the same day still latches and is still restarted on the budget.
+- New watchdog tests: a 350 MiB/min native leak on an 8 GiB container with a 2,400 MB budget and no heap telemetry is restarted at about 7,800 MB, under the limit (the previous commit restarted it at 8,500 MB, past the limit); a compaction-shaped ramp of +1.4 GB on a 16 GiB container is not restarted; and the critical notice names the budget restart time.
+
 ## [0.10.210] - 2026-11-07
 
 The OpenClaw 2026.10.9 gateway runs fewer worker threads on Linux machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB. In an 8-hour test on a 32-CPU host the gateway ran 19 worker threads instead of 27 and used about 0.7 GB less memory (3.3 GB instead of 4.0 GB), with no failed turns.
