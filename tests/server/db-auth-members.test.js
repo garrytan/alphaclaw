@@ -58,6 +58,30 @@ describe("server/db/auth members store (4.1)", () => {
     ).toBeNull();
   });
 
+  it("the async password check and the decoy hash give the same answers and leave the event loop free", async () => {
+    const crypto = require("crypto");
+    const owner = createOwner();
+    const spy = vi.spyOn(crypto, "scrypt");
+    let finished = 0;
+    const work = [
+      store.verifyMemberPasswordAsync({ email: "OWNER@example.com", password: "correct horse battery" }),
+      store.verifyMemberPasswordAsync({ email: "owner@example.com", password: "wrong" }),
+      store.verifyMemberPasswordAsync({ email: "nobody@example.com", password: "x" }),
+      store.burnDecoyVerification("x"),
+    ].map((pending) => Promise.resolve(pending).then((value) => {
+      finished += 1;
+      return value;
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(finished).toBe(0);
+    const [right, wrong, unknown] = await Promise.all(work);
+    expect(right).toEqual(expect.objectContaining({ id: owner.id }));
+    expect(wrong).toBeNull();
+    expect(unknown).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(4);
+    spy.mockRestore();
+  });
+
   it("refuses empty, near-miss and different-length passwords, and a corrupt stored hash, without throwing", () => {
     createOwner();
     const verify = (password) =>
@@ -116,11 +140,11 @@ describe("server/db/auth members store (4.1)", () => {
     }
   });
 
-  it("acceptInvite validates the token before any email check (no enumeration oracle, H3)", () => {
+  it("acceptInvite validates the token before any email check (no enumeration oracle, H3)", async () => {
     createOwner();
     // A bad token returns invite_invalid even when the email is already taken —
     // an unauthenticated caller cannot distinguish taken vs free emails.
-    const res = store.acceptInvite({
+    const res = await store.acceptInvite({
       token: "no-such-token",
       providedEmail: "owner@example.com",
       password: "long enough pw",
@@ -128,7 +152,7 @@ describe("server/db/auth members store (4.1)", () => {
     expect(res).toEqual({ ok: false, code: "invite_invalid" });
   });
 
-  it("acceptInvite does not burn the single-use invite when member creation fails (F9/H4)", () => {
+  it("acceptInvite does not burn the single-use invite when member creation fails (F9/H4)", async () => {
     const owner = createOwner();
     // Pin the invite to an email that is already taken → create must fail, and
     // the invite must remain usable.
@@ -136,13 +160,13 @@ describe("server/db/auth members store (4.1)", () => {
       email: "owner@example.com",
       createdBy: owner.id,
     });
-    const first = store.acceptInvite({
+    const first = await store.acceptInvite({
       token: invite.token,
       password: "long enough pw",
     });
     expect(first).toEqual(expect.objectContaining({ ok: false, code: "email_taken" }));
     // The token is NOT consumed — a later accept with a free email still works.
-    const second = store.acceptInvite({
+    const second = await store.acceptInvite({
       token: invite.token,
       providedEmail: "new@example.com",
       password: "long enough pw",
@@ -153,10 +177,10 @@ describe("server/db/auth members store (4.1)", () => {
     expect(store.getMemberByEmail("new@example.com")).toBeNull();
   });
 
-  it("acceptInvite consumes the invite and creates the member on success (F9)", () => {
+  it("acceptInvite consumes the invite and creates the member on success (F9)", async () => {
     const owner = createOwner();
     const invite = store.createInvite({ role: "member", createdBy: owner.id });
-    const res = store.acceptInvite({
+    const res = await store.acceptInvite({
       token: invite.token,
       providedEmail: "teammate@example.com",
       password: "long enough pw",
@@ -165,7 +189,7 @@ describe("server/db/auth members store (4.1)", () => {
     expect(res.member.email).toBe("teammate@example.com");
     expect(res.member.role).toBe("member");
     // Single-use: a second accept with the same token is rejected.
-    const again = store.acceptInvite({
+    const again = await store.acceptInvite({
       token: invite.token,
       providedEmail: "other@example.com",
       password: "long enough pw",

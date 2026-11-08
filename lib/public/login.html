@@ -66,7 +66,34 @@
           class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted hidden"
           style="color: var(--text)"
         />
-        <div id="error" class="text-status-error-muted text-xs hidden"></div>
+        <div id="recovery" class="space-y-2 hidden">
+          <p id="recovery-help" class="text-xs" style="color: var(--text-muted)">
+            Locked out? Enter the recovery code set as
+            <code>ALPHACLAW_LOGIN_RECOVERY_CODE</code> in your hosting
+            environment, with your password. Not set? Set 32+ random
+            characters there (for example <code>openssl rand -hex 32</code>)
+            and redeploy, or wait until the lockout ends.
+          </p>
+          <input
+            id="recovery-code"
+            type="password"
+            placeholder="Recovery code"
+            autocomplete="off"
+            spellcheck="false"
+            aria-describedby="recovery-help"
+            class="w-full bg-field border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-fg-muted"
+            style="color: var(--text)"
+          />
+        </div>
+        <div id="error" class="text-status-error-muted text-xs hidden" role="status" aria-live="polite"></div>
+        <button
+          id="recovery-toggle"
+          type="button"
+          class="w-full text-xs hidden"
+          style="color: var(--text-muted)"
+        >
+          Locked out? Use your recovery code
+        </button>
         <button
           id="submit-btn"
           type="submit"
