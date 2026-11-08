@@ -61,6 +61,22 @@ describe("ALPHACLAW_GATEWAY_LOCKED_ENV", () => {
     expect(child.ANTHROPIC_API_KEY).toBe("k");
   });
 
+it("strips a locked key from OPENCLAW_SERVICE_MANAGED_ENV_KEYS, so OpenClaw's .env loader cannot override the deployment value", () => {
+    const { policy } = loadWithDeploymentEnv("WM_GUARDS_DISABLE");
+    const child = policy.blankDeniedGatewayEnvKeys(
+      policy.filterGatewayChildEnv(
+        {
+          WM_GUARDS_DISABLE: "0",
+          OPENCLAW_SYSTEMD_UNIT: "x.service",
+          OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "wm_guards_disable, OTHER_KEY",
+        },
+        { logger: quietLogger(), hatch: noHatch },
+      ),
+    );
+    expect(child.WM_GUARDS_DISABLE).toBe("0");
+    expect(child.OPENCLAW_SERVICE_MANAGED_ENV_KEYS).toBe("OTHER_KEY");
+  });
+
   it("never passes the list itself to the gateway child", () => {
     const { policy } = loadWithDeploymentEnv("WM_GUARDS_DISABLE");
     const child = policy.blankDeniedGatewayEnvKeys(
