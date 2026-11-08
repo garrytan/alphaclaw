@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.209] - 2026-11-07
+## [0.10.210] - 2026-11-07
 
 The OpenClaw 2026.10.9 gateway no longer keeps about 20 extra worker threads on machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB, so the gateway's memory grew by gigabytes over a day on a 32-CPU host. The gateway also now uses at most 2 malloc arenas on those OpenClaw versions, which trims about a tenth of its native memory on such hosts.
 
@@ -17,6 +17,23 @@ The OpenClaw 2026.10.9 gateway no longer keeps about 20 extra worker threads on 
 ### Tests
 - New `gateway-memory-worker-pool-cap` tests run a respawning `gateway run` fixture with OpenClaw 2026.10.9's pool-sizing module on a simulated 32-CPU host and check the pool sizes against 2026.10.10's. The 2026.10.9 case fails on the previous main.
 - New tests check that a respawning 2026.10.9 `gateway run` fixture starts with `MALLOC_ARENA_MAX=2`, that the gateway and the commands it runs no longer see it afterwards, that 2026.10.10 and later get no cap, and that an operator's value wins.
+
+## [0.10.209] - 2026-11-07
+
+The setup wizard and the Gmail and Telegram wizards share one step indicator, and the gateway card no longer sits above step 1 on a healthy new box. Each wizard now shows "Step n of m", the step's title as a heading and a segmented bar that screen readers announce as one progress bar.
+
+### Changed
+- **One step indicator for the three wizards.** The setup wizard, the Gmail Pub/Sub wizard and the Telegram workspace wizard each drew their own thin bar, with the step words in a pill, a tooltip or a corner label. They now render the same indicator. The count and the title are always visible, the bar marks finished, current and remaining steps (the current one is outlined), and it carries `role="progressbar"` with the step count and title as its spoken value. On the light theme finished steps use the darker cyan so the bar stays visible on white.
+- **No gateway card above a new box's setup.** Before setup, the card said "Setup required" with Restart and Repair greyed out, which looked like something was wrong. It now appears during setup only when the gateway reports a problem (a red or yellow state such as startup failed, configuration error or down), and it then shows that problem, with Restart and Repair still blocked until setup completes.
+- **Plain words in the setup wizard.** "Choose your destiny" is now "Choose how to set up this box", and the Channels step sends you to the Channels page instead of "General → Channels", a page that was renamed Home.
+- **Wizard buttons on a phone.** At phone width the wizards' Back and primary buttons stack in one column, primary first and full width, right under the form instead of side by side.
+- **Visible, linked labels on wizard fields.** The Telegram group chat ID and topic instructions fields had only placeholder text, and the Gmail project ID and session fields had text above them that was not tied to the field. Each now has a visible label linked to its field, as do the setup wizard's own fields. The Telegram step titles moved from each step into the indicator ("Verify bot setup", "Create a Telegram group", "Verify the group", "Create topics", "Summary").
+
+- **Readable links under setup wizard fields.** The links in field hints (@BotFather, the setup guides, the API key pages) are now underlined, and an open channel section on the light theme no longer puts them on a grey that fails contrast.
+
+### Not covered
+- The Nodes, Team and Buzz channel wizards keep their own indicator inside the shared wizard dialog.
+- During setup the dashboard does not stream gateway status, so the card judges only the last status it saw before setup opened. On a fresh box there is none, so the card stays hidden even if the gateway later fails during setup.
 
 ## [0.10.208] - 2026-11-07
 
