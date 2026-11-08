@@ -101,6 +101,13 @@ tools do not inherit it. Operator `NODE_OPTIONS` remain intact. The main-thread
 sampler activates when the pinned gateway identifies itself as `openclaw-gateway`.
 Other entrypoint/title variants degrade to unavailable telemetry.
 
+The same eligible bootstrap first runs `worker-pool-cap.js` in its own caught
+import. For an OpenClaw package older than 2026.10.10 on a host with more than
+5 CPUs, it makes only the session-transcript and SQLite broker pool sizing calls
+see 5 CPUs, matching 2026.10.10's fixed pool sizes (openclaw#169110); every other
+caller keeps the real count. It works on Linux only (elsewhere the preload drops
+out before OpenClaw respawns the gateway) and is off when telemetry is off.
+
 The sampler publishes immediately and every 30 seconds: process RSS, heap
 used/total, actual V8 heap limit, external memory, and ArrayBuffers. ArrayBuffers
 are included in external memory. A natural major-GC observer records the lowest
