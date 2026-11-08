@@ -637,6 +637,30 @@ describe("server/doctor-fix-runner retained capture (ALPH-69)", () => {
     ]);
   });
 
+  it("reports the capture Doctor retained when the run itself throws", async () => {
+    const onCaptureRetained = vi.fn();
+    const runStream = {
+      runStreamed: vi.fn(async ({ onOutput }) => {
+        onOutput("Pre-repair state retained for manual recovery at /data/.openclaw.update-captures/doctor-7c/manifest.json.\n", "stdout");
+        throw new Error("spawn bookkeeping failed");
+      }),
+    };
+    const run = createDoctorFixRunner({
+      openclawDir: mkOpenclawDir(),
+      doctorGuard: passthroughGuard(),
+      runStream,
+      gatewayEnv: () => kGatewayEnv,
+      notifier: { notify: vi.fn() },
+      logger: kSilentLogger,
+      getOpenclawVersion: () => "2026.10.9",
+      onCaptureRetained,
+    });
+    await expect(run({ source: "repair" })).rejects.toThrow("spawn bookkeeping failed");
+    expect(onCaptureRetained.mock.calls).toEqual([
+      [{ manifestPath: "/data/.openclaw.update-captures/doctor-7c/manifest.json", openclawVersion: "2026.10.9", source: "repair" }],
+    ]);
+  });
+
   it("reports nothing when Doctor retained no capture, and a failing callback never fails the run", async () => {
     const onCaptureRetained = vi.fn();
     await runWith({ chunks: [["Doctor complete\n", "stdout"]], onCaptureRetained });

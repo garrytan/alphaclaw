@@ -43,7 +43,14 @@ describe("version-anchored retention for OpenClaw update captures", () => {
     return directory;
   };
   const makeTracker = (overrides = {}) =>
-    createUpdateCaptureTracker({ managedDir, getInstalledVersion: () => installed, nowFn: () => clock, logger, ...overrides });
+    createUpdateCaptureTracker({
+      managedDir,
+      getInstalledVersion: () => installed,
+      listCaptures: () => listManagedCaptures({ stateDir }),
+      nowFn: () => clock,
+      logger,
+      ...overrides,
+    });
   // A Doctor run on the installed version seals a capture and prints its line.
   const doctorSeals = (tracker, name) => {
     clock += kHour;
@@ -55,7 +62,7 @@ describe("version-anchored retention for OpenClaw update captures", () => {
     clock += kHour;
     const launchedAt = clock;
     clock += 60_000;
-    return tracker.noteHealthyStart({ openclawVersion: version, launchedAt, listCaptures: () => listManagedCaptures({ stateDir }) });
+    return tracker.noteHealthyStart({ openclawVersion: version, launchedAt });
   };
   const sweep = (tracker, env = {}) =>
     sweepRetainedCopies({ stateDir, captureState: tracker ? tracker.getState({ flush: true }) : null, env, nowMs: clock, readOpen: () => new Set(), logger });
@@ -190,9 +197,11 @@ describe("version-anchored retention for OpenClaw update captures", () => {
     doctorSeals(tracker, "doctor-upgrade");
     healthyStart(tracker);
     expect(doctorSeals(tracker, "doctor-after-ready")).toEqual({ promoted: false, reason: "same_version" });
-    const before = fs.readFileSync(path.join(managedDir, "openclaw-update-captures.json"), "utf8");
+    const before = readCaptureRecord({ managedDir }).record;
     expect(healthyStart(tracker)).toEqual({ changed: false });
-    expect(fs.readFileSync(path.join(managedDir, "openclaw-update-captures.json"), "utf8")).toBe(before);
+    const after = readCaptureRecord({ managedDir }).record;
+    expect(after).toEqual({ ...before, lastHealthyAt: clock });
+    expect(after.lastHealthyAt).toBeGreaterThan(before.lastHealthyAt);
     expect(makeTracker().getState().record.preUpgradeCapture.name).toBe("doctor-upgrade");
     expect(verdicts(makeTracker())["doctor-upgrade"]).toBe("kept_pre_upgrade");
   });
@@ -215,6 +224,165 @@ describe("version-anchored retention for OpenClaw update captures", () => {
     expect(left()).toEqual(["doctor-before-c", "doctor-c-repair", "doctor-c-repair2"]);
   });
 
+  it("an upgrade that never starts cleanly, fixed forward to a newer version: the copy from before the failed upgrade is still held after the newer version starts cleanly (Doctor line seen)", () => {
+    const tracker = establishedOnA();
+    installed = B;
+    expect(doctorSeals(tracker, "doctor-upgrade")).toEqual({ promoted: true, name: "doctor-upgrade" });
+    doctorSeals(tracker, "doctor-b-repair1");
+    doctorSeals(tracker, "doctor-b-repair2");
+    installed = C;
+    expect(doctorSeals(tracker, "doctor-before-c")).toEqual({ promoted: false, reason: "already_recorded" });
+    expect(logger.log.mock.calls.map(([line]) => line)).toContain(
+      "[alphaclaw] update captures: keeping doctor-upgrade as the copy from before OpenClaw " + A + " -> " + C + " (" + B + " never started cleanly)",
+    );
+    healthyStart(tracker);
+    sweep(tracker);
+    expect(readCaptureRecord({ managedDir }).record.preUpgradeCapture).toMatchObject({ name: "doctor-upgrade", fromVersion: A, toVersion: C, settled: true });
+    expect(left()).toEqual(["doctor-b-repair2", "doctor-before-c", "doctor-upgrade"]);
+  });
+
+  it("an upgrade that never starts cleanly, fixed forward to a newer version whose Doctor line AlphaClaw never saw: the newer version's clean start keeps the copy from before the failed upgrade", () => {
+    const tracker = establishedOnA();
+    installed = B;
+    doctorSeals(tracker, "doctor-upgrade");
+    doctorSeals(tracker, "doctor-b-repair1");
+    doctorSeals(tracker, "doctor-b-repair2");
+    installed = C;
+    clock += kHour;
+    capture("doctor-before-c", clock);
+    healthyStart(tracker);
+    doctorSeals(tracker, "doctor-c-repair");
+    sweep(tracker);
+    expect(readCaptureRecord({ managedDir }).record.preUpgradeCapture).toMatchObject({ name: "doctor-upgrade", fromVersion: A, toVersion: C, source: "doctor", settled: true });
+    expect(left()).toEqual(["doctor-before-c", "doctor-c-repair", "doctor-upgrade"]);
+  });
+
+  it("AlphaClaw dies before it reads Doctor's line for the pre-upgrade copy: the next Doctor line on the new version still holds that copy, not the repair copy", () => {
+    const tracker = establishedOnA();
+    installed = B;
+    clock += kHour;
+    capture("doctor-upgrade", clock);
+    const restarted = makeTracker();
+    expect(doctorSeals(restarted, "doctor-b-repair1")).toEqual({ promoted: true, name: "doctor-upgrade" });
+    expect(doctorSeals(restarted, "doctor-b-repair2")).toEqual({ promoted: false, reason: "already_recorded" });
+    healthyStart(restarted);
+    sweep(restarted);
+    expect(readCaptureRecord({ managedDir }).record.preUpgradeCapture).toMatchObject({ name: "doctor-upgrade", fromVersion: A, toVersion: B, source: "doctor", settled: true });
+    expect(left()).toEqual(["doctor-b-repair1", "doctor-b-repair2", "doctor-upgrade"]);
+    expect(tracker).toBeTruthy();
+  });
+
+  it("a container restart on the same version moves the boundary: the upgrade's copy is held, not the older restart copy", () => {
+    const tracker = establishedOnA();
+    clock += kDay;
+    capture("doctor-a-restart", clock);
+    healthyStart(tracker);
+    installed = B;
+    clock += kHour;
+    capture("doctor-upgrade", clock);
+    expect(doctorSeals(tracker, "doctor-b-repair")).toEqual({ promoted: true, name: "doctor-upgrade" });
+    healthyStart(tracker);
+    sweep(tracker);
+    expect(readCaptureRecord({ managedDir }).record.preUpgradeCapture).toMatchObject({ name: "doctor-upgrade", fromVersion: A, toVersion: B });
+    expect(left()).toEqual(["doctor-a-restart", "doctor-b-repair", "doctor-upgrade"]);
+  });
+
+  it("leaves the record as it is while the captures can't be listed, and places the copy once they can", () => {
+    establishedOnA();
+    let listingFails = false;
+    const tracker = makeTracker({
+      listCaptures: () => {
+        if (listingFails) throw Object.assign(new Error("I/O error"), { code: "EIO" });
+        return listManagedCaptures({ stateDir });
+      },
+    });
+    const recordPath = path.join(managedDir, "openclaw-update-captures.json");
+    const before = fs.readFileSync(recordPath, "utf8");
+    installed = B;
+    listingFails = true;
+    expect(doctorSeals(tracker, "doctor-upgrade")).toEqual({ promoted: false, reason: "listing_failed" });
+    expect(healthyStart(tracker)).toEqual({ changed: false, reason: "listing_failed" });
+    expect(fs.readFileSync(recordPath, "utf8")).toBe(before);
+    expect(sweep(tracker).removed).toBe(0);
+    expect(verdicts(tracker)["doctor-a1"]).toBe("kept_unproven");
+
+    listingFails = false;
+    expect(healthyStart(tracker)).toEqual({ changed: true });
+    expect(readCaptureRecord({ managedDir }).record).toMatchObject({
+      lastHealthyVersion: B,
+      preUpgradeCapture: { name: "doctor-upgrade", fromVersion: A, toVersion: B, source: "healthy_start", settled: true },
+    });
+  });
+
+  it("keeps copies from before the record too while the installed version is unknown", () => {
+    clock = kStart + 60 * kDay;
+    for (const [name, days] of [["doctor-old", 40], ["doctor-older", 20], ["doctor-c3", 3], ["doctor-c2", 2], ["doctor-c1", 1]]) capture(name, clock - days * kDay);
+    const tracker = makeTracker();
+    healthyStart(tracker);
+    installed = null;
+    expect(verdicts(tracker)).toMatchObject({ "doctor-old": "kept_unplaced:version_unknown", "doctor-older": "kept_unplaced:version_unknown" });
+    expect(sweep(tracker).removed).toBe(0);
+    installed = A;
+    expect(sweep(tracker).removed).toBe(2);
+    expect(left()).toEqual(["doctor-c1", "doctor-c2", "doctor-c3"]);
+  });
+
+  it("while the record can't be saved, copies from before the record still follow the keep-3-and-7-days rule and the rest are kept", () => {
+    let failWrites = false;
+    const flakyFs = Object.create(fs);
+    flakyFs.renameSync = (...args) => {
+      if (failWrites) throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+      return fs.renameSync(...args);
+    };
+    clock = kStart + 60 * kDay;
+    for (const [name, days] of [["doctor-old", 40], ["doctor-older", 20], ["doctor-c3", 3], ["doctor-c2", 2], ["doctor-c1", 1]]) capture(name, clock - days * kDay);
+    const tracker = makeTracker({ fsModule: flakyFs });
+    healthyStart(tracker);
+    doctorSeals(tracker, "doctor-a-repair1");
+    doctorSeals(tracker, "doctor-a-repair2");
+    failWrites = true;
+    installed = B;
+    doctorSeals(tracker, "doctor-upgrade");
+    expect(tracker.getState().status).toBe("unsaved");
+    expect(verdicts(tracker)).toEqual({
+      "doctor-upgrade": "kept_pre_upgrade",
+      "doctor-a-repair2": "kept_newest",
+      "doctor-a-repair1": "kept_unplaced:record_unsaved",
+      "doctor-c1": "kept_recent:before_record",
+      "doctor-c2": "kept_recent:before_record",
+      "doctor-c3": "kept_recent:before_record",
+      "doctor-older": "due:before_record",
+      "doctor-old": "due:before_record",
+    });
+    expect(sweep(tracker).removed).toBe(2);
+    expect(left()).toEqual(["doctor-a-repair1", "doctor-a-repair2", "doctor-c1", "doctor-c2", "doctor-c3", "doctor-upgrade"]);
+  });
+
+  it("never overwrites a record it could not read, and reads it again next time", () => {
+    const tracker = establishedOnA();
+    installed = B;
+    doctorSeals(tracker, "doctor-upgrade");
+    const recordPath = path.join(managedDir, "openclaw-update-captures.json");
+    const before = fs.readFileSync(recordPath, "utf8");
+    let failReads = true;
+    const flakyFs = Object.create(fs);
+    flakyFs.openSync = (file, ...rest) => {
+      if (failReads && file === recordPath) throw Object.assign(new Error("I/O error"), { code: "EIO" });
+      return fs.openSync(file, ...rest);
+    };
+    const reread = makeTracker({ fsModule: flakyFs });
+    expect(sweep(reread).removed).toBe(0);
+    healthyStart(reread);
+    expect(fs.readFileSync(recordPath, "utf8")).toBe(before);
+    expect(healthyStart(reread)).toEqual({ changed: false, reason: "record_read_failed" });
+    expect(verdicts(reread)["doctor-a1"]).toBe("kept_unplaced:record_read_failed");
+
+    failReads = false;
+    expect(reread.getState().record.preUpgradeCapture).toMatchObject({ name: "doctor-upgrade", fromVersion: A, toVersion: B, settled: false });
+    expect(healthyStart(reread)).toEqual({ changed: true });
+    expect(readCaptureRecord({ managedDir }).record).toMatchObject({ lastHealthyVersion: B, preUpgradeCapture: { name: "doctor-upgrade", settled: true } });
+  });
+
   it("keeps every capture while the record cannot be saved, and saves it on the next sweep", () => {
     let failWrites = false;
     const flakyFs = Object.create(fs);
@@ -232,7 +400,7 @@ describe("version-anchored retention for OpenClaw update captures", () => {
     expect(sweep(flaky)).toMatchObject({ due: 0, removed: 0 });
     expect(verdicts(flaky)["doctor-a1"]).toBe("kept_unplaced:record_unsaved");
     expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn.mock.calls[0][0]).toMatch(/could not save the record \(EIO\); no capture is removed until it saves/);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/could not save the record \(EIO\); only captures sealed before the record began are removed until it saves/);
     expect(tracker.getState().record.lastHealthyVersion).toBe(A);
 
     failWrites = false;
