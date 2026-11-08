@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.212] - 2026-11-08
+## [0.10.213] - 2026-11-08
 
 AlphaClaw now keeps at most two OpenClaw update captures once the upgraded gateway has started cleanly (the newest one, and the one taken before the current upgrade), and Health shows how many days are left until the disk fills. OpenClaw's Doctor writes a full copy of the state before every upgrade, and also whenever it runs outside an upgrade (each container start, every watchdog repair), about 5 GB each on a busy box. The retention sweep kept them under the same rule as Back up now archives (the newest 3 and anything under 7 days), so one box held three captures, 15.3 GB, with its disk on track to fill in 6 to 9 days.
 
@@ -20,6 +20,16 @@ AlphaClaw now keeps at most two OpenClaw update captures once the upgraded gatew
 ### Tests
 - New `update-capture-retention` tests: nothing is removed before a healthy start, after a start on another OpenClaw version, after one that came before the newest capture, or while the saved first healthy start is missing, unreadable or for another version; after a healthy start the newest capture (or the newest N) remains, the newest is never removed, bad settings fall back to 1, the archive rule is unchanged, and each removal is logged with its size. With an old capture, an upgrade capture and a newer repair capture, a healthy start removes only the old one; the upgrade capture is still kept after AlphaClaw restarts on the same version, and goes after the next version's first healthy start. They also check that only a managed launch that answers ready, and is still the current one, counts as a healthy start, that it is credited to the version installed at launch, and that the server hands each verified ready to the capture rule.
 - New `disk-space-fill-estimate` and `watchdog-disk-fill` tests cover the estimate (filling, not enough data, not filling, a shrinking disk, a resized disk, a size that drifts under 5%, saved samples written once an hour) and how Health shows it, including a warning raised by fast growth. All of these fail on the previous release.
+
+## [0.10.212] - 2026-11-08
+
+An operator can now lock chosen environment keys, such as a plugin's kill switch, so the gateway reads them only from the deployment environment and the agent cannot change them.
+
+### Added
+- **`ALPHACLAW_GATEWAY_LOCKED_ENV`.** This deployment-only setting takes a comma- or space-separated list of env keys, for example `WM_GUARDS_DISABLE,WM_GUARDS_MODE` for a guard plugin's off switch and mode. The listed keys become deployment-only: the Environment page, `env.patch` and AlphaClaw's `.env` loading refuse them. The OpenClaw gateway and CLI children get the deployment value, or an empty value when the deployment does not set the key. Give each locked key an explicit value in the deployment, for example `WM_GUARDS_DISABLE=0`: OpenClaw fills an empty value from openclaw.json's `env` block, so AlphaClaw logs a warning naming each locked key left unset. The lock covers the env keys only, not the plugin's enablement or config in openclaw.json. Before this, a plugin setting outside the gateway allowlist was dropped from the deployment environment, and OpenClaw then loaded it from the agent-writable `.env`, so an agent could turn its own guard off and restart. The list is read once at boot.
+
+### Tests
+- New `gateway-locked-env` tests cover parsing, the `.env` overlay, the gateway child env (deployment value passes, an unset key goes as empty, the list itself never reaches the child) and `PATCH /api/env` refusing a locked key, plus the one-time warning for a locked key the deployment leaves unset or blank.
 
 ## [0.10.211] - 2026-11-08
 
