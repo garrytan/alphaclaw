@@ -72,7 +72,7 @@ describe("issue #102 runtime safety (e2e)", () => {
       readMemorySettings: () => settings,
       readMemorySample: () => ({ rssBytes: processState.rssMb * kMb, rssBasis: "worker",
         groupRssBytes: processState.rssMb * kMb }),
-      memoryMonitorConfig: { startupGraceMs: 0, fastPathConfirmEvals: 2 },
+      memoryMonitorConfig: { startupGraceMs: 0, fastPathConfirmEvals: 2, floorSustainMs: 0 },
       memoryMitigationStatePath: statePath,
       restartGatewayForMitigation: restart,
       degradedRepairThreshold: 2,

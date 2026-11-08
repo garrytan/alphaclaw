@@ -35,6 +35,7 @@ const kMonitorConfig = {
   clearEvals: 3,
   caplessSlopeMbPerHour: 30,
   fastPathConfirmEvals: 2,
+  floorSustainMs: 0,
 };
 
 const createHarness = ({

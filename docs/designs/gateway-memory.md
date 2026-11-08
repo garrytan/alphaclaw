@@ -175,8 +175,13 @@ with the field: before this change the server dropped `budgetMb` and
 three consecutive fresh evaluations (the fast path also needs RSS rising on each):
 
 1. **Slope:** the fitted worker RSS slope over the window is positive.
-2. **Floor:** the worker's memory is at 90% of the budget or more, or the V8 heap
-   is at 70% of its limit or more. Worker memory is its private memory (USS, from
+2. **Floor:** the worker's memory has been at 90% of the budget or more for 15
+   minutes (`floorSustainMs`), or the V8 heap is at 70% of its limit or more, or
+   the worker itself has the container at 90% (those two count at once). The 15
+   minutes outlast a regular OpenClaw compaction and its RSS tail (GST-1829): on
+   2026.10.9 a safeguard compaction parses the session's whole transcript into the
+   main heap, so one 575 MB session lifts the worker by up to 1.4 GB for the 2-3
+   minutes the summary takes, and RSS needs about 15 minutes to settle. Worker memory is its private memory (USS, from
    its own `smaps_rollup`) while that read is fresh, otherwise its RSS. The
    worker's own reading stays fresh when tool children come and go; only the
    group PSS total goes stale with `membership_changed`.
@@ -184,6 +189,14 @@ three consecutive fresh evaluations (the fast path also needs RSS rising on each
    post-GC floors are rising (`possible_heap_retention`), or the worker itself
    has the container at 90% (it dominates the group and the container, and is
    growing).
+
+**Settling after a spike is not a leak (GST-1829).** The trend path does not
+latch `leak_suspected` while the series is at or below 90% of its own peak over
+the last 30 minutes (`excursionLookbackMs`), the same drop that clears an
+episode. A compaction's RSS tail can hold a bucket minimum up for longer than a
+10-minute bucket, so rising minima alone would read it as growth. The latch is
+held until the spike leaves the lookback; a real leak climbs past its own peak
+and latches then.
 
 A group series (the worker is not verified) can latch `leak_suspected`, labelled
 as the group with its tool children, but never goes critical and never counts
@@ -195,8 +208,8 @@ The opt-in mitigation also needs a restart authority on the snapshot:
 `heap_near_limit` (fresh heap telemetry at 85% of the V8 limit or more: the
 worker would abort anyway), `worker_container_oom` (the dominant, growing worker
 has the container at 90%), or `operator_budget` (the operator's own
-`watchdog.memory.budgetMb` is the cap and the worker is at 90% of it, the issue
-#56 fast-leak profile). Without one, the watchdog logs one `mitigation_skipped`
+`watchdog.memory.budgetMb` is the cap and the worker has been at 90% of it for
+15 minutes, the issue #56 fast-leak profile). Without one, the watchdog logs one `mitigation_skipped`
 `not_near_limit` per episode. A restart always goes through the graceful ladder
 with the derived drain; the drain's exhaustion estimate now includes the heap's
 own crossing (heap used toward its limit at the worker slope) and takes the
