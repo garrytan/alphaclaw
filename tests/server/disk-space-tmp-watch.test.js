@@ -136,7 +136,7 @@ describe("/tmp watch", () => {
     expect(h.messages()).toHaveLength(2);
   });
 
-  it("evicts at the eviction line even when the alert line is set above it", async () => {
+  it("evicts at the eviction line even when the alert line is set above it, and keeps the alert line where eviction is off", async () => {
     const h = harness({ alertMiB: 5, evictMiB: 3 });
     writeFile(path.join(h.root, "a.bin"), 2, 3 * kHourMs);
     writeFile(path.join(h.root, "b.bin"), 1.5, 2 * kHourMs);
@@ -146,6 +146,13 @@ describe("/tmp watch", () => {
     expect(h.events().filter((event) => event.details.kind === "tmp_evicted").map((event) => path.basename(event.details.entry))).toEqual(["a.bin"]);
     expect(duSync(h.root)).toBeLessThan(3 * kMiB);
     expect(h.watch.getSnapshot()).toMatchObject({ alertBytes: 3 * kMiB, evictBytes: 3 * kMiB });
+
+    const off = harness({ env: {}, alertMiB: 5, evictMiB: 3 });
+    writeFile(path.join(off.root, "a.bin"), 2, 3 * kHourMs);
+    writeFile(path.join(off.root, "b.bin"), 1.5, 2 * kHourMs);
+    await off.watch.tick();
+    expect(off.kinds()).toEqual([]);
+    expect(off.watch.getSnapshot()).toMatchObject({ alertBytes: 5 * kMiB, evictEnabled: false });
   });
 
   it("never evicts a file a running process holds open, and names it and a deleted-but-open file in the alert", async () => {

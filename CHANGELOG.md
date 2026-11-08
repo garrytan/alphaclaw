@@ -10,10 +10,10 @@ Versions follow this repository's `package.json` release counter.
 The /tmp safety net now always evicts at its eviction line, even when the alert line is set higher.
 
 ### Fixed
-- **An alert line above the eviction line no longer delays eviction.** The watchdog only looked at /tmp once usage passed `ALPHACLAW_TMP_ALERT_MB`. With the alert line set above `ALPHACLAW_TMP_EVICT_MB`, /tmp could sit past the eviction line, unevicted, until it reached the higher alert line, and on Render that can be too late. The alert line now drops to the eviction line when it is set above it, so the owner is told and old entries are evicted at the eviction line. The defaults (1400 and 1650 MiB) are unchanged.
+- **An alert line above the eviction line no longer delays eviction.** The watchdog only looked at /tmp once usage passed `ALPHACLAW_TMP_ALERT_MB`. With the alert line set above `ALPHACLAW_TMP_EVICT_MB`, /tmp could sit past the eviction line, unevicted, until it reached the higher alert line, and on Render that can be too late. Where eviction is on, the alert line now drops to the eviction line when it is set above it, so the owner is told and old entries are evicted at the eviction line. Where eviction is off, the alert line stays where it was set. The defaults (1400 and 1650 MiB) are unchanged.
 
 ### Tests
-- A new test sets the alert line above the eviction line and checks that the watchdog evicts at the eviction line. It fails on the previous code.
+- A new test sets the alert line above the eviction line and checks that the watchdog evicts at the eviction line, and that with eviction off the alert line stays where it was set. It fails on the previous code.
 
 ## [0.10.217] - 2026-11-08
 
