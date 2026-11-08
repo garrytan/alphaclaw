@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.211] - 2026-11-08
+
+An operator can now lock chosen environment keys, such as a plugin's kill switch, so the gateway reads them only from the deployment environment and the agent cannot change them.
+
+### Added
+- **`ALPHACLAW_GATEWAY_LOCKED_ENV`.** This deployment-only setting takes a comma- or space-separated list of env keys, for example `WM_GUARDS_DISABLE,WM_GUARDS_MODE` for a guard plugin's off switch and mode. The listed keys become deployment-only: the Environment page, `env.patch` and AlphaClaw's `.env` loading refuse them. The OpenClaw gateway and CLI children get the deployment value, or an empty value when the deployment does not set the key. Before this, a plugin setting outside the gateway allowlist was dropped from the deployment environment, and OpenClaw then loaded it from the agent-writable `.env`, so an agent could turn its own guard off and restart. The list is read once at boot.
+
+### Tests
+- New `gateway-locked-env` tests cover parsing, the `.env` overlay, the gateway child env (deployment value passes, an unset key goes as empty, the list itself never reaches the child) and `PATCH /api/env` refusing a locked key.
+
 ## [0.10.210] - 2026-11-07
 
 The OpenClaw 2026.10.9 gateway runs fewer worker threads on Linux machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB. In an 8-hour test on a 32-CPU host the gateway ran 19 worker threads instead of 27 and used about 0.7 GB less memory (3.3 GB instead of 4.0 GB), with no failed turns.
