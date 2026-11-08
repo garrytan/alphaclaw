@@ -136,7 +136,8 @@ describe("Relay page conversations open in Chat (ALPH-69)", () => {
     const first = collectText(anchors[0]);
     expect(first).toContain("@capy-ops");
     expect(first).toContain("Answered");
-    expect(first).toContain("4 · ");
+    expect(first).toContain("4 messages");
+    expect(first).toContain("Open in Chat");
     expect(first).toContain("@wintermute: pong: disk is at 41%");
   });
 

@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.216] - 2026-11-08
+
+The Relay page now opens with one sentence saying whether Relay is ready and how many conversations are waiting, and lists conversations, agents and engine details as plain rows. Every control on the page works as before.
+
+### Changed
+- **One headline.** The page opens with "Relay is ready. Two conversations, all answered." (or how many are waiting), "Relay is off.", "Relay is starting.", "Relay is not running." or "Relay is not answering messages." It is built from the status and conversation lists the page already reads. While a filter is set it does not count the filtered list as every conversation. When the status read fails the headline says so and the status facts, Agents, Engine and the brain archive are hidden; Waiting on you, the run rows and Conversations keep showing what they last loaded. When a conversations refresh fails, the rows already loaded and "Load more conversations" stay under the error, and the headline counts those rows and says they may be out of date.
+- **Facts as rows.** Relay's state, the engine port warning, why other agents cannot connect yet and the one-time connection code are dot-and-word rows under the headline. Env keys and addresses in them are set in monospace.
+- **Plain rows instead of cards.** Conversations show the handle, the last message, the message count, a state word, the time and "Open in Chat →", with the relay log button beside each row. Agents show online or offline and when each was last seen. Engine details and the brain archive counts are a key and value list. Connections, bound threads, Revoke, Remove, Retry now and the search filters keep their handlers.
+- **One solid button.** "Allow a new connection" moved to the page header as the page's one solid button. Refresh stays beside it, and on a phone it moves into the ⋯ menu.
+- The Relay page now uses the full content width, like Health and Doctor.
+
+### Tests
+- New `relay-headline-model` tests cover every headline branch, and new `relay-page-layout` tests render the page and check the headline against the rows, the single solid button, the Open in Chat links, monospace only on handles and literal values, the section order, the relay-off page, a failed status read, a failed conversations refresh over loaded rows and a Revoke confirm that stays open when remote access becomes unavailable.
+- The Relay page browser smoke now also checks the headline and that the page has one solid button.
+
 ## [0.10.215] - 2026-11-08
 
 The Health page now estimates how many days are left until the disk that holds OpenClaw's state is full, so a disk that fills slowly over a week shows up before it becomes an emergency.
