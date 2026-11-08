@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.999] - 2026-11-08
+## [0.10.216] - 2026-11-08
 
 The Relay page now opens with one sentence saying whether Relay is ready and how many conversations are waiting, and lists conversations, agents and engine details as plain rows. Every control on the page works as before.
 
@@ -19,6 +19,56 @@ The Relay page now opens with one sentence saying whether Relay is ready and how
 ### Tests
 - New `relay-headline-model` tests cover every headline branch, and new `relay-page-layout` tests render the page and check the headline against the rows, the single solid button, the Open in Chat links, monospace only on handles and literal values, the section order, the relay-off page and a failed status read.
 - The Relay page browser smoke now also checks the headline and that the page has one solid button.
+
+## [0.10.215] - 2026-11-08
+
+The Health page now estimates how many days are left until the disk that holds OpenClaw's state is full, so a disk that fills slowly over a week shows up before it becomes an emergency.
+
+### Added
+- **Days until the disk is full, on Health.** The Resources section shows an estimate such as "Full in about 7 days at the current rate", next to the low-space warning when there is one. It comes from the disk's free space, sampled once an hour over the last 7 days and fitted to a straight line: days to full is the free space left divided by the rate it falls. It reads "not enough data yet" until the samples cover a day. After that, nothing is shown unless free space fell by at least 1 GB across the samples and would run out within a year. It follows free space rather than the space used, so a ZFS or btrfs pool shared with other datasets, whose reported size shrinks as the others write, still shows it filling. The same estimate is in `GET /api/watchdog/resources` as `diskSpace.volumes[].fillEstimate`.
+- **The hourly samples survive restarts.** They are saved to `.alphaclaw/disk-fill-history.json` in the OpenClaw state directory, written only when an hourly sample is added, and read back when AlphaClaw starts. They start over when the disk's reported size jumps by more than 5% from one reading to the next, or since the last save across a restart (a resize). A size that drifts gradually, as on a shared ZFS or btrfs pool, keeps them however far it drifts. If the file cannot be written, the log says so once, and again only after a later save has worked.
+
+### Changed
+- **The low-space warning on Health says what is true now.** Under the warning line (free space below 10% of the disk or 20 GB, whichever is smaller) it says so. Above the line, it says the disk is filling fast, with the time to full at the last hour's rate, only while that rate would fill the disk within 6 hours. Otherwise, while the warning is still open because free space has not yet climbed far enough above the line to clear it, it says how much is free and that the disk is not filling fast.
+
+### Fixed
+- **A save that runs out of disk space no longer leaves a temp file behind.** AlphaClaw writes its config and state files to a temp file and renames it into place. When writing that temp file failed part way, for example with the disk full, the partial temp file stayed next to the real one and took more of an already full disk. It is now removed before the error is reported. The real file is untouched either way.
+
+### Tests
+- New `disk-space-fill-estimate` and `watchdog-disk-fill` tests cover the estimate (filling, not enough data, not filling, a shrinking disk, a resized disk, a size that drifts under 5%, a pool whose size falls with its free space, samples saved once an hour and read back, an older saved file starting over, one log line when saving fails) and each wording of the warning on Health, including a disk that is recovering above the warning line. A new `safe-file` test covers a save that fails part way through.
+
+## [0.10.214] - 2026-11-08
+
+The memory watchdog's early restart for a fast leak now counts the memory every other process in the container already uses, and a reading or two below the memory budget's line no longer restarts its 15-minute wait.
+
+### Fixed
+- **A fast leak in a crowded container is restarted in time.** The 5-minute out-of-memory check projected the gateway worker's own memory toward the container limit. The container fills when all of its processes together reach the limit, so with other processes holding memory it saw the limit later than it would come. With a fresh container reading that leaves out page cache, it now projects from the container's whole usage. A reading that still counts page cache is not used, because the kernel can reclaim it.
+- **A dip keeps the budget wait running.** Over the memory budget, the 15-minute wait started over on any one reading below 90% of the budget. Now it starts over after 3 readings in a row below 90%, or at once when the operator raises the budget above the worker's current use. Through a shorter dip the wait keeps counting, the critical notice keeps its restart time, and once the 15 minutes have passed the budget still counts.
+- **The memory check no longer fails on an almost flat worker.** A tiny positive growth rate projected the limit past the last date JavaScript can hold, so the check threw and skipped that minute. Such a projection now counts as none.
+
+### Tests
+- Three monitor tests fail on the previous code. A fast leak beside 1,000 MB of other memory in a 4 GiB container skips the wait (the worker alone does not, and neither does a page-cache reading); a reading or two below 90% keeps the hold, its restart time and, once held, the floor, while a raised budget ends it; and a projection past the last JavaScript date is none. A fourth checks that scattered dips never add up to a reset. The existing dip test now uses 3 readings.
+
+## [0.10.213] - 2026-11-08
+
+A program that fills `/tmp` can no longer take a Render box down without warning. On Render, 2 GB of `/tmp` replaces the whole instance, and on Nov 8 a cron job did exactly that by extracting two 1 GB `git archive` copies into `/tmp`. The watchdog now watches `/tmp`, tells the owner who is filling it, and on Render clears room before the limit. The gateway's SQLite temp files also land on the data volume when the deployment has not chosen a temp directory.
+
+### Added
+- **A /tmp safety net in the watchdog.** It reads `/tmp` with one `statfs` every 2 seconds. At about 1.47 GB (`ALPHACLAW_TMP_ALERT_MB`) the owner gets one notice per episode naming the three biggest `/tmp` entries and the process (pid and command) writing each, including deleted files a process still holds open, which only that process can free. Passwords, tokens, API keys, `KEY=value` pairs and URL credentials in those commands are masked. At about 1.73 GB (`ALPHACLAW_TMP_EVICT_MB`), on Render by default (`ALPHACLAW_TMP_EVICT=on|off` changes that), it evicts the oldest entries of 1 MB or more that no process holds open, in the same sample, until `/tmp` is back under 1.47 GB. Inside a directory a job is still using, it looks deeper for parts nobody holds, so a finished copy next to the one still being written can go. A directory too big to size in one bounded walk (200,000 entries or 5 seconds) is left alone, with everything in it. An evicted entry is moved to `<root>/tmp/evicted-<time>/` when that is a rename, or a copy of at most 256 MB that leaves 2 GB free on the data volume; otherwise it is deleted. Each eviction is a `tmp_evicted` watchdog event with the path, size, age and whether it was moved or deleted, and the owner gets one notice per pass that gets `/tmp` under 1.47 GB. A pass that cannot is reported to the owner once per episode (later ones only log their `tmp_evicted` events), and the size walk and process scan rerun at most every 30 seconds until usage moves by more than 100 MB or comes back over the eviction line. Right before each move or delete it checks again that no part of the path became a symlink or left `/tmp`'s filesystem. It never touches a file or directory a process has open, as its working directory or mapped, nor sockets, pid or lock files, a directory holding another mount or a subdirectory it cannot read, AlphaClaw's or OpenClaw's own temp entries, tmux sockets or the Node compile cache, and it evicts nothing when it cannot read every process's open files, working directory and mapped files. Where `/tmp` is not its own mount of 8 GB or less, it sizes `/tmp` with a bounded `du` every 30 seconds on Render and stays idle elsewhere. The three settings, and the `RENDER` and `RENDER_SERVICE_ID` that pick the Render default, are read from the deployment environment only.
+
+### Fixed
+- **SQLite temp files for the gateway.** With neither `TMPDIR` nor `SQLITE_TMPDIR` set, SQLite in the gateway and the `openclaw` CLI wrote its temp files (a VACUUM writes a copy of the whole database) to `/var/tmp` on the container's own disk. AlphaClaw now sets `SQLITE_TMPDIR` to `<root>/tmp/gateway-sqlite` (mode 0700) for them, and removes stale SQLite temp files from it before a gateway launch when no gateway is serving. A `TMPDIR` or `SQLITE_TMPDIR` from the deployment or `.env` always wins, and then AlphaClaw adds nothing.
+- **An operator's `SQLITE_TMPDIR` never reached the gateway.** The gateway's environment allowlist dropped it. It now passes through.
+
+### Tests
+- `gateway-sqlite-tmp` drives the real gateway environment builder and checks the data-volume dir when neither variable is set, nothing added when a template sets `TMPDIR`, an operator `SQLITE_TMPDIR` passed through, both set, a dir tightened back to 0700, a symlink refused, and a sweep that removes only stale `etilqs_*` files.
+- `disk-space-tmp-watch` fills a fixture `/tmp` (an injected root and `statfs`) past both lines and checks the alert, oldest-first eviction until under the alert line and the eviction events. A file held open by a real child process and a deleted-but-open file are named and never evicted, a finished copy beside one still being written is evicted, AlphaClaw, OpenClaw, compile-cache, pid, lock and socket entries stay, off Render it alerts and evicts nothing, a full data volume turns a move into a delete, and unreadable open files stop eviction. Nothing inside a directory whose size walk stopped early is evicted, a directory holding a subdirectory it cannot read stays, a parent swapped for a symlink after the scan is refused, eviction does not wait for the owner alert to be delivered, a pass that cannot get under the alert line backs off and says so once, credentials in a holder's command line are masked, an unreadable `maps` or fd link stops eviction, and `RENDER` in `.env` does not turn eviction on.
+- 16 of the 18 new checks fail on the previous main. The two that pass there check that nothing is added when the deployment sets `TMPDIR` and that a symlinked dir is refused. A further check pins the defaults (1400 and 1650 MiB) so the eviction line stays more than 250 MB under a decimal 2 GB limit.
+- Off box, in Docker with a 2 GB `/tmp` tmpfs and `RENDER` set: the pinned OpenClaw 2026.10.9 gateway booted to `/readyz` 200 in 35 s with `SQLITE_TMPDIR` set, answered a turn on a mock model and ran a cron job. A script filling `/tmp` like the Nov 8 cron job peaked at 1.81 GiB and finished, with a held-open file kept. On the previous main the same script filled `/tmp` to 2 GiB (100%) and its second copy failed with ENOSPC.
+
+### Not covered
+- A single process that keeps one file open while it grows past the limit cannot be helped by eviction; the alert names it.
+- Moved entries under `<root>/tmp/evicted-*` are never deleted automatically.
 
 ## [0.10.212] - 2026-11-08
 

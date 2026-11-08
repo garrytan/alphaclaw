@@ -108,6 +108,14 @@ describe("deployment-only authority through CLI boot and runtime reload", () => 
     expect(result.stderr.split("\n").filter((line) => line.includes(`deployment-only setting ${key} in .env`))).toEqual([]);
   });
 
+  it("ignores RENDER and RENDER_SERVICE_ID from .env, so they cannot turn on /tmp eviction", () => {
+    const { resolveTmpEvictEnabled } = require("../../lib/server/disk-space/temp-dir-watch");
+    const { captured } = run({}, { fileKeys: ["RENDER", "RENDER_SERVICE_ID"] });
+    expect(captured.boot).toEqual({ RENDER: null, RENDER_SERVICE_ID: null });
+    expect(captured.reloaded).toEqual({ RENDER: null, RENDER_SERVICE_ID: null });
+    expect(resolveTmpEvictEnabled(captured.boot, "")).toBe(false);
+  });
+
   it("does not promote a file-only value over an empty deployment setting", () => {
     const key = "ALPHACLAW_SETUP_URL";
     const { result, captured } = run({ [key]: "" });

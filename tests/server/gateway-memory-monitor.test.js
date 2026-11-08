@@ -989,6 +989,14 @@ describe("restart authority (ALPH-22)", () => {
 
 
 describe("regular compaction spikes (GST-1829)", () => {
+  it("a projection past the last date JavaScript can hold is no projection", () => {
+    expect(projectExhaustion({ rssBytes: 0, capBytes: mb(1000), slopeBytesPerMs: 1e-9, nowMs: kStartMs })).toBeNull();
+    const flat = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
+      ticks: 61, rssAt: (i) => mb(500) + (i === 60 ? 1 : 0), capAt: () => ({ budgetBytes: mb(4000) }),
+    });
+    expect(flat.snapshot.projectedExhaustionAt).toBeNull();
+  });
+
   const budget = { budgetBytes: mb(1100) };
   const overBudget = (i) => mb(1000 + 10 * i);
 
@@ -1007,7 +1015,7 @@ describe("regular compaction spikes (GST-1829)", () => {
       criticalGates: { slope: true, floor: true, heap: true } });
   });
 
-  it("the floor timer starts over after a sampler outage or a dip below 90%", () => {
+  it("the floor timer starts over after a sampler outage or three readings below 90%", () => {
     const config = { startupGraceMs: 0 };
     const gapped = drive(createGatewayMemoryMonitor({ config }), {
       ticks: 25, rssAt: (i) => (i >= 10 && i < 15 ? null : overBudget(i)), capAt: () => budget,
@@ -1015,10 +1023,55 @@ describe("regular compaction spikes (GST-1829)", () => {
     expect(gapped.snapshot.criticalGates.floor).toBe(false);
     expect(gapped.snapshot.restartAuthority).toBeNull();
     const dipped = drive(createGatewayMemoryMonitor({ config }), {
-      ticks: 21, rssAt: (i) => (i === 10 ? mb(880) : overBudget(i)), capAt: () => budget,
+      ticks: 21, rssAt: (i) => (i >= 10 && i < 13 ? mb(880) : overBudget(i)), capAt: () => budget,
     });
     expect(dipped.snapshot.criticalGates.floor).toBe(false);
-    expect(dipped.snapshot.budgetFloorHoldsAtMs).toBe(kStartMs + 11 * kTickMs + 15 * 60_000);
+    expect(dipped.snapshot.budgetFloorHoldsAtMs).toBe(kStartMs + 13 * kTickMs + 15 * 60_000);
+  });
+
+  it("a reading or two below 90% keeps the hold, its restart time and, once held, the floor", () => {
+    const config = { startupGraceMs: 0 };
+    const atDip = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 11, rssAt: (i) => (i === 10 ? mb(880) : overBudget(i)), capAt: () => budget,
+    });
+    expect(atDip.snapshot.criticalGates.floor).toBe(false);
+    expect(atDip.snapshot.budgetFloorHoldsAtMs).toBe(kStartMs + 15 * 60_000);
+    const sawtooth = (i) => (i >= 15 && i % 2 === 1 ? mb(880) : overBudget(i));
+    for (const ticks of [16, 22, 24]) {
+      const dipping = drive(createGatewayMemoryMonitor({ config }), { ticks, rssAt: sawtooth, capAt: () => budget });
+      expect(dipping.snapshot.criticalGates.floor).toBe(true);
+    }
+    const raised = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 17, rssAt: (i) => (i === 16 ? mb(880) : overBudget(i)), capAt: (i) => (i === 16 ? { budgetBytes: mb(2200) } : budget),
+    });
+    expect(raised.snapshot.criticalGates.floor).toBe(false);
+    expect(raised.snapshot.budgetFloorHoldsAtMs).toBeNull();
+  });
+
+  it("dips below 90% that are not in a row never add up to a reset", () => {
+    const config = { startupGraceMs: 0 };
+    const scattered = (i) => (i === 9 || i === 11 || i === 13 ? mb(880) : overBudget(i));
+    const before = drive(createGatewayMemoryMonitor({ config }), { ticks: 15, rssAt: scattered, capAt: () => budget });
+    expect(before.snapshot.budgetFloorHoldsAtMs).toBe(kStartMs + 15 * 60_000);
+    const after = drive(createGatewayMemoryMonitor({ config }), { ticks: 24, rssAt: scattered, capAt: () => budget });
+    expect(after.snapshot).toMatchObject({ state: "critical", restartAuthority: "operator_budget" });
+  });
+
+  it("the out-of-memory bypass counts what the rest of the container already uses", () => {
+    const config = { startupGraceMs: 0 };
+    const limit = mb(4096);
+    const fast = (i) => mb(2000 + 100 * i);
+    const capAt = (others) => (i) => ({ budgetBytes: mb(2000), containerLimitBytes: limit, freshCgroup: true,
+      cgroupUsedBytes: fast(i) + others, cgroupAtMs: kStartMs + i * kTickMs });
+    const alone = drive(createGatewayMemoryMonitor({ config }), { ticks: 8, rssAt: fast, capAt: capAt(0) });
+    expect(alone.snapshot.criticalGates.floor).toBe(false);
+    expect(alone.snapshot.restartAuthority).toBeNull();
+    const crowded = drive(createGatewayMemoryMonitor({ config }), { ticks: 8, rssAt: fast, capAt: capAt(mb(1000)) });
+    expect(crowded.snapshot.criticalGates.floor).toBe(true);
+    expect(crowded.snapshot.restartAuthority).toBe("operator_budget");
+    const pageCache = (i) => ({ ...capAt(mb(1000))(i), cgroupUsageBasis: "raw" });
+    const raw = drive(createGatewayMemoryMonitor({ config }), { ticks: 8, rssAt: fast, capAt: pageCache });
+    expect(raw.snapshot.criticalGates.floor).toBe(false);
   });
 
   it("a heap near its V8 limit still counts at once", () => {

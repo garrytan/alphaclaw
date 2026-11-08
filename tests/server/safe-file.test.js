@@ -118,6 +118,24 @@ describe("server/utils/safe-file", () => {
       expect(fs.readdirSync(tempDir)).toEqual(["config.json"]);
     });
 
+    it("removes a partly written temp file when the temp write fails, and rethrows the write's error", () => {
+      const target = path.join(tempDir, "config.json");
+      fs.writeFileSync(target, "original");
+      const enospc = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+      const fsModule = {
+        ...fs,
+        writeFileSync: (p, content, options) => {
+          if (p === target) return fs.writeFileSync(p, content, options);
+          fs.writeFileSync(p, String(content).slice(0, 2), options);
+          throw enospc;
+        },
+      };
+      expect(() => writeFileAtomic(target, "new content", { fsModule })).toThrow(enospc);
+      expect(() => writeFileAtomic(target, "new content", { fsModule, mode: 0o600 })).toThrow(enospc);
+      expect(fs.readFileSync(target, "utf8")).toBe("original");
+      expect(fs.readdirSync(tempDir)).toEqual(["config.json"]);
+    });
+
     it("leaves the original intact and discards the temp when the file fsync fails", () => {
       const target = path.join(tempDir, "config.json");
       fs.writeFileSync(target, "original");

@@ -212,6 +212,14 @@ describe("server/utils/redact env and credential backstop", () => {
     );
   });
 
+  it("redactCommandLine masks mysql passwords, api keys, env pairs and URL userinfo", () => {
+    expect(redactCommandLine("mysql --password=hunter2xyz -u root")).toBe("mysql --password=*** -u root");
+    expect(redactCommandLine("mysql -phunter2xyz -u root")).toBe("mysql -p*** -u root");
+    expect(redactCommandLine("tool --api_key=k3y --access-token t0k")).toBe("tool --api_key=*** --access-token ***");
+    expect(redactCommandLine("env DB_TOKEN=t0ken PGPASSWORD=pw psql")).toBe("env DB_TOKEN=*** PGPASSWORD=*** psql");
+    expect(redactCommandLine("psql postgres://u:PASSWORD@db/x")).toBe("psql postgres://***@db/x");
+  });
+
   it("collectSecretArgValues reads both flag forms", () => {
     expect(
       collectSecretArgValues(["channels", "add", "--bot-token", "t-1", "--api-key=k-2", "--name", "n"]),
