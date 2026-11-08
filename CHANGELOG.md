@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.214] - 2026-11-08
+## [0.10.215] - 2026-11-08
 
 The Health page now estimates how many days are left until the disk that holds OpenClaw's state is full, so a disk that fills slowly over a week shows up before it becomes an emergency.
 
@@ -21,6 +21,18 @@ The Health page now estimates how many days are left until the disk that holds O
 
 ### Tests
 - New `disk-space-fill-estimate` and `watchdog-disk-fill` tests cover the estimate (filling, not enough data, not filling, a shrinking disk, a resized disk, a size that drifts under 5%, a pool whose size falls with its free space, samples saved once an hour and read back, an older saved file starting over, one log line when saving fails) and each wording of the warning on Health, including a disk that is recovering above the warning line. A new `safe-file` test covers a save that fails part way through.
+
+## [0.10.214] - 2026-11-08
+
+The memory watchdog's early restart for a fast leak now counts the memory every other process in the container already uses, and a reading or two below the memory budget's line no longer restarts its 15-minute wait.
+
+### Fixed
+- **A fast leak in a crowded container is restarted in time.** The 5-minute out-of-memory check projected the gateway worker's own memory toward the container limit. The container fills when all of its processes together reach the limit, so with other processes holding memory it saw the limit later than it would come. With a fresh container reading that leaves out page cache, it now projects from the container's whole usage. A reading that still counts page cache is not used, because the kernel can reclaim it.
+- **A dip keeps the budget wait running.** Over the memory budget, the 15-minute wait started over on any one reading below 90% of the budget. Now it starts over after 3 readings in a row below 90%, or at once when the operator raises the budget above the worker's current use. Through a shorter dip the wait keeps counting, the critical notice keeps its restart time, and once the 15 minutes have passed the budget still counts.
+- **The memory check no longer fails on an almost flat worker.** A tiny positive growth rate projected the limit past the last date JavaScript can hold, so the check threw and skipped that minute. Such a projection now counts as none.
+
+### Tests
+- Three monitor tests fail on the previous code. A fast leak beside 1,000 MB of other memory in a 4 GiB container skips the wait (the worker alone does not, and neither does a page-cache reading); a reading or two below 90% keeps the hold, its restart time and, once held, the floor, while a raised budget ends it; and a projection past the last JavaScript date is none. A fourth checks that scattered dips never add up to a reset. The existing dip test now uses 3 readings.
 
 ## [0.10.213] - 2026-11-08
 
