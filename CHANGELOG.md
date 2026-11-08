@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.999] - 2026-11-08
+## [0.10.212] - 2026-11-08
 
 AlphaClaw now keeps only the newest OpenClaw upgrade capture once the upgraded gateway has started cleanly, and Health shows how many days are left until the disk fills. OpenClaw's Doctor writes a full copy of the state before every upgrade (about 5 GB each on a busy box). The retention sweep kept them under the same rule as Back up now archives (the newest 3 and anything under 7 days), so one box held three captures, 15.3 GB, with its disk on track to fill in 6 to 9 days.
 
