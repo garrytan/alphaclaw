@@ -183,11 +183,16 @@ three consecutive fresh evaluations (the fast path also needs RSS rising on each
    main heap, so one 575 MB session lifts the worker by up to 1.4 GB for the 2-3
    minutes the summary takes, and RSS needs about 15 minutes to settle. The budget
    counts at once when the worker's slope over its last 5 samples
-   (`floorHoldHeadroomSamples`; the window fit lags a sudden leak) would reach the
-   container limit, or the host's when there is none, within 5 minutes
+   (`floorHoldHeadroomSamples`; the window fit lags a sudden leak) would fill the
+   container, or the host when there is none, within 5 minutes
    (`floorHoldHeadroomMs`): a restart beats an OOM, so a compaction that close to
-   filling the container skips the hold too. The timer starts over when the worker
-   dips below 90%, after `maxConsecutiveMisses` read misses and on a process reset.
+   filling the container skips the hold too. With a fresh cgroup reading that
+   leaves out page cache (basis not `raw`), that projection starts from the
+   container's whole usage, not the worker alone, since other processes fill the
+   same limit. The timer starts over after 3 consecutive readings below 90%
+   (`floorResetEvals`; a shorter dip, a GC sawtooth or a USS/RSS switch, keeps it
+   running and counting), at once when the operator raises the budget, after
+   `maxConsecutiveMisses` read misses and on a process reset.
    While the timer runs the snapshot carries `budgetFloorHoldsAtMs`, and the
    critical notice names that time. Worker memory is its private memory (USS, from
    its own `smaps_rollup`) while that read is fresh, otherwise its RSS. The
