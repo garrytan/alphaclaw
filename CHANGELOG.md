@@ -11,7 +11,7 @@ The memory watchdog's early restart for a fast leak now counts the memory every 
 
 ### Fixed
 - **A fast leak in a crowded container is restarted in time.** The 5-minute out-of-memory check projected the gateway worker's own memory toward the container limit. The container fills when all of its processes together reach the limit, so with other processes holding memory it saw the limit later than it would come. With a fresh container reading that leaves out page cache, it now projects from the container's whole usage. A reading that still counts page cache is not used, because the kernel can reclaim it.
-- **A dip keeps the budget wait running.** Over the memory budget, the 15-minute wait started over on any one reading below 90% of the budget. Now it starts over after 3 readings in a row below 90%, or at once when the operator raises the budget. Through a shorter dip the wait keeps counting, the critical notice keeps its restart time, and once the 15 minutes have passed the budget still counts.
+- **A dip keeps the budget wait running.** Over the memory budget, the 15-minute wait started over on any one reading below 90% of the budget. Now it starts over after 3 readings in a row below 90%, or at once when the operator raises the budget above the worker's current use. Through a shorter dip the wait keeps counting, the critical notice keeps its restart time, and once the 15 minutes have passed the budget still counts.
 - **The memory check no longer fails on an almost flat worker.** A tiny positive growth rate projected the limit past the last date JavaScript can hold, so the check threw and skipped that minute. Such a projection now counts as none.
 
 ### Tests
