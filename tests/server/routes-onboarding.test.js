@@ -27,11 +27,18 @@ const createBaseDeps = ({ onboarded = false, hasCodexOauth = false } = {}) => {
   // writeFileAtomic writes `<path>.<pid>.tmp` then renames; replay the most
   // recent write at the rename target so assertions (and per-test content
   // maps) keyed by the final path keep working.
+  // A rename carries the bytes and the mode, never the temp file's "wx" flag.
   fsMock.renameSync = vi.fn((sourcePath, targetPath) => {
     const sourceWrite = [...fsMock.writeFileSync.mock.calls]
       .reverse()
       .find(([writtenPath]) => writtenPath === sourcePath);
-    if (sourceWrite) fsMock.writeFileSync(targetPath, ...sourceWrite.slice(1));
+    if (!sourceWrite) return;
+    const [, contents, { flag, ...options } = {}] = sourceWrite;
+    if (Object.keys(options).length === 0) {
+      fsMock.writeFileSync(targetPath, contents);
+    } else {
+      fsMock.writeFileSync(targetPath, contents, options);
+    }
   });
   return {
     fs: fsMock,
