@@ -56,6 +56,9 @@ sticky bit on the directory it names (`chmod +t /data`). That keeps group
 write and only stops users from replacing each other's files. Snapshots are
 written next to the state directory (`<state>.update-captures/`), are not
 part of backups, and need free space about the size of the state databases.
+AlphaClaw keeps only the newest one (`ALPHACLAW_UPDATE_CAPTURE_KEEP`, default
+1) and removes older ones once the upgraded gateway has started and answered
+ready.
 
 ## The workspace folder moved (`now resolves to …, but its saved setup records belong to …`)
 

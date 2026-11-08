@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.999] - 2026-11-08
+
+AlphaClaw now keeps only the newest OpenClaw upgrade capture once the upgraded gateway has started cleanly, and Health shows how many days are left until the disk fills. OpenClaw's Doctor writes a full copy of the state before every upgrade (about 5 GB each on a busy box). The retention sweep kept them under the same rule as Back up now archives (the newest 3 and anything under 7 days), so one box held three captures, 15.3 GB, with its disk on track to fill in 6 to 9 days.
+
+### Changed
+- **One upgrade capture by default.** The 30-minute retention sweep keeps the newest `ALPHACLAW_UPDATE_CAPTURE_KEEP` captures (default 1, 1 to 100, deployment environment only) whatever their age. Back up now archives keep their old rule (`ALPHACLAW_BACKUP_RETENTION_KEEP` and `ALPHACLAW_BACKUP_RETENTION_DAYS`), and the days setting no longer applies to captures.
+- **Older captures wait for a healthy start.** No capture is removed until a gateway that AlphaClaw launched has answered `/readyz` ready on the OpenClaw version that is installed now, after the newest capture was written. Until then every capture stays where it is, so the copy you would roll back with is never removed before the upgrade has proven itself. The newest capture is never removed, and the sweep's existing checks still apply: only directories owned by AlphaClaw's user, carrying OpenClaw's private marker and sealed manifest, and not held open by any process.
+- **Each removal is logged.** The log names every removed capture and its size, for example `retention sweep: removed OpenClaw update capture doctor-… (5.1 GB, 5123456789 bytes)`. `GET /api/box/disk` shows each capture's verdict and, for captures still kept, why.
+
+### Added
+- **Days until the disk is full, on Health.** The Resources section shows the low-space warning (free space under 10% of the disk or 20 GB) and, next to it, an estimate such as "Full in about 7 days at the current rate". The estimate comes from one disk sample an hour over the last 7 days, saved across AlphaClaw restarts, and needs a day of samples and at least 1 GB of growth. Before that it reads "not enough data yet"; when the disk is not filling, or would take more than a year to fill, nothing is shown. The same estimate is in `GET /api/watchdog/resources` as `diskSpace.volumes[].fillEstimate`.
+
+### Tests
+- New `update-capture-retention` tests: nothing is removed before a healthy start, after a start on another OpenClaw version, or after one that came before the newest capture; after a healthy start only the newest capture (or the newest N) remains, the newest is never removed, bad settings fall back to 1, the archive rule is unchanged, and each removal is logged with its size. They also check that only a managed launch that answers ready, and is still the current one, counts as a healthy start.
+- New `disk-space-fill-estimate` and `watchdog-disk-fill` tests cover the estimate (filling, not enough data, not filling, a shrinking disk, a resized disk, saved samples) and how Health shows it. All of these fail on the previous release.
+
 ## [0.10.211] - 2026-11-08
 
 A regular OpenClaw compaction no longer looks like a memory leak to the watchdog. On OpenClaw 2026.10.9 a compaction parses the session's whole transcript into the gateway's main heap. On Garry's box one 575 MB Telegram session lifted the gateway by up to 1.4 GB for the 2-3 minutes each summary took, and RSS then needed about 15 minutes to settle. The watchdog read the afternoon's compactions as growth twice (16:40 and 17:44), warning the owner both times. It did not restart the gateway that day, but a replay of the 17:32 compaction with the heap reading stale restarted it in the middle of a turn on the previous release.
