@@ -35,6 +35,7 @@ const kMonitorConfig = {
   clearEvals: 3,
   caplessSlopeMbPerHour: 30,
   fastPathConfirmEvals: 2,
+  floorSustainMs: 0,
 };
 
 const createHarness = ({
@@ -49,6 +50,7 @@ const createHarness = ({
   // Most cases pin the per-transition notification; the one-message-per-
   // episode hold (ALPH-22) has its own cases below.
   memoryNoticeHoldMs = 0,
+  monitorConfig = kMonitorConfig,
 } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
@@ -69,7 +71,7 @@ const createHarness = ({
     sleepImpl: () => Promise.resolve(),
     readMemorySample,
     readMemorySettings: readMemorySettings || (() => settings),
-    memoryMonitorConfig: kMonitorConfig,
+    memoryMonitorConfig: monitorConfig,
     memoryNoticeHoldMs,
     restartGatewayForMitigation,
     ...(readProcStartTicks ? { readProcStartTicks } : {}),
@@ -1863,6 +1865,68 @@ describe("restart authority in the watchdog (ALPH-22)", () => {
     expect(skipped).toHaveLength(1);
     expect(skipped[0].details).toMatchObject({ reason: "not_near_limit" });
     expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_restart")).toBe(false);
+  });
+
+  it("a critical worker over the operator budget says when the budget restart comes, then restarts on it (GST-1829)", async () => {
+    const restart = vi.fn(async () => ({ ok: true }));
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true, budgetMb: 400 },
+      restartGatewayForMitigation: restart,
+      monitorConfig: { ...kMonitorConfig, floorSustainMs: 15 * kTickMs },
+    });
+    launchGateway(harness);
+    const sampleAt = (i) => ({
+      rssBytes: (365 + 2 * i) * kMb,
+      cgroupUsedBytes: (365 + 2 * i) * kMb,
+      containerLimitBytes: 100 * 1024 * kMb,
+      heap: { status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: 750 * kMb, limitBytes: 1000 * kMb },
+    });
+    await driveTicks(harness, { ticks: 8, sampleAt });
+    const pending = harness.watchdog.getMemoryTrend();
+    expect(pending).toMatchObject({ state: "critical", restartAuthority: null });
+    expect(Number.isFinite(pending.budgetFloorHoldsAtMs)).toBe(true);
+    expect(restart).not.toHaveBeenCalled();
+    expect(memoryEvents(harness.insertWatchdogEvent).some((e) => e.details.kind === "mitigation_skipped")).toBe(false);
+    const critical = notifications(harness.notifier).find((m) => m.includes("If it stays there until"));
+    expect(critical).toContain(new Date(pending.budgetFloorHoldsAtMs).toISOString());
+    expect(notifications(harness.notifier).some((m) => m.includes("will not restart the gateway"))).toBe(false);
+    await driveTicks(harness, { ticks: 12, sampleAt, startTick: 8 });
+    expect(harness.watchdog.getMemoryTrend().restartAuthority).toBe("operator_budget");
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  const kGiB = 1024 * kMb;
+  const restartTick = async ({ containerGiB, budgetMb, rssMbAt, ticks }) => {
+    let tick = null;
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true, budgetMb },
+      restartGatewayForMitigation: vi.fn(async () => {
+        tick ??= current;
+        return { ok: true };
+      }),
+      monitorConfig: {},
+    });
+    let current = 0;
+    launchGateway(harness);
+    const sampleAt = (i) => {
+      current = i;
+      const rssBytes = Math.round(rssMbAt(i) * kMb);
+      return { rssBytes, groupRssBytes: rssBytes, cgroupUsedBytes: rssBytes, containerLimitBytes: containerGiB * kGiB };
+    };
+    await driveTicks(harness, { ticks, sampleAt });
+    return tick;
+  };
+
+  it("a fast native leak the budget alone sees restarts before the container fills (GST-1829)", async () => {
+    const rssMbAt = (i) => (i < 70 ? 2000 : 2200 + 350 * (i - 70));
+    const tick = await restartTick({ containerGiB: 8, budgetMb: 2400, rssMbAt, ticks: 95 });
+    expect(tick).not.toBeNull();
+    expect(rssMbAt(tick)).toBeLessThan(8 * 1024);
+  });
+
+  it("a compaction-shaped ramp on a 16 GiB container does not restart on the budget (GST-1829)", async () => {
+    const rssMbAt = (i) => (i < 70 ? 4800 : i < 73 ? 4800 + 470 * (i - 70) : i < 76 ? 6200 : Math.max(4800, 6200 - 100 * (i - 76)));
+    expect(await restartTick({ containerGiB: 16, budgetMb: 5500, rssMbAt, ticks: 110 })).toBeNull();
   });
 });
 

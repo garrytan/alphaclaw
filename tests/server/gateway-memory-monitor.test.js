@@ -236,7 +236,7 @@ describe("fast high-pressure path", () => {
   });
 
   it("three rising post-grace evals with every critical gate jump straight to critical; two are not enough", () => {
-    const early = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
+    const early = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } }), {
       ticks: 3,
       rssAt: (i) => mb(980 + 10 * i),
       capAt: cap,
@@ -244,7 +244,7 @@ describe("fast high-pressure path", () => {
     expect(early.transitions).toHaveLength(0);
     expect(early.snapshot.state).not.toBe("critical");
     const monitor = createGatewayMemoryMonitor({
-      config: { startupGraceMs: 0 },
+      config: { startupGraceMs: 0, floorSustainMs: 0 },
     });
     const { transitions, snapshot } = drive(monitor, {
       ticks: 4,
@@ -260,7 +260,7 @@ describe("fast high-pressure path", () => {
 
   it("a stable gateway sitting flat at 92% never restarts-eligible (no latch)", () => {
     const monitor = createGatewayMemoryMonitor({
-      config: { startupGraceMs: 0 },
+      config: { startupGraceMs: 0, floorSustainMs: 0 },
     });
     const { transitions, snapshot } = drive(monitor, {
       ticks: 10,
@@ -273,7 +273,7 @@ describe("fast high-pressure path", () => {
 
   it("two rising jitter ticks with a NEGATIVE window slope never latch (slope-gated)", () => {
     const monitor = createGatewayMemoryMonitor({
-      config: { startupGraceMs: 0 },
+      config: { startupGraceMs: 0, floorSustainMs: 0 },
     });
     // High plateau, dip, then two tiny consecutive rises: per-tick rssRising
     // is true twice in a row, but the fitted slope over the window is
@@ -301,7 +301,7 @@ describe("fast high-pressure path", () => {
 
   it("treats a computed cap at/below current RSS as maximal pressure (no clamped headroom)", () => {
     const monitor = createGatewayMemoryMonitor({
-      config: { startupGraceMs: 0 },
+      config: { startupGraceMs: 0, floorSustainMs: 0 },
     });
     // containerLimit 400, non-gateway 150 → cap 250MB ≤ rss 300MB.
     const { snapshot, transitions } = drive(monitor, {
@@ -328,6 +328,7 @@ const kSmallConfig = {
   minCoverageFraction: 0.5,
   minGrowthMb: 10,
   startupGraceMs: 0,
+  floorSustainMs: 0,
   confirmEvals: 2,
   clearEvals: 3,
   caplessSlopeMbPerHour: 30,
@@ -617,7 +618,7 @@ describe("previewCap", () => {
 
 describe("scoped policy, freshness and retained explanations", () => {
   it("container pressure cannot make a flat process group restart eligible", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot, transitions } = drive(monitor, {
       ticks: 8, rssAt: () => mb(100),
       capAt: (i) => ({ cgroupUsedBytes: mb(950 + i), containerLimitBytes: mb(1000) }),
@@ -631,7 +632,7 @@ describe("scoped policy, freshness and retained explanations", () => {
   });
 
   it("rising group RSS never uses container pressure and never goes critical (ALPH-22)", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot, transitions } = drive(monitor, {
       ticks: 8, rssAt: (i) => mb(900 + 10 * i),
       capAt: (i) => ({ rssBasis: "group", groupRssBytes: mb(900 + 10 * i),
@@ -646,7 +647,7 @@ describe("scoped policy, freshness and retained explanations", () => {
   });
 
   it("a summed group RSS above the container limit (shared pages counted twice) never goes critical", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot, transitions } = drive(monitor, {
       ticks: 6, rssAt: (i) => mb(4900 + i),
       capAt: () => ({ rssBasis: "group", cgroupUsedBytes: mb(2600), containerLimitBytes: mb(4096) }),
@@ -657,7 +658,7 @@ describe("scoped policy, freshness and retained explanations", () => {
   });
 
   it("stale or repeated cgroup evidence cannot confirm the pressure side", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot, transitions } = drive(monitor, {
       ticks: 5, rssAt: (i) => mb(100 + i),
       capAt: () => ({ cgroupUsedBytes: mb(950), containerLimitBytes: mb(1000), cgroupAtMs: kStartMs }),
@@ -668,7 +669,7 @@ describe("scoped policy, freshness and retained explanations", () => {
   });
 
   it("forged diagnostic measurements cannot set, widen, clear or suppress a group policy", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 4, rssAt: (i) => mb(300 + 5 * i),
       capAt: () => ({ budgetBytes: mb(320), activeHeapMb: 128, evidence: {
@@ -683,7 +684,7 @@ describe("scoped policy, freshness and retained explanations", () => {
   });
 
   it("duplicates, partial scans and aged samples hold the verdict without fresh enforcement evidence", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 4, rssAt: (i) => mb(300 + 5 * i), capAt: () => ({ budgetBytes: mb(320) }),
     });
@@ -749,7 +750,7 @@ describe("enforcement basis (ALPH-17)", () => {
   const fullContainer = () => ({ containerLimitBytes: mb(1100), cgroupUsedBytes: mb(1050), activeHeapMb: null });
 
   it("container pressure cannot escalate a worker-basis verdict while tool children dominate the group", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     // The worker rises fast (600 MB/h) but holds only 40% of the group.
     const { transitions, snapshot } = drive(monitor, {
       ticks: 8,
@@ -763,7 +764,7 @@ describe("enforcement basis (ALPH-17)", () => {
   });
 
   it("container pressure cannot escalate a flat worker that dominates the group", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const jitter = [0, 3, -2, 1, -3, 2, 0, 3, -1, 2];
     const { transitions, snapshot } = drive(monitor, {
       ticks: jitter.length,
@@ -775,7 +776,7 @@ describe("enforcement basis (ALPH-17)", () => {
   });
 
   it("container pressure still escalates a dominant, growing worker", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { transitions, snapshot } = drive(monitor, {
       ticks: 4,
       rssAt: (i) => mb(900 + 10 * i),
@@ -790,7 +791,7 @@ describe("enforcement basis (ALPH-17)", () => {
     // is the worker plus a small launcher, so the worker dominates its own
     // group. Worker RSS re-faults after reclaim: 2,900 MB flat, then a burst
     // at about 4.4 GB/h to 3,046 MB. Heap far from its limit, cap 76,800 MB.
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const rssMbAt = (i) => (i < 20 ? 2754 + (i % 2) : 2754 + (i - 19) * 73);
     const heapAt = (i) => ({ status: "fresh", atMs: kStartMs + i * kTickMs, usedBytes: mb(1100), limitBytes: mb(4144) });
     const { transitions, snapshot } = drive(monitor, {
@@ -814,7 +815,7 @@ describe("enforcement basis (ALPH-17)", () => {
     const flat = (i) => 3072 + [0, 3, -2, 1, -3, 2][i % 6];
     const growing = (i) => 3072 + 10 * i;
     for (const rssMbAt of [flat, growing]) {
-      const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+      const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
       const { transitions, snapshot } = drive(monitor, { ticks: 30, rssAt: (i) => mb(rssMbAt(i)), capAt: coResident(rssMbAt) });
       expect(snapshot.containerPressureFraction).toBeGreaterThanOrEqual(0.97);
       expect(snapshot.pressureSource).not.toBe("container");
@@ -825,7 +826,7 @@ describe("enforcement basis (ALPH-17)", () => {
   });
 
   it("without a complete census (no group RSS) the container does not count toward a worker verdict", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { transitions } = drive(monitor, {
       ticks: 4,
       rssAt: (i) => mb(600 + 10 * i),
@@ -852,7 +853,7 @@ describe("enforcement basis (ALPH-17)", () => {
   });
 
   it("a read miss does not flip the basis", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     drive(monitor, { ticks: 3, rssAt: (i) => mb(500 + i), capAt: () => ({ rssBasis: "worker", groupRssBytes: mb(600) }) });
     monitor.addSample({ atMs: kStartMs + 3 * kTickMs, pid: 100, rssBytes: null, rssBasis: "group", sampleStatus: "partial" });
     monitor.addSample({ atMs: kStartMs + 4 * kTickMs, pid: 100, rssBytes: mb(504), rssBasis: "worker", groupRssBytes: mb(600) });
@@ -871,7 +872,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   const budget = { budgetBytes: mb(1100) };
 
   it("fresh heap telemetry with a roomy heap and flat post-GC floors vetoes critical at 90%+ of the cap", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { transitions, snapshot } = drive(monitor, {
       ticks: 8, rssAt: rising, capAt: (i) => ({ ...budget, heap: heapAt(i, { usedMb: 789 }) }),
     });
@@ -885,7 +886,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   it("stale or missing heap telemetry leaves the heap gate open", () => {
     for (const heap of [(i) => heapAt(i, { usedMb: 789, status: "stale" }),
       (i) => ({ ...heapAt(i, { usedMb: 789 }), atMs: kStartMs + i * kTickMs - 5 * kTickMs }), () => null]) {
-      const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+      const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
       const { snapshot } = drive(monitor, { ticks: 5, rssAt: rising, capAt: (i) => ({ ...budget, heap: heap(i) }) });
       expect(snapshot.state).toBe("critical");
       expect(snapshot.criticalGates.heap).toBe(true);
@@ -893,7 +894,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 
   it("rising post-GC heap floors satisfy the heap gate", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 5, rssAt: rising, capAt: (i) => ({ ...budget, heap: heapAt(i, { usedMb: 789, floorsRising: true }) }),
     });
@@ -901,7 +902,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 
   it("a heap at 70% of its limit is the floor even when worker memory is far below the cap", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 5, rssAt: (i) => mb(6800 + 30 * i),
       capAt: (i) => ({ budgetBytes: mb(80_000), heap: heapAt(i, { usedMb: (t) => 6300 + 30 * t }) }),
@@ -912,7 +913,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 
   it("the floor reads the worker's private memory when it is fresh, not its RSS", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 8, rssAt: rising, capAt: (i) => ({ ...budget, workerPrivateBytes: mb(600 + 10 * i) }),
     });
@@ -922,7 +923,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 
   it("a group series ignores a private-memory reading", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 3, rssAt: rising, capAt: () => ({ rssBasis: "group", workerPrivateBytes: mb(10) }),
     });
@@ -930,7 +931,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 
   it("a dominant, growing worker filling the container opens the heap gate", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const { snapshot } = drive(monitor, {
       ticks: 5, rssAt: (i) => mb(900 + 10 * i),
       capAt: (i) => ({ rssBasis: "worker", groupRssBytes: mb(950 + 10 * i), containerLimitBytes: mb(1100),
@@ -940,7 +941,7 @@ describe("critical gates: slope, floor, heap (ALPH-22)", () => {
   });
 
   it("a burst that meets every gate for two evaluations and recovers never goes critical", () => {
-    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } });
+    const monitor = createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } });
     const shape = [900, 905, 910, 1000, 1010, 905, 900, 900];
     const { transitions, snapshot } = drive(monitor, {
       ticks: shape.length, rssAt: (i) => mb(shape[i]), capAt: () => budget,
@@ -955,7 +956,7 @@ describe("restart authority (ALPH-22)", () => {
   const heapAt = (i, usedMb, floorsRising = false) => ({ status: "fresh", atMs: kStartMs + i * kTickMs,
     usedBytes: mb(usedMb), limitBytes: mb(1000), floorsRising });
   const run = (capAt, rssAt = (i) => mb(1000 + 10 * i)) =>
-    drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), { ticks: 5, rssAt, capAt }).snapshot;
+    drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0, floorSustainMs: 0 } }), { ticks: 5, rssAt, capAt }).snapshot;
 
   it("the V8 heap at 85% of its limit authorizes a restart", () => {
     const snapshot = run((i) => ({ hostTotalBytes: mb(1400), heap: heapAt(i, 860) }));
@@ -982,6 +983,61 @@ describe("restart authority (ALPH-22)", () => {
     const snapshot = run((i) => ({ hostTotalBytes: mb(100_000), heap: heapAt(i, 200) }));
     expect(snapshot.state).not.toBe("critical");
     expect(snapshot.restartAuthority).toBeNull();
+  });
+});
+
+
+
+describe("regular compaction spikes (GST-1829)", () => {
+  const budget = { budgetBytes: mb(1100) };
+  const overBudget = (i) => mb(1000 + 10 * i);
+
+  it("a budget overrun shorter than floorSustainMs is not critical; held longer it is, with the budget's authority", () => {
+    const brief = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
+      ticks: 12, rssAt: overBudget, capAt: () => budget,
+    });
+    expect(brief.snapshot.pressureFraction).toBeGreaterThan(0.9);
+    expect(brief.snapshot.criticalGates.floor).toBe(false);
+    expect(brief.snapshot.state).not.toBe("critical");
+    expect(brief.snapshot.restartAuthority).toBeNull();
+    const held = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
+      ticks: 24, rssAt: overBudget, capAt: () => budget,
+    });
+    expect(held.snapshot).toMatchObject({ state: "critical", restartAuthority: "operator_budget",
+      criticalGates: { slope: true, floor: true, heap: true } });
+  });
+
+  it("the floor timer starts over after a sampler outage or a dip below 90%", () => {
+    const config = { startupGraceMs: 0 };
+    const gapped = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 25, rssAt: (i) => (i >= 10 && i < 15 ? null : overBudget(i)), capAt: () => budget,
+    });
+    expect(gapped.snapshot.criticalGates.floor).toBe(false);
+    expect(gapped.snapshot.restartAuthority).toBeNull();
+    const dipped = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 21, rssAt: (i) => (i === 10 ? mb(880) : overBudget(i)), capAt: () => budget,
+    });
+    expect(dipped.snapshot.criticalGates.floor).toBe(false);
+    expect(dipped.snapshot.budgetFloorHoldsAtMs).toBe(kStartMs + 11 * kTickMs + 15 * 60_000);
+  });
+
+  it("a heap near its V8 limit still counts at once", () => {
+    const { snapshot } = drive(createGatewayMemoryMonitor({ config: { startupGraceMs: 0 } }), {
+      ticks: 5, rssAt: overBudget, capAt: (i) => ({ ...budget, heap: { status: "fresh", atMs: kStartMs + i * kTickMs,
+        usedBytes: mb(880), limitBytes: mb(1000), floorsRising: false } }),
+    });
+    expect(snapshot).toMatchObject({ state: "critical", restartAuthority: "heap_near_limit" });
+  });
+
+  it("memory settling well below a recent spike holds the latch until the spike leaves the lookback", () => {
+    const config = { ...kSmallConfig, excursionLookbackMs: 3 * kTickMs };
+    const climb = (i) => mb(100 + 5 * i);
+    const steady = drive(createGatewayMemoryMonitor({ config }), { ticks: 16, rssAt: climb });
+    expect(steady.transitions.find((t) => t.type === "latched")?.tick).toBe(10);
+    const spiked = drive(createGatewayMemoryMonitor({ config }), {
+      ticks: 16, rssAt: (i) => i === 7 ? climb(i) + mb(80) : climb(i),
+    });
+    expect(spiked.transitions.find((t) => t.type === "latched")?.tick).toBe(11);
   });
 });
 
