@@ -7,6 +7,7 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.207] - 2026-11-07
 
+<<<<<<< HEAD
 The OpenClaw 2026.10.9 gateway no longer keeps about 20 extra worker threads on machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB, so the gateway's memory grew by gigabytes over a day on a 32-CPU host. The gateway also now uses at most 2 malloc arenas on those OpenClaw versions, which trims about a tenth of its native memory on such hosts.
 
 ### Fixed
@@ -17,6 +18,15 @@ The OpenClaw 2026.10.9 gateway no longer keeps about 20 extra worker threads on 
 ### Tests
 - New `gateway-memory-worker-pool-cap` tests run a respawning `gateway run` fixture with OpenClaw 2026.10.9's pool-sizing module on a simulated 32-CPU host and check the pool sizes against 2026.10.10's. The 2026.10.9 case fails on the previous main.
 - New tests check that a respawning 2026.10.9 `gateway run` fixture starts with `MALLOC_ARENA_MAX=2`, that the gateway and the commands it runs no longer see it afterwards, that 2026.10.10 and later get no cap, and that an operator's value wins.
+=======
+The model check no longer calls a built-in provider misconfigured when its `models.providers` entry leaves out `baseUrl`. OpenClaw fills in that provider's own base URL, so a working Google setup showed as an error, and the error led someone to delete the box's Google provider block.
+
+### Fixed
+- **Check models called a working built-in provider misconfigured.** A `models.providers.google` block with an `api` and an `apiKey` but no `baseUrl` showed "models.providers.google has no usable baseUrl", while a real turn through it replied. OpenClaw (2026.10.9) accepts an entry without a `baseUrl` for its built-in providers and fills in the base URL itself. The check now reports such an entry as not checked, with the reason that OpenClaw fills in the base URL, and AlphaClaw never sends it a test request or reads its credential for one. An entry without a `baseUrl` for any other provider id is still an error, and the reason now says OpenClaw fills one in only for its built-in providers. An entry that sets its own `baseUrl` is checked exactly as before. The check still never writes config.
+
+### Not covered
+- A built-in provider whose entry has no `baseUrl` is not tested at all, so a wrong key or model id there still shows up only when a real turn fails.
+>>>>>>> origin/main
 
 ## [0.10.206] - 2026-11-07
 
