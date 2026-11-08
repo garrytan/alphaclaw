@@ -88,6 +88,24 @@ describe("legacy OpenClaw worker pool sizing cap", () => {
     expect(sync).not.toHaveBeenCalled();
   });
 
+  it("falls back to the real CPU count and restores the stack limit when stack formatting throws", () => {
+    const pkg = path.join(temporary, "openclaw");
+    writePackage(pkg, "2026.10.9", "");
+    const osModule = { availableParallelism: () => 32 };
+    capLegacyWorkerPoolSizing({ entry: path.join(pkg, "openclaw.mjs"), osModule, syncBuiltinESMExports: vi.fn() });
+    const resolveSqliteBrokerWorkerCount = () => osModule.availableParallelism();
+    const savedPrepare = Error.prepareStackTrace;
+    const savedLimit = Error.stackTraceLimit;
+    expect(resolveSqliteBrokerWorkerCount()).toBe(5);
+    Error.prepareStackTrace = () => { throw new Error("boom"); };
+    try {
+      expect(resolveSqliteBrokerWorkerCount()).toBe(32);
+      expect(Error.stackTraceLimit).toBe(savedLimit);
+    } finally {
+      Error.prepareStackTrace = savedPrepare;
+    }
+  });
+
   it.each([
     ["2026.10.9", { cpus: 32, transcriptWorkers: 2, brokerWorkers: 2, computeLimit: 31, computeClass: 4 }],
     ["2026.10.10", { cpus: 32, transcriptWorkers: 8, brokerWorkers: 4, computeLimit: 31, computeClass: 4 }],
