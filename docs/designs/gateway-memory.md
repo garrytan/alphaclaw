@@ -181,7 +181,15 @@ three consecutive fresh evaluations (the fast path also needs RSS rising on each
    minutes outlast a regular OpenClaw compaction and its RSS tail (GST-1829): on
    2026.10.9 a safeguard compaction parses the session's whole transcript into the
    main heap, so one 575 MB session lifts the worker by up to 1.4 GB for the 2-3
-   minutes the summary takes, and RSS needs about 15 minutes to settle. Worker memory is its private memory (USS, from
+   minutes the summary takes, and RSS needs about 15 minutes to settle. The budget
+   counts at once when the worker's slope over its last 5 samples
+   (`floorHoldHeadroomSamples`; the window fit lags a sudden leak) would reach the
+   container limit, or the host's when there is none, within 5 minutes
+   (`floorHoldHeadroomMs`): a restart beats an OOM, so a compaction that close to
+   filling the container skips the hold too. The timer starts over when the worker
+   dips below 90%, after `maxConsecutiveMisses` read misses and on a process reset.
+   While the timer runs the snapshot carries `budgetFloorHoldsAtMs`, and the
+   critical notice names that time. Worker memory is its private memory (USS, from
    its own `smaps_rollup`) while that read is fresh, otherwise its RSS. The
    worker's own reading stays fresh when tool children come and go; only the
    group PSS total goes stale with `membership_changed`.
@@ -209,7 +217,7 @@ The opt-in mitigation also needs a restart authority on the snapshot:
 worker would abort anyway), `worker_container_oom` (the dominant, growing worker
 has the container at 90%), or `operator_budget` (the operator's own
 `watchdog.memory.budgetMb` is the cap and the worker has been at 90% of it for
-15 minutes, the issue #56 fast-leak profile). Without one, the watchdog logs one `mitigation_skipped`
+15 minutes, or is 5 minutes from the physical limit, the issue #56 fast-leak profile). Without one, the watchdog logs one `mitigation_skipped`
 `not_near_limit` per episode. A restart always goes through the graceful ladder
 with the derived drain; the drain's exhaustion estimate now includes the heap's
 own crossing (heap used toward its limit at the worker slope) and takes the

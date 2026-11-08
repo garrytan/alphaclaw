@@ -1894,6 +1894,40 @@ describe("restart authority in the watchdog (ALPH-22)", () => {
     expect(harness.watchdog.getMemoryTrend().restartAuthority).toBe("operator_budget");
     expect(restart).toHaveBeenCalledTimes(1);
   });
+
+  const kGiB = 1024 * kMb;
+  const restartTick = async ({ containerGiB, budgetMb, rssMbAt, ticks }) => {
+    let tick = null;
+    const harness = createHarness({
+      settings: { enabled: true, autoRestart: true, effectiveAutoRestart: true, budgetMb },
+      restartGatewayForMitigation: vi.fn(async () => {
+        tick ??= current;
+        return { ok: true };
+      }),
+      monitorConfig: {},
+    });
+    let current = 0;
+    launchGateway(harness);
+    const sampleAt = (i) => {
+      current = i;
+      const rssBytes = Math.round(rssMbAt(i) * kMb);
+      return { rssBytes, groupRssBytes: rssBytes, cgroupUsedBytes: rssBytes, containerLimitBytes: containerGiB * kGiB };
+    };
+    await driveTicks(harness, { ticks, sampleAt });
+    return tick;
+  };
+
+  it("a fast native leak the budget alone sees restarts before the container fills (GST-1829)", async () => {
+    const rssMbAt = (i) => (i < 70 ? 2000 : 2200 + 350 * (i - 70));
+    const tick = await restartTick({ containerGiB: 8, budgetMb: 2400, rssMbAt, ticks: 95 });
+    expect(tick).not.toBeNull();
+    expect(rssMbAt(tick)).toBeLessThan(8 * 1024);
+  });
+
+  it("a compaction-shaped ramp on a 16 GiB container does not restart on the budget (GST-1829)", async () => {
+    const rssMbAt = (i) => (i < 70 ? 4800 : i < 73 ? 4800 + 470 * (i - 70) : i < 76 ? 6200 : Math.max(4800, 6200 - 100 * (i - 76)));
+    expect(await restartTick({ containerGiB: 16, budgetMb: 5500, rssMbAt, ticks: 110 })).toBeNull();
+  });
 });
 
 
