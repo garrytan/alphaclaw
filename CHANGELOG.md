@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.207] - 2026-11-07
+## [0.10.208] - 2026-11-07
 
 Someone hammering the sign-in page can no longer lock the owner out, and sign-in now blocks and logs by client address. The box-wide cap on password guesses stays exactly where it was.
 
@@ -29,6 +29,16 @@ Someone hammering the sign-in page can no longer lock the owner out, and sign-in
 
 ### Tests
 - New `routes-auth-owner-lane` and `login-client-ip` files, plus a new case in `proxy-identity`. They cover owner access during an attack, per-address blocks against forged headers, the audit lines, the recovery-code rules and the pass rules, and they fail on the previous main. A throughput guard checks that 475 rotating clients sending forged, tampered and expired passes, passes for the wrong account and wrong codes get at most 25 password checks between them (at most 30 when one valid pass is stolen). It passes on the previous main, and fails if the box-wide count is removed or a tampered pass is accepted. Further cases check that 1,200 junk codes from 300 IPv6 networks run at most 25 decoy hashes, also while an owner signs in during the flood; that member sign-ins and invite acceptances sent at once stay within their limits, and a burst from one address gets at most 5 checks across sign-ins, junk codes and invite acceptances; that with hashing stalled past the 10-minute window, a flood from rotating IPv4 and IPv6 clients on every lane (known and unknown emails, wrong passes, the right code with wrong passwords, junk codes, invite acceptances) keeps at most 4 hashes running and 16 waiting, the rest get 429 at once and never run, and the owner with a pass still signs in (they fail on the previous build of this change, which let 30 hashes run at once); that a check that throws counts as a failure and gives its gate slot back; that an email that isn't text gets 400; that the password check leaves the event loop free; the locked-pass fallback; the IPv4-in-IPv6 keys; the warning's wording; that 40 addresses in one IPv6 /64 write 5 audit lines and one summary; that a correct 25th sign-in leaves the box-wide bucket open while a pass-lane success and a success still in its check leave locks other attempts set; that the sign-in page clears a recovery code after a 401 (login.js run in a small fake page, a new tests/frontend file); and that a TRUST_PROXY_HOPS of yes, -1 or 1.5 counts as not set, with one boot warning.
+
+## [0.10.207] - 2026-11-07
+
+The model check no longer calls a built-in provider misconfigured when its `models.providers` entry leaves out `baseUrl`. OpenClaw fills in that provider's own base URL, so a working Google setup showed as an error, and the error led someone to delete the box's Google provider block.
+
+### Fixed
+- **Check models called a working built-in provider misconfigured.** A `models.providers.google` block with an `api` and an `apiKey` but no `baseUrl` showed "models.providers.google has no usable baseUrl", while a real turn through it replied. OpenClaw (2026.10.9) accepts an entry without a `baseUrl` for its built-in providers and fills in the base URL itself. The check now reports such an entry as not checked, with the reason that OpenClaw fills in the base URL, and AlphaClaw never sends it a test request or reads its credential for one. An entry without a `baseUrl` for any other provider id is still an error, and the reason now says OpenClaw fills one in only for its built-in providers. An entry that sets its own `baseUrl` is checked exactly as before. The check still never writes config.
+
+### Not covered
+- A built-in provider whose entry has no `baseUrl` is not tested at all, so a wrong key or model id there still shows up only when a real turn fails.
 
 ## [0.10.206] - 2026-11-07
 

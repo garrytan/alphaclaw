@@ -221,3 +221,113 @@ describe("server/model-check run", () => {
     expect(byRef(run)["meta/muse-wonder-1.0"]).toMatchObject({ status: "not_checked", severity: "info" });
   });
 });
+
+// The box's models.providers.google block (OpenClaw 2026.10.9), key order as
+// stored, key redacted: no baseUrl key at all. OpenClaw accepts it because
+// google is one of its built-in providers and fills in the Google plugin's
+// base URL; a real turn through it replies.
+const boxGoogleBlock = () =>
+  JSON.parse(
+    '{"apiKey":"${GEMINI_API_KEY}","api":"google-generative-ai","models":[{"id":"gemini-3.1-pro-preview","name":"Gemini 3.1 Pro","reasoning":true,"contextWindow":1048576,"contextTokens":1048576,"maxTokens":65536,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}]}',
+  );
+
+describe("server/model-check built-in providers without a baseUrl", () => {
+  const kGoogleKey = "test-gemini-key-000000000000";
+  const kOpenaiKey = "test-openai-key-000000000000";
+  const makeFetch = () => {
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, authorization: init.headers.Authorization || null, apiKey: init.headers["x-api-key"] || null });
+      return { status: 200, text: async () => "{}" };
+    };
+    return { calls, fetchImpl };
+  };
+
+  it("reports the box's Google block as not checked, sends no request and returns no key", async () => {
+    const config = {
+      models: { providers: { google: boxGoogleBlock() } },
+      agents: {
+        defaults: {
+          models: { "google/gemini-3.1-pro-preview": { alias: "gemini" } },
+          modelPolicy: { allow: ["google/gemini-3.1-pro-preview"] },
+        },
+      },
+    };
+    const before = JSON.stringify(config);
+    const { calls, fetchImpl } = makeFetch();
+    const check = createModelCheck({
+      readConfig: () => config,
+      getEnv: () => ({ GEMINI_API_KEY: kGoogleKey }),
+      listProfiles: () => [
+        { id: "google:default", provider: "google", type: "api_key", key: kGoogleKey },
+        { id: "google-vertex:default", provider: "google-vertex", type: "api_key", key: "test-vertex-key-0000" },
+      ],
+      listOpenclawModels: async () => [{ key: "google/gemini-3.1-pro-preview", input: "text+image", contextWindow: 1048576, available: true }],
+      fetchImpl,
+    });
+    const result = await check.checkRef("google/gemini-3.1-pro-preview");
+    expect(result).toMatchObject({
+      status: "not_checked",
+      severity: "info",
+      custom: true,
+      api: "google-generative-ai",
+      openclaw: "available",
+      aliases: ["gemini"],
+    });
+    expect(result.baseUrl).toBeUndefined();
+    expect(result.reason).toBe("OpenClaw fills in the base URL for its built-in google provider, so AlphaClaw sends no test request.");
+    expect(calls).toEqual([]);
+    expect(JSON.stringify(config)).toBe(before);
+    expect(JSON.stringify(result)).not.toContain(kGoogleKey);
+  });
+
+  it("never probes a built-in provider without a baseUrl, even with a plain API key, inline oauth or OPENAI_BASE_URL set", async () => {
+    const cases = [
+      { provider: "OpenAI", entry: { api: "openai-responses", apiKey: "${OPENAI_KEY}" }, env: { OPENAI_KEY: kOpenaiKey } },
+      { provider: "openai", entry: { auth: "oauth", apiKey: kOpenaiKey }, env: {} },
+      { provider: "xai", entry: { auth: "oauth", apiKey: kOpenaiKey }, env: {} },
+      { provider: "openai", entry: { apiKey: "${OPENAI_API_KEY}" }, env: { OPENAI_API_KEY: kOpenaiKey, OPENAI_BASE_URL: "https://api.example.test/v1" } },
+    ];
+    for (const { provider, entry, env } of cases) {
+      const config = { models: { providers: { [provider]: { ...entry, models: [{ id: "gpt-6-sol" }] } } } };
+      expect(resolveProviderConnection({ config, provider, env })).toMatchObject({ custom: true, probe: false, skip: "openclaw_base_url", baseUrl: null });
+      const { calls, fetchImpl } = makeFetch();
+      const result = await createModelCheck({ readConfig: () => config, getEnv: () => env, fetchImpl }).checkRef(provider + "/gpt-6-sol");
+      expect(result).toMatchObject({ status: "not_checked", severity: "info" });
+      expect(result.reason).toBe("OpenClaw fills in the base URL for its built-in " + provider + " provider, so AlphaClaw sends no test request.");
+      expect(calls).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain(kOpenaiKey);
+    }
+  });
+
+  it("keeps a provider OpenClaw has no built-in base URL for misconfigured, even on the Google API", async () => {
+    const config = { models: { providers: { "my-gemini": boxGoogleBlock() } } };
+    const result = await createModelCheck({ readConfig: () => config, getEnv: () => ({ GEMINI_API_KEY: kGoogleKey }) }).checkRef("my-gemini/gemini-3.1-pro-preview");
+    expect(result).toMatchObject({ status: "misconfigured", severity: "error" });
+    expect(result.reason).toBe("models.providers.my-gemini has no baseUrl, and OpenClaw fills one in only for its built-in providers.");
+    expect(result.fix).toBe("Set models.providers.my-gemini.baseUrl to the provider's API root.");
+  });
+
+  it("keeps probing an entry that sets its own baseUrl, on that URL and with the token as configured", async () => {
+    const kSetupToken = "sk-ant-oat01-test-000000000000";
+    const config = {
+      models: {
+        providers: {
+          anthropic: { baseUrl: "https://proxy.example.test", api: "anthropic-messages", apiKey: kSetupToken },
+          openai: { baseUrl: "https://gateway.example.test/v1", api: "openai-completions", apiKey: "test-openai-key-0000" },
+        },
+      },
+    };
+    const checkOne = async (ref) => {
+      const { calls, fetchImpl } = makeFetch();
+      const result = await createModelCheck({ readConfig: () => config, fetchImpl }).checkRef(ref);
+      return { result, calls };
+    };
+    const ant = await checkOne("anthropic/claude-opus-5-5");
+    expect(ant.result).toMatchObject({ status: "ok", api: "anthropic-messages", baseUrl: "https://proxy.example.test" });
+    expect(ant.calls).toEqual([{ url: "https://proxy.example.test/v1/messages", authorization: null, apiKey: kSetupToken }]);
+    const oai = await checkOne("openai/gpt-6-sol");
+    expect(oai.result).toMatchObject({ status: "ok", api: "openai-completions", baseUrl: "https://gateway.example.test/v1" });
+    expect(oai.calls).toEqual([{ url: "https://gateway.example.test/v1/chat/completions", authorization: "Bearer test-openai-key-0000", apiKey: null }]);
+  });
+});
