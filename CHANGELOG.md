@@ -7,7 +7,7 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.210] - 2026-11-07
 
-The OpenClaw 2026.10.9 gateway no longer keeps about 20 extra worker threads on machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB. In an 8-hour test on a 32-CPU host the gateway ran 19 worker threads instead of 27 and used about 0.7 GB less memory (3.3 GB instead of 4.0 GB), with no failed turns.
+The OpenClaw 2026.10.9 gateway runs fewer worker threads on machines with many CPUs. Each of those threads has its own JavaScript heap that fills toward 512 MiB. In an 8-hour test on a 32-CPU host the gateway ran 19 worker threads instead of 27 and used about 0.7 GB less memory (3.3 GB instead of 4.0 GB), with no failed turns.
 
 ### Fixed
 - **Gateway memory on many-CPU hosts with OpenClaw before 2026.10.10.** These versions size the session-history, transcript-search and SQLite worker pools from the CPU count, up to 8 threads per lane on a 32-CPU host, and the history and search lanes never release their threads while the gateway is busy. OpenClaw 2026.10.10 fixed the sizes at 2 (openclaw#169110). AlphaClaw's gateway preload now makes just those two size calculations see 5 CPUs, which gives the same pool sizes as 2026.10.10. Everything else in the gateway, such as default agent concurrency and shared compute permits, still sees the real CPU count. The preload reads the version of the OpenClaw package it launches and does nothing for 2026.10.10 or later, for OpenClaw CLI commands other than `gateway run`, for AlphaClaw's own server, or when `ALPHACLAW_GATEWAY_MEMORY_TELEMETRY=off`.
