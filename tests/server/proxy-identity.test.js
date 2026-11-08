@@ -117,6 +117,10 @@ describe("server/proxy-identity", () => {
         "note=setup_token",
       );
     });
+    it("strips the known-browser sign-in pass (alphaclaw_device)", () => {
+      expect(stripSessionCookie("a=1; alphaclaw_device=v1.x; b=2")).toBe("a=1; b=2");
+      expect(stripSessionCookie("alphaclaw_device=v1.x")).toBe("");
+    });
     it("returns empty string for empty input", () => {
       expect(stripSessionCookie("")).toBe("");
       expect(stripSessionCookie(undefined)).toBe("");
