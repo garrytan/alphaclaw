@@ -211,7 +211,6 @@ describe("server/utils/safe-file", () => {
         fs.readdirSync(tempDir).filter((name) => name.endsWith(".tmp")).sort();
 
       it("keeps another writer's read-only <target>.<pid>.tmp intact and still saves", () => {
-        if (process.platform === "win32" || process.getuid?.() === 0) return;
         const target = path.join(tempDir, "config.json");
         fs.writeFileSync(target, "original");
         const foreign = pidTempPath(target);
@@ -289,6 +288,27 @@ describe("server/utils/safe-file", () => {
           expect(() =>
             writeFileAtomic(target, "new content", { fsModule: failingRename, ...options }),
           ).toThrow("EXDEV");
+        }
+        expect(listTemps()).toEqual([path.basename(foreign)]);
+        expect(fs.readFileSync(foreign, "utf8")).toBe("theirs");
+        expect(fs.readFileSync(target, "utf8")).toBe("original");
+      });
+
+      it("keeps another writer's temp file when the content is not a string or Buffer", () => {
+        const target = path.join(tempDir, "config.json");
+        fs.writeFileSync(target, "original");
+        const foreign = pidTempPath(target);
+        fs.writeFileSync(foreign, "theirs");
+        for (const options of [{}, { mode: 0o600 }]) {
+          expect(() => writeFileAtomic(target, { not: "bytes" }, options)).toThrow(
+            expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }),
+          );
+          expect(() => writeFileAtomic(target, 42, options)).toThrow(
+            expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }),
+          );
+          expect(() => writeFileAtomic(target, undefined, options)).toThrow(
+            expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }),
+          );
         }
         expect(listTemps()).toEqual([path.basename(foreign)]);
         expect(fs.readFileSync(foreign, "utf8")).toBe("theirs");
