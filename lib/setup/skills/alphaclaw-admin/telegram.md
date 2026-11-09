@@ -44,6 +44,7 @@ The change needs the group's current revision. Read GET /api/telegram/groups and
 
 The group's rules changed since you read them. Read the groups again, check the new rules, and send the change with the new revision. Retry: after reading the revision.
 
+Block-list saves use their own revision: send `blockedSendersRevision` from GET /api/telegram/groups as If-Match on PUT /api/telegram/blocked-senders.
 
 ### owner_required
 

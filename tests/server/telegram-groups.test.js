@@ -510,6 +510,21 @@ describe("telegram group rules routes", () => {
     expect(res.headers.etag).toBe('"' + res.body.revision + '"');
   });
 
+  it("refuses a block-list save from a tab that read an older list, with 412 revision_mismatch", async () => {
+    const { app } = createApp();
+    const read = await request(app).get("/api/telegram/groups");
+    const revision = read.body.blockedSendersRevision;
+    expect(revision).toMatch(/^[0-9a-f]{16}$/);
+    const first = await request(app).put("/api/telegram/blocked-senders").set("If-Match", '"' + revision + '"').send({ senders: [{ id: kMossab }] });
+    expect(first.status).toBe(200);
+    expect(first.headers.etag).toBe('"' + first.body.revision + '"');
+    const stale = await request(app).put("/api/telegram/blocked-senders").set("If-Match", '"' + revision + '"').send({ senders: [] });
+    expectProblem(stale, "revision_mismatch");
+    expect(stale.body.detail).toContain("block list");
+    expect(stale.body.revision).toBe(first.body.revision);
+    expect((await request(app).get("/api/telegram/groups")).body.blockedSenders.map((entry) => entry.id)).toEqual([kMossab]);
+  });
+
   it("answers every refusal with its status and an RFC 9457 body", async () => {
     const { app, groups } = createApp();
     expectProblem(await request(app).put("/api/telegram/groups/abc/policy").send({ mode: "silent" }), "invalid_group_id");

@@ -587,6 +587,9 @@ describe("the admin skill's Telegram reference", () => {
     expect(reference).toContain("Known limit: a blocked person's messages as context.");
   });
 
+  it("documents the block list's revision", () => {
+    expect(reference).toContain("send `blockedSendersRevision` from GET /api/telegram/groups as If-Match");
+  });
 });
 
 describe("anonymous admins in Trusted mode", () => {

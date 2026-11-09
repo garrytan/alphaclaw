@@ -60,6 +60,15 @@ describe("frontend/api/telegram-groups", () => {
     });
   });
 
+  it("sends the block list's revision as a quoted If-Match", async () => {
+    const api = await loadApi();
+    global.fetch.mockResolvedValue(response(200, { ok: true, changed: true }));
+    await api.setTelegramBlockedSenders([{ id: "42" }], { revision: "b3" });
+    expect(lastCall().headers.get("If-Match")).toBe('"b3"');
+    await api.setTelegramBlockedSenders([{ id: "42" }]);
+    expect(lastCall().headers.has("If-Match")).toBe(false);
+  });
+
   it("treats ok:false on a 200 as a failure and falls back to the action's title", async () => {
     const api = await loadApi();
     global.fetch.mockResolvedValue(response(200, { ok: false }));

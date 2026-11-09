@@ -25,7 +25,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
 }));
 vi.mock("../../lib/public/js/components/toast.js", () => ({ showToast: vi.fn() }));
 
-import { setTelegramGroupPolicy } from "../../lib/public/js/lib/api.js";
+import { setTelegramBlockedSenders, setTelegramGroupPolicy } from "../../lib/public/js/lib/api.js";
 import { showToast } from "../../lib/public/js/components/toast.js";
 import { GroupsTab } from "../../lib/public/js/components/groups-tab/index.js";
 import { BlockedPeople } from "../../lib/public/js/components/groups-tab/blocked-people.js";
@@ -40,6 +40,7 @@ const kData = {
   accountPolicy: "allowlist",
   visibleReplies: "automatic",
   blockedSenders: [{ id: "100000007", label: "Spam bot" }],
+  blockedSendersRevision: "rev-list",
   groupGuard: { enforced: true, reason: null },
   groups: [],
 };
@@ -85,6 +86,21 @@ describe("groups page races", () => {
     const [, body, options] = setTelegramGroupPolicy.mock.calls[1];
     expect(body).toEqual({ mode: "approved", trusted: [{ id: "300000001", scope: "conversation" }], title: "Placeholder group" });
     expect(options).toEqual({ revision: "rev-at-preview", accountId: "default" });
+  });
+
+  it("saves the block list under the revision it was read at, and reloads it when another tab changed it", async () => {
+    hooks.index = 0;
+    expect(collectNodes(GroupsTab({ accountId: "default" })).find((node) => node.type === BlockedPeople).props.revision).toBe("rev-list");
+    setTelegramBlockedSenders.mockRejectedValueOnce(Object.assign(new Error("changed"), { problem: { code: "revision_mismatch", revision: "rev-new" } }));
+    const onChanged = vi.fn(async () => {});
+    hooks.values = [];
+    hooks.index = 0;
+    const tree = BlockedPeople({ blockedSenders: kData.blockedSenders, revision: "rev-list", owners: kData.owners, onChanged });
+    const unblock = collectNodes(tree).find((node) => typeof node.props?.onClick === "function");
+    await unblock.props.onClick();
+    expect(setTelegramBlockedSenders).toHaveBeenCalledWith([], { revision: "rev-list" });
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Someone changed the block list"), "error");
   });
 
   it("refreshes the page and closes the dialog when the group changed after the preview", async () => {
