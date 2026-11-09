@@ -7,10 +7,22 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.226] - 2026-11-09
 
+<<<<<<< HEAD
 A Capy thread you made a relay delegate now gets what it asked for. When it asks your agent for files, an export or results, your agent hands them over in its answer instead of asking for your approval, because that answer goes back to your own thread.
 
 ### Fixed
 - **Delegates receive what they asked for.** A delegate's relay header now says that its final answer goes back to the requesting Capy thread, so giving that thread file contents, a staged export or results is you receiving them, not a send to another person. Before, an agent could treat the requesting thread as a third party and ask for your own go before handing over an export the thread had asked for. Sending to anyone else still needs an approval you gave in Capy that names them.
+=======
+The watchdog's out-of-memory verdict for a force-killed gateway gets three follow-up fixes. A relaunch killed while it boots is judged on its own, the wording no longer overstates what the kernel counter proves, and an outside kill still pages like the OOM verdict it was split from.
+
+### Fixed
+- **A relaunch killed while booting is no longer blamed on its predecessor's OOM.** The kernel `oom_kill` count the next exit is compared with is now also re-read at each gateway exit, not only at the launch notice. The notice comes only once the gateway listens, so a relaunch SIGKILLed during boot used to be compared with its predecessor's launch count and inherited that gateway's OOM kill. A relaunch that does reach its notice is still judged from the notice.
+- **The OOM verdict says "most likely".** A risen counter shows the kernel OOM killer fired in the container while the gateway ran, not that it was the gateway's killer. Over a gateway life of days another process may have been the victim, so the crash detail and the owner notice now say the kernel OOM killer most likely did it.
+- **An outside SIGKILL stays critical.** `killed_by_signal` (a SIGKILL with no kernel OOM kill) is critical-class for automatic review and quiet mode, as `oom` was before the split.
+
+### Changed
+- The cgroup v2 `oom_kill` reader moved from `lib/server.js` into `system-resources.js` as `readCgroupOomKillCount`, with a test. The watchdog comment no longer says it reads cgroup v1.
+>>>>>>> origin/main
 
 ## [0.10.225] - 2026-11-09
 
