@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.243] - 2026-11-09
+
+Three fixes to how AlphaClaw reports a long OpenClaw upgrade boot, from a 16-agent cold-boot test of the 2026.11.2 upgrade.
+
+### Fixed
+- **A long upgrade boot is no longer recorded as failed.** After its Doctor, 2026.11.2's `/readyz` lists each agent whose database is still being inspected in `failing[]` as `agent-database:<id>` (30 s for a 4 GB database in the test). A `failing[]` made only of agents whose `agentDatabases` entry says `agent-database-inspection-pending` is now the starting phase, so the watchdog no longer opens a `gateway_readiness` incident and the boot timeline no longer ends "failed (readiness_failed)" on a boot that comes up a few seconds later. Any other agent refusal, or another failing component beside it, is still a failure.
+- **Leftover session `.jsonl` count and quote with wrapped warnings.** OpenClaw prints its `active_sqlite_transcript_jsonl` warning wrapped to fit the terminal when its output is a pipe. AlphaClaw now joins each warning's lines before reading it, counts each transcript once (by session key, else by path), and quotes the whole first warning instead of a fragment. The notice and the upgrade alert could show about twice the real number of sessions before.
+
+### Changed
+- **The "upgrading OpenClaw's data" notice warns when the disk is short.** When free space is under about twice the OpenClaw state, the upgrade's measured need (2026.11.2 grew a 14.5 GB-state volume from 42 GB to 71 GB used, the same ratio as 2026.10.6), the notice now carries the disk check's warning that OpenClaw will likely skip its recovery copy. The upgrade alert already showed it; the refusal below 1.1× the state is unchanged.
+
+### Tests
+- `gateway-readiness.test.js` and `watchdog.test.js`: the 2026.11.2 pending-inspection body is the starting phase for 30 s and never `readiness_degraded`; another refusal code or a second failing component stays a component failure.
+- `openclaw-boot-migration.test.js`: wrapped warnings for two agents with a duplicate count two sessions and quote the whole warning; a trailing OpenClaw error line is still quoted instead.
+- `deploy-announce.test.js`: the upgrading notice carries the disk warning.
+
 ## [0.10.242] - 2026-11-09
 
 AlphaClaw now runs OpenClaw 2026.11.2, the current stable release, instead of 2026.10.9. The first boot migrates OpenClaw's databases one way; README's OpenClaw Version section says how to back up first and how to go back.

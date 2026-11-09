@@ -284,6 +284,26 @@ describe("server/openclaw-boot-migration", () => {
     expect(summarizeDoctorResult({ ok: false, code: 1, stdout: `${warnings}Doctor blocked: external config is read-only\n` })).toMatchObject({ reason: "session_jsonl_pending", detail: "Doctor blocked: external config is read-only" });
   });
 
+  it("reads a leftover .jsonl warning that OpenClaw's note() wrapped over several lines as one warning", () => {
+    const wrapped = (n, agent) => [
+      `│  - [active_sqlite_transcript_jsonl] agent:${agent}:s-${n}: SQLite-backed`,
+      "│    session has a legacy JSONL transcript awaiting verification:",
+      `│    /data/.openclaw/agents/${agent}/sessions/s-${n}.jsonl. Run openclaw doctor --fix or`,
+      "│    openclaw doctor --session-sqlite recover with the Gateway stopped to",
+      "│    verify, import any missing events, and archive the original.",
+    ].join("\n");
+    const stdout = [wrapped(1, "main"), wrapped(2, "ops"), wrapped(1, "main")].join("\n") + "\n";
+    const lone = summarizeDoctorResult({ ok: false, code: 1, stdout });
+    expect(lone).toMatchObject({ reason: "session_jsonl_pending", sessionJsonlCount: 2 });
+    expect(lone.detail).toContain("awaiting verification: /data/.openclaw/agents/main/sessions/s-1.jsonl. Run openclaw doctor");
+    expect(lone.detail).toMatch(/import any missing events, and archive the original\.$/);
+    expect(summarizeDoctorResult({ ok: false, code: 1, stdout: stdout + "Doctor blocked: external config is read-only\n" })).toMatchObject({
+      reason: "session_jsonl_pending",
+      sessionJsonlCount: 2,
+      detail: "Doctor blocked: external config is read-only",
+    });
+  });
+
   it("counts leftover session .jsonl files read-only before a pin change's Doctor", async () => {
     const box = newBox();
     recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.10.9", nowFn: () => kNow });

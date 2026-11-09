@@ -168,6 +168,15 @@ describe("deploy announcements", () => {
       "⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.11.2; replies resume when it finishes. openclaw.json from before the upgrade is kept at /data/.openclaw/.alphaclaw/openclaw.json.pre-2026.11.2.",
     );
 
+    const short = makeAnnouncer({ clock });
+    await short.announcer.onDataUpgradeStart({
+      toVersion: "2026.11.2",
+      diskWarning: "Only 20.0 GB is free for 14.5 GB of OpenClaw state. The data upgrade needs about 29.0 GB, so OpenClaw will likely skip its recovery copy and the upgrade will have no rollback snapshot.",
+    });
+    expect(short.notices[0].message).toBe(
+      "⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.11.2; replies resume when it finishes. Only 20.0 GB is free for 14.5 GB of OpenClaw state. The data upgrade needs about 29.0 GB, so OpenClaw will likely skip its recovery copy and the upgrade will have no rollback snapshot.",
+    );
+
     const stopping = makeAnnouncer({ clock });
     await stopping.announcer.onShutdown({ reason: "SIGINT" });
     expect(await stopping.announcer.onDataUpgradeStart({ toVersion: "2026.10.8" })).toEqual({ notified: false });
