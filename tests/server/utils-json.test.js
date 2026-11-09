@@ -58,11 +58,13 @@ describe("server/utils/json", () => {
   it("bails fast on pathological unmatched-opener input instead of scanning O(n²)", () => {
     // 200KB of "{": every position starts a candidate scan that walks to the
     // end without balancing — unbounded, that is ~2×10^10 steps on the event
-    // loop. The work budget must return null well under real-time limits.
+    // loop (minutes). The work budget must return null in a few million steps;
+    // the 5 s bound leaves room for coverage instrumentation (~750 ms in CI)
+    // while still failing an unbounded scan by orders of magnitude.
     const pathological = "{".repeat(200 * 1024);
     const startedAt = Date.now();
     expect(parseJsonValueFromNoisyOutput(pathological)).toBeNull();
-    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(Date.now() - startedAt).toBeLessThan(5000);
   });
 
   it("still parses a valid payload at the end of 1MB of prefix noise", () => {
