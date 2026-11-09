@@ -10,13 +10,21 @@ const ruleBody = (selectorPattern) => {
 };
 
 describe("frontend/phone shell CSS", () => {
-  it("gives every control in the app shell a 40 px floor on phones", () => {
+  it("gives every control in the app shell and its dialogs a 40 px floor on phones", () => {
+    const shell = String.raw`:is\(\.app-shell, \[aria-modal="true"\]\)`;
     const body = ruleBody(
-      String.raw`\.app-shell\s*:is\(button, select, summary, \[role="button"\], \[role="tab"\], input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\)\)`,
+      shell + String.raw`\s*:is\(button, select, summary, \[role="button"\], \[role="tab"\], input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\)\)`,
     );
     expect(body).toContain("min-height: 40px");
-    expect(ruleBody(String.raw`\.app-shell :is\(button, \[role="button"\], \[role="tab"\]\)`)).toContain("min-width: 40px");
-    expect(ruleBody(String.raw`\.app-shell label:has\(> input\[type="checkbox"\]\)`)).toContain("min-height: 40px");
+    expect(ruleBody(shell + String.raw` :is\(button, \[role="button"\], \[role="tab"\]\)`)).toContain("min-width: 40px");
+    expect(ruleBody(shell + String.raw` label:has\(> input\[type="checkbox"\]\)`)).toContain("min-height: 40px");
+  });
+
+  it("makes file-tree rows 40 px tall without changing their full-width flex layout", () => {
+    const body = ruleBody(String.raw`\.app-shell \.file-tree a`);
+    expect(body).toContain("min-height: 40px");
+    expect(body).not.toContain("display");
+    expect(css).not.toMatch(/\.file-tree a\)/);
   });
 
   it("hides the closed phone drawer from the tab order and the top bar keeps the only status chip", () => {
