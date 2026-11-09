@@ -111,6 +111,7 @@ const kExpectedApiExports = [
   "fetchStatus",
   "fetchTeam",
   "fetchTeamPresence",
+  "fetchTelegramGroups",
   "fetchThinkingOptions",
   "fetchUpgradeStatus",
   "fetchUsageSessionDetail",
@@ -177,6 +178,8 @@ const kExpectedApiExports = [
   "setCronJobEnabled",
   "setDefaultAgent",
   "setPrimaryModel",
+  "setTelegramBlockedSenders",
+  "setTelegramGroupPolicy",
   "startClaudeCodeLocalLogin",
   "startDoctorRun",
   "startGmailWatch",
@@ -188,6 +191,7 @@ const kExpectedApiExports = [
   "subscribeStatusEvents",
   "sweepTopicDiscovery",
   "syncBrowseChanges",
+  "testTelegramGroup",
   "triggerCronJobRun",
   "triggerWatchdogRepair",
   "triggerWatchdogTestNotification",
@@ -217,7 +221,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(206);
+    expect(kExpectedApiExports).toHaveLength(210);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

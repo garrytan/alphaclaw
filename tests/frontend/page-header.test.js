@@ -31,6 +31,7 @@ const kSpecHeaders = {
   channels: ["Channels", "Where people reach your agents"],
   integrations: ["Integrations", "Services and tools this box connects to"],
   relay: ["Relay", "Other agents can message this box's agent over the relay"],
+  groups: ["Groups", "Who your agent listens to in each Telegram group, and who it ignores everywhere"],
   models: ["Models & keys", "The models this box can use and the keys that pay for them"],
   environment: ["Environment", "Every other variable this box runs with"],
   team: ["Team", "Who can open this box"],

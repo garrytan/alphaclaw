@@ -141,7 +141,7 @@ there are more.
 
 ## Setup UI
 
-The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage, plus the Open Claude Code and Dashboards launchers, admins only), **Connect** (Channels, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). The icon tabs at the top of the sidebar switch it between this menu, the Browse file tree and the Chat session list. Webhooks, Nodes and the Telegram workspace are opened from the pages that own them. Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
+The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage, plus the Open Claude Code and Dashboards launchers, admins only), **Connect** (Channels, Groups, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). The icon tabs at the top of the sidebar switch it between this menu, the Browse file tree and the Chat session list. Webhooks, Nodes and the Telegram workspace are opened from the pages that own them. Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
 
 | Page          | What it manages                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
