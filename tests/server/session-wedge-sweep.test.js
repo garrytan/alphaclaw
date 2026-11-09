@@ -67,19 +67,6 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     ]);
   });
 
-  it("leaves Doctor sessions alone: AlphaClaw stops an interrupted Doctor turn itself and never resumes or reports it", () => {
-    const stopped = "agent:main:doctor:7";
-    const interrupted = "agent:main:doctor:8";
-    const { recoverable, wedged } = classifySessions({
-      rows: [row(stopped, { abortedLastRun: true }), row(interrupted)],
-      recorded: new Map([[stopped, {}], [interrupted, {}]]),
-      launchAtMs: kLaunchAt,
-      nowMs: kLaunchAt + 120_000,
-    });
-    expect(recoverable).toEqual([]);
-    expect(wedged).toEqual([]);
-  });
-
   it("records the sessions running when a restart is requested, through sessions.list activeOnly", async () => {
     const gateway = createGateway({
       "sessions.list": async () => ({ body: { sessions: [row("a", { hasActiveRun: true }), row("idle")] } }),

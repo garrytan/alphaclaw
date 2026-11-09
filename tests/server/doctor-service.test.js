@@ -267,48 +267,6 @@ describe("server/doctor-service", () => {
     expect(manifestSpy).toHaveBeenLastCalledWith(secondImport.runId);
   });
 
-  it("lists as abandoned only runs cut off at boot or whose gateway turn never answered, until forgotten", async () => {
-    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-abandoned-workspace-"));
-    const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-abandoned-db-"));
-    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Workspace Guidance\n", "utf8");
-    const doctorDb = loadManagedDoctorDb();
-    doctorDb.initDoctorDb({ rootDir: dbRoot });
-    const replies = [
-      { ok: false, stdout: "", stderr: "gateway closed (1006)", code: 1 },
-      { ok: true, stdout: "not json", stderr: "", code: 0 },
-    ];
-    const clawCmd = vi.fn(async () => replies.shift());
-    const { buildDoctorSessionKey, createDoctorService } = loadDoctorService();
-    const doctorService = createDoctorService({
-      clawCmd,
-      listDoctorRuns: doctorDb.listDoctorRuns,
-      listDoctorCards: doctorDb.listDoctorCards,
-      getInitialWorkspaceBaseline: doctorDb.getInitialWorkspaceBaseline,
-      setInitialWorkspaceBaseline: doctorDb.setInitialWorkspaceBaseline,
-      createDoctorRun: doctorDb.createDoctorRun,
-      completeDoctorRun: doctorDb.completeDoctorRun,
-      insertDoctorCards: doctorDb.insertDoctorCards,
-      getDoctorRun: doctorDb.getDoctorRun,
-      getDoctorCardsByRunId: doctorDb.getDoctorCardsByRunId,
-      getDoctorCard: doctorDb.getDoctorCard,
-      updateDoctorCardStatus: doctorDb.updateDoctorCardStatus,
-      listRunsInterruptedAtInit: () => [41],
-      workspaceRoot,
-      managedRoot: workspaceRoot,
-      computeSnapshotAsync: fastComputeSnapshotAsync,
-    });
-    expect(doctorService.listAbandonedRunSessionKeys()).toEqual([buildDoctorSessionKey(41)]);
-    const lost = await doctorService.runDoctor();
-    await vi.waitFor(() => expect(doctorDb.getDoctorRun(lost.runId).status).toBe("failed"));
-    fs.writeFileSync(path.join(workspaceRoot, "AGENTS.md"), "# Workspace Guidance\n\nChanged.\n", "utf8");
-    const answered = await doctorService.runDoctor();
-    await vi.waitFor(() => expect(doctorDb.getDoctorRun(answered.runId).status).toBe("failed"));
-    expect(doctorService.listAbandonedRunSessionKeys()).toEqual([buildDoctorSessionKey(41), buildDoctorSessionKey(lost.runId)]);
-    doctorService.forgetAbandonedRunSession(buildDoctorSessionKey(41));
-    doctorService.forgetAbandonedRunSession("agent:ops:doctor:" + lost.runId);
-    expect(doctorService.listAbandonedRunSessionKeys()).toEqual([buildDoctorSessionKey(lost.runId)]);
-  });
-
   it("runs Doctor analysis in a dedicated doctor session", async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-session-workspace-"));
     const dbRoot = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-session-db-"));

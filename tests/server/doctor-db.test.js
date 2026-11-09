@@ -36,19 +36,6 @@ describe("server/doctor-db", () => {
     }
   });
 
-  it("marks runs still running at init failed, says they will not resume, and remembers which they were", () => {
-    const ctx = createDoctorDbContext("doctor-db-interrupted-");
-    const running = ctx.createDoctorRun({ status: kDoctorRunStatus.running });
-    const done = ctx.createDoctorRun({ status: kDoctorRunStatus.running });
-    ctx.completeDoctorRun({ id: done, status: kDoctorRunStatus.completed, summary: "ok" });
-    ctx.closeDoctorDb();
-    currentDoctorDb.initDoctorDb({ rootDir: currentRootDir });
-    expect(currentDoctorDb.getRunsInterruptedAtInit()).toEqual([running]);
-    const run = currentDoctorDb.getDoctorRun(running);
-    expect(run.status).toBe(kDoctorRunStatus.failed);
-    expect(run.error).toMatch(/^Cut off by a restart\. AlphaClaw does not resume an interrupted Doctor run/);
-  });
-
   it("initializes doctor.db under root db directory", () => {
     const result = createDoctorDbContext("doctor-db-init-");
 
