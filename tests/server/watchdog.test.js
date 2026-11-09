@@ -8159,6 +8159,42 @@ describe("server/watchdog", () => {
         watchdog.stop();
       });
 
+      it("GST-2169: 2026.11.2's 503 {failing:['agent-database:main']} while main is still under inspection after a long upgrade Doctor is the starting phase, never readiness_degraded, and the ready body ends it", async () => {
+        vi.useFakeTimers();
+        const { control, fetchImpl } = createGatewayControl();
+        control.readyzHttpStatus = 503;
+        control.readyzBody = JSON.stringify({
+          ready: false,
+          coreReady: false,
+          failing: ["agent-database:main"],
+          uptimeMs: 3857,
+          agentDatabases: [{ agentId: "main", paths: ["/data/.openclaw/agents/main/agent/openclaw-agent.sqlite"], code: "agent-database-inspection-pending" }],
+        });
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+          autoRepair: false,
+          fetchImpl,
+          resolveGatewayReadyzUrl: () => kReadyzUrl,
+        });
+        watchdog.onGatewayLaunch({ startedAt: Date.now(), pid: 100 });
+        await tick();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(watchdog.getStatus()).toMatchObject({
+          health: "healthy",
+          degradedReason: null,
+          readiness: "not_ready",
+          readinessStatus: "starting",
+        });
+
+        control.readyzBody = null;
+        control.readyzHttpStatus = 200;
+        control.readyzFailing = [];
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(watchdog.getStatus()).toMatchObject({ health: "healthy", readiness: "ready", readinessStatus: null });
+        expect(rowsOfType(insertWatchdogEvent, "readiness_degraded")).toHaveLength(0);
+        expect(notifier.notify).not.toHaveBeenCalled();
+        watchdog.stop();
+      });
+
       it("#87 4c. a transitional gateway keeps a crash incident open (pending rows) and closes it within one 5s tick of `started`; the pending replacement is certified only by `started`", async () => {
         vi.useFakeTimers();
         const { control, fetchImpl } = createGatewayControl();

@@ -5,6 +5,7 @@ const express = require("express");
 const request = require("supertest");
 
 const { createDeployAnnouncer, formatDuration, median } = require("../../lib/server/deploy-announce");
+const { evaluateUpgradeDiskCheck } = require("../../lib/server/upgrade-disk-check");
 const { registerDeployRoutes } = require("../../lib/server/routes/deploy");
 const { createServerLifecycle } = require("../../lib/server/init/server-lifecycle");
 const { getManifest } = require("../../lib/server/admin-manifest");
@@ -167,6 +168,21 @@ describe("deploy announcements", () => {
     expect(kept.notices[0].message).toBe(
       "⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.11.2; replies resume when it finishes. openclaw.json from before the upgrade is kept at /data/.openclaw/.alphaclaw/openclaw.json.pre-2026.11.2.",
     );
+
+    const short = makeAnnouncer({ clock });
+    await short.announcer.onDataUpgradeStart({
+      toVersion: "2026.11.2",
+      diskCheck: evaluateUpgradeDiskCheck({ stateBytes: 14.5e9, freeBytes: 20e9 }),
+    });
+    expect(short.notices[0].message).toBe(
+      "⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.11.2; replies resume when it finishes. Only 20.0 GB is free for 14.5 GB of OpenClaw state. The data upgrade needs about 29.0 GB, so OpenClaw will likely skip its recovery copy and the upgrade will have no rollback snapshot.",
+    );
+
+    for (const diskCheck of [evaluateUpgradeDiskCheck({ stateBytes: 14.5e9, freeBytes: 100e9 }), evaluateUpgradeDiskCheck({ stateBytes: 14.5e9, freeBytes: 10e9 })]) {
+      const other = makeAnnouncer({ clock });
+      await other.announcer.onDataUpgradeStart({ toVersion: "2026.11.2", diskCheck });
+      expect(other.notices[0].message).toBe("⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.11.2; replies resume when it finishes.");
+    }
 
     const stopping = makeAnnouncer({ clock });
     await stopping.announcer.onShutdown({ reason: "SIGINT" });

@@ -41,6 +41,32 @@ describe("classifyReadinessResponse — real 2026.9.8 / 2026.10.2 /readyz shapes
     ).toMatchObject({ kind: "not_ready", status: "draining", unreadyReason: "draining" });
   });
 
+  it("2026.11.2: failing[] that is only agents still under inspection is the starting phase; any other agent refusal stays a component failure", () => {
+    const pending = (agentId) => ({ agentId, paths: ["/data/.openclaw/agents/" + agentId + "/agent/openclaw-agent.sqlite"], code: "agent-database-inspection-pending" });
+    expect(
+      classifyReadinessResponse({
+        httpStatus: 503,
+        body: { ready: false, coreReady: false, failing: ["agent-database:main", "agent-database:ops"], uptimeMs: 3857, agentDatabases: [pending("main"), pending("ops")] },
+      }),
+    ).toMatchObject({ kind: "not_ready", status: "starting", unreadyReason: "starting", agentDatabasesPending: 2 });
+    expect(
+      classifyReadinessResponse({
+        httpStatus: 503,
+        body: { ready: false, failing: ["agent-database:main", "agent-database:ops"], agentDatabases: [pending("main"), { agentId: "ops", code: "agent-database-schema-newer" }] },
+      }),
+    ).toMatchObject({ status: null, unreadyReason: "components" });
+    expect(
+      classifyReadinessResponse({ httpStatus: 503, body: { ready: false, failing: ["agent-database:main", "telegram"], agentDatabases: [pending("main")] } }),
+    ).toMatchObject({ status: null, unreadyReason: "components" });
+    const many = Array.from({ length: 20 }, (_, i) => `agent-${i}`);
+    expect(
+      classifyReadinessResponse({
+        httpStatus: 503,
+        body: { ready: false, failing: [...many.map((id) => `agent-database:${id}`), "state-database"], agentDatabases: many.map(pending) },
+      }),
+    ).toMatchObject({ status: null, unreadyReason: "components" });
+  });
+
   it("only an exact single phase entry is a phase: a real component, a phase beside a component, or a phase without ready:false stays what it was", () => {
     expect(
       classifyReadinessResponse({ httpStatus: 503, body: { ready: false, failing: ["state-database"], stateDatabase: { reason: "x" } } }),

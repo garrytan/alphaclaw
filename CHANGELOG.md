@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.244] - 2026-11-09
+
+Three fixes to how AlphaClaw reports a long OpenClaw upgrade boot, from a 16-agent cold-boot test of the 2026.11.2 upgrade.
+
+### Fixed
+- **A long upgrade boot is no longer recorded as failed.** After its Doctor, 2026.11.2's `/readyz` lists each agent whose database is still being inspected in `failing[]` as `agent-database:<id>` (30 s for a 4 GB database in the test). A `failing[]` made only of agents whose `agentDatabases` entry says `agent-database-inspection-pending` is now the starting phase, so the watchdog no longer opens a `gateway_readiness` incident and the boot timeline no longer ends "failed (readiness_failed)" on a boot that comes up a few seconds later. Any other agent refusal, or another failing component beside it (checked on the full list, not the first 20 entries AlphaClaw keeps for display), is still a failure. Those seconds now count as not yet serving, so the measured downtime and the "back" notice include them.
+- **Leftover session `.jsonl` count and quote with wrapped warnings.** OpenClaw prints its `active_sqlite_transcript_jsonl` warning wrapped to fit the terminal when its output is a pipe. AlphaClaw now joins each warning's lines before reading it (a stderr line printed between two stdout chunks no longer splits one), starts a new warning at each `[active_sqlite_transcript_jsonl]`, counts each transcript once (by session key, else by path), and quotes the whole first warning instead of a fragment. The notice and the upgrade alert could show about twice the real number of sessions before.
+
+### Changed
+- **The "upgrading OpenClaw's data" notice warns when the disk is short.** When free space is under about twice the OpenClaw state, the upgrade's measured need (2026.11.2 grew a 14.5 GB-state volume from 42 GB to 71 GB used, the same ratio as 2026.10.6), the notice now carries the disk check's warning that OpenClaw will likely skip its recovery copy, and, for state larger than the Doctor time limit is sized for, its time-limit warning too. The upgrade alert already showed it; the refusal below 1.1× the state is unchanged.
+
+### Tests
+- `gateway-readiness.test.js` and `watchdog.test.js`: the 2026.11.2 pending-inspection body is the starting phase for 30 s and never `readiness_degraded`; another refusal code, a second failing component, or a real failure after 20 pending agents stays a component failure.
+- `openclaw-boot-migration.test.js`: wrapped warnings for two agents with a duplicate count two sessions and quote the whole warning; a trailing OpenClaw error line is still quoted instead; 2026.11.2's real `<storePath>: [code] …` shape, wrapped, with a stderr line between stdout chunks and a short store path after it, counts three.
+- `deploy-announce.test.js`: the upgrading notice carries a warn verdict's sentences and nothing for ok or refuse.
+
 ## [0.10.243] - 2026-11-09
 
 The coverage run on main no longer fails on a timing check that coverage instrumentation slows past its limit.
