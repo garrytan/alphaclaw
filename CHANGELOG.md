@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.221] - 2026-11-09
+
+The dashboard drops code and styles nothing used any more, shows the Dashboards link in the sidebar without first asking the server whether it may, and the README's page table now matches the sidebar.
+
+### Changed
+- **Dashboards is always in the sidebar.** The server has answered "yes" for every OpenClaw feature since the pinned OpenClaw shipped them all, so the sidebar no longer fetches `/api/openclaw/features` before adding the Dashboards link at the foot of Operate. Admins see it from the first render; members still don't. The server endpoint is unchanged.
+- **Webhook test sends, request replays and the explorer's rule files go through the shared API module.** Sending a test webhook and replaying a stored request call the hook's public URL exactly as before (a plain request, so a hook that answers 401 is reported as the hook's answer and never signs you out), and Browse still reads its protected-path and restart rules from `/shared/*.json`; the calls now live in `lib/api` with the rest.
+- **Removed unused code.** The provider tables `kCoreProviders` and `kProviderFeatures`, helpers that only tests called (`buildDashboardFocusUrl`, `getDoctorStatusTone`, `getIncidentStatusTone`, `isKnownTimeZone`, `invalidateCachePrefix`, `fetchOpenclawFeatures` and the `useOpenclawFeatures` hook), the colour-name toast aliases (`green`, `red`, `yellow`, `blue`; no caller used them), three props nothing read, and the Health overseer's handling of a bare `true` in-flight flag that only servers before the current one sent.
+- **CSS.** The light-theme rows for `text-blue-400`, `text-indigo-300` and `text-purple-400` and two unused Schedules list classes are gone. The Schedules calendar grid used an undefined `--bg-surface` variable and so had no background; it now uses the card surface colour.
+- **README.** The Setup UI table follows the sidebar order and adds Chat, Agents, Open Claude Code, Dashboards, Relay and Telegram; Browse is described as a sidebar mode, and Webhooks, Nodes and Telegram say which page opens them. The Team section no longer says it needs an older OpenClaw line.
+
+### Tests
+- Tests for the removed helpers are removed with them. The sidebar tests now expect Dashboards in Operate for admins and hidden for members. New `api` tests cover the webhook send (accepted, rejected by the hook, a 401 that does not sign you out, an empty error body) and the two shared rule-file reads.
+
 ## [0.10.220] - 2026-11-09
 
 On a phone, every button, link, field and tab in the dashboard is now at least 40 px tall, the menu drawer closes when you pick a page, and button and status wording is consistent across the app.
