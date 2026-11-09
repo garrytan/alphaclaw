@@ -37,6 +37,7 @@
         "tests/live/gateway-locked-env.e2e.test.js",
         "tests/live/gateway-restart-ladder.e2e.test.js",
         "tests/live/gateway-restart-loop.e2e.test.js",
+        "tests/live/hook-ingress.e2e.test.js",
         "tests/live/openclaw-live-agents-roster.e2e.test.js",
         "tests/live/openclaw-live-backup.e2e.test.js",
         "tests/live/openclaw-live-memory.e2e.test.js",

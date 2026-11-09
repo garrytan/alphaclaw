@@ -59,6 +59,7 @@ const kExpectedApiExports = [
   "fetchBrowseRestartRules",
   "fetchBrowseSqliteTable",
   "fetchBrowseTree",
+  "fetchBuiltinHooks",
   "fetchBuzzSetup",
   "fetchChannelAccountLoginStatus",
   "fetchChannelAccountToken",
@@ -136,6 +137,7 @@ const kExpectedApiExports = [
   "getTelegramTopics",
   "logout",
   "logoutClaudeCodeLocal",
+  "mintBuiltinHookToken",
   "moveBrowsePath",
   "openRelayConsentWindow",
   "patchEnvVar",
@@ -147,6 +149,7 @@ const kExpectedApiExports = [
   "removeRelayBinding",
   "removeTeamMember",
   "renewGmailWatch",
+  "reopenBuiltinHookSharedToken",
   "requestWatchdogOverseerReview",
   "resolveManagedUpdateAttempt",
   "restartGatewayAsync",
@@ -175,6 +178,7 @@ const kExpectedApiExports = [
   "sendAgentMessage",
   "sendDoctorCardFix",
   "sendWebhookRequest",
+  "setBuiltinHookEnabled",
   "setCronJobEnabled",
   "setDefaultAgent",
   "setPrimaryModel",
@@ -221,7 +225,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(210);
+    expect(kExpectedApiExports).toHaveLength(214);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {
