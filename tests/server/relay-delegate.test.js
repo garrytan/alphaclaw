@@ -598,6 +598,16 @@ describe("relay delegates: the bridge", () => {
         { role: "assistant", content: [{ type: "text", text: "Sent." }] },
       ]);
       expect(ctx.notices.map((notice) => notice.opts.id)).toContain("relay-approved-send-" + dispatched);
+      for (const [index, selector] of [{ toolId: "openclaw:core:message" }, { name: "message" }].entries()) {
+        const selected = ctx.engine.dm(kAgent, "and by selector " + index, { relay_approval: kApproval });
+        await ctx.tick();
+        await ctx.end(ctx.sends[3 + index], [
+          { role: "assistant", content: [{ type: "toolCall", id: "s" + index, name: "dispatch_action", arguments: { ...selector, args: { action: "send", target: "@lupe" } } }] },
+          { role: "toolResult", toolCallId: "s" + index, toolName: "dispatch_action", content: [{ type: "text", text: JSON.stringify({ tool: { id: "openclaw:core:message" }, result: { ok: true } }) }] },
+          { role: "assistant", content: [{ type: "text", text: "Sent." }] },
+        ]);
+        expect(ctx.notices.map((notice) => notice.opts.id)).toContain("relay-approved-send-" + selected);
+      }
     } finally {
       ctx.close();
     }

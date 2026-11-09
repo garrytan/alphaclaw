@@ -219,15 +219,15 @@ describe("server/openclaw-boot-migration", () => {
     );
   });
 
-  it("a leftover session .jsonl stop is its own remembered reason, and the notice gives OpenClaw's recover steps", async () => {
+  it("a leftover session .jsonl stop is its own reason, never remembered, and the notice gives OpenClaw's recover steps", async () => {
     const box = newBox();
     const notify = vi.fn(async () => {});
     const line = "[active_sqlite_transcript_jsonl] agent:main:small-10: SQLite-backed session has a legacy JSONL transcript awaiting verification: /data/.openclaw/agents/main/sessions/small-10.jsonl. Run openclaw doctor --fix or openclaw doctor --session-sqlite recover with the Gateway stopped to verify, import any missing events, and archive the original.";
     const stdout = `${line}\n${line.replace(/small-10/g, "small-11")}\n`;
     await expect(
       runBootMigration({ ...box, installedVersion: "2026.11.2", runDoctorFix: async () => ({ ok: false, code: 1, stdout, stderr: "" }), notify, nowFn: () => kNow, logger: silentLogger() }),
-    ).resolves.toMatchObject({ status: "failed", reason: "session_jsonl_pending", class: "deterministic", detail: expect.stringContaining("/data/.openclaw/agents/main/sessions/small-10.jsonl") });
-    expect(readMigrationRecord({ managedDir: box.managedDir }).failed).toMatchObject({ reason: "session_jsonl_pending", sessionJsonlCount: 2, attempts: 1 });
+    ).resolves.toMatchObject({ status: "failed", reason: "session_jsonl_pending", class: "transient", detail: expect.stringContaining("/data/.openclaw/agents/main/sessions/small-10.jsonl") });
+    expect(readMigrationRecord({ managedDir: box.managedDir }).failed).toBeUndefined();
     const message = notify.mock.calls[0][0];
     expect(message).toContain("because 2 sessions already in OpenClaw's database still have their old .jsonl transcript");
     expect(message).toContain("a restart won't clear it");

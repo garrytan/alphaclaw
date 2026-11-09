@@ -74,7 +74,7 @@ describe("openclaw-upgrade-status: the alert matrix", () => {
 
   it("leftover session .jsonl stop: OpenClaw's recover steps and Retry", () => {
     const status = buildUpgradeStatus({
-      record: { lastOutcome: failed({ reason: "session_jsonl_pending", detail: "SQLite-backed session has a legacy JSONL transcript awaiting verification" }) },
+      record: { lastOutcome: failed({ class: "transient", reason: "session_jsonl_pending", detail: "SQLite-backed session has a legacy JSONL transcript awaiting verification" }) },
       installedVersion: kPin,
       isAdmin: true,
     });
