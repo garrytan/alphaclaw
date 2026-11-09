@@ -33,7 +33,7 @@ import {
 } from "../../lib/public/js/components/routes/channels-route.js";
 import { IntegrationLinkRow, IntegrationsRoute } from "../../lib/public/js/components/routes/integrations-route.js";
 import { RoutePageHeader } from "../../lib/public/js/components/page-header.js";
-import { Channels } from "../../lib/public/js/components/channels.js";
+import { Channels } from "../../lib/public/js/components/channels/index.js";
 import { ChannelOperationsPanel } from "../../lib/public/js/components/channel-operations-panel.js";
 import { Pairings } from "../../lib/public/js/components/pairings.js";
 import { DevicePairings } from "../../lib/public/js/components/device-pairings.js";

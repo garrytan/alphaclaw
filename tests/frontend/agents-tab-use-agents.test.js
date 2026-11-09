@@ -60,7 +60,7 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 
 // channels.js transitively imports channel-login-modal, which uses CDN URL
 // imports the node ESM loader can't resolve.
-vi.mock("../../lib/public/js/components/channels.js", () => ({
+vi.mock("../../lib/public/js/components/channels/index.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
   ChannelsCard: () => null,
   getChannelMeta: (id) => ({ label: String(id || "") }),

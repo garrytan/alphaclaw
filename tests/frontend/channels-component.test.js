@@ -66,7 +66,7 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 import {
   Channels,
   ChannelsCard,
-} from "../../lib/public/js/components/channels.js";
+} from "../../lib/public/js/components/channels/index.js";
 import { ChannelAccountStatusBadge } from "../../lib/public/js/components/channel-account-status-badge.js";
 import { ConfirmDialog } from "../../lib/public/js/components/confirm-dialog.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";

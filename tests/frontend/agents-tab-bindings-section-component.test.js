@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // channels.js transitively imports channel-login-modal, which uses CDN URL
 // imports the node ESM loader can't resolve.
-vi.mock("../../lib/public/js/components/channels.js", () => ({
+vi.mock("../../lib/public/js/components/channels/index.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
   CREATABLE_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
   ChannelsCard: () => null,
@@ -29,7 +29,7 @@ import { useAgentBindings } from "../../lib/public/js/components/agents-tab/agen
 import { AgentBindingsSection } from "../../lib/public/js/components/agents-tab/agent-bindings-section/index.js";
 import { ChannelItemTrailing } from "../../lib/public/js/components/agents-tab/agent-bindings-section/channel-item-trailing.js";
 import { InlineErrorChip } from "../../lib/public/js/components/inline-error-chip.js";
-import { ChannelsCard } from "../../lib/public/js/components/channels.js";
+import { ChannelsCard } from "../../lib/public/js/components/channels/index.js";
 
 // Shallow walk (no function-component rendering): assertions target vnode
 // props, which exist without a DOM renderer.

@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.224] - 2026-11-09
+
+The dashboard's largest hook, the app-shell controller, and the Channels page code are split by area so each part is easier to read and change, and two quick taps on a drawer tab no longer keep the phone drawer open.
+
+### Changed
+- **The app-shell controller is split by concern.** `hooks/use-app-shell-controller.js` (1,228 lines) is now a 113-line composer over eight files in `hooks/app-shell-controller/`: `use-auth-bootstrap.js` (onboarded, login and role), `use-connectivity.js` (the outage monitor, AlphaClaw's self-restart reconnect and the boot progress probe), `use-status-feed.js` (the status stream, its polling fallback and freshness), `use-upgrade-alert.js` (the OpenClaw data upgrade alert), `use-restart-operation.js` (the restart and upgrade operation and the restart-required banner), `use-alphaclaw-update.js` (the Update action), `use-gateway-shell-publisher.js` (what the Gateway card and banner read) and the pure `restart-operation-model.js` (refusal codes, timings and the record mapping). `useAppShellController` returns the same `{ state, actions }`, so `app.js` is unchanged. The Gateway-surface route check moved to `lib/routes.js` as `isGatewaySurfaceLocation`.
+- **The Channels components live in one folder.** `components/channels.js` moved to `components/channels/index.js` beside the Buzz wizard, with the account list card in `channels-card.js` and the WhatsApp QR login modal's state and polling in `use-channel-login.js`. `index.js` exports the same names, and every import now points at the folder.
+
+### Fixed
+- **Two quick taps on the drawer's Chat or Browse tab no longer keep the drawer open through your next navigation.** The second tap, made before the page re-rendered, counted as a navigation to the page you were already going to.
+
+### Tests
+- Tests that import or mock `components/channels.js` now use `components/channels/index.js`, with no other change to them. The gateway-recovery and reliability Chromium smokes, which drive the real controller, pass.
+- New tests cover a second drawer tab tap before the page re-renders, the request-history refresh after a test webhook (accepted, rejected, or its answer fails to read) and the spaces on the Telegram topics page's discovery and deleted lines. Each fails on the code before its fix.
+
 ## [0.10.223] - 2026-11-09
 
 A gateway killed with SIGKILL is now reported as out of memory only when the container's kernel OOM counter actually went up. A kill from another process gets its own cause and no memory advice.
