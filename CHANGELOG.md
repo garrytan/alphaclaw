@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.236] - 2026-11-09
+
+Blocked people stay out of your Telegram groups in four edge cases the first version missed. They are a damaged rules file, a box with more than one Telegram bot, owner changes and a join watcher that falls behind.
+
+### Fixed
+- **A damaged rules file never lets a blocked person through.** A gateway that starts while `telegram/group-rules.json` cannot be read used to block nobody. It now drops every Telegram turn except yours (your ids come from OpenClaw's own config) until the file is fixed. A running gateway still keeps the last rules it read.
+- **No bot's owner can be blocked.** On a box with several Telegram accounts and no `commands.ownerAllowFrom`, only the default account's owner was protected. The owners are now read from every account, for the block list and for the plugin.
+- **New groups are never missed.** The join watcher queues each join it reads before it moves on in the log and clears it only once it is handled, so a failed save or a long outage of the rules file no longer loses a join (a re-added Blocked group is still left). A leave or new-group notice that fails is tried again on the next two checks. Its records no longer need openclaw.json to be plain JSON, and a failure of the join check or the owner sync is logged once when it starts and once when it clears, instead of every minute.
+- **Owner changes reach the plugin within a minute,** on the join watcher's next check, instead of at the next rules save or restart.
+- **"Test this group" matches the plugin.** It takes the owner exemption from the same rules file the plugin reads, and it says when a block is not enforced because the group guard plugin entry is missing, not AlphaClaw's or switched off (`groupGuard`, `guard_not_enforced`).
+- A malformed id on the block list is answered `invalid_input` even while no owner id is known (it was `owner_required`).
+
+### Added
+- Trusted people groups carry an `anonymous_admins` warning in the groups list and the save preview. An admin who posts anonymously reaches the agent as Telegram's GroupAnonymousBot, so they are not heard there.
+
+### Changed
+- The admin skill's Telegram reference now says that only adding someone to the block list needs a known owner id, that becoming an owner ends a block for good, and that in an Approved group OpenClaw can still show a blocked person's messages as context in other people's turns (it has no hook to filter them; Trusted people mode does).
+
 ## [0.10.235] - 2026-11-09
 
 After a redeploy, AlphaClaw now tells you by name which tools the rebuild took away: the ones someone installed by hand inside the old container, and the ones the new image no longer ships. You hear it once per new container, even after a crash or an out-of-memory replacement, and a Doctor card keeps the names until each tool is back on PATH or you dismiss it.
@@ -73,7 +91,7 @@ You can now set who your agent talks to in each Telegram group, and AlphaClaw wr
 
 ### Added
 - **One mode per Telegram group.** `PUT /api/telegram/groups/:groupId/policy` sets Approved (every member gets conversation, only you and people you trust with actions get tools), Trusted people (only you and the people you name are heard), Silent or Blocked. Each mode is written into the group's own `channels.telegram.groups` entry (`enabled`, `groupPolicy`, `allowFrom`, `tools`, `toolsBySender`), checked with `openclaw config patch --dry-run` first, and the previous entry is backed up. Your own Telegram ids (`commands.ownerAllowFrom`, else the bot's DM `allowFrom`) are always written in with every tool; a save that cannot include them is refused. A group entry is never deleted, and a save that would leave the groups list empty or the account policy other than `allowlist` is refused, because either would admit groups nobody chose. Rules set outside the page show as Custom and are replaced only when you convert them. Changes need the group's revision (`If-Match`), and repeating a saved change is a no-op.
-- **People blocked everywhere.** `PUT /api/telegram/blocked-senders` sets a block list; the new built-in group guard plugin (`lib/plugin/group-guard`) drops their turns in every chat with no reply, and drops every turn in a Blocked group. You can never be blocked, and nobody can be blocked until AlphaClaw knows your Telegram id. A rule matches only the exact chat id OpenClaw reports, so a rule on `-1005297954291` never applies to `-5297954291`. If AlphaClaw's rules file (`telegram/group-rules.json`) is not a JSON object, the routes answer `rules_unreadable` and change nothing, and the plugin keeps the last rules it read.
+- **People blocked everywhere.** `PUT /api/telegram/blocked-senders` sets a block list; the new built-in group guard plugin (`lib/plugin/group-guard`) drops their turns in every chat with no reply, and drops every turn in a Blocked group. You can never be blocked, and nobody new can be added to the block list until AlphaClaw knows your Telegram id (a saved list can still shrink or be cleared). A rule matches only the exact chat id OpenClaw reports, so a rule on `-1005297954291` never applies to `-5297954291`. If AlphaClaw's rules file (`telegram/group-rules.json`) is not a JSON object, the routes answer `rules_unreadable` and change nothing, and the plugin keeps the last rules it read.
 - **Test this group.** `POST /api/telegram/groups/:groupId/test` says, for you, each trusted or configured person, each blocked person and anyone else, whether the agent would reply and whether it could act. It uses OpenClaw's own policy resolvers and lists other plugins on the box as not modelled.
 - **New-group notices.** A watcher reads OpenClaw's own file log (and its rotated files) for the bot being added to a group, tells you once about each group that has no rule yet (it stays silent), and leaves a Blocked group again whenever someone adds the bot back.
 - Every failure of these routes is an RFC 9457 problem body with a real status, a fix, retry guidance and what was already done (`sideEffects`), documented in the admin skill's Telegram reference. All four routes are for signed-in people only.

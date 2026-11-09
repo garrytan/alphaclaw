@@ -18,7 +18,13 @@
 //   - the join watcher reads the gateway's own file log, tells the owner once
 //     about the unlisted group and leaves TEST CHAT again when re-added;
 //   - "Test this group" agrees with what the gateway did for every case;
-//   - a mode change applies to the running gateway without a restart.
+//   - a mode change applies to the running gateway without a restart;
+//   - a blocked person's message in a Trusted people group never reaches
+//     another person's turn as context (in an Approved group OpenClaw's own
+//     history window still carries it: recorded, not asserted, see the
+//     telegram.md "Known limit");
+//   - a gateway that starts over a damaged group-rules.json still drops a
+//     blocked person (and every other non-owner) and still serves the owner.
 // Run with:
 //   OPENCLAW_LIVE_E2E=1 npx vitest run tests/live/telegram-groups.e2e.test.js
 const fs = require("fs");
@@ -95,6 +101,7 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
   const notices = [];
   const offered = new Map();
   const probed = new Map();
+  const contexts = new Map();
   const results = [];
 
   const readyzOk = async () => {
@@ -152,6 +159,7 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
           .flatMap((m) => [...textOf(m.content).matchAll(/case (gr(\d+)x[a-z0-9]+)/g)])
           .sort((a, b) => Number(b[2]) - Number(a[2]));
         const tag = tags[0]?.[1];
+        if (tag && !contexts.has(tag)) contexts.set(tag, messages.map((m) => textOf(m.content)).join("\n"));
         const probeResult = tag && messages.find((m) => m.role === "tool" && m.tool_call_id === "call_probe_" + tag);
         console.log("[live] model request " + JSON.stringify({ tag: tag || null, messages: messages.length, tools: names.length, probeResult: Boolean(probeResult) }));
         const chunk = (delta, finish = null) =>
@@ -381,6 +389,54 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
       const garryReopened = await runCase({ name: "Garry in the same group after it is approved", from: kGarry, chat: kGarrysAgents, expectReply: true });
       expect(garryReopened.tools?.length).toBeGreaterThan(0);
       expect(await readyzOk()).toBe(true);
+    },
+  );
+
+  it(
+    "keeps a blocked person's message out of another person's turn in a Trusted people group",
+    { timeout: kTestTimeoutMs, retry: 0 },
+    async () => {
+      const trustedMarker = "blocked-context-trusted-" + Math.random().toString(36).slice(2, 8);
+      const mossabTrusted = await runCase({ name: "Mossab (blocked) in a Trusted people group", from: kMossab, chat: kSecurity, text: trustedMarker, expectReply: false });
+      expect(mossabTrusted.sends).toEqual([]);
+      const harjAfter = await runCase({ name: "Harj in the same group right after", from: kHarj, chat: kSecurity, expectReply: true });
+      expect(contexts.get(harjAfter.tag)).toBeTruthy();
+      expect(contexts.get(harjAfter.tag)).not.toContain(trustedMarker);
+
+      const approvedMarker = "blocked-context-approved-" + Math.random().toString(36).slice(2, 8);
+      const mossabApproved = await runCase({ name: "Mossab (blocked) in an Approved group, as context", from: kMossab, chat: kAlfredGroup, text: approvedMarker, expectReply: false });
+      expect(mossabApproved.sends).toEqual([]);
+      const garryAfter = await runCase({ name: "Garry in the same Approved group right after", from: kGarry, chat: kAlfredGroup, expectReply: true });
+      console.log("[live] blocked-context " + JSON.stringify({ mode: "approved", presentInOwnersTurn: String(contexts.get(garryAfter.tag) || "").includes(approvedMarker) }));
+    },
+  );
+
+  it(
+    "drops a blocked person and still serves the owner when the gateway starts over a damaged rules file",
+    { timeout: kTestTimeoutMs, retry: 0 },
+    async () => {
+      const { resolveStatePaths } = require("../../lib/server/telegram-groups");
+      const { statePath } = resolveStatePaths(kRootDir);
+      const saved = fs.readFileSync(statePath, "utf8");
+      fs.writeFileSync(statePath, "{ damaged by hand");
+      try {
+        const restart = await gateway.restartGateway(() => {}, { source: "api:restart", reason: "live damaged group rules file" });
+        console.log("[live] telegram-groups restart " + JSON.stringify({ ok: restart?.ok ?? null }));
+        await waitFor(readyzOk, 180_000, "gateway /readyz 200 after the restart");
+        const pollsBefore = telegram.polls();
+        await waitFor(async () => telegram.polls() > pollsBefore + 1, 120_000, "telegram polling again after the restart");
+
+        const mossab = await runCase({ name: "Mossab (blocked) after a restart over a damaged rules file", from: kMossab, chat: kAlfredGroup, expectReply: false });
+        expect(mossab.sends).toEqual([]);
+        expect(mossab.tools).toBeNull();
+        const guest = await runCase({ name: "Alfred's bot after a restart over a damaged rules file", from: kAlfredBot, chat: kAlfredGroup, expectReply: false });
+        expect(guest.sends).toEqual([]);
+        expect(guest.tools).toBeNull();
+        const garry = await runCase({ name: "Garry after a restart over a damaged rules file", from: kGarry, chat: kAlfredGroup, expectReply: true });
+        expect(garry.tools?.length).toBeGreaterThan(0);
+      } finally {
+        fs.writeFileSync(statePath, saved);
+      }
     },
   );
 });
