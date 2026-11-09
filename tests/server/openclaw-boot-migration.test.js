@@ -106,7 +106,14 @@ describe("server/openclaw-boot-migration", () => {
     expect(fs.readFileSync(copyPath, "utf8")).toBe('{"meta":{"lastTouchedVersion":"2026.10.9"}}\n');
     expect(fs.statSync(copyPath).mode & 0o777).toBe(0o600);
     expect(onDoctorStart).toHaveBeenCalledWith({ fromVersion: "2026.10.9", toVersion: "2026.11.2", preUpgradeConfigPath: copyPath });
-    expect(readMigrationRecord({ managedDir: box.managedDir }).preUpgradeConfig).toEqual({ path: copyPath, fromVersion: "2026.10.9", toVersion: "2026.11.2", at: kNow });
+    expect(readMigrationRecord({ managedDir: box.managedDir }).preUpgradeConfig).toEqual({
+      path: copyPath,
+      fromVersion: "2026.10.9",
+      toVersion: "2026.11.2",
+      bytes: 44,
+      sha256: require("crypto").createHash("sha256").update('{"meta":{"lastTouchedVersion":"2026.10.9"}}\n').digest("hex"),
+      at: kNow,
+    });
     expect(logger.log).toHaveBeenCalledWith(`[alphaclaw] openclaw.json from before the upgrade to OpenClaw 2026.11.2 is kept at ${copyPath}`);
 
     await runBootMigration({ ...box, installedVersion: "2026.11.2", runDoctorFix, nowFn: () => kNow + kRememberedFailureRetryMs + 1, logger: silentLogger() });
@@ -114,10 +121,41 @@ describe("server/openclaw-boot-migration", () => {
     expect(fs.readFileSync(copyPath, "utf8")).toBe('{"meta":{"lastTouchedVersion":"2026.10.9"}}\n');
   });
 
+  it("a torn or unrecorded copy is rewritten while openclaw.json is still the old version's, and never from a file the new version stamped", async () => {
+    const box = newBox();
+    recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.10.9", nowFn: () => kNow - 1 });
+    const config = path.join(box.openclawDir, "openclaw.json");
+    const copyPath = path.join(box.managedDir, "openclaw.json.pre-2026.11.2");
+    const old = '{"meta":{"lastTouchedVersion":"2026.10.9"}}\n';
+    fs.writeFileSync(config, old);
+    fs.writeFileSync(copyPath, "");
+    const onDoctorStart = vi.fn();
+    const runDoctorFix = vi.fn(async () => {
+      fs.writeFileSync(config, '{"meta":{"lastTouchedVersion":"2026.11.2"}}\n');
+      return { ok: false, code: 1, stdout: "Failing check sessions: refused\n" };
+    });
+    await runBootMigration({ ...box, installedVersion: "2026.11.2", runDoctorFix, onDoctorStart, nowFn: () => kNow, logger: silentLogger() });
+    expect(fs.readFileSync(copyPath, "utf8")).toBe(old);
+    expect(onDoctorStart).toHaveBeenLastCalledWith(expect.objectContaining({ preUpgradeConfigPath: copyPath }));
+
+    fs.writeFileSync(copyPath, '{"meta":');
+    const logger = silentLogger();
+    await runBootMigration({ ...box, installedVersion: "2026.11.2", runDoctorFix, onDoctorStart, nowFn: () => kNow + kRememberedFailureRetryMs + 1, logger });
+    expect(fs.readFileSync(copyPath, "utf8")).toBe('{"meta":');
+    expect(onDoctorStart).toHaveBeenLastCalledWith(expect.objectContaining({ preUpgradeConfigPath: null }));
+    expect(logger.warn).toHaveBeenCalledWith(`[alphaclaw] no verified copy of openclaw.json from before the upgrade to OpenClaw 2026.11.2: the current file was already written by 2026.11.2, and ${copyPath} is left as it is`);
+  });
+
   it("a copy that cannot be kept is logged and the upgrade goes ahead", async () => {
     const box = newBox();
     recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.10.9", nowFn: () => kNow - 1 });
-    const fsModule = { ...fs, copyFileSync: () => { throw new Error("EROFS: read-only file system"); } };
+    const fsModule = {
+      ...fs,
+      renameSync: (from, to) => {
+        if (String(to).includes("openclaw.json.pre-")) throw new Error("EROFS: read-only file system");
+        return fs.renameSync(from, to);
+      },
+    };
     const logger = silentLogger();
     const runDoctorFix = vi.fn(async () => ({ ok: true }));
     await expect(runBootMigration({ ...box, installedVersion: "2026.11.2", runDoctorFix, fsModule, nowFn: () => kNow, logger })).resolves.toMatchObject({ ran: true });
@@ -230,7 +268,7 @@ describe("server/openclaw-boot-migration", () => {
     expect(readMigrationRecord({ managedDir: box.managedDir }).failed).toBeUndefined();
     const message = notify.mock.calls[0][0];
     expect(message).toContain("because 2 sessions already in OpenClaw's database still have their old .jsonl transcript");
-    expect(message).toContain("a restart won't clear it");
+    expect(message).toContain("AlphaClaw runs the upgrade again each time the server starts, and it stops the same way until OpenClaw's recover has run.");
     expect(message).toContain("openclaw doctor --session-sqlite recover");
     expect(message).toContain("press Retry upgrade");
   });
@@ -243,6 +281,7 @@ describe("server/openclaw-boot-migration", () => {
     const timedOut = summarizeDoctorResult({ ok: false, timedOut: true, stdout: `${warnings}still migrating agent main\n` });
     expect(timedOut).toMatchObject({ reason: "timed_out", detail: "still migrating agent main" });
     expect(timedOut.sessionJsonlCount).toBeUndefined();
+    expect(summarizeDoctorResult({ ok: false, code: 1, stdout: `${warnings}Doctor blocked: external config is read-only\n` })).toMatchObject({ reason: "session_jsonl_pending", detail: "Doctor blocked: external config is read-only" });
   });
 
   it("counts leftover session .jsonl files read-only before a pin change's Doctor", async () => {

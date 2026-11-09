@@ -79,6 +79,8 @@ describe("openclaw-upgrade-status: the alert matrix", () => {
       isAdmin: true,
     });
     expect(status.alert.sentence).toContain("old .jsonl transcript files under agents/<id>/sessions/");
+    expect(status.alert.sentence).toContain("it stops the same way until OpenClaw's recover has run");
+    expect(status.alert.sentence).not.toMatch(/retries automatically|next time the AlphaClaw server starts/);
     expect(status.alert.steps).toHaveLength(3);
     expect(status.alert.steps[1]).toContain("openclaw doctor --session-sqlite recover");
     expect(status.alert.actions).toContain("retry_upgrade");
