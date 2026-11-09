@@ -146,6 +146,35 @@ describe("server/telegram-workspace", () => {
     });
   });
 
+  it("keeps a group's rules (enabled, groupPolicy, allowFrom, tools, toolsBySender) when a topic sync rewrites the group", () => {
+    const rules = {
+      enabled: true,
+      groupPolicy: "allowlist",
+      allowFrom: ["6167919517", "8793019333"],
+      tools: { deny: ["*"] },
+      toolsBySender: { "id:6167919517": {}, "id:8793019333": {}, "*": { deny: ["*"] } },
+    };
+    writeOpenclawConfig({
+      dir: openclawDir,
+      config: { channels: { telegram: { groups: { "-1001234567890": { requireMention: false, ...rules } } } } },
+    });
+
+    syncConfigForTelegram({
+      fs,
+      openclawDir,
+      topicRegistry: {
+        getGroup: () => ({ topics: { "3": { name: "Ops", systemInstructions: "Ops only." } } }),
+        getTotalTopicCount: () => 1,
+      },
+      groupId: "-1001234567890",
+      requireMention: true,
+      resolvedUserId: "6167919517",
+    });
+
+    const group = readOpenclawConfig({ dir: openclawDir }).channels.telegram.groups["-1001234567890"];
+    expect(group).toEqual({ ...rules, requireMention: true, topics: { "3": { systemPrompt: "Ops only." } } });
+  });
+
   it("skips discovered and deleted topics when writing config topics", () => {
     writeOpenclawConfig({
       dir: openclawDir,

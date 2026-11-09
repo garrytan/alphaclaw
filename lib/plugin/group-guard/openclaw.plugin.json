@@ -1,0 +1,18 @@
+{
+  "id": "group-guard",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "_alphaclawManaged": {
+        "type": "string"
+      },
+      "rootDir": {
+        "type": "string"
+      }
+    }
+  }
+}
