@@ -206,6 +206,7 @@ describe("relay delegates: the guard's tiers", () => {
       { action: "send", target: "@lupe", chatId: "999", message: "x" },
       { action: "send", target: "@lupe", userId: "u-stranger", message: "x" },
       { action: "send", target: "@lupe", gatewayUrl: "ws://elsewhere", message: "x" },
+      { action: "send", channel: "telegram", target: "-100777", accountId: "second-bot", message: "x" },
       { action: "send", channel: "discord", target: "-100777", message: "x" },
       { action: "send", channel: "telegram", target: "-100777", threadId: "999", message: "x" },
       { action: "thread-reply", channel: "telegram", target: "-100777", threadId: "999", message: "x" },
