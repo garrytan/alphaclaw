@@ -92,6 +92,29 @@ describe("relay handoff", () => {
     expect(await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_NEW" })).toMatchObject({ error: "prefix_denied" });
   });
 
+  it("a code the previous holder re-issued dies at the successor's first call, so the binding cannot be taken back", async () => {
+    const { call } = setup();
+    const first = await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_NEW" });
+    const claimed = await call(kOtherClient, "relay_claim", { as: kAgent, handoff_code: first.handoff_code, thread_id: "jam_NEW", webhook_url: kNewHook });
+    const stolen = await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_OLD" });
+    expect(stolen.handoff_code).toMatch(/^arho_/);
+    expect(await call(kOtherClient, "relay_inbox", { as: kAgent, capability: claimed.capability })).toEqual({ unread_dms: [] });
+    expect(await call(kClient, "relay_claim", { as: kAgent, handoff_code: stolen.handoff_code, thread_id: "jam_OLD", webhook_url: kOldHook })).toMatchObject({ error: "handoff_invalid" });
+    expect(store.bindings.get(kAgent)).toMatchObject({ threadId: "jam_NEW", clientId: kOtherClient, generation: 2 });
+  });
+
+  it("the successor's renew and its own handoff end the previous holder's window too", async () => {
+    const { call } = setup();
+    const first = await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_NEW" });
+    const claimed = await call(kOtherClient, "relay_claim", { as: kAgent, handoff_code: first.handoff_code, thread_id: "jam_NEW", webhook_url: kNewHook });
+    const stolen = await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_OLD" });
+    const own = await call(kOtherClient, "relay_handoff", { as: kAgent, capability: claimed.capability, successor_thread: "jam_THIRD" });
+    expect(own.handoff_code).toMatch(/^arho_/);
+    expect(await call(kClient, "relay_claim", { as: kAgent, handoff_code: stolen.handoff_code, thread_id: "jam_OLD", webhook_url: kOldHook })).toMatchObject({ error: "handoff_invalid" });
+    expect(await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_OLD" })).toMatchObject({ error: "prefix_denied" });
+    expect(store.bindings.get(kAgent).priorCapabilityHash).toBeNull();
+  });
+
   it("the re-issue right ends after an hour even if the successor never calls", async () => {
     const { call } = setup();
     const first = await call(kClient, "relay_handoff", { as: kAgent, capability: "arcap_old", successor_thread: "jam_NEW" });
@@ -175,5 +198,43 @@ describe("relay handoff", () => {
     for (let index = 0; index < 40 && posts.length < 1; index += 1) await new Promise((resolve) => setImmediate(resolve));
     wake.stop();
     expect(posts).toEqual([expect.objectContaining({ path: "/w/new", body: expect.objectContaining({ message_id: "900", lane: "gbrain", generation: 2 }) })]);
+  });
+
+  it("a 404 from the previous holder's webhook, answered after a claim landed, does not kill the successor's binding", async () => {
+    setup();
+    const posts = [];
+    const wake = createWakeDelivery({
+      store,
+      getConfig: () => ({ wakeHosts: ["api.capy.ai"] }),
+      now: () => clock,
+      lookup: async () => [{ address: "34.120.1.1", family: 4 }],
+      requestImpl: (options, onResponse) => {
+        const { EventEmitter } = require("events");
+        const req = new EventEmitter();
+        req.destroy = () => {};
+        req.end = (body) => {
+          posts.push({ path: options.path, body: JSON.parse(body) });
+          if (posts.length === 1) {
+            store.bindings.claim({ agent: kAgent, generation: 1, threadId: "jam_NEW", clientId: kOtherClient, webhookUrl: kNewHook, capabilityHash: "h2", priorUntil: clock + kHour });
+          }
+          const res = new EventEmitter();
+          res.statusCode = posts.length === 1 ? 404 : 202;
+          res.resume = () => {};
+          setImmediate(() => {
+            onResponse(res);
+            res.emit("end");
+          });
+        };
+        return req;
+      },
+      logger: quiet,
+    });
+    wake.enqueue({ agent: kAgent, message: { id: "901", agent_name: "wintermute", text: "done", metadata: {} } });
+    wake.start();
+    for (let index = 0; index < 80 && posts.length < 2; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    wake.stop();
+    expect(store.bindings.get(kAgent).deadAt).toBeNull();
+    expect(posts.map((post) => post.path)).toEqual(["/w/old", "/w/new"]);
+    expect(posts[1].body).toMatchObject({ message_id: "901", generation: 2 });
   });
 });

@@ -199,6 +199,37 @@ describe("relay lanes: the bridge", () => {
     }
   });
 
+  it("a long answer to a sender with no relay_result (not a capy- agent) goes out whole", async () => {
+    const ctx = setup({ verdict: () => ({ trust: "peer", reason: "not_bound" }) });
+    try {
+      await ctx.tick();
+      const messageId = ctx.engine.dm("scout", "write it all out");
+      await ctx.tick();
+      const answer = "y".repeat(9000);
+      await ctx.end(ctx.sends[0], answer);
+      expect(ctx.replies).toHaveLength(1);
+      expect(ctx.replies[0].text).toBe(answer);
+      expect(ctx.replies[0].data.relay_result_ref).toBeUndefined();
+      expect(ctx.store.get(messageId).state).toBe("answered");
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("a sender with no grant keeps one queue: a second lane gets lane_limit", async () => {
+    const ctx = setup({ verdict: () => ({ trust: "peer", reason: "no_grant", grantId: null, lanesMax: 3 }) });
+    try {
+      await ctx.tick();
+      ctx.engine.dm(kAgent, "a", { relay_lane: "a" });
+      const second = ctx.engine.dm(kAgent, "b", { relay_lane: "b" });
+      await ctx.tick();
+      expect(ctx.store.get(second)).toMatchObject({ state: "lane_limit", code: "lane_limit" });
+      expect(ctx.sends).toHaveLength(1);
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("splits at a line break near the end of a part, else at the size", () => {
     expect(splitResult("a".repeat(10), 4)).toEqual(["aaaa", "aaaa", "aa"]);
     expect(splitResult("abcd\nefgh\nij", 6)).toEqual(["abcd", "\nefgh", "\nij"]);

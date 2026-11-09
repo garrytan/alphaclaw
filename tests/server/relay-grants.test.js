@@ -147,7 +147,7 @@ describe("relay grants: remote tools", () => {
     box = null;
   });
 
-  const toolsFor = ({ delegateAgents = [] } = {}) => {
+  const toolsFor = ({ delegateAgents = [], hourlyCap = 30, dmMessages = async () => [], dmConversations = async () => [] } = {}) => {
     const sent = [];
     const engine = {
       sendDm: async (token, to, text, metadata) => {
@@ -155,14 +155,14 @@ describe("relay grants: remote tools", () => {
         return { conversation_id: "dm_1", message: { id: String(1000 + sent.length) } };
       },
       inbox: async () => ({ unread_dms: [] }),
-      dmConversations: async () => [],
-      dmMessages: async () => [],
+      dmConversations,
+      dmMessages,
     };
     const set = createRemoteRelayTools({
       engine,
       store: box.remote,
       getWorkspaceKey: () => "rk",
-      getConfig: () => ({ hourlyCap: 30, maxBindingsPerClient: 20, wakeHosts: ["api.capy.ai"], delegateAgents }),
+      getConfig: () => ({ hourlyCap, maxBindingsPerClient: 20, wakeHosts: ["api.capy.ai"], delegateAgents }),
       getResult: (ref) => box.bridge.getResult(ref),
       logger: quiet,
     });
@@ -183,6 +183,33 @@ describe("relay grants: remote tools", () => {
     const third = await call("relay_send", { to: "wintermute", text: "three" });
     expect(third.body).toMatchObject({ error: "rate_limited" });
     expect((await call("relay_send", { to: "wintermute", text: "x", lane: "Not a lane!" })).body).toMatchObject({ error: "invalid_input" });
+  });
+
+  it("a delegate's sends do not use up its connection's cap for the peers on it", async () => {
+    box = makeBox();
+    box.remote.grants.create({ agent: kAgent, hourlyCap: 5, createdBy: "admin" });
+    const peer = "capy-aaaaaaaaaaaa";
+    box.remote.bindings.upsert({ agent: peer, threadId: "jam_P", clientId: kClient, webhookUrl: "https://api.capy.ai/w/p", until: Date.now() + kHour, capabilityHash: sha256("arcap_peer"), agentToken: "at_peer" });
+    const { call } = toolsFor({ hourlyCap: 2 });
+    for (const text of ["1", "2", "3"]) expect((await call("relay_send", { to: "wintermute", text })).body).toMatchObject({ trust: "delegate" });
+    const asPeer = (text) => call("relay_send", { as: peer, capability: "arcap_peer", to: "wintermute", text });
+    expect((await asPeer("p1")).body).toMatchObject({ trust: "peer" });
+    expect((await asPeer("p2")).body).toMatchObject({ trust: "peer" });
+    expect((await asPeer("p3")).body).toMatchObject({ error: "rate_limited" });
+  });
+
+  it("relay_history on a lane pages back past a busier lane", async () => {
+    box = makeBox();
+    const all = Array.from({ length: 250 }, (_, index) => ({ id: String(10000 - index), agent_name: "wintermute", text: "m" + index, metadata: { relay_lane: index === 180 ? "quiet" : "busy" } }));
+    const dmMessages = vi.fn(async (token, conversationId, query) => {
+      const start = query.before ? all.findIndex((message) => message.id === query.before) + 1 : 0;
+      return all.slice(start, start + query.limit);
+    });
+    const { call } = toolsFor({ dmConversations: async () => [{ id: "dm_1", participants: [kAgent, "wintermute"] }], dmMessages });
+    const { body } = await call("relay_history", { with: "wintermute", lane: "quiet", limit: 5 });
+    expect(body.lane).toBe("quiet");
+    expect(body.messages.map((message) => message.text)).toEqual(["m180"]);
+    expect(dmMessages.mock.calls.length).toBeGreaterThan(1);
   });
 
   it("a grant that requires the tailnet refuses every call of its binding on the public route, reads and renewals included", async () => {
