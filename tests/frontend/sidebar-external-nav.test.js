@@ -59,8 +59,8 @@ vi.mock("../../lib/public/js/components/theme-toggle.js", () => ({
 import * as preactHooks from "preact/hooks";
 import { AppSidebar } from "../../lib/public/js/components/sidebar.js";
 import {
-  buildNavSections,
   kDashboardsNavItem,
+  kNavSections,
 } from "../../lib/public/js/lib/app-navigation.js";
 
 const harness = preactHooks.__harness;
@@ -79,7 +79,7 @@ const collectNodes = (node, out = []) => {
 const renderSidebar = (props = {}) => {
   harness.beginRender();
   return AppSidebar({
-    navSections: buildNavSections({ features: { sessionDashboards: true } }),
+    navSections: kNavSections,
     ...props,
   });
 };

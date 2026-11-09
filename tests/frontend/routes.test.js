@@ -12,6 +12,7 @@ import {
   filterNavSectionsForRole,
   getSelectedNavId,
   kClaudeCodeNavItem,
+  kDashboardsNavItem,
   kDefaultUiTab,
   kMemberNavIds,
   kNavSections,
@@ -285,6 +286,7 @@ describe("sidebar lists and highlight from the route table", () => {
           { id: "schedules", label: "Schedules", path: "/schedules" },
           { id: "usage", label: "Usage", path: "/usage" },
           kClaudeCodeNavItem,
+          kDashboardsNavItem,
         ],
       },
       {

@@ -56,10 +56,6 @@ vi.mock("../../lib/public/js/hooks/use-cached-fetch.js", () => ({
   useCachedFetch: vi.fn(),
 }));
 
-vi.mock("../../lib/public/js/hooks/use-openclaw-features.js", () => ({
-  useOpenclawFeatures: vi.fn(() => ({ features: null })),
-}));
-
 import * as preactHooks from "preact/hooks";
 import { useCachedFetch } from "../../lib/public/js/hooks/use-cached-fetch.js";
 import { ActionButton } from "../../lib/public/js/components/action-button.js";

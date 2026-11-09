@@ -141,23 +141,29 @@ there are more.
 
 ## Setup UI
 
-The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage), **Connect** (Channels, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
+The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage, plus the Open Claude Code and Dashboards launchers, admins only), **Connect** (Channels, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). The icon tabs at the top of the sidebar switch it between this menu, the Browse file tree and the Chat session list. Webhooks, Nodes and the Telegram workspace are opened from the pages that own them. Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
 
 | Page          | What it manages                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | **Home**      | Status and next steps: a one-line headline, a status strip (gateway, watchdog, incidents in 7 days, spend in 30 days), Attention (device approvals, data upgrade, Drift Doctor, prompt hardening, pin drift, sync off), Finish setting up, Coming up (next scheduled jobs), Agents, a Channels summary, and This box (versions and update, one-click OpenClaw dashboard that opens signed in, hardening state, Back up now, repo sync schedule) |
+| **Chat**      | Talk to your agents from the browser: sessions per agent in the sidebar's Chat list, live run status, and relay conversations shown read-only |
+| **Agents**    | One page per agent (listed in the sidebar): overview with its model and 7-day activity, tools, channel bindings and sessions; add, edit, set as default and delete |
+| **Health**    | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, gateway memory trend + leak-detection settings, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
+| **Doctor**    | Drift Doctor workspace health review — LLM scan plus deterministic environment checks, model-drift checks (outdated model bindings, invalid model codings, context-limit drift, and skills still steering the agent toward old models), and bridged `openclaw doctor` findings, a context-budget meter against OpenClaw's real injection budget with self-explaining Blocked/Dropped/Truncated chips, opt-in scheduled scans, configurable scan limits, and queued fixes you can dispatch to your agent in the chat you pick |
+| **Schedules** | Cron job management, interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns |
+| **Usage**     | Token summaries, per-session and per-agent cost and token breakdown with source/agent dimension comparisons              |
+| **Open Claude Code** | (launcher, admins only) Opens a Claude Code session in a new tab: the local rescue session on the box when it is set up, otherwise a claude.ai routine or plain claude.ai/code (see [Open Claude Code Launcher](#open-claude-code-launcher)) |
+| **Dashboards** | (launcher, admins only) Opens OpenClaw's session dashboards in a new tab, signed in                                     |
 | **Channels**  | Channel accounts (add, edit, delete, WhatsApp QR linking), chat pairing approvals and device approvals |
 | **Integrations** | Google Workspace, feature health (memory embeddings, audio transcription), the OpenAI-compatible API and Agent Administration toggles, and links to Webhooks and Nodes |
-| **Browse**    | File explorer for workspace visibility, inline edits, diff review, and Git-backed sync                                   |
-| **Usage**     | Token summaries, per-session and per-agent cost and token breakdown with source/agent dimension comparisons              |
-| **Schedules** | Cron job management, interactive rolling calendar, run-history drilldowns, trend analytics, and per-run usage breakdowns |
-| **Doctor**    | Drift Doctor workspace health review — LLM scan plus deterministic environment checks, model-drift checks (outdated model bindings, invalid model codings, context-limit drift, and skills still steering the agent toward old models), and bridged `openclaw doctor` findings, a context-budget meter against OpenClaw's real injection budget with self-explaining Blocked/Dropped/Truncated chips, opt-in scheduled scans, configurable scan limits, and queued fixes you can dispatch to your agent in the chat you pick |
-| **Nodes**     | (from Integrations) Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
-| **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
-| **Health**    | Health monitoring, live status narrative, incident history, optional AI incident overseer, resource autotune card, gateway memory trend + leak-detection settings, auto-repair toggle, notifications, event log, live log tail, interactive terminal |
+| **Relay**     | The [Agent Relay](#agent-relay): its health, the agents on it, anything waiting on you or failed, the message log, and the approved remote connections |
 | **Models & keys** | AI provider credentials (Anthropic, OpenAI, Gemini, Particle, Mistral, Voyage, Groq, Deepgram) and model selection       |
 | **Environment** | Environment variables — view, edit, add — with gateway restart prompts                                                   |
+| **Team**      | Member accounts, invites, roles, and a who's-online roster (beta) — enable wizard applies the gateway change and verifies login end to end |
+| **Browse**    | (sidebar mode) File explorer for workspace visibility, inline edits, diff review, and Git-backed sync                   |
 | **Webhooks**  | (from Integrations) Webhook endpoints, transform modules, request history, payload inspection, OAuth callbacks, Gmail watch delivery flows   |
+| **Nodes**     | (from Integrations) Guided local-node setup for VPS deployments, per-node browser attach, reconnect commands, and routing/pairing controls   |
+| **Telegram**  | (from Channels) Telegram workspace: forum topics, their agents and health, and the agent and subagent concurrency limits |
 
 ## Particle (particle-1)
 
@@ -190,7 +196,7 @@ The sidebar groups pages by task. Home and Chat come first, then your agents, **
 
 ## Open Claude Code Launcher
 
-The Monitoring section of the sidebar has an **Open Claude Code** item. Out of the box it opens [claude.ai/code](https://claude.ai/code) in a new tab. Configure it and one click starts a Claude Code session and lands you directly in it — a **local rescue session on the box itself** once you've done its one-time login (see below), or a fresh cloud session via a claude.ai routine.
+The Operate group of the sidebar has an **Open Claude Code** item (admins only). Out of the box it opens [claude.ai/code](https://claude.ai/code) in a new tab. Configure it and one click starts a Claude Code session and lands you directly in it — a **local rescue session on the box itself** once you've done its one-time login (see below), or a fresh cloud session via a claude.ai routine.
 
 Routine setup (one time, on your claude.ai account — requires a Pro/Max/Team/Enterprise plan):
 
@@ -307,7 +313,7 @@ openclaw gateway call agents.create --params "{\"name\":\"$ID\",\"workspace\":\"
 
 ## Team Access (beta)
 
-The **Team** tab turns a single-password AlphaClaw into a multi-member workspace. It needs the OpenClaw 2026.8.1-beta line (on older builds the tab explains that it needs a newer OpenClaw).
+The **Team** tab turns a single-password AlphaClaw into a multi-member workspace.
 
 How it works:
 

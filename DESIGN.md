@@ -243,7 +243,7 @@ General splits into Home (status and next steps) and Integrations. Every card on
 | Channels, ChannelOperationsPanel, Pairings (channel pairing approvals), WhatsApp QR | Channels page (new route reusing these components); Home shows a compact Channels summary |
 | DevicePairings (pending device approvals) | Home "Attention" slot while any are pending, and the Channels page |
 | Features (memory embeddings, audio transcription) | Integrations |
-| Google Accounts | Integrations |
+| Google accounts | Integrations |
 | ApiFeaturePanel, AgentAdminPanel | Integrations |
 | Workspace sync (SyncLastRunLine, sync schedule), UpdateActionButton | Home, in a "This box" card (version, update, sync) |
 | BackupsCard | Home, in the same "This box" card group |

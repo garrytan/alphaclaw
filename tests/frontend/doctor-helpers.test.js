@@ -124,8 +124,6 @@ describe("frontend/doctor helpers", () => {
     expect(helpers.getDoctorChangeLabel({ changedFilesCount: 1 })).toBe(
       "1 change since last run",
     );
-    expect(helpers.getDoctorStatusTone("fixed")).toBe("success");
-    expect(helpers.getDoctorStatusTone("working")).toBe("info");
     expect(helpers.buildDoctorStatusFilterOptions()).toEqual([
       { value: "open", label: "Open" },
       { value: "working", label: "Working" },

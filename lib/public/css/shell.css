@@ -1573,7 +1573,7 @@
 
 /* ── Phone tap targets: 40 px in the app shell and its dialogs ── */
 
-@media (max-width: 767px) {
+@media (max-width: 768px) {
   :is(.app-shell, [aria-modal="true"])
     :is(button, select, summary, [role="button"], [role="tab"], input:not([type="checkbox"]):not([type="radio"])) {
     min-height: 40px;

@@ -185,19 +185,6 @@
   gap: 8px;
 }
 
-.cron-list-status-inline {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.cron-list-last-run {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1;
-}
-
 .cron-list-item-title {
   font-size: 12px;
   font-weight: 700;
@@ -310,7 +297,7 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: auto;
-  background: var(--bg-surface);
+  background: var(--bg-sidebar);
 }
 
 .cron-calendar-grid-header,

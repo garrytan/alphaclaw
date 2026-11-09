@@ -5,7 +5,6 @@ import {
   fitTerminalWhenVisible,
   formatBytes,
   formatWatchdogCopyAllText,
-  getIncidentStatusTone,
   kWatchdogConsoleTabLogs,
   kWatchdogConsoleTabTerminal,
   kWatchdogLogsPanelDefaultHeightPx,
@@ -135,26 +134,6 @@ describe("frontend/watchdog-helpers (extended)", () => {
     expect(formatBytes(2048)).toBe("2 KB");
     expect(formatBytes(3 * 1024 * 1024)).toBe("3 MB");
     expect(formatBytes(5.5 * 1024 * 1024 * 1024)).toBe("5.5 GB");
-  });
-
-  it("maps incident events to status tones", () => {
-    expect(getIncidentStatusTone({ status: "FAILED" })).toEqual({
-      dotClass: "bg-red-500/90",
-      label: "Failed",
-    });
-    expect(
-      getIncidentStatusTone({ status: "ok", eventType: "HEALTH_CHECK" }),
-    ).toEqual({
-      dotClass: "bg-green-500/90",
-      label: "Healthy",
-    });
-    expect(getIncidentStatusTone({ status: "warn" }).label).toBe("Warning");
-    expect(getIncidentStatusTone({ status: "warning" }).label).toBe("Warning");
-    expect(getIncidentStatusTone({ status: "ok", eventType: "restart" })).toEqual({
-      dotClass: "bg-gray-500/70",
-      label: "Unknown",
-    });
-    expect(getIncidentStatusTone(null).label).toBe("Unknown");
   });
 
   it("falls back to the current time for invalid export dates", () => {
