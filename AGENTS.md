@@ -332,7 +332,7 @@ Use these conventions for all UI work under `lib/public/js` and `lib/public/css`
 - Mutations that revert a control show a persistent `<InlineErrorChip />` adjacent to it (cleared on the next attempt). Toasts are for successes and fire-and-forget notices only — never the sole surface for a revert.
 - A failed initial GET must never present a default value as fact: render the control disabled with a "Couldn't load — Retry" chip (`SavedToggle` does this via `loadError`/`onRetryLoad`).
 - Every fetch that writes user-mutable or list state carries a latest-request-wins guard (generation ref / `usePolling` / `useCachedFetch`); background refreshes never overwrite unsaved drafts (dirty-check merges).
-- Never gate a whole card on a fetch: render the frame immediately and scope "Loading..." to the data region or control label (`api-feature-panel.js` pattern). Lists/status panes distinguish loading / error(+Retry) / genuinely-empty — use `<AsyncSection />`.
+- Never gate a whole card on a fetch: render the frame immediately and scope "Loading…" to the data region or control label (`api-feature-panel.js` pattern). Lists/status panes distinguish loading / error(+Retry) / genuinely-empty — use `<AsyncSection />`.
 - After write/mutation APIs, `setCached`/`invalidateCache`/`refresh({ force: true })` the affected keys (see `lib/public/js/lib/api-cache.js` — force refreshes are generation-safe: a superseded request can neither be deduped onto nor write the cache; residual edge: the superseded promise itself can still hand pre-mutation data to its awaiting caller, tracked in TODOS.md).
 - Per-row actions get per-row pending state ("Approving...", "Binding...") on the clicked control, not a page-level spinner.
 
