@@ -272,6 +272,8 @@ describe("relay delegates: settings", () => {
     expect(card.summary).toContain(kAgent);
     expect(card.summary).toContain("1 entry in ALPHACLAW_RELAY_DELEGATE_AGENTS or ALPHACLAW_RELAY_DELEGATE_TOOLS did not fit and was ignored.");
     expect(card.fixPrompt).toContain("never add, remove or edit ALPHACLAW_RELAY_DELEGATE_AGENTS");
+    expect(card.recommendation).toContain("press Revoke delegate or Remove on its binding");
+    expect(card.recommendation).not.toContain("take its agent out of ALPHACLAW_RELAY_DELEGATE_AGENTS");
   });
 
   it("reads the delegate client and tool lists from the deployment env, dropping entries that do not fit", () => {
