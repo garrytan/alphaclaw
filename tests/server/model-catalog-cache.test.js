@@ -687,6 +687,39 @@ describe("server/model-catalog-cache", () => {
     expect(fs.existsSync(cachePath)).toBe(true);
   });
 
+  it("waits for the gateway without re-running the CLI while the configured-only list is in memory", async () => {
+    vi.useFakeTimers();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-model-catalog-down-"));
+    const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
+    const execFileCmd = vi.fn().mockResolvedValue("{}");
+    const parseJsonFromNoisyOutput = vi.fn(() => ({ models: [{ key: "custom/only-configured", name: "Only Configured" }] }));
+    let gatewayUp = false;
+    const cache = createModelCatalogCache({
+      cachePath,
+      execFileCmd,
+      parseJsonFromNoisyOutput,
+      normalizeOnboardingModels: normalizeModels,
+      readOpenclawVersion: vi.fn(() => "2026.11.2"),
+      isGatewayRunning: vi.fn(async () => gatewayUp),
+      setTimeoutFn: setTimeout,
+      clearTimeoutFn: clearTimeout,
+    });
+
+    await cache.getCatalogResponse();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs * 3);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+
+    gatewayUp = true;
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
+    expect(await cache.getCatalogResponse()).toMatchObject({ source: "openclaw", stale: false });
+  });
+
   it("forces a fresh catalog load when requested", async () => {
     const tempRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "alphaclaw-model-catalog-force-refresh-"),
