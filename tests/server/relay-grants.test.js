@@ -284,6 +284,20 @@ describe("relay grants: the remote side and the owner's routes", () => {
     expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "peer", reason: "grant_revoked" });
   });
 
+  it("a second delegate grant for a delegate is refused, so one revoke on the page makes it a peer", async () => {
+    const ctx = setup({ ALPHACLAW_RELAY_DELEGATE_AGENTS: "" });
+    const added = await request(ctx.app).post("/api/relay/remote/grants").send({ agent: kAgent });
+    expect(added.status).toBe(200);
+    const again = await request(ctx.app).post("/api/relay/remote/grants").send({ agent: kAgent });
+    expect(again.status).toBe(400);
+    expect(again.body.code).toBe("invalid_input");
+    expect(ctx.store.grants.forAgent(kAgent)).toHaveLength(1);
+    expect((await request(ctx.app).post("/api/relay/remote/grants/" + added.body.grant.id + "/revoke")).status).toBe(200);
+    expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "peer", reason: "grant_revoked" });
+    expect((await request(ctx.app).post("/api/relay/remote/grants").send({ agent: kAgent })).status).toBe(200);
+    expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "delegate", reason: "grant" });
+  });
+
   it("the agent actor cannot add or revoke a grant, and bad input is refused", async () => {
     const ctx = setup();
     ctx.setActor({ type: "agent" });
