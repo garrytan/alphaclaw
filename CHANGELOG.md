@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.239] - 2026-11-09
+
+### Fixed
+- **No false "session may be stuck" alert for a Doctor session AlphaClaw already stopped.** The post-restart session sweep looks back 15 minutes, but the record of which Doctor sessions had their restarted turn stopped was cleared on every gateway launch and lived only in memory, so a redeploy minutes after a post-kill boot reported `agent:main:doctor:<n>` as `not_resumed`. The sweep now skips such a session whenever the stop was made no earlier than the session's last change, reading stops from this process and from the `resumed_turn_stopped` watchdog events of earlier ones. A later stuck turn in the same session is still reported.
+
+### Tests
+- A new hermetic test replays the sequence. One AlphaClaw stops the restarted Doctor turn, and a second one started six minutes later runs the real post-restart session sweep against the stopped session and stays silent, while a later stuck turn there is still alerted. On the old code the sweep alerts.
+- A second test reads the recorded stops back from a real watchdog database, the way a new AlphaClaw process finds them.
+
 ## [0.10.238] - 2026-11-09
 
 ### Changed
