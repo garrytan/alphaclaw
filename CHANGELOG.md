@@ -5,20 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.239] - 2026-11-09
-
-### Fixed
-- **No false "session may be stuck" alert for a Doctor session AlphaClaw already stopped.** The post-restart session sweep looks back 15 minutes, but the record of which Doctor sessions had their restarted turn stopped was cleared on every gateway launch and lived only in memory, so a redeploy minutes after a post-kill boot reported `agent:main:doctor:<n>` as `not_resumed`. The sweep now skips such a session whenever the stop was made no earlier than the session's last change, reading stops from this process and from the `resumed_turn_stopped` watchdog events of earlier ones. A later stuck turn in the same session is still reported.
-
-### Tests
-- A new hermetic test replays the sequence. One AlphaClaw stops the restarted Doctor turn, and a second one started six minutes later runs the real post-restart session sweep against the stopped session and stays silent, while a later stuck turn there is still alerted. On the old code the sweep alerts.
-- A second test reads the recorded stops back from a real watchdog database, the way a new AlphaClaw process finds them.
-
-## [0.10.238] - 2026-11-09
-
-### Changed
-- **gstack's pregate knows which tests cover the lockfile and the browser smoke scripts.** `.gstack/pregate.json` now declares the vitest runner and maps `package-lock.json` to `tests/server/alphaclaw-version.test.js` (the test that reads its version) and `tests/browser/**` to no lane, since those smoke scripts run by hand through `npm run test:ui:*`, not in vitest. A change touching either no longer gets a "no lane policy" warning. CI configuration only; nothing changes for someone running AlphaClaw.
-## [0.10.238] - 2026-11-09
+## [0.10.240] - 2026-11-09
 
 AlphaClaw now checks the credential on every `/hooks` webhook delivery itself, before the gateway sees it, and closes OpenClaw's two built-in agent hooks to the outside unless you turn them on. Senders keep working unchanged.
 
@@ -32,6 +19,20 @@ AlphaClaw now checks the credential on every `/hooks` webhook delivery itself, b
 
 ### Added
 - A Doctor card and a startup warning when `gateway.bind` is not `loopback`: the gateway then also answers `/hooks` on its own port, where none of these checks run. AlphaClaw never changes the setting.
+
+## [0.10.239] - 2026-11-09
+
+### Fixed
+- **No false "session may be stuck" alert for a Doctor session AlphaClaw already stopped.** The post-restart session sweep looks back 15 minutes, but the record of which Doctor sessions had their restarted turn stopped was cleared on every gateway launch and lived only in memory, so a redeploy minutes after a post-kill boot reported `agent:main:doctor:<n>` as `not_resumed`. The sweep now skips such a session whenever the stop was made no earlier than the session's last change, reading stops from this process and from the `resumed_turn_stopped` watchdog events of earlier ones. A later stuck turn in the same session is still reported.
+
+### Tests
+- A new hermetic test replays the sequence. One AlphaClaw stops the restarted Doctor turn, and a second one started six minutes later runs the real post-restart session sweep against the stopped session and stays silent, while a later stuck turn there is still alerted. On the old code the sweep alerts.
+- A second test reads the recorded stops back from a real watchdog database, the way a new AlphaClaw process finds them.
+
+## [0.10.238] - 2026-11-09
+
+### Changed
+- **gstack's pregate knows which tests cover the lockfile and the browser smoke scripts.** `.gstack/pregate.json` now declares the vitest runner and maps `package-lock.json` to `tests/server/alphaclaw-version.test.js` (the test that reads its version) and `tests/browser/**` to no lane, since those smoke scripts run by hand through `npm run test:ui:*`, not in vitest. A change touching either no longer gets a "no lane policy" warning. CI configuration only; nothing changes for someone running AlphaClaw.
 
 ## [0.10.237] - 2026-11-09
 
