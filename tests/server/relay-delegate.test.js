@@ -169,8 +169,8 @@ describe("relay delegates: the guard's tiers", () => {
   it("an operator entry never unlocks a withheld tool: short prefixes are ignored and the never-list wins over exact names", () => {
     box = makeBox();
     box.message();
-    register({ delegateTools: ["m*", "s*", "g*", "message", "gateway", "sessions_send", "relay__*", "nori__*"] });
-    for (const toolName of ["message", "memory_wipe", "sessions_send", "sessions_spawn", "gateway", "relay__relay_send", "secrets"]) {
+    register({ delegateTools: ["m*", "s*", "g*", "message", "gateway", "sessions_send", "browser", "conversations_inbox", "relay__*", "nori__*"] });
+    for (const toolName of ["message", "memory_wipe", "sessions_send", "sessions_spawn", "gateway", "browser", "conversations_inbox", "relay__relay_send", "secrets"]) {
       expect(blocked(call(toolName, { action: "send", target: "@x" })), toolName).toBe(true);
     }
     expect(call("nori__search", {})).toEqual({});
@@ -207,7 +207,9 @@ describe("relay delegates: the guard's tiers", () => {
       { action: "send", target: "@lupe", userId: "u-stranger", message: "x" },
       { action: "send", target: "@lupe", gatewayUrl: "ws://elsewhere", message: "x" },
       { action: "send", channel: "discord", target: "-100777", message: "x" },
-      { action: "send", channel: "discord", target: "telegram:-100777", message: "x" },
+      { action: "send", channel: "telegram", target: "-100777", threadId: "999", message: "x" },
+      { action: "thread-reply", channel: "telegram", target: "-100777", threadId: "999", message: "x" },
+      { action: "send", target: "@LUPE", message: "x" },
     ]) {
       expect(blocked(call("message", params)), JSON.stringify(params)).toBe(true);
     }
@@ -215,12 +217,22 @@ describe("relay delegates: the guard's tiers", () => {
     expect(infos.join("\n")).toContain("[relay-guard] approved send tool=message");
     const again = call("message", { action: "send", channel: "telegram", target: "-100777", message: "7pm again" });
     expect(again.blockReason).toContain("already used for -100777");
-    expect(call("message", { action: "send", target: "@LUPE", message: "hi" })).toEqual({});
+    expect(call("message", { action: "send", target: "@lupe", message: "hi" })).toEqual({});
     expect(blocked(call("message", { action: "send", target: "@stephanie", message: "cc" }))).toBe(true);
     expect(blocked(call("message", { action: "react", target: "@lupe" }))).toBe(true);
     expect(blocked(call("message", { action: "send", message: "to the current chat" }))).toBe(true);
     expect(blocked(call("message", { action: "send", target: { id: "@lupe" } }))).toBe(true);
     expect(blocked(call("message", { action: "send", targets: "@lupe" }))).toBe(true);
+  });
+
+  it("approved recipient ids are compared exactly, and a channel prefix is matched only by a channel's own name", () => {
+    box = makeBox();
+    box.message({ approval: { words: "do it", action: "Post the plan", targets: ["matrix:!AbC:example.org", "channel:123"] } });
+    register();
+    expect(blocked(call("message", { action: "send", channel: "matrix", target: "!abc:example.org", message: "x" }))).toBe(true);
+    expect(blocked(call("message", { action: "send", channel: "discord", target: "123", message: "x" }))).toBe(true);
+    expect(call("message", { action: "send", channel: "Matrix", target: "!AbC:example.org", message: "x" })).toEqual({});
+    expect(call("message", { action: "send", channel: "discord", target: "channel:123", message: "x" })).toEqual({});
   });
 
   it("an approval does not survive its run, does not count for a peer, and drops when the delegate is revoked", () => {
@@ -570,7 +582,7 @@ describe("relay delegates: the bridge", () => {
       expect(ctx.aborts).toEqual([]);
       expect(ctx.store.get(messageId).trust).toBe("peer");
       await ctx.bridge._internal.pump();
-      expect(ctx.aborts).toEqual([{ sessionKey: kSession, runId: "relay-" + messageId }]);
+      expect(ctx.aborts).toEqual([{ sessionKey: kSession }]);
       await ctx.bridge._internal.pump();
       expect(ctx.aborts).toHaveLength(1);
     } finally {
@@ -616,7 +628,7 @@ describe("relay delegates: the bridge", () => {
       const first = ctx.engine.dm(kAgent, "long job");
       await ctx.tick();
       expect(await ctx.bridge.demoteSender(kAgent, "revoked")).toBe(1);
-      expect(ctx.aborts).toEqual([{ sessionKey: kSession, runId: "relay-" + first }]);
+      expect(ctx.aborts).toEqual([{ sessionKey: kSession }]);
       expect(ctx.store.get(first)).toMatchObject({ trust: "peer", approval: null, state: "dispatched" });
       await ctx.end(ctx.sends[0], [{ role: "assistant", content: [{ type: "text", text: "stopped" }] }]);
       const second = ctx.engine.dm(kAgent, "another job");
@@ -624,7 +636,7 @@ describe("relay delegates: the bridge", () => {
       expect(ctx.store.get(second).trust).toBe("delegate");
       live = false;
       await ctx.bridge._internal.pump();
-      expect(ctx.aborts.at(-1)).toEqual({ sessionKey: kSession, runId: "relay-" + second });
+      expect(ctx.aborts.at(-1)).toEqual({ sessionKey: kSession });
       expect(ctx.store.get(second).trust).toBe("peer");
     } finally {
       ctx.close();
