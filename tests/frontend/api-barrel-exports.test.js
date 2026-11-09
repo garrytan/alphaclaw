@@ -130,10 +130,12 @@ const kExpectedApiExports = [
   "fetchWatchdogSettings",
   "fetchWatchdogStatus",
   "fetchWebhookDetail",
+  "fetchWebhookIngress",
   "fetchWebhookRequest",
   "fetchWebhookRequests",
   "fetchWebhooks",
   "finishAgentDelete",
+  "generateWebhookIngressSecret",
   "getTelegramTopics",
   "grantRelayDelegate",
   "logout",
@@ -151,6 +153,7 @@ const kExpectedApiExports = [
   "removeTeamMember",
   "renewGmailWatch",
   "reopenBuiltinHookSharedToken",
+  "reopenWebhookIngressSharedToken",
   "requestWatchdogOverseerReview",
   "resolveManagedUpdateAttempt",
   "restartGatewayAsync",
@@ -219,6 +222,7 @@ const kExpectedApiExports = [
   "updateWatchdogOverseer",
   "updateWatchdogSettings",
   "updateWebhookDestination",
+  "updateWebhookIngress",
   "verifyGithubOnboardingRepo",
   "verifyTelegramTopic",
 ];
@@ -227,7 +231,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(216);
+    expect(kExpectedApiExports).toHaveLength(220);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

@@ -5,6 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.245] - 2026-11-09
+
+Each webhook can now check who sent a delivery instead of trusting the one shared webhook token, so a leaked token no longer lets anyone post to a Circleback, Quo or Verkada hook once it has moved over.
+
+### Added
+- **Sender verification per hook.** Webhooks → a hook → Sender verification moves a hook to Circleback, Quo (current and legacy signatures), Verkada, Standard Webhooks or a token AlphaClaw mints for that hook alone. Signing secrets live in `<root>/hook-ingress/secrets.json` (0600), never in `.env`, and the policy in `alphaclaw.json` `hooksIngress.hooks`; a policy without its secret, or the reverse, refuses the hook (`503`) and notifies you rather than reopening it to the shared token.
+- **Replay protection.** A signed delivery the gateway already accepted is answered `200 {"deduped": true}` without running the hook again, also after a restart; a copy arriving while the first is still being forwarded gets `409` with `Retry-After`.
+- **A fixed move-over window.** The shared token keeps working on a hook until the gateway accepts its first verified delivery and then for 24 hours; later deliveries with it get `401` and a notice, and only a person reopens it. Deliveries with the shared token inside the window notify you that the move is unfinished.
+- **Back up now** saves the hook policy and secrets together beside the archive (`<stamp>-hook-ingress-backup`), swept with the archives' retention.
+
+### Changed
+- **A signed hook's transform sees only what the sender signed.** AlphaClaw forwards the exact signed bytes with no query string and its own header set (`Content-Type: application/json`, the gateway credential, `Idempotency-Key`, and only the headers the scheme signs). The page warns when a hook's mapping or transform reads query or header fields.
+- The webhook detail's auth note is per hook, and it reports the hook's verification method.
+
+### Tests
+- `hook-ingress-signatures.test.js`: the Standard Webhooks reference vector, vectors from each provider's documented algorithm and every failure reason.
+- `hook-ingress-senders.test.js`: exact-bytes forwarding, byte-identical transform input when unsigned headers change, stale and compressed deliveries, the limiter, replay across a DB reopen, the 409 for a concurrent copy, the injected failure after the gateway's 2xx, the 24 h window, own tokens, fail-closed policy and secrets, OAuth aliases on a signed hook, delete and recreate, the backup and restore, and humans-only routes.
+- `tests/live/hook-ingress.e2e.test.js`: a signed delivery reaches the pinned gateway's transform with only the signed body, its replay is not dispatched, a 250 KiB body is admitted and the shared token is refused after the window.
+- `webhook-sender-verification.test.js`: the Sender verification card's states and labels, and that a shown-once secret never reaches the cache.
+
 ## [0.10.244] - 2026-11-09
 
 Three fixes to how AlphaClaw reports a long OpenClaw upgrade boot, from a 16-agent cold-boot test of the 2026.11.2 upgrade.
