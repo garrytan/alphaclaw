@@ -1,4 +1,12 @@
 {
+  "$schema": "https://github.com/garrytan/gstack/docs/pregate.md#pregate-v1",
+  "runner": "npx vitest run {files}",
+  "dependencies": {
+    "package-lock.json": [
+      "tests/server/alphaclaw-version.test.js"
+    ],
+    "tests/browser/**": []
+  },
   "run_profiles": {
     "ci/test-24": {
       "workflow": "ci.yml",
