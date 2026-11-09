@@ -18,6 +18,7 @@ const {
 const { kTelegramGroupErrors, toTelegramGroupsError } = require("../../lib/server/telegram-groups-errors");
 const { registerTelegramGroupRoutes } = require("../../lib/server/routes/telegram-groups");
 const { syncConfigForTelegram } = require("../../lib/server/telegram-workspace");
+const groupGuard = require("../../lib/plugin/group-guard");
 
 // Garry's box, as of 2026-11-09: six approved groups, one silent, TEST CHAT
 // blocked; owners 6167919517 and 8756803657; Harj and Sylvia trusted, Alfred's
@@ -350,6 +351,58 @@ describe("telegram group rules: mapping onto OpenClaw's group entry", () => {
     expect(() => groups.setBlockedSenders({ senders: [{ id: kMossab }] })).toThrow(expect.objectContaining({ code: "owner_required" }));
     expect(fs.existsSync(resolveStatePaths(kRootDir).statePath)).toBe(false);
     expect(groups.setBlockedSenders({ senders: [] })).toMatchObject({ blockedSenders: [] });
+  });
+
+  it("lets a saved block list shrink while no owner id is known, but never grow", () => {
+    const { statePath } = resolveStatePaths(kRootDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify({ owners: [], groups: {}, blockedSenders: [{ id: kMossab }, { id: kAlfredBot }], seen: {} }));
+    const config = boxConfig({ allowFrom: [] });
+    delete config.commands;
+    writeConfig(config);
+    const { groups } = makeGroups();
+    expect(() => groups.setBlockedSenders({ senders: [{ id: kMossab }, { id: kHarj }] })).toThrow(expect.objectContaining({ code: "owner_required" }));
+    expect(groups.setBlockedSenders({ senders: [{ id: kMossab }] }).blockedSenders.map((entry) => entry.id)).toEqual([kMossab]);
+  });
+
+  describe("owners the guard plugin trusts", () => {
+    const pluginFor = () => {
+      const handlers = {};
+      groupGuard.register({ pluginConfig: { rootDir: kRootDir, ownerIds: [kGarry, kGarry2] }, logger: {}, on: (name, handler) => (handlers[name] = handler) });
+      return (senderId) => handlers.before_dispatch(
+        { channel: "telegram", senderId, content: "hi", sessionKey: "agent:main:telegram:group:" + kAlfredGroup },
+        { channelId: "telegram", senderId, conversationId: kAlfredGroup },
+      );
+    };
+
+    it("drops a former owner's next turn as soon as they are blocked, with no restart", () => {
+      const { groups } = makeGroups();
+      groups.syncOwners();
+      const dispatch = pluginFor();
+      expect(dispatch(kGarry2)).toBeUndefined();
+      const config = boxConfig({ allowFrom: [kGarry] });
+      config.commands.ownerAllowFrom = ["telegram:" + kGarry];
+      writeConfig(config);
+      groups.setBlockedSenders({ senders: [{ id: kGarry2 }] });
+      expect(readState({ rootDir: kRootDir }).owners).toEqual([kGarry]);
+      expect(dispatch(kGarry2)).toEqual({ handled: true });
+      expect(dispatch(kGarry)).toBeUndefined();
+    });
+
+    it("takes a newly added owner off the block list when the owners are synced", () => {
+      const { groups } = makeGroups();
+      groups.setBlockedSenders({ senders: [{ id: kMossab }, { id: kAlfredBot }] });
+      const dispatch = pluginFor();
+      expect(dispatch(kMossab)).toEqual({ handled: true });
+      const config = boxConfig();
+      config.commands.ownerAllowFrom.push("telegram:" + kMossab);
+      writeConfig(config);
+      expect(groups.syncOwners()).toBe(true);
+      expect(readState({ rootDir: kRootDir })).toMatchObject({ owners: [kGarry, kGarry2, kMossab], blockedSenders: [{ id: kAlfredBot }] });
+      expect(dispatch(kMossab)).toBeUndefined();
+      expect(dispatch(kAlfredBot)).toEqual({ handled: true });
+      expect(groups.syncOwners()).toBe(false);
+    });
   });
 
   it("keeps a rule on its exact chat id: a block on -N never covers -100N, and the other way round", async () => {

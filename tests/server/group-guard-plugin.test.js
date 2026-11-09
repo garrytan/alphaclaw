@@ -86,8 +86,8 @@ describe("group guard plugin", () => {
     const { dispatch } = register(rootDir);
     expect(dispatch(...groupTurn(kGarry, kAlfredGroup))).toBeUndefined();
     expect(dispatch(...groupTurn(kGarry, kTestChat))).toBeUndefined();
-    const configOwner = register(makeRoot({ blockedSenders: [{ id: "111111" }] }), { ownerIds: ["111111"] });
-    expect(configOwner.dispatch(...groupTurn("111111", kAlfredGroup))).toBeUndefined();
+    const stalePluginConfig = register(makeRoot({ owners: [kGarry], blockedSenders: [{ id: "111111" }] }), { ownerIds: ["111111"] });
+    expect(stalePluginConfig.dispatch(...groupTurn("111111", kAlfredGroup))).toEqual({ handled: true });
   });
 
   it("lets everyone else through, and ignores other channels", () => {
@@ -141,7 +141,7 @@ describe("group guard plugin entry", () => {
     expect(cfg.plugins.entries["group-guard"]).toEqual({
       enabled: true,
       hooks: { allowConversationAccess: true },
-      config: { _alphaclawManaged: "telegram-groups", rootDir: "/data", ownerIds: [kGarry] },
+      config: { _alphaclawManaged: "telegram-groups", rootDir: "/data" },
     });
     expect(applyGroupGuardEntry(cfg, { rootDir: "/data", log: () => {} }).changed).toBe(false);
   });

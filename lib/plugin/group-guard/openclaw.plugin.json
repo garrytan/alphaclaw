@@ -12,12 +12,6 @@
       },
       "rootDir": {
         "type": "string"
-      },
-      "ownerIds": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
       }
     }
   }
