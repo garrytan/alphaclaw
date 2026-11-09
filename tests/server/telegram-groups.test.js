@@ -15,7 +15,7 @@ const {
   readState,
   resolveStatePaths,
 } = require("../../lib/server/telegram-groups");
-const { kTelegramGroupErrors } = require("../../lib/server/telegram-groups-errors");
+const { kTelegramGroupErrors, toTelegramGroupsError } = require("../../lib/server/telegram-groups-errors");
 const { registerTelegramGroupRoutes } = require("../../lib/server/routes/telegram-groups");
 const { syncConfigForTelegram } = require("../../lib/server/telegram-workspace");
 
@@ -298,6 +298,42 @@ describe("telegram group rules: mapping onto OpenClaw's group entry", () => {
     expect(retry).toMatchObject({ changed: false, leave: { ok: true } });
   });
 
+  it("shows a block that is still saving in the list, so the page matches what the guard drops", async () => {
+    const { setOpenclawConfigWriteGate } = require("../../lib/server/openclaw-config");
+    const { groups } = makeGroups();
+    const revision = revisionOf(groups, kTestChat);
+    setOpenclawConfigWriteGate("an agent delete is in progress");
+    try {
+      await expect(groups.setPolicy({ groupId: kTestChat, body: { mode: "blocked" }, ifMatch: revision })).rejects.toMatchObject({ code: "config_busy" });
+    } finally {
+      setOpenclawConfigWriteGate(null);
+    }
+    const listed = groups.list().groups.find((group) => group.groupId === kTestChat);
+    expect(listed.pendingBlockAt).toBe(readState({ rootDir: kRootDir }).groups[kTestChat].pendingBlockAt);
+    expect(listed.pendingBlockAt).toEqual(expect.any(String));
+  });
+
+  it("re-reads the group's record inside the save, so a block that landed while OpenClaw validated is not overwritten", async () => {
+    const { groups } = makeGroups();
+    await groups.setPolicy({ groupId: kHomeTeam, body: { mode: "silent", convert: true }, ifMatch: revisionOf(groups, kHomeTeam) });
+    const revision = revisionOf(groups, kHomeTeam);
+    const validatePatch = vi.fn(async () => {
+      const state = readState({ rootDir: kRootDir });
+      state.groups[kHomeTeam] = { ...state.groups[kHomeTeam], mode: "blocked", blockedAt: new Date().toISOString() };
+      fs.writeFileSync(resolveStatePaths(kRootDir).statePath, JSON.stringify(state));
+      return { ok: true, errors: [] };
+    });
+    const { groups: racing } = makeGroups({ validatePatch });
+    await expectCode(racing.setPolicy({ groupId: kHomeTeam, body: { mode: "approved" }, ifMatch: revision }), "revision_mismatch");
+    expect(groupEntry(kHomeTeam)).toEqual({ requireMention: false, enabled: false });
+    expect(readState({ rootDir: kRootDir }).groups[kHomeTeam].mode).toBe("blocked");
+  });
+
+  it("calls only lock errors busy, never an error whose message merely contains 'lock'", () => {
+    expect(toTelegramGroupsError(Object.assign(new Error("Timed out waiting for lock"), { code: "ELOCKTIMEOUT" })).code).toBe("config_busy");
+    expect(toTelegramGroupsError(new TypeError("Cannot read properties of undefined (reading 'blockedSenders')")).code).toBe("internal_error");
+  });
+
   it("refuses to block an owner and keeps the block list sorted and deduplicated", () => {
     const { groups } = makeGroups();
     expect(() => groups.setBlockedSenders({ senders: [{ id: kGarry2 }] })).toThrow(expect.objectContaining({ code: "owner_protected" }));
@@ -376,6 +412,18 @@ describe("telegram group rules routes", () => {
     expectProblem(await request(app).put("/api/telegram/blocked-senders").send({ senders: [{ id: kGarry }] }), "owner_protected");
     expectProblem(await request(app).put("/api/telegram/blocked-senders").send({ senders: "x" }), "invalid_input");
     expectProblem(await request(app).post("/api/telegram/groups/-12/test").send({}), "invalid_group_id");
+  });
+
+  it("refuses an account id that is not a channel account id, before anything reads it", async () => {
+    const config = boxConfig();
+    config.channels.telegram.accounts = { default: { ...config.channels.telegram } };
+    writeConfig(config);
+    const { app, groups } = createApp();
+    const revision = revisionOf(groups, kHomeTeam);
+    expectProblem(await request(app).put("/api/telegram/groups/" + kHomeTeam + "/policy?accountId=__proto__").set("If-Match", revision).send({ mode: "silent", convert: true }), "invalid_input");
+    expectProblem(await request(app).get("/api/telegram/groups?accountId=" + encodeURIComponent("../x")), "invalid_input");
+    expectProblem(await request(app).post("/api/telegram/groups/" + kHomeTeam + "/test").send({ accountId: "constructor" }), "invalid_input");
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "groups")).toBe(false);
   });
 
   it("answers owner_required with 422", async () => {
