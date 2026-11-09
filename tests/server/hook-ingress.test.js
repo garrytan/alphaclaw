@@ -21,6 +21,7 @@ const { buildGatewayBindCard } = require("../../lib/server/doctor/gateway-bind-c
 
 const kShared = "shared-hook-token-value";
 const kHour = 60 * 60 * 1000;
+const kEdited = "edited-but-not-restarted";
 const kDay = 24 * kHour;
 
 const createGateway = async () => {
@@ -168,7 +169,7 @@ describe("edge decision for configured hooks", () => {
       expect(res.status).toBe(200);
       expect(h.gateway.calls).toHaveLength(1);
       expect(h.gateway.calls[0].headers.authorization).toBe("Bearer " + kShared);
-      expect(h.rows.at(-1)).toMatchObject({ hookName: "calendar", auth: "shared_token", gatewayStatus: 200 });
+      expect(h.rows.at(-1)).toMatchObject({ hookName: "calendar", authMethod: "shared_token", gatewayStatus: 200 });
       expect(typeof h.rows.at(-1).gatewayMs).toBe("number");
     } finally {
       await h.close();
@@ -181,7 +182,7 @@ describe("edge decision for configured hooks", () => {
       const res = await request(h.app).post("/hooks/calendar").set("Authorization", "Bearer wrong").send({ a: 1 });
       expect(res.status).toBe(401);
       expect(h.gateway.calls).toHaveLength(0);
-      expect(h.rows.at(-1)).toMatchObject({ hookName: "calendar", gatewayStatus: 401, auth: "rejected:bad_credential" });
+      expect(h.rows.at(-1)).toMatchObject({ hookName: "calendar", gatewayStatus: 401, authMethod: "rejected:bad_credential" });
     } finally {
       await h.close();
     }
@@ -208,10 +209,10 @@ describe("edge decision for configured hooks", () => {
     const h = await createHarness();
     try {
       for (let i = 0; i < 5; i += 1) await request(h.app).post("/hooks/calendar").set("x-openclaw-token", "bad").send({});
-      expect(h.rows.filter((row) => row.auth?.startsWith("rejected:"))).toHaveLength(1);
+      expect(h.rows.filter((row) => row.authMethod?.startsWith("rejected:"))).toHaveLength(1);
       h.clock.now += 10_000;
       await request(h.app).post("/hooks/calendar").set("x-openclaw-token", "bad").send({});
-      const refused = h.rows.filter((row) => row.auth?.startsWith("rejected:"));
+      const refused = h.rows.filter((row) => row.authMethod?.startsWith("rejected:"));
       expect(refused).toHaveLength(2);
       expect(refused[1].gatewayBody).toContain("4 more refused");
     } finally {
@@ -222,10 +223,10 @@ describe("edge decision for configured hooks", () => {
   it("judges against the launch environment, so an Envars edit before a restart changes nothing", async () => {
     const h = await createHarness();
     const previous = process.env.WEBHOOK_TOKEN;
-    process.env.WEBHOOK_TOKEN = "edited-but-not-restarted";
+    process.env.WEBHOOK_TOKEN = kEdited;
     try {
       expect((await request(h.app).post("/hooks/calendar").set("Authorization", "Bearer " + kShared).send({})).status).toBe(200);
-      expect((await request(h.app).post("/hooks/calendar").set("Authorization", "Bearer edited-but-not-restarted").send({})).status).toBe(401);
+      expect((await request(h.app).post("/hooks/calendar").set("Authorization", "Bearer " + kEdited).send({})).status).toBe(401);
     } finally {
       if (previous === undefined) delete process.env.WEBHOOK_TOKEN;
       else process.env.WEBHOOK_TOKEN = previous;
@@ -249,7 +250,7 @@ describe("edge decision for configured hooks", () => {
       const res = await request(h.app).post("/hooks/calendar").set("Authorization", "Bearer anything").send({});
       expect(res.status).toBe(200);
       expect(h.gateway.calls).toHaveLength(1);
-      expect(h.rows.at(-1).auth).toBe("unchecked");
+      expect(h.rows.at(-1).authMethod).toBe("unchecked");
     } finally {
       await h.close();
     }
@@ -262,7 +263,7 @@ describe("edge decision for configured hooks", () => {
       expect(res.status).toBe(401);
       expect(res.headers.connection).toBe("close");
       expect(h.gateway.calls).toHaveLength(0);
-      expect(h.rows.at(-1)).toMatchObject({ auth: "rejected:no_credential", payloadSize: 0 });
+      expect(h.rows.at(-1)).toMatchObject({ authMethod: "rejected:no_credential", payloadSize: 0 });
     } finally {
       await h.close();
     }
@@ -274,7 +275,7 @@ describe("edge decision for configured hooks", () => {
       const res = await request(h.app).get("/oauth/cb1?code=abc&state=s1");
       expect(res.status).toBe(200);
       expect(h.gateway.calls[0].headers.authorization).toBe("Bearer " + kShared);
-      expect(h.rows.at(-1).auth).toBe("oauth_alias");
+      expect(h.rows.at(-1).authMethod).toBe("oauth_alias");
     } finally {
       await h.close();
     }
@@ -303,7 +304,7 @@ describe("built-in /hooks/agent and /hooks/wake", () => {
       await request(h.app).post("/hooks/agent").set("Authorization", "Bearer " + kShared).send({ message: "hi" });
       await flush();
       expect(h.rows.filter((row) => row.hookName === "agent")).toHaveLength(1);
-      expect(h.rows.at(-1).auth).toBe("rejected:builtin_off");
+      expect(h.rows.at(-1).authMethod).toBe("rejected:builtin_off");
       const offNotices = h.notices.filter((notice) => notice.id.startsWith("hook-ingress-builtin-off-agent"));
       expect(offNotices.length).toBeGreaterThan(0);
       expect(new Set(offNotices.map((notice) => notice.id)).size).toBe(1);
@@ -341,7 +342,7 @@ describe("built-in /hooks/agent and /hooks/wake", () => {
       const res = await request(h.app).post("/hooks/agent?token=" + own).send({ message: "hi" });
       expect(res.status).toBe(200);
       expect(h.gateway.calls[0].headers.authorization).toBe("Bearer " + kShared);
-      expect(h.rows.at(-1).auth).toBe("per_hook_token");
+      expect(h.rows.at(-1).authMethod).toBe("per_hook_token");
       expect(h.hookIngress.builtinStatus().hooks.agent.firstOwnTokenAt).toBeTruthy();
     } finally {
       await h.close();
@@ -361,7 +362,7 @@ describe("built-in /hooks/agent and /hooks/wake", () => {
       h.clock.now += 4 * kHour + 1;
       const refused = await request(h.app).post("/hooks/agent").set("Authorization", "Bearer " + kShared).send({});
       expect(refused.status).toBe(401);
-      expect(h.rows.at(-1).auth).toBe("rejected:shared_token_retired");
+      expect(h.rows.at(-1).authMethod).toBe("rejected:shared_token_retired");
       expect((await request(h.app).post("/hooks/agent").set("Authorization", "Bearer " + own).send({})).status).toBe(200);
       await flush();
       expect(h.notices.some((notice) => notice.id.startsWith("hook-ingress-builtin-shared-agent"))).toBe(true);
@@ -393,7 +394,7 @@ describe("built-in /hooks/agent and /hooks/wake", () => {
       fs.writeFileSync(path.join(h.openclawDir, "alphaclaw.json"), "{ not json");
       const res = await request(h.app).post("/hooks/agent").set("Authorization", "Bearer " + kShared).send({});
       expect(res.status).toBe(404);
-      expect(h.rows.at(-1).auth).toBe("rejected:builtin_policy_unreadable");
+      expect(h.rows.at(-1).authMethod).toBe("rejected:builtin_policy_unreadable");
     } finally {
       await h.close();
     }
@@ -460,10 +461,10 @@ describe("request log auth and gateway_ms columns", () => {
     try {
       expect(db.hasAcceptedRequest("agent")).toBe(true);
       expect(db.hasAcceptedRequest("wake")).toBe(false);
-      db.insertRequest({ hookName: "calendar", method: "POST", headers: {}, payload: "", payloadSize: 0, sourceIp: "1.2.3.4", gatewayStatus: 200, gatewayBody: "", auth: "shared_token", gatewayMs: 12.6 });
+      db.insertRequest({ hookName: "calendar", method: "POST", headers: {}, payload: "", payloadSize: 0, sourceIp: "10.0.0.4", gatewayStatus: 200, gatewayBody: "", authMethod: "shared_token", gatewayMs: 12.6 });
       const [row] = db.getRequests("calendar");
-      expect(row).toMatchObject({ auth: "shared_token", gatewayMs: 13 });
-      expect(db.getRequests("agent")[0]).toMatchObject({ auth: null, gatewayMs: null });
+      expect(row).toMatchObject({ authMethod: "shared_token", gatewayMs: 13 });
+      expect(db.getRequests("agent")[0]).toMatchObject({ authMethod: null, gatewayMs: null });
     } finally {
       db.closeWebhooksDb();
     }
