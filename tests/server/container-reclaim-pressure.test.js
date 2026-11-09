@@ -1,5 +1,5 @@
 const fs = require("fs");
-const { getSystemResources, parseCgroupPressure } = require("../../lib/server/system-resources");
+const { getSystemResources, parseCgroupPressure, readCgroupOomKillCount } = require("../../lib/server/system-resources");
 const { readGatewayMemorySample } = require("../../lib/server/gateway-memory/sample");
 const { createContainerPressureTracker } = require("../../lib/server/gateway-memory/container-alerts");
 const containerCensus = require("../../lib/server/gateway-memory/container-census");
@@ -120,6 +120,17 @@ describe("container pressure ignores reclaimable page cache and needs reclaim ev
   it("shmem counts as non-reclaimable even though memory.stat files it under file", () => {
     mockCgroup(cgroupFiles({ ...kCacheHeavy, shmem: gb(10) }));
     expect(readGatewayMemorySample({}).cgroupUsedBytes).toBe(gb(103.2) - gb(85.7) + gb(10));
+  });
+
+  it("readCgroupOomKillCount reads the v2 memory.events oom_kill count and is null on v1 or with no cgroup files", () => {
+    mockCgroup({ "/sys/fs/cgroup/memory.events": "low 0\nhigh 0\nmax 9\noom 2\noom_kill 2\noom_group_kill 0\n" });
+    expect(readCgroupOomKillCount()).toBe(2);
+    vi.restoreAllMocks();
+    mockCgroup({ "/sys/fs/cgroup/memory/memory.oom_control": "oom_kill_disable 0\nunder_oom 0\noom_kill 3\n" });
+    expect(readCgroupOomKillCount()).toBeNull();
+    vi.restoreAllMocks();
+    mockCgroup({});
+    expect(readCgroupOomKillCount()).toBeNull();
   });
 
   it("reads v1 limit counters from memory.failcnt and memory.oom_control", () => {

@@ -1721,6 +1721,8 @@ describe("#87 overseer admission, quiet class, recheck-before-send", () => {
       }
       expect(isCriticalClassIncident({ incidentKey: "gateway_crash", cause: { cause: "oom" } })).toBe(true);
       expect(isCriticalClassIncident({ summary: { cause: { cause: "oom" } } })).toBe(true);
+      expect(isCriticalClassIncident({ incidentKey: "gateway_crash", cause: { cause: "killed_by_signal" } })).toBe(true);
+      expect(isCriticalClassIncident({ summary: { cause: { cause: "killed_by_signal" } } })).toBe(true);
     });
 
     it("#87 false for warning crash/readiness rows, a non-OOM cause, and non-objects", () => {
