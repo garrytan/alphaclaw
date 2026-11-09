@@ -114,7 +114,7 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect(h.stop.hasStopped(key)).toBe(false);
   });
 
-  it("looks past earlier recovery messages to the turn they resume, and remembers the sessions it stopped for this launch only", async () => {
+  it("looks past earlier recovery messages to the turn they resume, and remembers the sessions it stopped past the next launch", async () => {
     const key = "agent:main:doctor:6";
     const h = harness({
       lists: [[active(key)]],
@@ -123,9 +123,85 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect(await h.stop.onGatewayLaunch({ generation: 1 })).toEqual({ stopped: ["recov-b"], missed: [] });
     expect(h.stop.hasStopped(key)).toBe(true);
     expect(h.stop.hasStopped("agent:main:doctor:5")).toBe(false);
-    const next = h.stop.onGatewayLaunch({ generation: 2 });
-    expect(h.stop.hasStopped(key)).toBe(false);
-    await next;
+    await h.stop.onGatewayLaunch({ generation: 2 });
+    expect(h.stop.hasStopped(key)).toBe(true);
+  });
+
+  it("a redeploy minutes after a stop: the next AlphaClaw's wedge sweep neither resumes nor reports the stopped Doctor session, and still reports a later stuck turn there", async () => {
+    const { createSessionWedgeSweep } = require("../../lib/server/session-wedge-sweep");
+    const key = "agent:main:doctor:1";
+    let clock = 1_800_000_000_000;
+    const events = [];
+    const insertEvent = (event) => events.push({ ...event, createdAt: new Date(clock).toISOString() });
+    const listStoppedSince = ({ sinceMs }) => events
+      .filter((event) => event.details?.kind === "resumed_turn_stopped" && Date.parse(event.createdAt) >= sinceMs)
+      .map((event) => ({ sessionKey: event.details.sessionKey, stoppedAtMs: Date.parse(event.createdAt) }));
+    const gatewayFor = (handlers) => vi.fn(async (command) => {
+      const method = /gateway call '?([a-z.]+)'?/.exec(command)?.[1];
+      const params = JSON.parse(/--params '(.*)' --json/.exec(command)[1]);
+      const body = await handlers[method]?.(params);
+      return body ? { ok: true, stdout: JSON.stringify(body) } : { ok: false, stdout: "" };
+    });
+    const ready = async () => ({ ok: true, kind: "ready" });
+
+    // Post-kill boot: the first AlphaClaw stops the Doctor run's restarted turn.
+    const first = createResumedDoctorTurnStop({
+      clawCmd: gatewayFor({
+        "sessions.list": () => ({ sessions: [active(key)] }),
+        "sessions.get": () => ({ messages: [doctorMessage(1), recoveryMessage(key, "recov-1")] }),
+        "chat.abort": (params) => ({ ok: true, aborted: true, runIds: [params.runId] }),
+      }),
+      probeReadiness: ready,
+      resolveReadyzUrl: () => "http://127.0.0.1:1/readyz",
+      insertEvent,
+      listStoppedSince,
+      sleep: async () => {},
+      now: () => clock,
+      checkOffsetsMs: [0],
+      logger: { log: vi.fn() },
+    });
+    expect((await first.onGatewayLaunch({ generation: 1 })).stopped).toEqual(["recov-1"]);
+    const stoppedAt = clock;
+
+    // Six minutes later a graceful redeploy starts a new AlphaClaw with no memory of that stop.
+    clock += 6 * 60_000;
+    const second = createResumedDoctorTurnStop({
+      clawCmd: gatewayFor({ "sessions.list": () => ({ sessions: [] }) }),
+      probeReadiness: ready,
+      resolveReadyzUrl: () => "http://127.0.0.1:1/readyz",
+      insertEvent,
+      listStoppedSince,
+      sleep: async () => {},
+      now: () => clock,
+      checkOffsetsMs: [0],
+      logger: { log: vi.fn() },
+    });
+    await second.onGatewayLaunch({ generation: 1 });
+    const sweepRows = (updatedAt) => [{ key, agentId: "main", hasActiveRun: false, abortedLastRun: true, updatedAt }];
+    const runSweep = async (rows) => {
+      const notify = vi.fn(async () => ({ ok: true }));
+      const gateway = gatewayFor({
+        "sessions.list": () => ({ sessions: rows }),
+        "sessions.recover": () => { throw new Error("must not resume the stopped Doctor session"); },
+      });
+      const sweep = createSessionWedgeSweep({
+        clawCmd: gateway,
+        notify,
+        resolveReadyzUrl: () => "http://127.0.0.1:1/readyz",
+        probeReadiness: ready,
+        sleep: async (ms) => { clock += ms; },
+        now: () => clock,
+        skipSession: (sessionKey, updatedAtMs) => second.hasStopped(sessionKey, updatedAtMs),
+      });
+      return { result: await sweep.onGatewayLaunch({ generation: 2, startedAt: clock }), notify };
+    };
+
+    const quiet = await runSweep(sweepRows(stoppedAt + 1_000));
+    expect(quiet.result).toEqual({ recovered: [], alerted: [] });
+    expect(quiet.notify).not.toHaveBeenCalled();
+
+    const later = await runSweep(sweepRows(stoppedAt + 4 * 60_000));
+    expect(later.result.alerted).toEqual([key]);
   });
 
   it("says so when the gateway never got ready", async () => {

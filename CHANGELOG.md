@@ -9,6 +9,11 @@ Versions follow this repository's `package.json` release counter.
 
 ### Changed
 - **gstack's pregate knows which tests cover the lockfile and the browser smoke scripts.** `.gstack/pregate.json` now declares the vitest runner and maps `package-lock.json` to `tests/server/alphaclaw-version.test.js` (the test that reads its version) and `tests/browser/**` to no lane, since those smoke scripts run by hand through `npm run test:ui:*`, not in vitest. A change touching either no longer gets a "no lane policy" warning. CI configuration only; nothing changes for someone running AlphaClaw.
+### Fixed
+- **No false "session may be stuck" alert for a Doctor session AlphaClaw already stopped.** The post-restart session sweep looks back 15 minutes, but the record of which Doctor sessions had their restarted turn stopped was cleared on every gateway launch and lived only in memory, so a redeploy minutes after a post-kill boot reported `agent:main:doctor:<n>` as `not_resumed`. The sweep now skips such a session whenever the stop was made no earlier than the session's last change, reading stops from this process and from the `resumed_turn_stopped` watchdog events of earlier ones. A later stuck turn in the same session is still reported.
+
+### Tests
+- A new hermetic test replays the sequence: one AlphaClaw stops the restarted Doctor turn, a second one started six minutes later runs the real wedge sweep against the stopped session and stays silent, and a later stuck turn there is still alerted. On the old code the sweep alerts.
 
 ## [0.10.237] - 2026-11-09
 
