@@ -7,7 +7,7 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.226] - 2026-11-09
 
-A Capy thread you made a relay delegate now gets what it asked for: when it asks your agent for files, an export or results, your agent hands them over in its answer instead of asking for your approval, because that answer goes back to your own thread.
+A Capy thread you made a relay delegate now gets what it asked for. When it asks your agent for files, an export or results, your agent hands them over in its answer instead of asking for your approval, because that answer goes back to your own thread.
 
 ### Fixed
 - **Delegates receive what they asked for.** A delegate's relay header now says that its final answer goes back to the requesting Capy thread, so giving that thread file contents, a staged export or results is you receiving them, not a send to another person. Before, an agent could treat the requesting thread as a third party and ask for your own go before handing over an export the thread had asked for. Sending to anyone else still needs an approval you gave in Capy that names them.
