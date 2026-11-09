@@ -8,15 +8,19 @@
 // deleted temp askpass and shadowed git for the whole machine. Each guarded
 // path has a test override (ALPHACLAW_GIT_SHIM_PATH,
 // ALPHACLAW_OPENCLAW_WRAPPER_PATH, ALPHACLAW_PROFILE_SNIPPET_PATH,
-// ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL): a test that runs `start` must set it.
+// ALPHACLAW_SKIP_SYSTEM_CRON_INSTALL, ALPHACLAW_CONTAINER_ID_PATH): a test
+// that runs `start` must set it.
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 export const kGuardedHostPaths = Object.freeze([
   "/usr/local/bin/git",
   "/usr/local/bin/openclaw",
   "/etc/profile.d/alphaclaw-openclaw.sh",
   "/etc/cron.d/openclaw-hourly-sync",
+  "/var/lib/alphaclaw/container-id",
 ]);
 
 export const fingerprintHostPath = (filePath) => {
@@ -82,6 +86,11 @@ export default function guardHostPaths() {
         "They shadow the real tools for every process; remove them before running the suite:\n" +
         leftovers.map((filePath) => `rm ${filePath}`).join("\n"),
     );
+  }
+  // lib/server.js reads (and on a new machine creates) the container marker at
+  // module load; every server the suite boots writes it under the run's TMPDIR.
+  if (!process.env.ALPHACLAW_CONTAINER_ID_PATH) {
+    process.env.ALPHACLAW_CONTAINER_ID_PATH = path.join(os.tmpdir(), "alphaclaw-container-id");
   }
   return createHostPathsGuard(kGuardedHostPaths);
 }
