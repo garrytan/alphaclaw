@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.226] - 2026-11-09
+
+The watchdog's out-of-memory verdict for a force-killed gateway gets three follow-up fixes: a relaunch killed while it boots is judged on its own, the wording no longer overstates what the kernel counter proves, and an outside kill still pages like the OOM verdict it was split from.
+
+### Fixed
+- **A relaunch killed while booting is no longer blamed on its predecessor's OOM.** The kernel `oom_kill` count the next exit is compared with is now taken at the previous gateway's exit. Before, it was read at the launch notice, which only comes after `/readyz`, so a relaunch SIGKILLed during boot was compared with its predecessor's launch count and inherited that gateway's OOM kill.
+- **The OOM verdict says "most likely".** A risen counter shows the kernel OOM killer fired in the container while the gateway ran, not that it was the gateway's killer. Over a gateway life of days another process may have been the victim, so the crash detail and the owner notice now say the kernel OOM killer most likely did it.
+- **An outside SIGKILL stays critical.** `killed_by_signal` (a SIGKILL with no kernel OOM kill) is critical-class for automatic review and quiet mode, as `oom` was before the split.
+
+### Changed
+- The cgroup v2 `oom_kill` reader moved from `lib/server.js` into `system-resources.js` as `readCgroupOomKillCount`, with a test. The watchdog comment no longer says it reads cgroup v1.
+
 ## [0.10.225] - 2026-11-09
 
 Capy threads you choose can now act as you through Agent Relay: their messages to your agent use its normal tools (files, commands, web, memory and the brain) instead of the messaging-only session, while sending to other people, scheduling, and changing the gateway, plugins, config or secrets stay with you.

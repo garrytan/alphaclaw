@@ -302,7 +302,7 @@ describe("classifyGatewayCrash — ownership, port, oom, config, unknown, null",
   it("SIGKILL with the cgroup oom_kill counter risen → oom, stated as the kernel OOM killer", () => {
     expect(classifyGatewayCrash({ code: 137, stderrTail: [], kernelOomKill: true })).toEqual({
       cause: "oom",
-      detail: "killed by the kernel OOM killer (exit 137; the cgroup oom_kill counter rose)",
+      detail: "most likely killed by the kernel OOM killer (exit 137; the cgroup oom_kill counter rose while it ran)",
       matchedLine: null,
     });
   });

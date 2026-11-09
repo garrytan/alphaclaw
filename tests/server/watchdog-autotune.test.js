@@ -178,6 +178,25 @@ describe("server/watchdog autotune OOM classification", () => {
     expect(causes).not.toContain("oom");
   });
 
+  it("a relaunch SIGKILLed while booting is compared with the counter at its predecessor's exit, not the predecessor's launch", async () => {
+    const { classifyGatewayCrash } = require("../../lib/server/gateway-crash-cause");
+    let oomKills = 3;
+    const { watchdog, insertWatchdogEvent } = createHarness({ readOomKillCount: () => oomKills, classifyGatewayCrash });
+    watchdog.onGatewayLaunch({ pid: 4242, generation: 1 });
+    oomKills = 4;
+    watchdog.onGatewayExit({ code: 137, expectedExit: false, stderrTail: [], pid: 4242, generation: 1 });
+    await flush();
+    insertWatchdogEvent.mockClear();
+
+    watchdog.onGatewayExit({ code: null, signal: "SIGKILL", expectedExit: false, stderrTail: [], pid: 4343, generation: 2 });
+    await flush();
+
+    const causes = insertWatchdogEvent.mock.calls.map(([event]) => event.details?.cause).filter(Boolean);
+    expect(causes).toContain("killed_by_signal");
+    expect(causes).not.toContain("oom");
+    expect(autotuneEvents(insertWatchdogEvent).map((event) => event.details.kind)).toEqual(["outside_signal"]);
+  });
+
   it("a SIGKILL with the cgroup oom_kill counter risen is a kernel OOM kill, stated without hedging", async () => {
     let oomKills = 3;
     const { watchdog, insertWatchdogEvent, notifier } = createHarness({ readOomKillCount: () => oomKills });
