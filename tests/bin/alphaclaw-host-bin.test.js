@@ -159,7 +159,7 @@ Module._load = function patchedLoad(request, parent) {
 
     expect(captured.hostWrites).toContain("symlinkSync /usr/local/bin/alphaclaw-test-persistent-tool");
     expect(output).toContain(
-      `[alphaclaw] persistent tools: linked=1 kept=0 skipped=0 (${stateBin}, ${path.join(rootDir, ".local", "bin")})`,
+      `[alphaclaw] persistent tools: linked=1 kept=0 removed=0 skipped=0 (${stateBin}, ${path.join(rootDir, ".local", "bin")})`,
     );
     const report = JSON.parse(fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "boot-report.json"), "utf8"));
     expect(report.persistentTools).toMatchObject({

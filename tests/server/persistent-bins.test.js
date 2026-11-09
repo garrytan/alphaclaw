@@ -52,7 +52,7 @@ describe("lib/cli/persistent-bins", () => {
     tool(stateBin, "yt-dlp");
     tool(localBin, "uv");
 
-    expect(relink()).toEqual({ linked: ["yt-dlp", "uv"], kept: [], skipped: [] });
+    expect(relink()).toEqual({ linked: ["yt-dlp", "uv"], kept: [], removed: [], skipped: [] });
     expect(linkTarget("yt-dlp")).toBe(path.join(stateBin, "yt-dlp"));
     expect(linkTarget("uv")).toBe(path.join(localBin, "uv"));
     expect(fs.realpathSync(path.join(linkDir, "uv"))).toBe(fs.realpathSync(path.join(localBin, "uv")));
@@ -62,7 +62,7 @@ describe("lib/cli/persistent-bins", () => {
     tool(stateBin, "yt-dlp");
     relink();
 
-    expect(relink()).toEqual({ linked: [], kept: ["yt-dlp"], skipped: [] });
+    expect(relink()).toEqual({ linked: [], kept: ["yt-dlp"], removed: [], skipped: [] });
     expect(linkTarget("yt-dlp")).toBe(path.join(stateBin, "yt-dlp"));
   });
 
@@ -73,7 +73,7 @@ describe("lib/cli/persistent-bins", () => {
     fs.symlinkSync(path.join(root, "gone", "yt-dlp"), path.join(linkDir, "yt-dlp"));
     fs.symlinkSync(path.join(localBin, "ffmpeg-static"), path.join(linkDir, "ffmpeg-static"));
 
-    expect(relink()).toEqual({ linked: ["ffmpeg-static", "yt-dlp"], kept: [], skipped: [] });
+    expect(relink()).toEqual({ linked: ["ffmpeg-static", "yt-dlp"], kept: [], removed: [], skipped: [] });
     expect(linkTarget("yt-dlp")).toBe(path.join(stateBin, "yt-dlp"));
     expect(linkTarget("ffmpeg-static")).toBe(path.join(stateBin, "ffmpeg-static"));
   });
@@ -88,6 +88,7 @@ describe("lib/cli/persistent-bins", () => {
     expect(relink()).toEqual({
       linked: [],
       kept: [],
+      removed: [],
       skipped: [
         { name: "jq", reason: "foreign_symlink" },
         { name: "rg", reason: "regular_file" },
@@ -104,12 +105,43 @@ describe("lib/cli/persistent-bins", () => {
     expect(relink()).toEqual({
       linked: [],
       kept: [],
+      removed: [],
       skipped: [{ name: "ffmpeg", reason: "shadows=" + imageCopy }],
     });
     expect(fs.existsSync(path.join(linkDir, "ffmpeg"))).toBe(false);
 
-    expect(relink({ allowShadow: ["ffmpeg"] })).toEqual({ linked: ["ffmpeg"], kept: [], skipped: [] });
+    expect(relink({ allowShadow: ["ffmpeg"] })).toEqual({ linked: ["ffmpeg"], kept: [], removed: [], skipped: [] });
     expect(linkTarget("ffmpeg")).toBe(path.join(stateBin, "ffmpeg"));
+  });
+
+  it("removes its own link once a name it shadowed is no longer allowed, and leaves a reserved name's link alone", () => {
+    tool(stateBin, "ffmpeg");
+    tool(stateBin, "node");
+    const imageCopy = tool(systemBin, "ffmpeg");
+    relink({ allowShadow: ["ffmpeg"] });
+    fs.symlinkSync(path.join(stateBin, "node"), path.join(linkDir, "node"));
+
+    expect(relink()).toEqual({
+      linked: [],
+      kept: [],
+      removed: ["ffmpeg"],
+      skipped: [
+        { name: "ffmpeg", reason: "shadows=" + imageCopy },
+        { name: "node", reason: "reserved" },
+      ],
+    });
+    expect(fs.existsSync(path.join(linkDir, "ffmpeg"))).toBe(false);
+    expect(linkTarget("node")).toBe(path.join(stateBin, "node"));
+  });
+
+  it("never removes a shadowing link it did not make", () => {
+    tool(stateBin, "ffmpeg");
+    tool(systemBin, "ffmpeg");
+    const elsewhere = tool(path.join(root, "opt"), "ffmpeg");
+    fs.symlinkSync(elsewhere, path.join(linkDir, "ffmpeg"));
+
+    expect(relink().removed).toEqual([]);
+    expect(linkTarget("ffmpeg")).toBe(elsewhere);
   });
 
   it("does not count a non-executable on PATH, the link dir or a source dir on PATH as a shadow", () => {
@@ -135,6 +167,7 @@ describe("lib/cli/persistent-bins", () => {
     expect(relink()).toEqual({
       linked: ["linked-tool"],
       kept: [],
+      removed: [],
       skipped: [
         { name: "bash", reason: "reserved" },
         { name: "git", reason: "reserved" },
@@ -148,7 +181,7 @@ describe("lib/cli/persistent-bins", () => {
     tool(stateBin, "uv");
     tool(localBin, "uv");
 
-    expect(relink()).toEqual({ linked: ["uv"], kept: [], skipped: [] });
+    expect(relink()).toEqual({ linked: ["uv"], kept: [], removed: [], skipped: [] });
     expect(linkTarget("uv")).toBe(path.join(stateBin, "uv"));
   });
 
@@ -158,6 +191,7 @@ describe("lib/cli/persistent-bins", () => {
     expect(relink({ linkDir: path.join(root, "missing") })).toEqual({
       linked: [],
       kept: [],
+      removed: [],
       skipped: [{ name: "yt-dlp", reason: "link_failed=ENOENT" }],
     });
   });
@@ -165,7 +199,7 @@ describe("lib/cli/persistent-bins", () => {
   it("treats missing source dirs as a silent no-op", () => {
     const result = relink();
 
-    expect(result).toEqual({ linked: [], kept: [], skipped: [] });
+    expect(result).toEqual({ linked: [], kept: [], removed: [], skipped: [] });
     expect(formatPersistentBinsLog({ result, sourceDirs: [stateBin, localBin], linkDir })).toEqual([]);
   });
 
@@ -173,6 +207,7 @@ describe("lib/cli/persistent-bins", () => {
     const result = {
       linked: ["yt-dlp"],
       kept: ["uv"],
+      removed: ["ffmpeg"],
       skipped: [
         { name: "ffmpeg", reason: "shadows=/usr/bin/ffmpeg" },
         { name: "git", reason: "reserved" },
@@ -183,8 +218,8 @@ describe("lib/cli/persistent-bins", () => {
     };
 
     expect(formatPersistentBinsLog({ result, sourceDirs: ["/data/.openclaw/bin", "/data/.local/bin"], linkDir: "/usr/local/bin" })).toEqual([
-      "[alphaclaw] persistent tools: linked=1 kept=1 skipped=5 (/data/.openclaw/bin, /data/.local/bin)",
-      "[alphaclaw] persistent tools: skipped ffmpeg (shadows=/usr/bin/ffmpeg): the image already provides it; add \"ffmpeg\" to tools.allowShadow in alphaclaw.json to use the persistent copy instead, or call it by its full path",
+      "[alphaclaw] persistent tools: linked=1 kept=1 removed=1 skipped=5 (/data/.openclaw/bin, /data/.local/bin)",
+      "[alphaclaw] persistent tools: skipped ffmpeg (shadows=/usr/bin/ffmpeg): removed the old /usr/local/bin/ffmpeg link to it; the image already provides it; add \"ffmpeg\" to tools.allowShadow in alphaclaw.json to use the persistent copy instead, or call it by its full path",
       "[alphaclaw] persistent tools: skipped git (reserved): AlphaClaw never links this name; call the tool by its full path",
       "[alphaclaw] persistent tools: skipped rg (regular_file): /usr/local/bin/rg is a file AlphaClaw did not create; remove it to use the persistent copy",
       "[alphaclaw] persistent tools: skipped jq (foreign_symlink): /usr/local/bin/jq links somewhere else; remove it to use the persistent copy",

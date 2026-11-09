@@ -1485,9 +1485,10 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
 // A rebuilt container starts with the image's /usr/local/bin, so a tool kept
 // in <state dir>/bin or ~/.local/bin (HOME is the root dir since step 7) loses
 // its PATH entry on every redeploy. Runs before cron starts so @reboot jobs
-// see the links. Root installs only: a non-root install has no container
-// layer to lose, and <root>/bin holds AlphaClaw's own shims. Fail-open; the
-// result goes to the boot report.
+// see the links. Root installs only (every Docker image, and a host install
+// run as root, which keeps the links in its real /usr/local/bin): a non-root
+// install has no container layer to lose, and <root>/bin holds AlphaClaw's
+// own shims. Fail-open; the result goes to the boot report.
 if (hostBinDir !== kSystemBinDir) {
   console.log(
     "[alphaclaw] persistent tools: not linked (not running as root) — call them by full path or put their folder on PATH",
