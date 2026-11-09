@@ -158,7 +158,7 @@ describe("agent-admin skill builder", () => {
     }
     // The cross-domain recipes stay in the index.
     expect(index).toContain("## Quick Recipes");
-    expect(index).toContain("alphaclaw admin PATCH /api/env --data-stdin");
+    expect(index).toContain("alphaclaw admin POST /api/secrets/requests");
   });
 
   it("renders every fragment file somewhere in the skill", () => {

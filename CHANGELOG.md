@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.228] - 2026-11-09
+
+The agent can now get a key, token or password from you without it going through a chat. It asks AlphaClaw for a one-time link, you open it signed in to AlphaClaw, paste the value, and AlphaClaw stores it in its `.env` and in OpenClaw's secret store. OpenClaw's own channel links (its credential prompt among them) now point at this box.
+
+### Added
+- **Secret drop.** `POST /api/secrets/requests` (agent op `secrets.request`) returns a one-time link to `/secret/<token>`, valid once for 15 minutes; `GET /api/secrets/requests/:id` (`secrets.status`) reports names and status only. The page needs an admin cookie session (signed out, the login returns to it; members, the agent bearer and other origins are refused) and has a CSRF token, `no-store` and a CSP with no script. Save writes the value to AlphaClaw's `.env` through the Envars write path and to OpenClaw's store with `openclaw secrets store set` on stdin: `--kind secret` for a new name, the existing kind kept otherwise. Both stores are checked first (`.env` format and a store `--dry-run`), the gateway lifecycle lock is held across both writes and `openclaw secrets reload` (run only when a store SecretRef names the key), and a one-store failure is `partial` with the link kept open for a retry. A second Save on the same link while one is still running gets a 409 and writes nothing. A multi-line value goes to the store only, and the page says so when `.env` still holds an older value of that key. Admins get a names-only notice. Reserved, deployment-only, locked, Channels-managed and launcher keys are refused at request and again at Save.
+- **`gateway.publicOrigin`.** `ensureGatewayProxyConfig` writes it once from the configured setup URL when it is unset and the origin is https or literal loopback with no path and no `gateway.portals.ingress.domain` conflict; otherwise it logs why it left it unset. A signed-out `/openclaw/ask/<id>` link goes to the login page and back.
+
+### Changed
+- **The agent's rules.** alphaclaw-admin rule 7 now says secret values never go through chat: request a drop, confirm by name, and if a value is pasted anyway, save it nowhere, delete the message where the channel allows, say it was exposed and offer the link; never print, `cat`, `echo` or `grep` credential files. The key-rotation recipe became the drop. A new `references/secrets.md` documents it.
+- **The Envars save note names where each key is usable.** When the gateway's launch environment did not change, the note says AlphaClaw and scripts that read `.env` see it at once, and whether the gateway sees it after its next start (OpenClaw loads its `.env` when the state-dir `.env` is AlphaClaw's) or never. It used to say the change took effect without a restart.
+- **`execFileCmd` takes `input`** and writes it to the child's stdin (process-group runner only; `input` without `processGroup` throws).
+
+### Security
+- A request body that fails to parse or is too large is logged as its error type, method and path only, and answered with a fixed sentence. Before, Node's JSON parse message could quote the start of a `PATCH /api/env` body, value included, into the log and the 400 response.
+
+### Tests
+- New `secret-drop` tests run success, CLI failure, dry-run refusal, partial (each store), multi-line, expired, member, agent bearer, cross-origin, forged CSRF, malformed and oversized bodies with a canary value and assert no value byte or 8-character prefix reaches a log line, notice, response, header or CLI argv. New tests cover `execFileCmd` stdin (a stub CLI reads the bytes; argv holds no value), the body-error log, the publicOrigin decision (https, loopback, http LAN, unset, path, portal conflict) and the env reach note. The live tier (`secret-drop-store`) stores through the pinned OpenClaw 2026.10.9 (a new name is stored as a secret, and an existing env entry keeps its kind) and validates each publicOrigin decision with `openclaw config validate`.
+
 ## [0.10.227] - 2026-11-09
 
 A Capy thread you made a relay delegate now gets what it asked for. When it asks your agent for files, an export or results, your agent hands them over in its answer instead of asking for your approval, because that answer goes back to your own thread.

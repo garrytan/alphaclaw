@@ -614,7 +614,9 @@ describe("server/routes/system", () => {
         changed: true,
         gatewayEnvChanged: false,
         restartRequired: false,
-        note: "Saved. The gateway does not receive the changed variables, so the change takes effect without a restart.",
+        note: expect.stringMatching(
+          new RegExp(`^Saved\\. AlphaClaw and scripts that read \\.env see the change now\\. The gateway( sees ${key} only after its next start|'s environment never gets ${key})`),
+        ),
       });
       expect(store.hasReason("env_vars_changed")).toBe(false);
     });

@@ -10,7 +10,7 @@ Google Workspace connects on the **Integrations** page (`{{SETUP_UI_URL}}#integr
 
 ### Environment variables
 
-Changes to env vars are made through the **Environment** page (`{{SETUP_UI_URL}}#environment`). After saving, a gateway restart may be required to pick up the changes — the UI prompts for this automatically. Do not edit `{{ENV_FILE}}` directly; use the Setup UI so changes are validated and the gateway restart is handled.
+Changes to env vars are made through the **Environment** page (`{{SETUP_UI_URL}}#environment`). After saving, a gateway restart may be required to pick up the changes — the UI prompts for this automatically. Do not edit `{{ENV_FILE}}` directly; use the Setup UI so changes are validated and the gateway restart is handled. Never ask for a key or token in chat: request a secret drop (`POST /api/secrets/requests`, alphaclaw-admin skill) and send the link.
 
 ## Telegram
 

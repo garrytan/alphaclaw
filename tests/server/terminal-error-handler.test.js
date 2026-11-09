@@ -74,3 +74,36 @@ describe("public disk-full notice", () => {
     expect(isDiskFullError(null)).toBe(false);
   });
 });
+
+describe("terminal error handler: a rejected request body", () => {
+  const kCanary = "zq9CANARYvalue7x";
+  const buildBodyApp = (lines) => {
+    const app = express();
+    app.use(express.json({ limit: "1kb" }));
+    app.patch("/api/env", (req, res) => res.json({ ok: true }));
+    app.use(createTerminalErrorHandler({ logger: { error: (line) => lines.push(String(line)) } }));
+    return app;
+  };
+
+  it("logs only the type, method and path of malformed JSON, and never echoes the body", async () => {
+    const lines = [];
+    const res = await request(buildBodyApp(lines))
+      .patch("/api/env")
+      .set("Content-Type", "application/json")
+      .send('{"key":"DEMO_TOKEN","value":"' + kCanary + '"');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ ok: false, error: "The request body is not valid JSON." });
+    expect(lines).toEqual(["[alphaclaw] Request body rejected on PATCH /api/env: entity.parse.failed"]);
+    expect(JSON.stringify(res.body) + lines.join("\n")).not.toContain(kCanary.slice(0, 8));
+  });
+
+  it("does the same for an oversized body", async () => {
+    const lines = [];
+    const res = await request(buildBodyApp(lines))
+      .patch("/api/env")
+      .send({ key: "DEMO_TOKEN", value: kCanary + "x".repeat(4096) });
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe("The request body is too large.");
+    expect(lines.join("\n")).not.toContain(kCanary.slice(0, 8));
+  });
+});

@@ -485,6 +485,31 @@ describe("server/commands clawCmd timeout kills the whole process group", () => 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("execFileCmd hands input to the CLI on stdin, never in argv", async () => {
+    writeFakeOpenclaw(`printf '%s\\n' "$@" > "${dir}/argv"\ncat > "${dir}/stdin"\necho stored`);
+    delete require.cache[modulePath];
+    const { createCommands } = require(modulePath);
+    const { execFileCmd } = createCommands({ gatewayEnv: () => ({}) });
+    const value = "canary-\u00e9-secret-value";
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
+
+    await expect(
+      execFileCmd("openclaw", ["secrets", "store", "set", "DEMO_TOKEN"], { env, processGroup: true, input: value, timeoutMs: 10_000 }),
+    ).resolves.toBe("stored");
+
+    expect(fs.readFileSync(path.join(dir, "stdin"), "utf8")).toBe(value);
+    const argv = fs.readFileSync(path.join(dir, "argv"), "utf8");
+    expect(argv).toBe("secrets\nstore\nset\nDEMO_TOKEN\n");
+    expect(argv).not.toContain(value);
+  });
+
+  it("execFileCmd refuses input without processGroup", async () => {
+    delete require.cache[modulePath];
+    const { createCommands } = require(modulePath);
+    const { execFileCmd } = createCommands({ gatewayEnv: () => ({}) });
+    await expect(execFileCmd("openclaw", ["secrets"], { input: "x" })).rejects.toThrow(/processGroup/);
+  });
+
   it("leaves no openclaw grandchild alive after a timeout", async () => {
     writeFakeOpenclaw(`sleep 30 &\necho "$$ $!" > "${dir}/pids"\nwait`);
     const clawCmd = loadClawCmd();
