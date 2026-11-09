@@ -371,6 +371,36 @@ describe("server/gateway restart behavior", () => {
     }
   });
 
+  it("gives the daemon one heap flag: the operator cap replaces autotune's derived one", () => {
+    const { stripTelemetryNodeOptions } = require("../../lib/server/gateway-memory/telemetry-bootstrap");
+    const autotune = require("../../lib/server/autotune");
+    const suffix = vi.spyOn(autotune, "getGatewayNodeOptionsSuffix").mockReturnValue("--max-old-space-size=8192");
+    const previousCap = process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    try {
+      process.env.NODE_OPTIONS = "--enable-source-maps";
+      process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = "16384";
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      expect(stripTelemetryNodeOptions(gateway.gatewayLaunchEnv().NODE_OPTIONS)).toBe(
+        "--enable-source-maps --max-old-space-size=16384",
+      );
+      expect(stripTelemetryNodeOptions(gateway.gatewayEnv().NODE_OPTIONS)).toBe(
+        "--enable-source-maps --max-old-space-size=8192",
+      );
+      delete process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+      expect(stripTelemetryNodeOptions(gateway.gatewayLaunchEnv().NODE_OPTIONS)).toBe(
+        "--enable-source-maps --max-old-space-size=8192",
+      );
+    } finally {
+      suffix.mockRestore();
+      if (previousCap === undefined) delete process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE;
+      else process.env.ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE = previousCap;
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+  });
+
   it("sets OPENCLAW_DEBUG on the daemon launch env only, so a failed gateway run prints its Reason line", () => {
     delete require.cache[modulePath];
     const gateway = require(modulePath);
