@@ -19,6 +19,13 @@ You can now see and set every Telegram group's rule on a new **Groups** page (Co
 ### Changed
 - The new-group notice and the admin skill's Telegram reference now point at the Groups page.
 
+### Fixed
+- **A damaged rules file can no longer silence you.** A gateway that started over a damaged or unreadable `telegram/group-rules.json` (for example one it may not open) dropped every Telegram turn except the owners', and dropped the owner's too when an owner entry was a username or DMs were open to everyone (`"*"`). It now enforces the blocks in `telegram/group-rules.last-good.json`, a copy AlphaClaw saves beside the rules on every write, and serves everyone else. With no readable copy either, it blocks nobody until the file is fixed.
+- **A block that ends because someone became an owner is no longer silent.** AlphaClaw logs each person it takes off the block list and tells you once.
+- **One failing group join no longer holds up the rest.** A join that fails to be handled counts as one of its three attempts, the joins behind it are still handled, and each different error is logged once.
+- **A damaged join-watch queue is no longer wiped.** When `telegram/join-watch-pending.json` is not a JSON list, the join watcher stops and logs how to fix it, instead of reading it as empty and overwriting it. It also no longer logs a false "recovered" while a slow check is still running.
+- **The Groups page saves what you previewed.** A mode change saves the exact rules OpenClaw checked in the preview, and after any save the page reloads past a refresh already under way, so an unblock is not undone by a stale list.
+
 ## [0.10.236] - 2026-11-09
 
 Blocked people stay out of your Telegram groups in four edge cases the first version missed. They are a damaged rules file, a box with more than one Telegram bot, owner changes and a join watcher that falls behind.

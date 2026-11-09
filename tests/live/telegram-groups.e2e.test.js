@@ -24,7 +24,8 @@
 //     history window still carries it: recorded, not asserted, see the
 //     telegram.md "Known limit");
 //   - a gateway that starts over a damaged group-rules.json still drops a
-//     blocked person (and every other non-owner) and still serves the owner.
+//     blocked person, from the last-good copy AlphaClaw saves beside it, and
+//     still serves the owner and everyone else in an Approved group.
 // Run with:
 //   OPENCLAW_LIVE_E2E=1 npx vitest run tests/live/telegram-groups.e2e.test.js
 const fs = require("fs");
@@ -429,9 +430,8 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
         const mossab = await runCase({ name: "Mossab (blocked) after a restart over a damaged rules file", from: kMossab, chat: kAlfredGroup, expectReply: false });
         expect(mossab.sends).toEqual([]);
         expect(mossab.tools).toBeNull();
-        const guest = await runCase({ name: "Alfred's bot after a restart over a damaged rules file", from: kAlfredBot, chat: kAlfredGroup, expectReply: false });
-        expect(guest.sends).toEqual([]);
-        expect(guest.tools).toBeNull();
+        const guest = await runCase({ name: "Alfred's bot after a restart over a damaged rules file", from: kAlfredBot, chat: kAlfredGroup, expectReply: true });
+        expect(guest.sends.length).toBeGreaterThan(0);
         const garry = await runCase({ name: "Garry after a restart over a damaged rules file", from: kGarry, chat: kAlfredGroup, expectReply: true });
         expect(garry.tools?.length).toBeGreaterThan(0);
       } finally {

@@ -76,19 +76,36 @@ afterEach(() => {
 describe("group guard on a fresh gateway over a damaged rules file", () => {
   const ownerConfig = { commands: { ownerAllowFrom: ["telegram:" + kOwner] }, channels: { telegram: { allowFrom: [kOwner] } } };
 
-  it("drops every non-owner Telegram turn and still serves the owner, in groups and DMs", () => {
+  const lastGood = (rules) => fs.writeFileSync(resolveStatePaths(box.rootDir).lastGoodPath, JSON.stringify(rules));
+
+  it("enforces the blocks in the last copy AlphaClaw saved, and serves the owner and everyone else, in groups and DMs", () => {
     box = makeBox({ rules: "{ not json" });
+    lastGood({ owners: [kOwner], blockedSenders: [{ id: kBlocked }], groups: { [kBlockedGroup]: { mode: "blocked" } } });
     const { dispatch, lines } = registerPlugin(box.rootDir, { runtimeConfig: ownerConfig });
     expect(dispatch(kBlocked)).toEqual({ handled: true });
-    expect(dispatch(kGuest)).toEqual({ handled: true });
     expect(dispatch(kBlocked, { dm: true })).toEqual({ handled: true });
+    expect(dispatch(kGuest, { groupId: kBlockedGroup })).toEqual({ handled: true });
+    expect(dispatch(kGuest)).toBeUndefined();
+    expect(dispatch(kGuest, { dm: true })).toBeUndefined();
     expect(dispatch(kOwner)).toBeUndefined();
     expect(dispatch(kOwner, { dm: true })).toBeUndefined();
-    expect(lines.filter((line) => line.includes("cannot read the block list"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("cannot read the block list"))).toEqual([expect.stringContaining("the blocks in the last copy AlphaClaw saved are enforced")]);
+  });
+
+  it("keeps the last copy written beside the rules file on every save", () => {
+    box = makeBox();
+    box.groups.setBlockedSenders({ senders: [{ id: kBlocked, label: "Placeholder" }] });
+    const { statePath, lastGoodPath } = resolveStatePaths(box.rootDir);
+    expect(fs.readFileSync(lastGoodPath, "utf8")).toBe(fs.readFileSync(statePath, "utf8"));
+    fs.writeFileSync(statePath, "{ damaged by hand");
+    const { dispatch } = registerPlugin(box.rootDir, { runtimeConfig: ownerConfig });
+    expect(dispatch(kBlocked)).toEqual({ handled: true });
+    expect(dispatch(kGuest)).toBeUndefined();
   });
 
   it("reads the owners from the config the plugin was loaded with when no runtime config is offered", () => {
     box = makeBox({ rules: JSON.stringify(["not", "an", "object"]) });
+    lastGood({ owners: [], blockedSenders: [{ id: kOtherOwner }, { id: kBlocked }], groups: {} });
     const { dispatch } = registerPlugin(box.rootDir, { config: { channels: { telegram: { accounts: { work: { allowFrom: [kOtherOwner] } } } } } });
     expect(dispatch(kOtherOwner)).toBeUndefined();
     expect(dispatch(kBlocked)).toEqual({ handled: true });
@@ -97,7 +114,7 @@ describe("group guard on a fresh gateway over a damaged rules file", () => {
   it("goes back to the saved rules once the file is fixed", () => {
     box = makeBox({ rules: "{ not json" });
     const { dispatch } = registerPlugin(box.rootDir, { runtimeConfig: ownerConfig });
-    expect(dispatch(kGuest)).toEqual({ handled: true });
+    expect(dispatch(kBlocked)).toBeUndefined();
     fs.writeFileSync(box.statePath, JSON.stringify({ owners: [kOwner], blockedSenders: [{ id: kBlocked }], groups: {} }));
     touchLater(box.statePath);
     expect(dispatch(kGuest)).toBeUndefined();
@@ -137,7 +154,7 @@ describe("join watcher with an openclaw.json AlphaClaw cannot parse for a write"
     };
     const watch = createTelegramJoinWatch({ openclawDir: box.openclawDir, rootDir: box.rootDir, groups, log: () => {} });
     fs.writeFileSync(logFile, joinLine(kBlockedGroup) + "\n");
-    await expect(watch.check()).rejects.toThrow("disk full");
+    expect((await watch.check()).outcomes).toEqual([{ groupId: kBlockedGroup, action: "failed" }]);
     const pendingPath = path.join(path.dirname(box.statePath), "join-watch-pending.json");
     expect(JSON.parse(fs.readFileSync(pendingPath, "utf8")).map((join) => join.groupId)).toEqual([kBlockedGroup]);
     fail = false;
@@ -238,6 +255,158 @@ describe("join watcher during a rules-file outage", () => {
     expect(pending).not.toContain(ids[1]);
     expect(pending[pending.length - 1]).toBe(ids[0]);
     expect(lines).toContain("[alphaclaw] telegram join watch: dropped 1 old pending joins");
+  });
+});
+
+describe("a damaged rules file never silences the owner or an approved group", () => {
+  const approvedRules = { owners: [kOwner], blockedSenders: [{ id: kBlocked }], groups: { [kGroup]: { mode: "approved" } } };
+
+  it("serves the owner's DMs and an approved group when the owner entry is not a numeric id", () => {
+    box = makeBox({ rules: "{ not json" });
+    const { dispatch } = registerPlugin(box.rootDir, { runtimeConfig: { commands: { ownerAllowFrom: ["@placeholder_owner"] }, channels: { telegram: { allowFrom: ["@placeholder_owner"] } } } });
+    expect(dispatch(kOwner, { dm: true })).toBeUndefined();
+    expect(dispatch(kOwner)).toBeUndefined();
+    expect(dispatch(kGuest)).toBeUndefined();
+  });
+
+  it("serves DMs and an approved group when DM allowFrom is \"*\"", () => {
+    box = makeBox({ rules: "{ not json" });
+    const { dispatch, lines } = registerPlugin(box.rootDir, { runtimeConfig: { channels: { telegram: { dmPolicy: "open", allowFrom: ["*"] } } } });
+    expect(dispatch(kOwner, { dm: true })).toBeUndefined();
+    expect(dispatch(kGuest, { dm: true })).toBeUndefined();
+    expect(dispatch(kGuest)).toBeUndefined();
+    expect(lines.filter((line) => line.includes("cannot read the block list"))).toEqual([expect.stringContaining("no block is enforced until it is fixed")]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("serves the owner and an approved group when the rules file cannot be opened (EACCES), keeping the saved copy's blocks", () => {
+    box = makeBox({ rules: approvedRules });
+    fs.writeFileSync(resolveStatePaths(box.rootDir).lastGoodPath, JSON.stringify(approvedRules));
+    fs.chmodSync(box.statePath, 0o000);
+    try {
+      const { dispatch } = registerPlugin(box.rootDir, { runtimeConfig: { channels: { telegram: { allowFrom: ["@placeholder_owner"] } } } });
+      expect(dispatch(kOwner, { dm: true })).toBeUndefined();
+      expect(dispatch(kOwner)).toBeUndefined();
+      expect(dispatch(kGuest)).toBeUndefined();
+      expect(dispatch(kBlocked)).toEqual({ handled: true });
+      fs.chmodSync(resolveStatePaths(box.rootDir).lastGoodPath, 0o000);
+      const fresh = registerPlugin(box.rootDir, { runtimeConfig: { channels: { telegram: { allowFrom: ["@placeholder_owner"] } } } });
+      expect(fresh.dispatch(kOwner, { dm: true })).toBeUndefined();
+      expect(fresh.dispatch(kGuest)).toBeUndefined();
+    } finally {
+      fs.chmodSync(box.statePath, 0o600);
+      fs.chmodSync(resolveStatePaths(box.rootDir).lastGoodPath, 0o600);
+    }
+  });
+});
+
+describe("taking a new owner off the block list", () => {
+  it("logs one line and sends the owner one notice per person taken off", async () => {
+    box = makeBox({ rules: { owners: [kOwner], groups: {}, blockedSenders: [{ id: kOtherOwner, label: "Placeholder" }, { id: kBlocked }], seen: {} } });
+    const lines = [];
+    const notify = vi.fn(async () => ({ ok: true }));
+    const groups = createTelegramGroups({ openclawDir: box.openclawDir, rootDir: box.rootDir, log: (line) => lines.push(line), notify });
+    const cfg = JSON.parse(fs.readFileSync(box.configPath, "utf8"));
+    cfg.commands.ownerAllowFrom.push("telegram:" + kOtherOwner);
+    fs.writeFileSync(box.configPath, JSON.stringify(cfg));
+    expect(groups.syncOwners()).toBe(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lines).toEqual(["[alphaclaw] telegram groups: took " + kOtherOwner + " off the block list because they are now an owner"]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain(kOtherOwner + " (Placeholder) is now one of your agent's owners");
+    expect(notify.mock.calls[0][1]).toEqual({ eventType: "telegram_owner_unblocked", id: "telegram-owner-unblocked-" + kOtherOwner });
+    expect(groups.syncOwners()).toBe(false);
+    expect(lines).toHaveLength(1);
+  });
+});
+
+describe("one failing join does not hold up the join queue", () => {
+  it("counts a join that throws as an attempt, handles the joins behind it, and logs each distinct error once", async () => {
+    box = makeBox({ rules: { owners: [kOwner], groups: { [kBlockedGroup]: { mode: "blocked" } }, blockedSenders: [], seen: {} } });
+    const logFile = path.join(box.logDir, "openclaw.log");
+    const lines = [];
+    let error = "ENOSPC: no space left on device";
+    const groups = {
+      ...box.groups,
+      noteSeen: (groupId, ...rest) => {
+        if (groupId === kGroup && error) throw new Error(error);
+        return box.groups.noteSeen(groupId, ...rest);
+      },
+    };
+    const watch = createTelegramJoinWatch({ openclawDir: box.openclawDir, rootDir: box.rootDir, groups, log: (line) => lines.push(line) });
+    fs.writeFileSync(logFile, joinLine(kGroup) + "\n" + joinLine(kBlockedGroup) + "\n");
+    expect((await watch.check()).outcomes).toEqual([{ groupId: kGroup, action: "failed" }, { groupId: kBlockedGroup, action: "left" }]);
+    const pendingPath = path.join(path.dirname(box.statePath), "join-watch-pending.json");
+    expect(JSON.parse(fs.readFileSync(pendingPath, "utf8"))).toEqual([expect.objectContaining({ groupId: kGroup, attempts: 1 })]);
+    expect((await watch.check()).outcomes).toEqual([{ groupId: kGroup, action: "failed" }]);
+    error = "EIO: i/o error";
+    expect((await watch.check()).outcomes).toEqual([{ groupId: kGroup, action: "failed" }]);
+    expect(await watch.check()).toEqual({ joins: 0 });
+    expect(lines.filter((line) => line.includes(" failed: "))).toEqual([
+      "[alphaclaw] telegram join watch: group=" + kGroup + " failed: ENOSPC: no space left on device",
+      "[alphaclaw] telegram join watch: group=" + kGroup + " failed: EIO: i/o error",
+    ]);
+    expect(lines).toContain("[alphaclaw] telegram join watch: group=" + kGroup + " failed after 3 checks; giving up until the bot is added again");
+  });
+
+  it("logs a new check error even while an earlier one has not cleared", async () => {
+    box = makeBox({ rules: "{ broken" });
+    const logFile = path.join(box.logDir, "openclaw.log");
+    const lines = [];
+    let message = "first outage";
+    const groups = { ...box.groups, readState: () => { throw new Error(message); }, syncOwners: () => false };
+    const watch = createTelegramJoinWatch({ openclawDir: box.openclawDir, rootDir: box.rootDir, groups, log: (line) => lines.push(line) });
+    fs.writeFileSync(logFile, joinLine(kGroup) + "\n");
+    await watch.tick();
+    await watch.tick();
+    message = "second outage";
+    await watch.tick();
+    expect(lines.filter((line) => line.includes("join watch failed"))).toEqual([
+      "[alphaclaw] telegram join watch failed: joins: first outage",
+      "[alphaclaw] telegram join watch failed: joins: second outage",
+    ]);
+  });
+
+  it("does not log a recovery for a check skipped because the last one is still running", async () => {
+    box = makeBox({ rules: { owners: [kOwner], groups: {}, blockedSenders: [], seen: {} } });
+    const logFile = path.join(box.logDir, "openclaw.log");
+    const lines = [];
+    let failRead = true;
+    let release;
+    const groups = { ...box.groups, readState: () => { if (failRead) throw new Error("rules down"); return box.groups.readState(); }, syncOwners: () => false };
+    const notify = () => new Promise((resolve) => (release = () => resolve({ ok: true })));
+    const watch = createTelegramJoinWatch({ openclawDir: box.openclawDir, rootDir: box.rootDir, groups, notify, log: (line) => lines.push(line) });
+    fs.writeFileSync(logFile, joinLine("-1003333333333") + "\n");
+    await watch.tick();
+    failRead = false;
+    const slow = watch.check();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(await watch.tick()).toEqual({ joins: 0, skipped: "running" });
+    expect(lines.filter((line) => line.includes("recovered"))).toEqual([]);
+    release();
+    await slow;
+    await watch.tick();
+    expect(lines.filter((line) => line.includes("recovered"))).toEqual(["[alphaclaw] telegram join watch recovered: joins"]);
+  });
+});
+
+describe("a corrupt join-watch pending file", () => {
+  it("stops the watcher without reading it as empty or overwriting it, and loses no join once it is fixed", async () => {
+    box = makeBox({ rules: { owners: [kOwner], groups: { [kBlockedGroup]: { mode: "blocked" } }, blockedSenders: [], seen: {} } });
+    const logFile = path.join(box.logDir, "openclaw.log");
+    const pendingPath = path.join(path.dirname(box.statePath), "join-watch-pending.json");
+    const lines = [];
+    const watch = createTelegramJoinWatch({ openclawDir: box.openclawDir, rootDir: box.rootDir, groups: box.groups, log: (line) => lines.push(line) });
+    fs.writeFileSync(pendingPath, "[{ broken");
+    fs.writeFileSync(logFile, joinLine(kBlockedGroup) + "\n");
+    await watch.tick();
+    await watch.tick();
+    expect(fs.readFileSync(pendingPath, "utf8")).toBe("[{ broken");
+    expect(box.telegramApi.leaveChat).not.toHaveBeenCalled();
+    expect(lines.filter((line) => line.includes("join watch failed"))).toEqual([expect.stringContaining("join-watch-pending.json")]);
+    fs.writeFileSync(pendingPath, JSON.stringify({ not: "a list" }));
+    await expect(watch.check()).rejects.toThrow("is not a JSON list");
+    fs.writeFileSync(pendingPath, "[]\n");
+    expect((await watch.tick()).outcomes).toEqual([{ groupId: kBlockedGroup, action: "left" }]);
   });
 });
 
@@ -386,3 +555,4 @@ describe("anonymous admins in Trusted mode", () => {
     expect(preview.warnings).toEqual([]);
   });
 });
+
