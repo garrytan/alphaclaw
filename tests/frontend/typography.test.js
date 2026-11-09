@@ -9,7 +9,7 @@ const root = path.resolve(__dirname, "../..");
 const read = (rel) => fs.readFileSync(path.join(root, rel), "utf8");
 const theme = read("lib/public/css/theme.css");
 const shell = read("lib/public/css/shell.css");
-const explorer = read("lib/public/css/explorer.css");
+const explorer = ["sidebar", "file-tree", "file-viewer"].map((file) => read("lib/public/css/" + file + ".css")).join("\n");
 const tailwindConfig = require(path.join(root, "tailwind.config.cjs"));
 
 const ruleBody = (css, selector) => {
@@ -71,7 +71,7 @@ describe("frontend/typography (ALPH-69 phase 1b)", () => {
   });
 
   it("names the mono face only in the token, so every data surface follows it", () => {
-    for (const file of ["theme", "shell", "explorer", "cron", "agents"]) {
+    for (const file of ["theme", "shell", "sidebar", "file-tree", "file-viewer", "cron", "agents"]) {
       const css = read("lib/public/css/" + file + ".css")
         .replace(/--font-mono:[^;]*;/, "")
         .replace(/@font-face \{[^}]*\}/g, "")

@@ -18,7 +18,7 @@ export const createCronHistoryFixture = async (root, { port = 0 } = {}) => {
     render(h(CronTab, { jobId, onSetLocation: (url) => { location.href = url; } }), document.getElementById("app"));
   `;
   const bundle = await build({ bundle: true, write: false, format: "esm", stdin: { contents: entry, resolveDir: process.cwd() } });
-  const css = ["theme.css", "tailwind.generated.css", "shell.css", "explorer.css", "cron.css"]
+  const css = ["theme.css", "tailwind.generated.css", "shell.css", "sidebar.css", "file-tree.css", "file-viewer.css", "cron.css"]
     .map((name) => fs.readFileSync(path.join("lib/public/css", name), "utf8")).join("\n");
   const app = express();
   const requests = [];

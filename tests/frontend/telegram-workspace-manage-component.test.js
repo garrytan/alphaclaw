@@ -74,19 +74,20 @@ import * as preactHooks from "preact/hooks";
 
 const harness = preactHooks.__harness;
 
-// useState call order in ManageTelegramWorkspace (see component source).
+// Hook slot order: useTelegramTopics' useState/useRef calls first, then
+// ManageTelegramWorkspace's own useState calls (see component source).
 const kTopicsSlot = 0;
 const kDeletingSlot = 6;
 const kEditingTopicIdSlot = 7;
 const kEditingTopicNameSlot = 8;
 const kErrorSlot = 12;
-const kDeleteTopicConfirmSlot = 13;
-const kRegistryRowsSlot = 15;
-const kRegistryDiscoverySlot = 16;
-const kRegistryErrorSlot = 17;
-const kShowDeletedSlot = 18;
-const kTopicsErrorSlot = 26;
-const kEditSaveErrorSlot = 27;
+const kRegistryRowsSlot = 14;
+const kRegistryDiscoverySlot = 15;
+const kRegistryErrorSlot = 16;
+const kTopicsErrorSlot = 21;
+const kEditSaveErrorSlot = 22;
+const kDeleteTopicConfirmSlot = 25;
+const kShowDeletedSlot = 26;
 
 const collectText = (vnode, out = []) => {
   if (vnode == null || vnode === false || vnode === true) return out;
@@ -121,6 +122,13 @@ const collectNodes = (vnode, out = []) => {
     return out;
   }
   out.push(vnode);
+  if (typeof vnode.type === "function") {
+    // Expand nested function components (TopicTable, TopicRow, ...) so their
+    // buttons are reachable, the same way collectText does.
+    try {
+      collectNodes(vnode.type(vnode.props || {}), out);
+    } catch {}
+  }
   if (vnode.props) collectNodes(vnode.props.children, out);
   return out;
 };
