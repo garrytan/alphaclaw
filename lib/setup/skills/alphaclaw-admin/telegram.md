@@ -3,7 +3,7 @@ Manages Telegram supergroups and their forum topics: verifying the bot's members
 
 ## Group rules
 
-The Groups page sets one mode per Telegram group, written into OpenClaw's own group config so the gateway enforces it before any plugin runs: **Approved** (every member gets conversation; only the owner and people trusted with actions get tools), **Trusted people** (only the owner and the named people are heard), **Silent** (nobody is heard; the entry is kept) and **Blocked** (silent, the group guard plugin drops its turns, and the bot leaves the group, and leaves again if it is added back). People on the block list are dropped in every chat. The owner (`commands.ownerAllowFrom`, else the bot's DM `allowFrom`) is always allowed and can never be blocked. A group whose rules were set outside the page shows as Custom until someone converts it. These routes are humans only, so you cannot call them: if someone asks you to change who you talk to in a group, point them to the Groups page.
+AlphaClaw's Telegram group rules (the Telegram group rules API; a Groups page comes in a later version) set one mode per Telegram group, written into OpenClaw's own group config so the gateway enforces it before any plugin runs: **Approved** (every member gets conversation; only the owner and people trusted with actions get tools), **Trusted people** (only the owner and the named people are heard), **Silent** (nobody is heard; the entry is kept) and **Blocked** (silent, the group guard plugin drops its turns, and the bot leaves the group, and leaves again if it is added back). People on the block list are dropped in every chat. The owner (`commands.ownerAllowFrom`, else the bot's DM `allowFrom`) is always allowed and can never be blocked. A group whose rules were set outside AlphaClaw shows as Custom until someone converts it. These routes are humans only, so you cannot call them: if someone asks you to change who you talk to in a group, tell them your owner changes it in AlphaClaw (the Telegram group rules API; a Groups page comes in a later version).
 
 ## Errors
 
@@ -19,7 +19,7 @@ The request is missing a field or has a bad value. The detail names the field. M
 
 ### humans_only
 
-Only a signed-in person can change Telegram group rules. Ask your owner to make the change on the Groups page. Retry: none.
+Only a signed-in person can change Telegram group rules. Ask your owner to change it in AlphaClaw. Retry: none.
 
 ### telegram_not_configured
 
@@ -51,7 +51,7 @@ The bot's group policy is not allowlist. Set groupPolicy to "allowlist" for this
 
 ### custom_config
 
-This group's rules were set outside the Groups page. Review the group's current rules, then send the change again with "convert": true to replace them with a page mode. The old rules are backed up. Retry: with convert set.
+This group's rules were set outside AlphaClaw. Ask your owner to change it in AlphaClaw: review the group's current rules, then save again with convert:true to replace the custom rules. The old rules are backed up. Retry: with convert set.
 
 ### topic_override
 
