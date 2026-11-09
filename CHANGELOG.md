@@ -5,23 +5,8 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.241] - 2026-11-09
+## [0.10.242] - 2026-11-09
 
-You can now make a connected Capy thread act as you on the box from the Relay page, and revoke it there, instead of editing `ALPHACLAW_RELAY_DELEGATE_AGENTS` and redeploying. A delegate thread can also hand its connection to a successor thread, run several conversations at once, and fetch long answers in full.
-
-### Added
-- **Make delegate / Revoke delegate on the Relay page.** Each bound thread shows its tier, and a signed-in admin can grant or revoke it (the box agent cannot). A revoke is permanent for that grant: it demotes the thread's queued and running messages and stops its turns, and neither the env list nor a reboot brings it back. Granting it again later makes a new grant.
-- **Handing a connection to another thread.** `relay_handoff` gives the current thread a one-time code (one hour, single use) to pass to its successor, which calls `relay_claim` with it over its own connection. The successor keeps the same relay agent, box sessions and grant, gets a fresh capability, and wakes go to it from then on; the old capability stops working.
-- **Lanes.** `lane` on `relay_send`, `relay_reply` and `relay_history` runs a conversation in its own queue and its own box session (`…:relay-<sender>:lane-<lane>`), up to 3 at once for a thread with a grant (a grant can allow up to 8); a sender without a grant keeps one queue, as before. Chat labels lane sessions "· <lane>".
-- **Long answers in parts.** An answer over 6,000 characters to a Capy thread goes out as one reply with its first part and a `result_ref`; the sender reads the rest with `relay_result`.
-- **Who said what, recorded per message.** The box records each relay message's grant, lane, route and connection generation, a delegate's turn is told which grant and lane it runs under and whether an approval was recorded, and wakes carry the lane, the result reference and the generation.
-
-### Changed
-- `ALPHACLAW_RELAY_DELEGATE_AGENTS` is imported once as grants when the relay starts and is deprecated. Afterwards it only covers an agent that has no grant at all, and taking an agent off it no longer revokes it: use Revoke delegate.
-- A thread with a grant is metered on its own at its grant's hourly cap (default 30) instead of sharing its Capy account's count, and its sends no longer use up that count for the account's other threads.
-
-### Fixed
-- **A conversation cut short by a restart names its peer again.** The engine renames a released peer to `<name>#released-<id>`; the Relay conversations list showed such a row as "between two other agents" with no Chat link. It now names the peer, links its session and marks it "released agent" (GST-1995).
 AlphaClaw now runs OpenClaw 2026.11.2, the current stable release, instead of 2026.10.9. The first boot migrates OpenClaw's databases one way; README's OpenClaw Version section says how to back up first and how to go back.
 
 ### Changed
@@ -45,6 +30,24 @@ AlphaClaw now runs OpenClaw 2026.11.2, the current stable release, instead of 20
 - `relay-delegate.test.js`: a delegate may call `dispatch_action`, and a send through it counts in the receipt.
 - `openclaw-boot-migration.test.js`: the pre-upgrade `openclaw.json` copy (kept once per target version, none on a first install, a failed copy logged); the `session_jsonl_pending` reason (named only when no failing check or atomic-replace refusal does, each transcript counted once, its line quoted only for that reason), its count and notice; the read-only `.jsonl` count before Doctor. `openclaw-upgrade-status.test.js` and `doctor-plain-language.test.js`: the alert's sentence, recover steps and Retry. `deploy-announce.test.js`: the notice names the kept copy.
 - `model-catalog-cache.test.js`: a load whose CLI says it found no gateway is treated as configured-only even when the probe said up. `auth-profiles-kv.test.js`: the Codex 409 carries the sign-in-again hint and the docs link; `config-unreadable.test.js`: other refused auth changes get the make-it-again hint.
+
+## [0.10.241] - 2026-11-09
+
+You can now make a connected Capy thread act as you on the box from the Relay page, and revoke it there, instead of editing `ALPHACLAW_RELAY_DELEGATE_AGENTS` and redeploying. A delegate thread can also hand its connection to a successor thread, run several conversations at once, and fetch long answers in full.
+
+### Added
+- **Make delegate / Revoke delegate on the Relay page.** Each bound thread shows its tier, and a signed-in admin can grant or revoke it (the box agent cannot). A revoke is permanent for that grant: it demotes the thread's queued and running messages and stops its turns, and neither the env list nor a reboot brings it back. Granting it again later makes a new grant.
+- **Handing a connection to another thread.** `relay_handoff` gives the current thread a one-time code (one hour, single use) to pass to its successor, which calls `relay_claim` with it over its own connection. The successor keeps the same relay agent, box sessions and grant, gets a fresh capability, and wakes go to it from then on; the old capability stops working.
+- **Lanes.** `lane` on `relay_send`, `relay_reply` and `relay_history` runs a conversation in its own queue and its own box session (`…:relay-<sender>:lane-<lane>`), up to 3 at once for a thread with a grant (a grant can allow up to 8); a sender without a grant keeps one queue, as before. Chat labels lane sessions "· <lane>".
+- **Long answers in parts.** An answer over 6,000 characters to a Capy thread goes out as one reply with its first part and a `result_ref`; the sender reads the rest with `relay_result`.
+- **Who said what, recorded per message.** The box records each relay message's grant, lane, route and connection generation, a delegate's turn is told which grant and lane it runs under and whether an approval was recorded, and wakes carry the lane, the result reference and the generation.
+
+### Changed
+- `ALPHACLAW_RELAY_DELEGATE_AGENTS` is imported once as grants when the relay starts and is deprecated. Afterwards it only covers an agent that has no grant at all, and taking an agent off it no longer revokes it: use Revoke delegate.
+- A thread with a grant is metered on its own at its grant's hourly cap (default 30) instead of sharing its Capy account's count, and its sends no longer use up that count for the account's other threads.
+
+### Fixed
+- **A conversation cut short by a restart names its peer again.** The engine renames a released peer to `<name>#released-<id>`; the Relay conversations list showed such a row as "between two other agents" with no Chat link. It now names the peer, links its session and marks it "released agent" (GST-1995).
 
 ## [0.10.240] - 2026-11-09
 
