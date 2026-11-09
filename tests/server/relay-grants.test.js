@@ -198,6 +198,15 @@ describe("relay grants: remote tools", () => {
     expect((await asPeer("p3")).body).toMatchObject({ error: "rate_limited" });
   });
 
+  it("revoking a delegate does not refill its hourly allowance", async () => {
+    box = makeBox();
+    const grant = box.remote.grants.create({ agent: kAgent, hourlyCap: 5, createdBy: "admin" });
+    const { call } = toolsFor({ hourlyCap: 2 });
+    for (const text of ["1", "2", "3"]) expect((await call("relay_send", { to: "wintermute", text })).body).toMatchObject({ trust: "delegate" });
+    box.remote.grants.revoke(grant.id, "admin");
+    expect((await call("relay_send", { to: "wintermute", text: "4" })).body).toMatchObject({ error: "rate_limited" });
+  });
+
   it("relay_history on a lane pages back past a busier lane", async () => {
     box = makeBox();
     const all = Array.from({ length: 250 }, (_, index) => ({ id: String(10000 - index), agent_name: "wintermute", text: "m" + index, metadata: { relay_lane: index === 180 ? "quiet" : "busy" } }));
