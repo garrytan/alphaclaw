@@ -5,6 +5,11 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.233] - 2026-11-09
+
+### Changed
+- **gstack's pregate can reuse CI's test run on Linux.** The `ci/test-24` run profile in `.gstack/pregate.json` now names its OS (`"os": "Linux"`), so /ship's pregate tests stage accepts the files CI's `test (24)` run already passed at the same tree instead of running them again locally. CI configuration only; nothing changes for someone running AlphaClaw.
+
 ## [0.10.231] - 2026-11-09
 
 Render no longer loses the whole instance when OpenClaw unpacks session archives into /tmp. OpenClaw 2026.10.9 writes a full decompressed copy of every compressed session archive it reads to `/tmp/openclaw/session-archive-read-cache`, whatever `TMPDIR` says, keeps them for a day and never caps them. On a box with a few hundred archives the first agent turn after a start (memory indexing) and the first usage read each wrote all of them, 2.69 GB in 65 seconds on Nov 9, past Render's 2 GB /tmp limit. AlphaClaw now keeps that cache on the data volume, and its /tmp watch deletes those copies first and reacts to how fast /tmp grows.
