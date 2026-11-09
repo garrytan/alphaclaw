@@ -241,6 +241,10 @@ describe("frontend/telegram-workspace manage component", () => {
     expect(text).toContain("Restore");
     expect(text).toContain("Topic discovery is on");
     expect(text).toContain("Sweep now");
+    const rawText = collectText(tree).join("");
+    expect(rawText).toMatch(/Topic discovery is on · last sweep \S/);
+    expect(rawText).toMatch(/ago \(1 discovered/);
+    expect(rawText).toMatch(/deleted \S/);
   });
 
   it("renders the non-dismissable banner for unreadable registry states", () => {

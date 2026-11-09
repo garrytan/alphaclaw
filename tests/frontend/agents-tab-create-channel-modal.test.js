@@ -55,7 +55,7 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
   ToastContainer: () => null,
 }));
 
-vi.mock("../../lib/public/js/components/channels.js", () => ({
+vi.mock("../../lib/public/js/components/channels/index.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
   getChannelMeta: (id) => ({
     label: String(id || "").charAt(0).toUpperCase() + String(id || "").slice(1),

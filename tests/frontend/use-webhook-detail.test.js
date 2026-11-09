@@ -78,6 +78,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchWebhookDetail: vi.fn(),
   rotateWebhookOauthCallback: vi.fn(),
   updateWebhookDestination: vi.fn(),
+  sendWebhookRequest: vi.fn(),
 }));
 
 // use-cached-fetch stand-in: per-call-index slots the tests drive directly.
@@ -157,7 +158,7 @@ vi.mock("../../lib/public/js/components/toast.js", () => ({
 import * as preactHooks from "preact/hooks";
 import { __cachedFetchRegistry } from "../../lib/public/js/hooks/use-cached-fetch.js";
 import { __destinationState } from "../../lib/public/js/hooks/use-destination-session-selection.js";
-import { deleteWebhook } from "../../lib/public/js/lib/api.js";
+import { deleteWebhook, sendWebhookRequest } from "../../lib/public/js/lib/api.js";
 import { getCached, setCached } from "../../lib/public/js/lib/api-cache.js";
 import { useWebhookDetail } from "../../lib/public/js/components/webhooks/webhook-detail/use-webhook-detail.js";
 
@@ -292,5 +293,21 @@ describe("frontend/use-webhook-detail delete", () => {
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+describe("frontend/use-webhook-detail test send", () => {
+  it.each([
+    ["the hook accepts", () => sendWebhookRequest.mockResolvedValue("")],
+    ["the hook rejects", () => sendWebhookRequest.mockResolvedValue("bad token")],
+    ["reading the answer fails", () => sendWebhookRequest.mockRejectedValue(new Error("connection reset"))],
+  ])("refreshes the request history once when %s", async (_label, arrange) => {
+    detailSlot().data = makeWebhook();
+    arrange();
+    const onTestWebhookSent = vi.fn();
+    const hook = renderHook({ onTestWebhookSent });
+    await hook.actions.handleSendTestWebhook();
+    expect(sendWebhookRequest).toHaveBeenCalled();
+    expect(onTestWebhookSent).toHaveBeenCalledTimes(1);
   });
 });

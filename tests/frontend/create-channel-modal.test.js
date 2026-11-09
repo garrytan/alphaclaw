@@ -45,7 +45,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
   fetchOpenclawCapabilities: vi.fn(),
 }));
 // channels.js drags in a CDN import chain — stub the two named imports.
-vi.mock("../../lib/public/js/components/channels.js", () => ({
+vi.mock("../../lib/public/js/components/channels/index.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp", "clickclack"],
   getChannelMeta: (id) => ({
     label: id === "clickclack" ? "ClickClack" : id,
