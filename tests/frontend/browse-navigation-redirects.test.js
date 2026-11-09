@@ -54,6 +54,19 @@ describe("saved last-visited tab", () => {
   );
 });
 
+describe("sidebar tab switch", () => {
+  it("reports whether it navigated, so the drawer keeps itself open only for a real navigation", () => {
+    storedSettings = {};
+    const setLocation = vi.fn();
+    const { actions } = useBrowseNavigation({ location: "/health", setLocation });
+    expect(actions.handleSelectSidebarTab("menu")).toBe(false);
+    expect(setLocation).not.toHaveBeenCalled();
+    expect(actions.handleSelectSidebarTab("chat")).toBe(true);
+    expect(actions.handleSelectSidebarTab("browse")).toBe(true);
+    expect(setLocation).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("sidebar items", () => {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;

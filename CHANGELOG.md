@@ -16,6 +16,9 @@ The Telegram topics page and the Browse stylesheet are split into smaller files 
 ### Fixed
 - **Missing spaces on the Telegram topics page.** The discovery line read "Topic discovery ison · last sweep10m ago(1 discovered…)" and a deleted topic read "deletedNov 7, …", because the template dropped the spaces next to the inline values. Both lines now have their spaces.
 
+- **A drawer tab click that doesn't navigate no longer keeps the drawer open through your next navigation.** Only a tab switch that changes the page marks the drawer to stay open.
+- **A test webhook refreshes the request history even when reading the hook's answer fails.**
+
 ### Tests
 - A new `telegram-resource-cap-model` test covers the concurrency preference order, the machine-size claim and the fallback for a cached workspace. The Telegram page component test follows the new hook order and now walks into nested components when it looks for a button. The typography test and the cron history browser fixture read the three new stylesheets instead of `explorer.css`.
 
