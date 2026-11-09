@@ -81,6 +81,10 @@ const makeDocument = () => {
   const listeners = new Map();
   return {
     body: { style: {} },
+    openLayer: null,
+    querySelector: vi.fn(function querySelector() {
+      return this.openLayer;
+    }),
     addEventListener: vi.fn((type, handler) => {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(handler);
@@ -96,15 +100,15 @@ const makeDocument = () => {
 };
 
 let shell;
-const render = (location) => {
+const render = (location, query = "") => {
   harness.beginRender();
-  shell = useAppShellUi({ location });
+  shell = useAppShellUi({ location, query });
   harness.flushEffects();
   return shell;
 };
-const isOpen = (location) => {
-  render(location);
-  return render(location).state.mobileSidebarOpen;
+const isOpen = (location, query = "") => {
+  render(location, query);
+  return render(location, query).state.mobileSidebarOpen;
 };
 
 describe("frontend/hooks useAppShellUi phone drawer", () => {
@@ -129,6 +133,13 @@ describe("frontend/hooks useAppShellUi phone drawer", () => {
     shell.actions.setMobileSidebarOpen(true);
     expect(isOpen("/health")).toBe(true);
     expect(isOpen("/agents/main")).toBe(false);
+  });
+
+  it("closes the drawer when only the query changes", () => {
+    render("/browse/notes.md");
+    shell.actions.setMobileSidebarOpen(true);
+    expect(isOpen("/browse/notes.md")).toBe(true);
+    expect(isOpen("/browse/notes.md", "view=diff")).toBe(false);
   });
 
   it("keeps the drawer open for the navigation a drawer tab switch makes, and only that one", () => {
@@ -165,6 +176,23 @@ describe("frontend/hooks useAppShellUi phone drawer", () => {
     doc.key("Enter");
     expect(isOpen("/home")).toBe(true);
     expect(focus).not.toHaveBeenCalled();
+  });
+
+  it("leaves Escape to an open dialog or file menu above the drawer", () => {
+    render("/home");
+    const focus = vi.fn();
+    shell.refs.mobileMenuButtonRef.current = { focus };
+    shell.actions.setMobileSidebarOpen(true);
+    render("/home");
+    doc.openLayer = {};
+    doc.key("Escape");
+    expect(isOpen("/home")).toBe(true);
+    expect(focus).not.toHaveBeenCalled();
+    expect(doc.querySelector).toHaveBeenCalledWith('[aria-modal="true"], .tree-context-menu');
+    doc.openLayer = null;
+    doc.key("Escape");
+    expect(isOpen("/home")).toBe(false);
+    expect(focus).toHaveBeenCalledTimes(1);
   });
 
   it("removes its Escape listener once the drawer closes", () => {
