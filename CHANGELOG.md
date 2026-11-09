@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.239] - 2026-11-09
+## [0.10.238] - 2026-11-09
 
 ### Changed
 - **gstack's pregate knows which tests cover the lockfile and the browser smoke scripts.** `.gstack/pregate.json` now declares the vitest runner and maps `package-lock.json` to `tests/server/alphaclaw-version.test.js` (the test that reads its version) and `tests/browser/**` to no lane, since those smoke scripts run by hand through `npm run test:ui:*`, not in vitest. A change touching either no longer gets a "no lane policy" warning. CI configuration only; nothing changes for someone running AlphaClaw.
