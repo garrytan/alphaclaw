@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.229] - 2026-11-09
+
+You can now set who your agent talks to in each Telegram group, and AlphaClaw writes it into OpenClaw's own group rules so the gateway enforces it before any plugin runs. This is the server side of the coming Groups page: the API, the "test this group" answer, a plugin that silences blocked people and groups, and a watcher that notices when the bot is added to a new group.
+
+### Added
+- **One mode per Telegram group.** `PUT /api/telegram/groups/:groupId/policy` sets Approved (every member gets conversation, only you and people you trust with actions get tools), Trusted people (only you and the people you name are heard), Silent or Blocked. Each mode is written into the group's own `channels.telegram.groups` entry (`enabled`, `groupPolicy`, `allowFrom`, `tools`, `toolsBySender`), checked with `openclaw config patch --dry-run` first, and the previous entry is backed up. Your own Telegram ids (`commands.ownerAllowFrom`, else the bot's DM `allowFrom`) are always written in with every tool; a save that cannot include them is refused. A group entry is never deleted, and a save that would leave the groups list empty or the account policy other than `allowlist` is refused, because either would admit groups nobody chose. Rules set outside the page show as Custom and are replaced only when you convert them. Changes need the group's revision (`If-Match`), and repeating a saved change is a no-op.
+- **People blocked everywhere.** `PUT /api/telegram/blocked-senders` sets a block list; the new built-in group guard plugin (`lib/plugin/group-guard`) drops their turns in every chat with no reply, and drops every turn in a Blocked group. You can never be blocked.
+- **Test this group.** `POST /api/telegram/groups/:groupId/test` says, for you, each trusted or configured person, each blocked person and anyone else, whether the agent would reply and whether it could act. It uses OpenClaw's own policy resolvers and lists other plugins on the box as not modelled.
+- **New-group notices.** A watcher reads OpenClaw's own file log (and its rotated files) for the bot being added to a group, tells you once about each group that has no rule yet (it stays silent), and leaves a Blocked group again whenever someone adds the bot back.
+- Every failure of these routes is an RFC 9457 problem body with a real status, a fix, retry guidance and what was already done (`sideEffects`), documented in the admin skill's Telegram reference. All four routes are for signed-in people only.
+
 ## [0.10.228] - 2026-11-09
 
 The agent can now get a key, token or password from you without it going through a chat. It asks AlphaClaw for a one-time link, you open it signed in to AlphaClaw, paste the value, and AlphaClaw stores it in its `.env` and in OpenClaw's secret store. OpenClaw's own channel links (its credential prompt among them) now point at this box.

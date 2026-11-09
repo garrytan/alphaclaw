@@ -43,7 +43,7 @@ jobs:
         include:
           - leg: leg1
             browser: false
-            timeout: 42
+            timeout: 60
           - leg: leg2
             browser: false
             timeout: 75

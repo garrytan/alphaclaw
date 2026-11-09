@@ -3,7 +3,7 @@
   "legs": {
     "leg1": {
       "browser": false,
-      "budgetSeconds": 1006,
+      "budgetSeconds": 1426,
       "files": [
         "tests/live/claude-code-fire.e2e.test.js",
         "tests/live/dashboard-launch.e2e.test.js",
@@ -20,10 +20,11 @@
         "tests/live/relay-guard.e2e.test.js",
         "tests/live/restart-exec-turn.e2e.test.js",
         "tests/live/restart-heapsnapshot-signal.e2e.test.js",
+        "tests/live/telegram-groups.e2e.test.js",
         "tests/live/workspace-alias-move.e2e.test.js"
       ],
       "maxTestTimeoutSeconds": 720,
-      "timeoutMinutes": 42
+      "timeoutMinutes": 60
     },
     "leg2": {
       "browser": false,
