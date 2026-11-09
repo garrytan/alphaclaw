@@ -1,4 +1,7 @@
-const { createResumedDoctorTurnStop, findResumedDoctorRunId } = require("../../lib/server/doctor/resumed-turns");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { createResumedDoctorTurnStop, createEventStopReader, findResumedDoctorRunId } = require("../../lib/server/doctor/resumed-turns");
 
 // Message shapes as sessions.get returns them on the pinned OpenClaw 2026.10.9
 // (recorded against the real gateway: a SIGKILLed Doctor turn, its restart
@@ -125,6 +128,49 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect(h.stop.hasStopped("agent:main:doctor:5")).toBe(false);
     await h.stop.onGatewayLaunch({ generation: 2 });
     expect(h.stop.hasStopped(key)).toBe(true);
+  });
+
+  it("a new AlphaClaw reads an earlier one's stops back from the real watchdog database", async () => {
+    const modulePath = require.resolve("../../lib/server/db/watchdog");
+    delete require.cache[modulePath];
+    const watchdogDb = require(modulePath);
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "resumed-turns-events-"));
+    try {
+      watchdogDb.initWatchdogDb({ rootDir });
+      const key = "agent:main:doctor:1";
+      const first = createResumedDoctorTurnStop({
+        clawCmd: vi.fn(async (command) => {
+          const method = /gateway call '?([a-z.]+)'?/.exec(command)?.[1];
+          const params = JSON.parse(/--params '(.*)' --json/.exec(command)[1]);
+          if (method === "sessions.list") return { ok: true, stdout: JSON.stringify({ sessions: [active(key)] }) };
+          if (method === "sessions.get") return { ok: true, stdout: JSON.stringify({ messages: [doctorMessage(1), recoveryMessage(key, "recov-1")] }) };
+          return { ok: true, stdout: JSON.stringify({ ok: true, aborted: true, runIds: [params.runId] }) };
+        }),
+        probeReadiness: async () => ({ ok: true, kind: "ready" }),
+        resolveReadyzUrl: () => "http://127.0.0.1:1/readyz",
+        insertEvent: watchdogDb.insertWatchdogEvent,
+        sleep: async () => {},
+        checkOffsetsMs: [0],
+        logger: { log: vi.fn() },
+      });
+      const beforeStop = Date.now() - 1_000;
+      await first.onGatewayLaunch();
+      const reader = createEventStopReader(watchdogDb.getRecentEvents);
+      const stops = reader({ sinceMs: beforeStop });
+      expect(stops).toEqual([{ sessionKey: key, stoppedAtMs: expect.any(Number) }]);
+      expect(stops[0].stoppedAtMs).toBeGreaterThanOrEqual(beforeStop);
+      expect(reader({ sinceMs: Date.now() + 5_000 })).toEqual([]);
+
+      const second = createResumedDoctorTurnStop({ clawCmd: vi.fn(), listStoppedSince: reader });
+      const stoppedAt = stops[0].stoppedAtMs;
+      expect(second.hasStopped(key, stoppedAt)).toBe(true);
+      expect(second.hasStopped(key, stoppedAt + 59_000)).toBe(true);
+      expect(second.hasStopped(key, stoppedAt + 120_000)).toBe(false);
+      expect(second.hasStopped("agent:main:doctor:2", stoppedAt)).toBe(false);
+    } finally {
+      watchdogDb.closeWatchdogDb?.();
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 
   it("a redeploy minutes after a stop: the next AlphaClaw's wedge sweep neither resumes nor reports the stopped Doctor session, and still reports a later stuck turn there", async () => {
