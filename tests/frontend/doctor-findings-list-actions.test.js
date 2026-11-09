@@ -63,7 +63,7 @@ describe("frontend/doctor-findings-list status action pending affordance", () =>
     });
     const markFixed = buttonByLabel(tree, "Mark fixed");
     expect(markFixed.props.loading).toBe(true);
-    expect(markFixed.props.loadingLabel).toBe("Marking fixed...");
+    expect(markFixed.props.loadingLabel).toBe("Marking fixed…");
     expect(buttonByLabel(tree, "Dismiss").props.disabled).toBe(true);
     expect(buttonByLabel(tree, "Ask agent to fix").props.disabled).toBe(true);
   });
@@ -75,7 +75,7 @@ describe("frontend/doctor-findings-list status action pending affordance", () =>
     });
     expect(buttonByLabel(dismissing, "Dismiss").props.loading).toBe(true);
     expect(buttonByLabel(dismissing, "Dismiss").props.loadingLabel).toBe(
-      "Dismissing...",
+      "Dismissing…",
     );
     expect(buttonByLabel(dismissing, "Mark fixed").props.disabled).toBe(true);
 
@@ -85,7 +85,7 @@ describe("frontend/doctor-findings-list status action pending affordance", () =>
     });
     expect(buttonByLabel(reopening, "Reopen").props.loading).toBe(true);
     expect(buttonByLabel(reopening, "Reopen").props.loadingLabel).toBe(
-      "Reopening...",
+      "Reopening…",
     );
 
     const restoring = renderList({
@@ -94,7 +94,7 @@ describe("frontend/doctor-findings-list status action pending affordance", () =>
     });
     expect(buttonByLabel(restoring, "Restore").props.loading).toBe(true);
     expect(buttonByLabel(restoring, "Restore").props.loadingLabel).toBe(
-      "Restoring...",
+      "Restoring…",
     );
   });
 

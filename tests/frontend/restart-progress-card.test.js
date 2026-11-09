@@ -309,7 +309,7 @@ describe("frontend/restart-progress-card", () => {
       `The gateway finished starting at ${hhmm} — your changes are live.`,
     );
     expect(describeRestartRecovered({ by: "unknown", at, changesLive: false })).toBe(
-      `The gateway came back at ${hhmm}, but AlphaClaw cannot tell whether your changes are live — press Restart to be sure.`,
+      `The gateway came back at ${hhmm}, but AlphaClaw cannot tell whether your changes are live — press Restart gateway to be sure.`,
     );
     const onRetry = vi.fn();
     const live = renderCard({
@@ -322,9 +322,9 @@ describe("frontend/restart-progress-card", () => {
       operation: { ...kRunningOperation, phase: "recovered", recovered: { by: "unknown", at, changesLive: false } },
       onRetry,
     });
-    expect(treeText(unsure)).toContain("press Restart to be sure");
+    expect(treeText(unsure)).toContain("press Restart gateway to be sure");
     const buttons = findAllByType(unsure, ActionButton);
-    expect(buttons.map((b) => b.props.idleLabel)).toEqual(["Restart"]);
+    expect(buttons.map((b) => b.props.idleLabel)).toEqual(["Restart gateway"]);
   });
 
   it("humanDuration renders whole minutes as 'N min' and everything else in seconds", () => {
@@ -492,7 +492,7 @@ describe("frontend/restart-progress-card", () => {
         onRetry,
         onRetryUpgrade,
       });
-      expect(treeText(tree)).toContain("OpenClaw is running again, but the data upgrade didn't finish: one of OpenClaw's upgrade checks failed: plugins.");
+      expect(treeText(tree)).toContain("The gateway is running again, but OpenClaw's data upgrade didn't finish: one of OpenClaw's upgrade checks failed: plugins.");
       expect(String(findAllByType(tree, "span").find((s) => String(s.props.class || "").includes("ac-gateway-dot")).props.class)).toContain("yellow");
       findButton(tree, "Try again").props.onClick();
       expect(onRetryUpgrade).toHaveBeenCalledTimes(1);
@@ -513,7 +513,7 @@ describe("frontend/restart-progress-card", () => {
         onRetryUpgrade,
       });
       expect(treeText(tree)).toContain("Data upgraded, but OpenClaw didn't start. Automatic recovery is checking now.");
-      findButton(tree, "Restart").props.onClick();
+      findButton(tree, "Restart gateway").props.onClick();
       expect(onRetry).toHaveBeenCalledTimes(1);
       expect(onRetryUpgrade).not.toHaveBeenCalled();
     });

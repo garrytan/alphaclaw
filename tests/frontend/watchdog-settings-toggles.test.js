@@ -497,7 +497,7 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
       savingSettingsContext: kAutoRepairContext,
     });
     const toggles = findAllByType(tree, ToggleSwitch);
-    expect(toggles[0].props.label).toBe("Saving...");
+    expect(toggles[0].props.label).toBe("Saving…");
     expect(toggles[0].props.disabled).toBe(true);
     expect(toggles[1].props.label).toBe("Enabled"); // no false claim
     expect(toggles[1].props.disabled).toBe(true); // shared doc lock
@@ -544,8 +544,8 @@ describe("frontend/watchdog settings card (SavedToggle wiring)", () => {
   it("holds unhydrated toggles at Loading... instead of the defaults", () => {
     const tree = renderCard({ settings: {}, settingsHydrated: false });
     const toggles = findAllByType(tree, ToggleSwitch);
-    expect(toggles[0].props.label).toBe("Loading...");
-    expect(toggles[1].props.label).toBe("Loading...");
+    expect(toggles[0].props.label).toBe("Loading…");
+    expect(toggles[1].props.label).toBe("Loading…");
     expect(toggles[0].props.disabled).toBe(true);
     expect(toggles[1].props.disabled).toBe(true);
   });

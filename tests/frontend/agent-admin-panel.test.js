@@ -80,7 +80,7 @@ describe("frontend/agent-admin-panel token-unavailable detail", () => {
 
   it("renders the reason-specific detail without the '(mint failure)' claim", () => {
     const text = renderText({ state: "unavailable", reason: "token_missing" });
-    expect(text).toContain("⚠ Token unavailable —");
+    expect(text).toContain("Token unavailable —");
     expect(text).toContain(
       "Flag is on but no token file exists — check server logs.",
     );

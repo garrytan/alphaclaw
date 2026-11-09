@@ -685,6 +685,15 @@
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
   }
 
+  .app-sidebar .sidebar-status {
+    display: none;
+  }
+
+  .app-sidebar:not(.mobile-open) {
+    visibility: hidden;
+    transition: transform 0.18s ease, visibility 0s linear 0.18s;
+  }
+
   .app-sidebar.mobile-open {
     transform: translateX(0);
   }
@@ -1545,21 +1554,48 @@
 
   .health-incident-ago { display: none; }
 
-  :is(.health, .doctor, .usage, .ac-pane-shell--wide)
-    :is(button, select, summary, [role="tab"], a.ac-tip-link, input:not([type="checkbox"]):not([type="radio"])) {
+}
+
+.ac-env-row-key {
+  width: 200px;
+}
+
+@media (max-width: 767px) {
+  .ac-env-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ac-env-row > * {
+    width: 100%;
+  }
+}
+
+/* ── Phone tap targets: 40 px in the app shell and its dialogs ── */
+
+@media (max-width: 767px) {
+  :is(.app-shell, [aria-modal="true"])
+    :is(button, select, summary, [role="button"], [role="tab"], input:not([type="checkbox"]):not([type="radio"])) {
     min-height: 40px;
   }
 
-  :is(.health, .doctor, .usage, .ac-pane-shell--wide) button {
+  :is(.app-shell, [aria-modal="true"]) :is(button, [role="button"], [role="tab"]) {
     min-width: 40px;
   }
 
-  :is(.health, .doctor, .usage, .ac-pane-shell--wide) a.ac-tip-link {
+  :is(.app-shell, [aria-modal="true"])
+    :is(a.ac-tip-link, a.status-chip, a.skip-link, a.home-card-link, a.home-card-more, a.home-list-name, a.agents-session-link, a[class*="ac-btn"]) {
     display: inline-flex;
     align-items: center;
+    min-height: 40px;
+    min-width: 40px;
   }
 
-  :is(.health, .doctor, .usage, .ac-pane-shell--wide) label:has(> input[type="checkbox"]:not(.ac-toggle-input)) {
+  .app-shell .file-tree a {
+    min-height: 40px;
+  }
+
+  :is(.app-shell, [aria-modal="true"]) label:has(> input[type="checkbox"]) {
     min-height: 40px;
     display: inline-flex;
     align-items: center;

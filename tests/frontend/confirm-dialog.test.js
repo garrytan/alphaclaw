@@ -47,7 +47,7 @@ describe("frontend/confirm dialog on ModalShell", () => {
     expect(text).toContain("Confirm action");
     expect(text).toContain("Are you sure you want to continue?");
     expect(buttons(tree).map((button) => button.props.idleLabel)).toEqual(["Cancel", "Confirm"]);
-    expect(buttons(tree)[1].props.loadingLabel).toBe("Working...");
+    expect(buttons(tree)[1].props.loadingLabel).toBe("Working…");
   });
 
   it("wires message, details, labels, loading and disabled state", () => {
@@ -59,8 +59,8 @@ describe("frontend/confirm dialog on ModalShell", () => {
       title: "Restart gateway?",
       message: "Running turns stop.",
       details,
-      confirmLabel: "Restart",
-      confirmLoadingLabel: "Restarting...",
+      confirmLabel: "Restart gateway",
+      confirmLoadingLabel: "Restarting…",
       cancelLabel: "Keep running",
       onConfirm,
       onCancel,
@@ -75,8 +75,8 @@ describe("frontend/confirm dialog on ModalShell", () => {
     expect(cancel.props.idleLabel).toBe("Keep running");
     expect(cancel.props.disabled).toBe(true);
     expect(cancel.props.onClick).toBe(onCancel);
-    expect(confirm.props.idleLabel).toBe("Restart");
-    expect(confirm.props.loadingLabel).toBe("Restarting...");
+    expect(confirm.props.idleLabel).toBe("Restart gateway");
+    expect(confirm.props.loadingLabel).toBe("Restarting…");
     expect(confirm.props.loading).toBe(true);
     expect(confirm.props.disabled).toBe(true);
     expect(confirm.props.onClick).toBe(onConfirm);

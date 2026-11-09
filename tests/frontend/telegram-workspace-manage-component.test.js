@@ -175,7 +175,7 @@ describe("frontend/telegram-workspace manage component", () => {
     const tree = renderManage();
     const text = renderToText(tree);
 
-    expect(text).toContain("Existing Topics");
+    expect(text).toContain("Existing topics");
     expect(text).toContain("Ops");
     expect(text).not.toContain("Health");
     expect(text).not.toContain("Deleted topics");
@@ -226,7 +226,7 @@ describe("frontend/telegram-workspace manage component", () => {
     expect(text).toContain("Verify now");
     expect(text).toContain("no account attributed");
     expect(text).toContain("seen by agent main");
-    expect(text).toContain("Discovered Topics");
+    expect(text).toContain("Discovered topics");
     expect(text).toContain("thread 77");
     expect(text).toContain("Deleted topics ( 1 )");
     expect(text).toContain("Old room");
@@ -367,7 +367,7 @@ describe("frontend/telegram-workspace manage component", () => {
     const saveButton = findButtonByText(tree, "Save");
     const savePromise = saveButton.props.onclick();
     tree = renderManage();
-    expect(renderToText(tree)).toContain("Saving...");
+    expect(renderToText(tree)).toContain("Saving…");
 
     rejectUpdate(new Error("boom"));
     await savePromise;

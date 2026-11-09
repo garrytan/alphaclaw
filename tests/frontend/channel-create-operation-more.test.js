@@ -52,11 +52,11 @@ describe("frontend/channel-create-operation (extended)", () => {
     // Unknown events and label-less phases are ignored.
     handlers.onMessage({ event: "unknown-event", data: {} });
     handlers.onMessage({ event: "phase", data: { phase: "x", label: "  " } });
-    expect(onPhase.mock.calls.map((call) => call[0])).toEqual(["Loading..."]);
+    expect(onPhase.mock.calls.map((call) => call[0])).toEqual(["Loading…"]);
 
     handlers.onMessage({
       event: "phase",
-      data: { phase: "restarting", label: "Restarting gateway..." },
+      data: { phase: "restarting", label: "Restarting gateway…" },
     });
     // Two updates inside the restart minimum-visibility window: the second
     // deferral must clear the first deferred timer.
@@ -70,8 +70,8 @@ describe("frontend/channel-create-operation (extended)", () => {
     });
     vi.advanceTimersByTime(1200);
     expect(onPhase.mock.calls.map((call) => call[0])).toEqual([
-      "Loading...",
-      "Restarting gateway...",
+      "Loading…",
+      "Restarting gateway…",
       "Step 2",
     ]);
 

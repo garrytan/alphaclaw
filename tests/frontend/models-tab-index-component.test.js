@@ -145,7 +145,7 @@ describe("frontend/models-tab pane shell states", () => {
 
     const text = collectText(tree).join(" ");
     expect(text).toContain("Models");
-    expect(text).toContain("Loading model settings...");
+    expect(text).toContain("Loading model settings…");
     expect(text).not.toContain("No models yet");
 
     const picker = findAllByType(tree, SearchableModelPicker)[0];
@@ -159,7 +159,7 @@ describe("frontend/models-tab pane shell states", () => {
 
     const text = collectText(tree).join(" ");
     expect(text).toContain("No models yet. Add one to give your agents something to run on.");
-    expect(text).not.toContain("Loading model settings...");
+    expect(text).not.toContain("Loading model settings…");
     expect(findAllByType(tree, SearchableModelPicker)[0].props.disabled).toBe(
       false,
     );

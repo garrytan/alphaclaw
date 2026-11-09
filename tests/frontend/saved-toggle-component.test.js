@@ -59,8 +59,8 @@ const toggleProps = (tree) => findAllByType(tree, ToggleSwitch)[0]?.props;
 
 describe("frontend/saved-toggle", () => {
   it("renders the label matrix: Loading / Saving / on / off", () => {
-    expect(toggleProps(renderToggle({ hydrated: false })).label).toBe("Loading...");
-    expect(toggleProps(renderToggle({ hydrated: true, saving: true })).label).toBe("Saving...");
+    expect(toggleProps(renderToggle({ hydrated: false })).label).toBe("Loading…");
+    expect(toggleProps(renderToggle({ hydrated: true, saving: true })).label).toBe("Saving…");
     expect(toggleProps(renderToggle({ hydrated: true, value: true })).label).toBe("Enabled");
     expect(toggleProps(renderToggle({ hydrated: true, value: false })).label).toBe("Disabled");
   });
@@ -136,7 +136,7 @@ describe("frontend/saved-toggle", () => {
       savingContext: "autoRepair",
       context: "autoRepair",
     });
-    expect(toggleProps(mine).label).toBe("Saving...");
+    expect(toggleProps(mine).label).toBe("Saving…");
   });
 });
 
@@ -152,8 +152,8 @@ describe("frontend/async-section", () => {
   });
 
   it("renders a loading line while loading, announced as a busy status region", () => {
-    const tree = render({ loading: true, loadingLabel: "Loading incidents..." });
-    expect(collectText(tree).join(" ")).toContain("Loading incidents...");
+    const tree = render({ loading: true, loadingLabel: "Loading incidents…" });
+    expect(collectText(tree).join(" ")).toContain("Loading incidents…");
     const region = collectNodes(tree).find((n) => n.type === "div");
     expect(region.props.role).toBe("status");
     expect(region.props["aria-busy"]).toBe("true");

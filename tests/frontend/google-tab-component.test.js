@@ -263,7 +263,7 @@ describe("frontend/google tab component", () => {
     const chip = findChip(tree, "Couldn't load Google accounts.");
     expect(chip).toBeTruthy();
     const emptyStateButtons = collectRawNodes(tree).filter(
-      (node) => node.props?.idleLabel === "Add Company Account",
+      (node) => node.props?.idleLabel === "Add company account",
     );
     expect(emptyStateButtons.length).toBe(0);
 
@@ -332,7 +332,7 @@ describe("frontend/google tab component", () => {
     // The modal submit path calls the same handler Google wires up.
     const setError = vi.fn();
     const addModal = collectRawNodes(r.tree).find(
-      (node) => node.props?.title === "Add Company Account" && node.props?.onSubmit,
+      (node) => node.props?.title === "Add company account" && node.props?.onSubmit,
     );
     await addModal.props.onSubmit({ email: "x@y.com", setError });
     expect(setError).toHaveBeenCalledWith("save blew up");
@@ -354,7 +354,7 @@ describe("frontend/google tab component", () => {
       const r = renderGoogle();
       const setError = vi.fn();
       const addModal = collectRawNodes(r.tree).find(
-        (node) => node.props?.title === "Add Company Account" && node.props?.onSubmit,
+        (node) => node.props?.title === "Add company account" && node.props?.onSubmit,
       );
       await addModal.props.onSubmit({ email: "new@corp.com", setError });
       expect(setError).not.toHaveBeenCalled();

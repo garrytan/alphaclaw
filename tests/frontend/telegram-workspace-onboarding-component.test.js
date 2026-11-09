@@ -140,7 +140,7 @@ describe("frontend/telegram-workspace onboarding VerifyBotStep", () => {
     harness.effects[0](); // mount verify: loading is set synchronously
 
     expect(renderToText(renderStep({ setBotInfo }))).toContain(
-      "Checking bot token...",
+      "Checking bot token…",
     );
 
     resolveVerify({ ok: true, bot: { username: "opsbot", first_name: "Ops" } });
@@ -150,7 +150,7 @@ describe("frontend/telegram-workspace onboarding VerifyBotStep", () => {
       first_name: "Ops",
     });
     expect(renderToText(renderStep({ setBotInfo }))).not.toContain(
-      "Checking bot token...",
+      "Checking bot token…",
     );
   });
 

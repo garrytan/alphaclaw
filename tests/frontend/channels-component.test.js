@@ -150,7 +150,7 @@ describe("frontend/channels component", () => {
     let tree = renderChannels();
     let card = collectNodes(tree).find((vnode) => vnode.type === ChannelsCard);
     expect(card.props.items).toHaveLength(0);
-    expect(card.props.loadingLabel).toBe("Loading...");
+    expect(card.props.loadingLabel).toBe("Loading…");
 
     harness.reset();
     useCachedFetch.mockReturnValue({

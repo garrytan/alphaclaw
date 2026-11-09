@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.220] - 2026-11-09
+
+On a phone, every button, link, field and tab in the dashboard is now at least 40 px tall, the menu drawer closes when you pick a page, and button and status wording is consistent across the app.
+
+### Changed
+- **40 px tap targets on phones.** One rule in `shell.css` gives every button, select, input, tab and button-like link in the app shell and its dialogs a 40 px minimum height (and width for buttons) below 768 px wide, replacing the per-page rule Health, Doctor and Usage had. A checkbox's label is the target, and file-tree rows are 40 px tall. The first-run setup wizard keeps its own sizes. Links inside a sentence keep their size, as WCAG 2.5.8 allows. On Environment the variable rows stack on a phone so the value field gets the full width.
+- **The phone drawer closes on navigation.** Picking any page, agent, chat, file (the open one too) or the status chip in the drawer closes it, and so does Escape, which puts focus back on the menu button. With a dialog or the file menu open, Escape closes only that. Switching the drawer's Menu, Browse and Chat tabs keeps it open. A closed drawer is no longer reachable with Tab, and the drawer no longer repeats the top bar's status chip.
+- **Wording.** Every in-progress label uses the ellipsis character (`Loading…`, `Saving…`). Headings and buttons are in sentence case (`Google accounts`, `Add company account`, `Connect node`, `Create webhook`, `Load more`). Restart buttons say `Restart gateway`, and the line after a data upgrade says the gateway is running again but OpenClaw's data upgrade didn't finish. Generic `Save` and `Add` buttons name what they save or add. Status lines lose their emoji. The Health narrative card uses the coloured gateway dot, and the WhatsApp login and setup-complete lines are plain text.
+
+### Tests
+- New `use-app-shell-ui` tests cover the drawer closing on navigation, staying open for a tab switch only, and Escape (handled elsewhere, during composition, while closed). New `phone-shell-css` tests pin the 40 px rule and the hidden closed drawer. Frontend tests that read the changed labels now expect the new wording.
+
 ## [0.10.219] - 2026-11-09
 
 The gateway now gets one Node heap flag when you set ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE, instead of autotune's flag followed by yours.

@@ -69,7 +69,7 @@ const kBaseHookState = {
   channels: [],
   configuredChannelMap: new Map(),
   configuredChannels: [],
-  createLoadingLabel: "Creating...",
+  createLoadingLabel: "Creating…",
   createProvider: "",
   defaultAgentId: "a1",
   deletingAccount: null,
@@ -168,7 +168,7 @@ describe("frontend/agents-tab bindings section component", () => {
         bindDisabled: true,
       });
       const button = findBindButton(tree);
-      expect(collectText(button).join(" ")).toContain("Binding...");
+      expect(collectText(button).join(" ")).toContain("Binding…");
       expect(button.props.disabled).toBe(true);
     });
 
@@ -180,7 +180,7 @@ describe("frontend/agents-tab bindings section component", () => {
       });
       const button = findBindButton(tree);
       expect(collectText(button).join(" ")).toContain("Bind");
-      expect(collectText(button).join(" ")).not.toContain("Binding...");
+      expect(collectText(button).join(" ")).not.toContain("Binding…");
       expect(button.props.disabled).toBe(true);
     });
 

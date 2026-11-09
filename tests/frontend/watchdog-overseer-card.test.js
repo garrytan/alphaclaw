@@ -769,11 +769,11 @@ describe("WatchdogOverseerCard rendering", () => {
   });
 
   it("keeps the loading shell until settings AND the first poll land", () => {
-    expect(textOf(renderCard({ settingsLoaded: false }))).toContain("Loading overseer status...");
+    expect(textOf(renderCard({ settingsLoaded: false }))).toContain("Loading overseer status…");
     expect(textOf(renderCard({ situation: null, situationError: null }))).toContain(
-      "Loading overseer status...",
+      "Loading overseer status…",
     );
-    expect(textOf(renderCard())).not.toContain("Loading overseer status...");
+    expect(textOf(renderCard())).not.toContain("Loading overseer status…");
   });
 
   it("enabled + available: button, scope line, copy, empty state; availability line hidden", () => {
@@ -782,7 +782,7 @@ describe("WatchdogOverseerCard rendering", () => {
     expect(buttons).toHaveLength(1);
     expect(buttons[0].props).toMatchObject({
       idleLabel: "Review current situation",
-      loadingLabel: "Reviewing...",
+      loadingLabel: "Reviewing…",
       tone: "secondary",
       size: "sm",
       loading: false,

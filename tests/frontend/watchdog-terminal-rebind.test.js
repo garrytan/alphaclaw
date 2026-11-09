@@ -226,7 +226,7 @@ describe("frontend/watchdog terminal socket-identity handlers (fix wave F156/F20
     const live = FakeWebSocket.instances[1];
     hook = renderHook(true);
     expect(hook.connectingTerminal).toBe(true);
-    expect(hook.terminalStatusText).toBe("Connecting...");
+    expect(hook.terminalStatusText).toBe("Connecting…");
 
     // Late events from the socket we abandoned.
     stale.onopen();
@@ -238,7 +238,7 @@ describe("frontend/watchdog terminal socket-identity handlers (fix wave F156/F20
     expect(hook.connectingTerminal).toBe(true);
     expect(hook.terminalConnected).toBe(false);
     expect(hook.terminalEnded).toBe(false);
-    expect(hook.terminalStatusText).toBe("Connecting...");
+    expect(hook.terminalStatusText).toBe("Connecting…");
     expect(terminal.write).not.toHaveBeenCalledWith("STALE");
     expect(showToast).not.toHaveBeenCalledWith("Watchdog terminal connection failed", "error");
 

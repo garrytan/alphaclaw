@@ -98,13 +98,13 @@ describe("frontend/api-feature-panel save failure", () => {
     )[0].props;
     expect(saving.busy).toBe(true);
     expect(saving.disabled).toBe(true);
-    expect(saving.label).toBe("Saving...");
+    expect(saving.label).toBe("Saving…");
 
     const unhydrated = findAllByType(
       render({ openAiCompatApi: { enabled: false } }),
       ToggleSwitch,
     )[0].props;
     expect(unhydrated.disabled).toBe(true);
-    expect(unhydrated.label).toBe("Loading...");
+    expect(unhydrated.label).toBe("Loading…");
   });
 });

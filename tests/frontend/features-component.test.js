@@ -84,7 +84,7 @@ describe("frontend/features card", () => {
     const tree = renderFeatures();
     expect(collectText(tree).join(" ")).toContain("Features");
     const regionText = visibleRegionText(tree);
-    expect(regionText).toContain("Loading feature status...");
+    expect(regionText).toContain("Loading feature status…");
     expect(regionText).not.toContain("Disabled");
   });
 
@@ -117,7 +117,7 @@ describe("frontend/features card", () => {
     const regionText = visibleRegionText(tree);
     expect(regionText).toContain("Disabled");
     expect(regionText).toContain("Add provider");
-    expect(regionText).not.toContain("Loading feature status...");
+    expect(regionText).not.toContain("Loading feature status…");
   });
 
   it("keeps last-known-good badges when a later refresh fails", () => {
