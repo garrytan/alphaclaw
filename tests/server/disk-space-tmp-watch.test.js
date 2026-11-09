@@ -370,6 +370,168 @@ describe("/tmp watch", () => {
     expect(h.messages()).toHaveLength(2);
   });
 
+  it("deletes OpenClaw's decompressed archive copies first, never moves them, and keeps one a process has open", async () => {
+    const h = harness();
+    const cache = path.join(h.root, "openclaw", "session-archive-read-cache");
+    const older = writeFile(path.join(cache, `${"a".repeat(32)}-1-1.jsonl`), 1.5, kHourMs);
+    const newer = writeFile(path.join(cache, `${"b".repeat(32)}-1-1.jsonl`), 1.5, 60_000);
+    const reading = writeFile(path.join(cache, `${"c".repeat(32)}-1-1.jsonl`), 1, 30_000);
+    const job = writeFile(path.join(h.root, "job.bin"), 1, 5 * kHourMs);
+    writeFile(path.join(h.root, "openclaw", "openclaw.json.bak"), 0.2, 5 * kHourMs);
+    await holdOpen(h, [reading]);
+    await h.watch.tick();
+    expect(fs.existsSync(older)).toBe(false);
+    expect(fs.existsSync(newer)).toBe(false);
+    expect(fs.existsSync(reading)).toBe(true);
+    expect(fs.existsSync(job)).toBe(true);
+    expect(fs.existsSync(path.join(h.root, "openclaw", "openclaw.json.bak"))).toBe(true);
+    expect(fs.readdirSync(h.dataTmp)).toEqual([]);
+    const cleared = h.events().find((event) => event.details.kind === "tmp_cache_cleared");
+    expect(cleared.details).toMatchObject({ entry: cache, files: 2, bytes: 3 * kMiB });
+    expect(h.kinds()).not.toContain("tmp_evicted");
+    expect(h.messages()[1]).toContain("🧹 Freed 3 MB in /tmp before it reached the limit");
+    expect(h.messages()[1]).toContain("• deleted 2 decompressed session-archive copies (3 MB) from `" + cache + "`; OpenClaw remakes any it reads again");
+  });
+
+  it("keeps an archive copy OpenClaw is still writing or wrote seconds ago", async () => {
+    const h = harness();
+    const cache = path.join(h.root, "openclaw", "session-archive-read-cache");
+    const old = writeFile(path.join(cache, `${"a".repeat(32)}-1-1.jsonl`), 1.5, kHourMs);
+    const writing = writeFile(path.join(cache, `${"b".repeat(32)}-1-1.jsonl.4242.0d5a1f3c-9a1b-4c2d-8e3f-1234567890ab.tmp`), 1.5, kHourMs);
+    const fresh = writeFile(path.join(cache, `${"c".repeat(32)}-1-1.jsonl`), 1.5, 1_000);
+    writeFile(path.join(h.root, "job.bin"), 1, 5 * kHourMs);
+    await h.watch.tick();
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(writing)).toBe(true);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it("leaves the archive read cache alone once it is a symlink to the data volume", async () => {
+    const h = harness();
+    const elsewhere = path.join(h.dataTmp, "openclaw-archive-read-cache");
+    writeFile(path.join(elsewhere, "copy.jsonl"), 1, kHourMs);
+    fs.mkdirSync(path.join(h.root, "openclaw"), { recursive: true });
+    fs.symlinkSync(elsewhere, path.join(h.root, "openclaw", "session-archive-read-cache"));
+    writeFile(path.join(h.root, "victim.bin"), 5.5, kHourMs);
+    await h.watch.tick();
+    expect(fs.existsSync(path.join(elsewhere, "copy.jsonl"))).toBe(true);
+    expect(h.kinds()).not.toContain("tmp_cache_cleared");
+    expect(fs.existsSync(path.join(h.root, "victim.bin"))).toBe(false);
+  });
+
+  it("acts on growth before the eviction line and samples a du-sized /tmp every 2 s while growth would cross the alert line", async () => {
+    let nowMs = Date.parse("2026-11-09T08:50:00Z");
+    const h = harness({
+      overrides: {
+        readStatfs: () => ({ ownMount: false, sizeBytes: 0, usedBytes: 0 }),
+        nowFn: () => nowMs,
+      },
+    });
+    writeFile(path.join(h.root, "a.bin"), 1, 3 * kHourMs);
+    await h.watch.tick();
+    expect(h.watch.getSnapshot()).toMatchObject({ source: "du", fastSampling: false });
+
+    nowMs += 30_000;
+    writeFile(path.join(h.root, "b.bin"), 1.5, 2 * kHourMs);
+    await h.watch.tick();
+    expect(h.kinds()).toEqual([]);
+    expect(h.watch.getSnapshot()).toMatchObject({ fastSampling: true });
+
+    nowMs += 2_000;
+    const writing = writeFile(path.join(h.root, "c.bin"), 1.4);
+    await holdOpen(h, [writing]);
+    await h.watch.tick();
+    const snapshot = h.watch.getSnapshot();
+    expect(snapshot.usedBytes).toBeLessThan(5 * kMiB);
+    expect(snapshot.projectedBytes).toBeGreaterThanOrEqual(5 * kMiB);
+    expect(h.kinds()[0]).toBe("tmp_high");
+    expect(h.events()[0].details.projectedBytes).toBe(snapshot.projectedBytes);
+    expect(h.events().filter((event) => event.details.kind === "tmp_evicted").map((event) => path.basename(event.details.entry))).toEqual(["a.bin", "b.bin"]);
+    expect(fs.existsSync(writing)).toBe(true);
+  });
+
+  it("projects nothing from two samples taken moments apart", async () => {
+    const h = harness();
+    writeFile(path.join(h.root, "a.bin"), 1, kHourMs);
+    await h.watch.tick();
+    writeFile(path.join(h.root, "b.bin"), 1.8, kHourMs);
+    await h.watch.tick();
+    expect(h.watch.getSnapshot().projectedBytes).toBe(h.watch.getSnapshot().usedBytes);
+    expect(h.kinds()).toEqual([]);
+  });
+
+  it("goes back to 30 s sampling once an eviction pass leaves a du-sized /tmp over the alert line, so a /tmp stuck full is not walked every 2 s", async () => {
+    let nowMs = Date.parse("2026-11-09T08:50:00Z");
+    const h = harness({
+      overrides: {
+        readStatfs: () => ({ ownMount: false, sizeBytes: 0, usedBytes: 0 }),
+        nowFn: () => nowMs,
+      },
+    });
+    writeFile(path.join(h.root, "openclaw", "stuck.bin"), 5.5, kHourMs);
+    await h.watch.tick();
+    expect(h.kinds()).toEqual(["tmp_high", "tmp_evict_skipped"]);
+    expect(h.watch.getSnapshot()).toMatchObject({ source: "du", fastSampling: false });
+    nowMs += 30_000;
+    await h.watch.tick();
+    expect(h.watch.getSnapshot().fastSampling).toBe(false);
+  });
+
+  it("keeps 2 s sampling while the projection is over the alert line but under the eviction line, and evicts once it crosses", async () => {
+    let nowMs = Date.parse("2026-11-09T08:50:00Z");
+    const h = harness({
+      overrides: {
+        readStatfs: () => ({ ownMount: false, sizeBytes: 0, usedBytes: 0 }),
+        nowFn: () => nowMs,
+      },
+    });
+    writeFile(path.join(h.root, "a.bin"), 1, 3 * kHourMs);
+    await h.watch.tick();
+    nowMs += 30_000;
+    writeFile(path.join(h.root, "b.bin"), 2.5, 2 * kHourMs);
+    await h.watch.tick();
+    const between = h.watch.getSnapshot();
+    expect(between.projectedBytes).toBeGreaterThanOrEqual(3 * kMiB);
+    expect(between.projectedBytes).toBeLessThan(5 * kMiB);
+    expect(between.fastSampling).toBe(true);
+    nowMs += 2_000;
+    writeFile(path.join(h.root, "c.bin"), 1.6, kHourMs);
+    await h.watch.tick();
+    expect(h.kinds()).toContain("tmp_evicted");
+  });
+
+  it("projects nothing from a du walk its budget cut short", async () => {
+    const { measureTmpEntries } = loadTmpWatch();
+    let nowMs = Date.parse("2026-11-09T08:50:00Z");
+    let walks = 0;
+    const h = harness({
+      overrides: {
+        readStatfs: () => ({ ownMount: false, sizeBytes: 0, usedBytes: 0 }),
+        nowFn: () => nowMs,
+        measure: (target) => measureTmpEntries(target, { maxEntries: walks++ === 0 ? 1 : 200_000 }),
+      },
+    });
+    writeFile(path.join(h.root, "a.bin"), 1, kHourMs);
+    writeFile(path.join(h.root, "b.bin"), 1.5, kHourMs);
+    await h.watch.tick();
+    nowMs += 30_000;
+    await h.watch.tick();
+    const snapshot = h.watch.getSnapshot();
+    expect(snapshot.projectedBytes).toBe(snapshot.usedBytes);
+    expect(snapshot.fastSampling).toBe(false);
+  });
+
+  it.skipIf(!process.getuid)("deletes archive copies from OpenClaw's fallback root /tmp/openclaw-<uid> first too", async () => {
+    const h = harness();
+    const cache = path.join(h.root, `openclaw-${process.getuid()}`, "session-archive-read-cache");
+    const copy = writeFile(path.join(cache, `${"d".repeat(32)}-1-1.jsonl`), 3, kHourMs);
+    const job = writeFile(path.join(h.root, "job.bin"), 2.5, 5 * kHourMs);
+    await h.watch.tick();
+    expect(fs.existsSync(copy)).toBe(false);
+    expect(fs.existsSync(job)).toBe(true);
+    expect(h.events().find((event) => event.details.kind === "tmp_cache_cleared").details).toMatchObject({ entry: cache, files: 1 });
+  });
+
   it("off Render it alerts but evicts nothing", async () => {
     const h = harness({ env: {} });
     writeFile(path.join(h.root, "a.bin"), 3, 3 * kHourMs);
