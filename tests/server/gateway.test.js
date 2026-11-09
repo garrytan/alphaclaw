@@ -16,7 +16,9 @@ const {
   kDefaultGatewayPort,
   kOnboardingMarkerPath,
   OPENCLAW_DIR,
+  PORT,
 } = require("../../lib/server/constants");
+const { applySecretDropCommandEntry, buildSecretDropCommandEntry } = require("../../lib/server/secret-drop/command-entry");
 const {
   kDefaultOpenclawCompileCacheDir,
 } = require("../../lib/server/openclaw-runtime-env");
@@ -856,12 +858,16 @@ describe("server/gateway restart behavior", () => {
   };
   // A config every other managed key already satisfies, so `changed` below
   // is decided by controlUi.basePath alone.
-  const convergedConfig = (controlUi) => ({
-    gateway: {
-      trustedProxies: ["127.0.0.1"],
-      controlUi: { allowedOrigins: [kSetupOrigin], ...controlUi },
-    },
-  });
+  const convergedConfig = (controlUi) => {
+    const cfg = {
+      gateway: {
+        trustedProxies: ["127.0.0.1"],
+        controlUi: { allowedOrigins: [kSetupOrigin], ...controlUi },
+      },
+    };
+    applySecretDropCommandEntry(cfg, buildSecretDropCommandEntry({ openclawDir: OPENCLAW_DIR, port: PORT }), { log: () => {} });
+    return cfg;
+  };
 
   it("leaves an already-canonical controlUi.basePath alone: no change, no write", () => {
     const io = setupControlUiConfigIo(convergedConfig({ basePath: "/openclaw" }));
@@ -1123,6 +1129,61 @@ describe("server/gateway restart behavior", () => {
             const io = setupConfigIo({ gateway: {}, mcp: { servers: { relay: mine } } });
             io.gateway.ensureGatewayProxyConfig(undefined);
             expect(io.getConfig().mcp.servers.relay).toEqual(mine);
+          }),
+        ));
+    });
+
+    describe("the /secret command plugin entry", () => {
+      const withSecretDropCommand = (value, fn) => {
+        const previous = process.env.ALPHACLAW_SECRET_DROP_COMMAND;
+        if (value === undefined) delete process.env.ALPHACLAW_SECRET_DROP_COMMAND;
+        else process.env.ALPHACLAW_SECRET_DROP_COMMAND = value;
+        try {
+          return fn();
+        } finally {
+          if (previous === undefined) delete process.env.ALPHACLAW_SECRET_DROP_COMMAND;
+          else process.env.ALPHACLAW_SECRET_DROP_COMMAND = previous;
+        }
+      };
+      const noRemote = { REMOTE_MCP_URL: undefined, REMOTE_MCP_API_TOKEN: undefined };
+
+      it("writes the owner-marked entry with only the state dir and port, and does not rewrite openclaw.json when nothing changed", () =>
+        withSecretDropCommand(undefined, () =>
+          withEnv(noRemote, () => {
+            const io = setupConfigIo({ gateway: {} });
+            expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(true);
+            const { plugins } = io.getConfig();
+            expect(plugins.entries["secret-drop"]).toEqual({ enabled: true, config: { _alphaclawManaged: "secret-drop", openclawDir: OPENCLAW_DIR, port: PORT } });
+            expect(plugins.allow).toContain("secret-drop");
+            expect(plugins.load.paths).toEqual([expect.stringMatching(/lib[\\/]plugin[\\/]secret-drop$/)]);
+            expect(io.configWrite).toHaveBeenCalledTimes(1);
+            expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(false);
+            expect(io.configWrite).toHaveBeenCalledTimes(1);
+          }),
+        ));
+
+      it("ALPHACLAW_SECRET_DROP_COMMAND=off removes the entry", () => {
+        let io;
+        withSecretDropCommand(undefined, () => withEnv(noRemote, () => {
+          io = setupConfigIo({ gateway: {}, plugins: { allow: ["usage-tracker"], entries: {} } });
+          io.gateway.ensureGatewayProxyConfig(undefined);
+        }));
+        withSecretDropCommand("off", () => withEnv(noRemote, () => {
+          expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(true);
+          expect(io.getConfig().plugins.entries["secret-drop"]).toBeUndefined();
+          expect(io.getConfig().plugins.allow).toEqual(["usage-tracker"]);
+          expect(io.getConfig().plugins.load.paths).toEqual([]);
+        }));
+      });
+
+      it("never touches a plugins.entries[\"secret-drop\"] someone else owns", () =>
+        withSecretDropCommand(undefined, () =>
+          withEnv(noRemote, () => {
+            const mine = { enabled: false, config: { note: "mine" } };
+            const io = setupConfigIo({ gateway: {}, plugins: { entries: { "secret-drop": mine } } });
+            io.gateway.ensureGatewayProxyConfig(undefined);
+            expect(io.getConfig().plugins.entries["secret-drop"]).toEqual(mine);
+            expect(io.getConfig().plugins.allow || []).not.toContain("secret-drop");
           }),
         ));
     });

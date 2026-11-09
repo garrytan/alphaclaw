@@ -28,7 +28,7 @@
     },
     "leg2": {
       "browser": false,
-      "budgetSeconds": 1213,
+      "budgetSeconds": 1248,
       "files": [
         "tests/live/agent-delete.e2e.test.js",
         "tests/live/boot-native-maintenance-once.e2e.test.js",
@@ -42,6 +42,7 @@
         "tests/live/particle-provider.e2e.test.js",
         "tests/live/particle-real-api.e2e.test.js",
         "tests/live/proxy-a2a.e2e.test.js",
+        "tests/live/secret-drop-command.e2e.test.js",
         "tests/live/secret-drop-store.e2e.test.js"
       ],
       "maxTestTimeoutSeconds": 3900,
