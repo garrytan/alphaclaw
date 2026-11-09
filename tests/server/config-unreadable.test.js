@@ -67,6 +67,24 @@ describe("utils/config-unreadable (fail-closed refusal vocabulary, PR 7)", () =>
     );
   });
 
+  it("a newer auth schema is a 409 that says nothing was saved, with a README link", () => {
+    const error = Object.assign(new Error("uses schema 23; this AlphaClaw reads schemas 12-22."), {
+      code: "AUTH_STORE_UNREADABLE",
+      reason: "unsupported_schema",
+      userVersion: 23,
+      supportedSchemas: { min: 12, max: 22 },
+    });
+    const res = makeRes();
+    expect(sendIfConfigUnreadable(res, error)).toBe(true);
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toMatchObject({
+      reason: "unsupported_schema",
+      hint: "Nothing was saved. After updating AlphaClaw, make this change again.",
+      docsUrl: "https://github.com/garrytan/alphaclaw#openclaw-version",
+      error: "uses schema 23; this AlphaClaw reads schemas 12-22. Nothing was saved. After updating AlphaClaw, make this change again.",
+    });
+  });
+
   it("describes SQLite auth failures without instructing operators to edit the database as JSON", () => {
     const body = configUnreadableEnvelope({ code: "AUTH_STORE_UNREADABLE", filePath: "/state/openclaw.sqlite" });
     expect(body).toMatchObject({ code: "config_unreadable", sourceCode: "AUTH_STORE_UNREADABLE", file: "openclaw.sqlite" });

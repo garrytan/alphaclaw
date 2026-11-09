@@ -141,7 +141,7 @@ describe("relay delegates: the guard's tiers", () => {
     box = makeBox();
     box.message();
     register();
-    for (const toolName of ["exec", "process", "read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "sessions_list", "tool_search", "tool_call", "EXEC"]) {
+    for (const toolName of ["exec", "process", "read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "sessions_list", "tool_search", "dispatch_action", "tool_call", "EXEC"]) {
       expect(call(toolName, { command: "gbrain put x" }), toolName).toEqual({});
     }
     for (const toolName of ["message", "sessions_history", "sessions_search", "sessions_send", "sessions_spawn", "subagents", "automations", "cron", "gateway", "plugins", "secrets", "ask_user", "nodes", "computer", "screen", "terminal", "browser", "openclaw", "skill_workshop", "personal_instructions", "github_publish", "relay__relay_send", "aside__click", "brand_new_tool"]) {
@@ -590,6 +590,24 @@ describe("relay delegates: the bridge", () => {
         { role: "assistant", content: [{ type: "text", text: "Sent." }] },
       ]);
       expect(ctx.notices.map((notice) => notice.opts.id)).toContain("relay-approved-send-" + wrapped);
+      const dispatched = ctx.engine.dm(kAgent, "and once more", { relay_approval: kApproval });
+      await ctx.tick();
+      await ctx.end(ctx.sends[2], [
+        { role: "assistant", content: [{ type: "toolCall", id: "d1", name: "dispatch_action", arguments: { id: "openclaw:core:message", args: { action: "send", target: "@lupe" } } }] },
+        { role: "toolResult", toolCallId: "d1", toolName: "dispatch_action", content: [{ type: "text", text: JSON.stringify({ tool: { id: "openclaw:core:message" }, result: { ok: true } }) }] },
+        { role: "assistant", content: [{ type: "text", text: "Sent." }] },
+      ]);
+      expect(ctx.notices.map((notice) => notice.opts.id)).toContain("relay-approved-send-" + dispatched);
+      for (const [index, selector] of [{ toolId: "openclaw:core:message" }, { name: "message" }].entries()) {
+        const selected = ctx.engine.dm(kAgent, "and by selector " + index, { relay_approval: kApproval });
+        await ctx.tick();
+        await ctx.end(ctx.sends[3 + index], [
+          { role: "assistant", content: [{ type: "toolCall", id: "s" + index, name: "dispatch_action", arguments: { ...selector, args: { action: "send", target: "@lupe" } } }] },
+          { role: "toolResult", toolCallId: "s" + index, toolName: "dispatch_action", content: [{ type: "text", text: JSON.stringify({ tool: { id: "openclaw:core:message" }, result: { ok: true } }) }] },
+          { role: "assistant", content: [{ type: "text", text: "Sent." }] },
+        ]);
+        expect(ctx.notices.map((notice) => notice.opts.id)).toContain("relay-approved-send-" + selected);
+      }
     } finally {
       ctx.close();
     }

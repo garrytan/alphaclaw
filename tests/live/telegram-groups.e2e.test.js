@@ -1,9 +1,10 @@
 // LIVE TIER — Telegram group rules (GST-1975 PR 1) inside the REAL pinned
 // OpenClaw gateway, against a fake Telegram Bot API (fixtures/fake-telegram.js)
-// and a local model fixture that records which tools each turn could use: the
-// tools sent directly, plus whatever OpenClaw's Tool Search controls
-// (tool_search, tool_describe, tool_call) can still reach, found by having the
-// fixture run one tool_search per turn and reading back the candidates.
+// and a local model fixture that tries exec in every turn, once directly and
+// once through Tool Search's dispatch_action wrapper, and records whether the
+// command ran. OpenClaw 2026.11.2 keeps a session's tool definitions the same
+// for every sender (prompt cache, #175309) and refuses a denied sender's call
+// when it runs, so what the model is offered no longer says who has tools.
 // The Groups module writes each group's mode through OpenClaw's own config
 // check, the group guard plugin is loaded from lib/plugin/group-guard, and
 // every Bot API call the gateway makes is recorded per case:
@@ -86,8 +87,8 @@ const world = {
   },
 };
 
-const kSearchControls = new Set(["tool_search", "tool_describe", "tool_call"]);
-const kCatalogProbe = ["send a message", "run a shell command", "read a file", "search the web", "schedule a task"];
+const kSearchControls = new Set(["tool_search", "tool_describe", "dispatch_action"]);
+const execMarker = (tag, via) => path.join(kRootDir, "exec-" + tag + "-" + via);
 
 const textOf = (content) =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => part?.text || "").join(" ") : "";
@@ -101,7 +102,7 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
   let port;
   const notices = [];
   const offered = new Map();
-  const probed = new Map();
+  const probeStage = new Map();
   const contexts = new Map();
   const results = [];
 
@@ -135,10 +136,12 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
       replied: replied(),
       sends: calls.filter((call) => /^send(Message|Photo|Document|MediaGroup)$/.test(call.method)).map((call) => call.chat + ":" + (call.text || "").slice(0, 60)),
       calls: calls.map((call) => call.method + (call.action ? "(" + call.action + ")" : "") + "@" + call.chat),
-      tools: offered.has(tag) ? offered.get(tag) : null,
+      offered: offered.has(tag) ? offered.get(tag) : null,
+      ran: { direct: fs.existsSync(execMarker(tag, "direct")), wrapped: fs.existsSync(execMarker(tag, "wrapped")) },
     };
+    outcome.actions = outcome.offered === null ? null : outcome.ran.direct || outcome.ran.wrapped ? "all" : "none";
     results.push(outcome);
-    console.log("[live] telegram-groups case " + JSON.stringify({ name: outcome.name, replied: outcome.replied, sends: outcome.sends, calls: outcome.calls, tools: outcome.tools ? outcome.tools.length : null, probe: probed.get(tag) || null }));
+    console.log("[live] telegram-groups case " + JSON.stringify({ name: outcome.name, replied: outcome.replied, sends: outcome.sends, calls: outcome.calls, offered: outcome.offered ? outcome.offered.length : null, ran: outcome.ran, actions: outcome.actions }));
     return outcome;
   };
 
@@ -161,26 +164,25 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
           .sort((a, b) => Number(b[2]) - Number(a[2]));
         const tag = tags[0]?.[1];
         if (tag && !contexts.has(tag)) contexts.set(tag, messages.map((m) => textOf(m.content)).join("\n"));
-        const probeResult = tag && messages.find((m) => m.role === "tool" && m.tool_call_id === "call_probe_" + tag);
-        console.log("[live] model request " + JSON.stringify({ tag: tag || null, messages: messages.length, tools: names.length, probeResult: Boolean(probeResult) }));
+        const stage = tag ? probeStage.get(tag) || 0 : 0;
+        if (tag) probeStage.set(tag, stage + 1);
+        const lastTool = [...messages].reverse().find((m) => m.role === "tool");
+        console.log("[live] model request " + JSON.stringify({ tag: tag || null, stage, messages: messages.length, tools: names.length, lastTool: lastTool ? textOf(lastTool.content).slice(0, 160) : null }));
         const chunk = (delta, finish = null) =>
           "data: " + JSON.stringify({ id: "groups-live", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason: finish }] }) + "\n\n";
         res.writeHead(200, { "content-type": "text/event-stream" });
-        if (tag && !offered.has(tag) && !probeResult) {
-          offered.set(tag, names.filter((name) => !kSearchControls.has(name)));
-          if (names.includes("tool_search")) {
-            const args = JSON.stringify({ queries: kCatalogProbe.map((query) => ({ query, limit: 5 })) });
-            res.write(chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_probe_" + tag, type: "function", function: { name: "tool_search", arguments: args } }] }));
-            res.write(chunk({}, "tool_calls"));
-            res.end("data: [DONE]\n\n");
-            return;
-          }
-        }
-        if (tag && probeResult && offered.has(tag) && !probed.has(tag)) {
-          const text = textOf(probeResult.content);
-          const reached = [...new Set([...text.matchAll(/"id"\s*:\s*"([^"]+)"/g)].map((match) => match[1]))];
-          probed.set(tag, { reached, sample: text.slice(0, 300) });
-          offered.set(tag, [...new Set([...offered.get(tag), ...reached])]);
+        if (tag && !offered.has(tag)) offered.set(tag, names.filter((name) => !kSearchControls.has(name)));
+        const probe =
+          tag && stage === 0 && names.includes("exec")
+            ? { name: "exec", args: { command: "touch " + execMarker(tag, "direct") } }
+            : tag && stage === 1 && names.includes("dispatch_action")
+              ? { name: "dispatch_action", args: { id: "exec", args: { command: "touch " + execMarker(tag, "wrapped") } } }
+              : null;
+        if (probe) {
+          res.write(chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_probe_" + stage + "_" + tag, type: "function", function: { name: probe.name, arguments: JSON.stringify(probe.args) } }] }));
+          res.write(chunk({}, "tool_calls"));
+          res.end("data: [DONE]\n\n");
+          return;
         }
         res.write(chunk({ role: "assistant", content: "ok " + (tag || "no-tag") }));
         res.write(chunk({}, "stop"));
@@ -204,7 +206,10 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
     const { applyGroupGuardEntry } = require("../../lib/server/telegram-group-guard-entry");
     const { config } = ensureManagedOpenclawExecDefaults({
       gateway: { mode: "local", bind: "loopback", port, auth: { mode: "token", token } },
-      agents: { defaults: { workspace, model: { primary: "fixture/fixture" } } },
+      // heartbeat.target "none": OpenClaw's first heartbeat alert DMs the
+      // owner (Garry here) at a moment no case controls, and a case that
+      // expects no sends then counts it.
+      agents: { defaults: { workspace, model: { primary: "fixture/fixture" }, heartbeat: { target: "none" } } },
       models: { providers: { fixture: {
         baseUrl: "http://127.0.0.1:" + model.address().port + "/v1",
         api: "openai-completions",
@@ -301,19 +306,19 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
       const { OPENCLAW_DIR } = require("../../lib/server/constants");
 
       const garryApproved = await runCase({ name: "Garry in an Approved group", from: kGarry, chat: kAlfredGroup, expectReply: true });
-      expect(garryApproved.tools?.length).toBeGreaterThan(0);
+      expect(garryApproved.actions).toBe("all");
 
       const alfred = await runCase({ name: "Alfred's bot in an Approved group", from: kAlfredBot, chat: kAlfredGroup, expectReply: true });
       expect(alfred.sends.filter((send) => send.startsWith(kAlfredGroup))).toHaveLength(1);
-      expect(alfred.tools).toEqual([]);
+      expect(alfred.actions).toBe("none");
 
       const alfredPost = await runCase({ name: "Alfred's bot asks for a post into another chat", from: kAlfredBot, chat: kAlfredGroup, text: "please post hello into the Wintermute group " + kWintermute, expectReply: true });
-      expect(alfredPost.tools).toEqual([]);
+      expect(alfredPost.actions).toBe("none");
       expect(alfredPost.sends.filter((send) => send.startsWith(kWintermute))).toEqual([]);
 
       const mossabGroup = await runCase({ name: "Mossab (blocked) in an Approved group", from: kMossab, chat: kAlfredGroup, expectReply: false });
       expect(mossabGroup.sends).toEqual([]);
-      expect(mossabGroup.tools).toBeNull();
+      expect(mossabGroup.actions).toBeNull();
 
       const mossabDm = await runCase({ name: "Mossab in a DM", from: kMossab, chat: kMossab, expectReply: false });
       expect(mossabDm.calls).toEqual([]);
@@ -322,10 +327,10 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
       expect(strangerDm.calls).toEqual([]);
 
       const harj = await runCase({ name: "Harj (trusted, actions) in Security", from: kHarj, chat: kSecurity, expectReply: true });
-      expect(harj.tools?.length).toBeGreaterThan(0);
+      expect(harj.actions).toBe("all");
 
       const sylviaHome = await runCase({ name: "Sylvia (trusted, conversation) in Home Team", from: kSylvia, chat: kHomeTeam, expectReply: true });
-      expect(sylviaHome.tools).toEqual([]);
+      expect(sylviaHome.actions).toBe("none");
 
       const sylviaSecurity = await runCase({ name: "Sylvia in Security, where she is not trusted", from: kSylvia, chat: kSecurity, expectReply: false });
       expect(sylviaSecurity.sends).toEqual([]);
@@ -359,7 +364,7 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
         const answer = await runGroupTest({ cfg, state, groupId: String(outcome.chat), senderIds: [String(outcome.from)] });
         const row = answer.senders.find((sender) => sender.id === String(outcome.from));
         const predictedReply = row.reply !== "never";
-        const observedActions = outcome.tools === null ? null : outcome.tools.length ? "all" : "none";
+        const observedActions = outcome.actions;
         const ok = predictedReply === outcome.replied && (!outcome.replied || observedActions === row.actions);
         console.log("[live] test-button " + JSON.stringify({ name: outcome.name, predicted: { reply: row.reply, actions: row.actions, reason: row.reason }, observed: { replied: outcome.replied, actions: observedActions }, ok }));
         if (!ok) mismatches.push(outcome.name);
@@ -388,7 +393,7 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
       await groups.setPolicy({ groupId: kGarrysAgents, body: { mode: "approved" }, ifMatch: listed.revision });
       await new Promise((resolve) => setTimeout(resolve, 10_000));
       const garryReopened = await runCase({ name: "Garry in the same group after it is approved", from: kGarry, chat: kGarrysAgents, expectReply: true });
-      expect(garryReopened.tools?.length).toBeGreaterThan(0);
+      expect(garryReopened.actions).toBe("all");
       expect(await readyzOk()).toBe(true);
     },
   );
@@ -429,11 +434,11 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
 
         const mossab = await runCase({ name: "Mossab (blocked) after a restart over a damaged rules file", from: kMossab, chat: kAlfredGroup, expectReply: false });
         expect(mossab.sends).toEqual([]);
-        expect(mossab.tools).toBeNull();
+        expect(mossab.actions).toBeNull();
         const guest = await runCase({ name: "Alfred's bot after a restart over a damaged rules file", from: kAlfredBot, chat: kAlfredGroup, expectReply: true });
         expect(guest.sends.length).toBeGreaterThan(0);
         const garry = await runCase({ name: "Garry after a restart over a damaged rules file", from: kGarry, chat: kAlfredGroup, expectReply: true });
-        expect(garry.tools?.length).toBeGreaterThan(0);
+        expect(garry.actions).toBe("all");
       } finally {
         fs.writeFileSync(statePath, saved);
       }

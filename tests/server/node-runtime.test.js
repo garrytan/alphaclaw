@@ -208,11 +208,24 @@ describe("node-runtime — the floor, the pin and the image move together (v0.9.
   const path = require("node:path");
   const repoRoot = path.join(__dirname, "..", "..");
 
-  it("equals the pinned OpenClaw's own engines.node — not a hand-typed lookalike", () => {
-    // AlphaClaw cannot run a gateway its own runtime cannot; when upstream
-    // moves its floor the pin bump must move this string (and the image).
+  it("stays inside the pinned OpenClaw's own engines.node", () => {
+    // AlphaClaw cannot run a gateway its own runtime cannot, so every Node it
+    // accepts must satisfy the pin. The floor may sit above the pin's:
+    // 2026.10.10 relaxed to 24.16 / 26.1 and AlphaClaw keeps the October 2026
+    // security releases (24.22.1 / 26.12.1).
     const openclawEngines = require(path.join(repoRoot, "node_modules", "openclaw", "package.json")).engines.node;
-    expect(kAlphaclawNodeEngines).toBe(openclawEngines);
+    let accepted = 0;
+    for (let major = 18; major <= 32; major += 1) {
+      for (let minor = 0; minor <= 40; minor += 1) {
+        for (let patch = 0; patch <= 3; patch += 1) {
+          const version = `${major}.${minor}.${patch}`;
+          if (!satisfiesEngines(kAlphaclawNodeEngines, version)) continue;
+          accepted += 1;
+          expect(satisfiesEngines(openclawEngines, version), `${version} vs ${openclawEngines}`).toBe(true);
+        }
+      }
+    }
+    expect(accepted).toBeGreaterThan(0);
   });
 
   it("the Dockerfile base image (and README's copy of it) runs a Node line inside the range", () => {

@@ -77,7 +77,7 @@ describe("server/model-catalog-cache coverage", () => {
     const logger = { error: vi.fn(), warn: vi.fn() };
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd: async () => "{}",
+      execFileCmd: async () => "{}",
       logger,
       setTimeoutFn: vi.fn(() => ({})),
       clearTimeoutFn: vi.fn(),
@@ -96,7 +96,7 @@ describe("server/model-catalog-cache coverage", () => {
     const cachePath = makeTempCachePath();
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd: async () => "{}",
+      execFileCmd: async () => "{}",
       parseJsonFromNoisyOutput: () => ({ models: [{ key: "openai/gpt" }] }),
       readOpenclawVersion: () => {
         throw new Error("no version");
@@ -127,7 +127,7 @@ describe("server/model-catalog-cache coverage", () => {
     const clearTimeoutFn = vi.fn();
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd: async () => {
+      execFileCmd: async () => {
         throw new Error("refresh failed");
       },
       readOpenclawVersion: () => "1.0.0",
@@ -148,10 +148,10 @@ describe("server/model-catalog-cache coverage", () => {
 
   it("treats shouldStartDynamicRefresh failures as not-onboarded", async () => {
     const cachePath = makeTempCachePath();
-    const shellCmd = vi.fn();
+    const execFileCmd = vi.fn();
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       shouldStartDynamicRefresh: () => {
         throw new Error("boom");
       },
@@ -161,7 +161,7 @@ describe("server/model-catalog-cache coverage", () => {
 
     expect(response.source).toBe("bootstrap");
     expect(response.refreshing).toBe(false);
-    expect(shellCmd).not.toHaveBeenCalled();
+    expect(execFileCmd).not.toHaveBeenCalled();
   });
 
   it("skips retry scheduling when onboarding turns off mid-refresh and backs off later requests", async () => {
@@ -171,7 +171,7 @@ describe("server/model-catalog-cache coverage", () => {
     const clearTimeoutFn = vi.fn();
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd: async () => {
+      execFileCmd: async () => {
         throw new Error("refresh failed");
       },
       shouldStartDynamicRefresh: () => canStart,

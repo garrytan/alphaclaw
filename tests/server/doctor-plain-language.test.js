@@ -19,6 +19,10 @@ describe("doctor-plain-language", () => {
     expect(describeCaptureCause(cause)).toMatchObject({ rule, path: failingPath });
   });
 
+  it("names the leftover session .jsonl stop", () => {
+    expect(describeDoctorFailure({ reason: "session_jsonl_pending" })).toMatch(/old \.jsonl transcript files under agents\/<id>\/sessions\//);
+  });
+
   it("never turns unknown upstream text into the headline", () => {
     expect(describeCaptureCause("weird new failure <script>")).toEqual({
       rule: null,

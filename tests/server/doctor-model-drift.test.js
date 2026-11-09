@@ -1174,9 +1174,9 @@ describe("server/doctor/model-drift catalog fallback", () => {
 describe("server/model-catalog-cache peekCatalog", () => {
   it("serves the bundled fallback exec-free with an honest source", () => {
     const { createModelCatalogCache } = require("../../lib/server/model-catalog-cache");
-    const shellCmd = vi.fn();
+    const execFileCmd = vi.fn();
     const cache = createModelCatalogCache({
-      shellCmd,
+      execFileCmd,
       gatewayEnv: () => ({}),
       parseJsonFromNoisyOutput: () => null,
       normalizeOnboardingModels: (models) => models,
@@ -1193,7 +1193,7 @@ describe("server/model-catalog-cache peekCatalog", () => {
     expect(peeked.models).toEqual([
       { key: "anthropic/claude-opus-5", provider: "anthropic", label: "Claude Opus 5" },
     ]);
-    expect(shellCmd).not.toHaveBeenCalled();
+    expect(execFileCmd).not.toHaveBeenCalled();
   });
 
   it("reports a disk-loaded catalog as stale ('cache'), still exec-free", () => {
@@ -1215,9 +1215,9 @@ describe("server/model-catalog-cache peekCatalog", () => {
       }),
       "utf8",
     );
-    const shellCmd = vi.fn();
+    const execFileCmd = vi.fn();
     const cache = createModelCatalogCache({
-      shellCmd,
+      execFileCmd,
       gatewayEnv: () => ({}),
       parseJsonFromNoisyOutput: () => null,
       normalizeOnboardingModels: (models) => models,
@@ -1229,6 +1229,6 @@ describe("server/model-catalog-cache peekCatalog", () => {
     const peeked = cache.peekCatalog();
     expect(peeked.source).toBe("cache");
     expect(peeked.models).toHaveLength(1);
-    expect(shellCmd).not.toHaveBeenCalled();
+    expect(execFileCmd).not.toHaveBeenCalled();
   });
 });

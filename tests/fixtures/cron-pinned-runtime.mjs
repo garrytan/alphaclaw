@@ -3,8 +3,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const dist = path.resolve("node_modules/openclaw/dist");
-const loadExport = async (prefix, symbol) => {
-  for (const name of fs.readdirSync(dist).filter((name) => name.startsWith(prefix) && name.endsWith(".mjs"))) {
+const loadExport = async (prefixes, symbol) => {
+  const names = fs.readdirSync(dist).filter((name) => name.endsWith(".mjs"));
+  for (const name of [].concat(prefixes).flatMap((prefix) => names.filter((name) => name.startsWith(prefix)))) {
     const source = fs.readFileSync(path.join(dist, name), "utf8");
     const match = source.match(new RegExp(`\\b${symbol} as ([\\w$]+)[, }]`));
     if (match) return (await import(pathToFileURL(path.join(dist, name))))[match[1]];
@@ -18,7 +19,8 @@ const GatewayScheduler = await loadExport("gateway-scheduler-", "GatewaySchedule
 // 2026.9.7 retired the Tasks-era readCronTaskRunHistoryPage; the gateway's
 // cron.runs handler now reads records and projects the page in two steps.
 const readCronRunRecords = await loadExport("read-only-", "readCronRunRecords");
-const projectCronRunHistoryPage = await loadExport("jobs-", "projectCronRunHistoryPage");
+// 2026.10.10 moved it from jobs-*.mjs to run-history-*.mjs.
+const projectCronRunHistoryPage = await loadExport(["run-history-", "jobs-"], "projectCronRunHistoryPage");
 const root = process.env.OPENCLAW_STATE_DIR;
 const storePath = path.join(root, "cron", "jobs.json");
 const events = [];

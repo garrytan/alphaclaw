@@ -62,11 +62,17 @@ describeLive("live: pinned gateway memory instrumentation", () => {
         await delay(100);
       }
       expect(telemetry?.status, tail).toBe("fresh");
-      expect(workerPid).not.toBe(child.pid);
       expect(telemetry.records.at(-1).heapUsedBytes).toBeGreaterThan(0);
       expect(telemetry.records.at(-1).heapLimitBytes).toBeGreaterThan(telemetry.records.at(-1).heapUsedBytes);
-      const launcherIdentity = getProcessIdentity(child.pid);
-      expect(readGatewayTelemetry({ identity: launcherIdentity, stateDir }).status).toBe("unavailable");
+      // 2026.10.10's launcher execs the gateway in place where Node offers
+      // execve, so the telemetry belongs to the launcher pid; elsewhere the
+      // respawned worker owns it and the launcher has none.
+      if (process.platform !== "win32" && typeof process.execve === "function") {
+        expect(workerPid).toBe(child.pid);
+      } else {
+        expect(workerPid).not.toBe(child.pid);
+        expect(readGatewayTelemetry({ identity: getProcessIdentity(child.pid), stateDir }).status).toBe("unavailable");
+      }
     } finally {
       try { child.kill("SIGTERM"); } catch {}
       await Promise.race([exit, delay(5000)]);

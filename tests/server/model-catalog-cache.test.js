@@ -135,7 +135,7 @@ describe("server/model-catalog-cache", () => {
     });
 
     let resolveShell;
-    const shellCmd = vi.fn(
+    const execFileCmd = vi.fn(
       () =>
         new Promise((resolve) => {
           resolveShell = resolve;
@@ -146,7 +146,7 @@ describe("server/model-catalog-cache", () => {
     }));
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       gatewayEnv: () => ({ OPENCLAW_GATEWAY_TOKEN: "token" }),
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
@@ -167,7 +167,7 @@ describe("server/model-catalog-cache", () => {
     expect(second.source).toBe("cache");
     expect(second.refreshing).toBe(true);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     resolveShell("{}");
     await flushPromises();
@@ -195,7 +195,7 @@ describe("server/model-catalog-cache", () => {
     const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
 
     let resolveShell;
-    const shellCmd = vi.fn(
+    const execFileCmd = vi.fn(
       () =>
         new Promise((resolve) => {
           resolveShell = resolve;
@@ -206,7 +206,7 @@ describe("server/model-catalog-cache", () => {
     }));
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
       readOpenclawVersion: vi.fn(() => "2026.4.15"),
@@ -226,7 +226,7 @@ describe("server/model-catalog-cache", () => {
     expect(repeated.source).toBe(kModelCatalogBootstrapSource);
     expect(repeated.refreshing).toBe(true);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     resolveShell("{}");
     await flushPromises();
@@ -249,10 +249,10 @@ describe("server/model-catalog-cache", () => {
       path.join(os.tmpdir(), "alphaclaw-model-catalog-bootstrap-only-"),
     );
     const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
-    const shellCmd = vi.fn().mockResolvedValue("{}");
+    const execFileCmd = vi.fn().mockResolvedValue("{}");
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       normalizeOnboardingModels: normalizeModels,
       shouldStartDynamicRefresh: () => false,
     });
@@ -269,7 +269,7 @@ describe("server/model-catalog-cache", () => {
       models: kFallbackOnboardingModels,
     });
     expect(repeated.refreshing).toBe(false);
-    expect(shellCmd).not.toHaveBeenCalled();
+    expect(execFileCmd).not.toHaveBeenCalled();
   });
 
   it("serves stale disk cache without refreshing when dynamic refresh is disabled", async () => {
@@ -282,10 +282,10 @@ describe("server/model-catalog-cache", () => {
       fetchedAt: 333,
       models: normalizeModels([{ key: "anthropic/claude-opus-4-7" }]),
     });
-    const shellCmd = vi.fn().mockResolvedValue("{}");
+    const execFileCmd = vi.fn().mockResolvedValue("{}");
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       normalizeOnboardingModels: normalizeModels,
       shouldStartDynamicRefresh: () => false,
     });
@@ -300,7 +300,7 @@ describe("server/model-catalog-cache", () => {
       refreshing: false,
       models: normalizeModels([{ key: "anthropic/claude-opus-4-7" }]),
     });
-    expect(shellCmd).not.toHaveBeenCalled();
+    expect(execFileCmd).not.toHaveBeenCalled();
   });
 
   it("marks a fresh memory cache stale when the openclaw version changes", async () => {
@@ -311,7 +311,7 @@ describe("server/model-catalog-cache", () => {
 
     let currentVersion = "2026.4.14";
     let resolveRefresh;
-    const shellCmd = vi
+    const execFileCmd = vi
       .fn()
       .mockResolvedValueOnce("{}")
       .mockImplementationOnce(
@@ -333,7 +333,7 @@ describe("server/model-catalog-cache", () => {
     );
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
       readOpenclawVersion,
@@ -376,7 +376,7 @@ describe("server/model-catalog-cache", () => {
       ]),
     });
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(2);
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
 
     resolveRefresh("{}");
     await flushPromises();
@@ -410,7 +410,7 @@ describe("server/model-catalog-cache", () => {
       models: normalizeModels([{ key: "openai/gpt-cached", label: "Cached" }]),
     });
 
-    const shellCmd = vi
+    const execFileCmd = vi
       .fn()
       .mockRejectedValueOnce(new Error("boom"))
       .mockResolvedValueOnce("{}");
@@ -419,7 +419,7 @@ describe("server/model-catalog-cache", () => {
     }));
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
       readOpenclawVersion: vi.fn(() => "2026.4.14"),
@@ -431,7 +431,7 @@ describe("server/model-catalog-cache", () => {
     expect(cached.source).toBe("cache");
     expect(cached.refreshing).toBe(true);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     await flushPromises();
 
@@ -447,11 +447,11 @@ describe("server/model-catalog-cache", () => {
 
     await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs - 1);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(1);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(2);
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
 
     const fresh = await cache.getCatalogResponse();
     expect(fresh).toEqual({
@@ -474,7 +474,7 @@ describe("server/model-catalog-cache", () => {
       'prefix\n{"models":[{"key":"anthropic/claude-opus-4-7","name":"Claude Opus 4.7"}]}\n';
     err.stderr =
       '[plugins] google failed to load from /app/node_modules/openclaw/dist/extensions/google/index.js';
-    const shellCmd = vi.fn().mockRejectedValue(err);
+    const execFileCmd = vi.fn().mockRejectedValue(err);
     const parseJsonFromNoisyOutput = vi.fn((raw) =>
       String(raw).includes('"models"')
         ? {
@@ -490,7 +490,7 @@ describe("server/model-catalog-cache", () => {
     const logger = { error: vi.fn(), warn: vi.fn() };
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
       readOpenclawVersion: vi.fn(() => "2026.4.24"),
@@ -531,7 +531,7 @@ describe("server/model-catalog-cache", () => {
       path.join(os.tmpdir(), "alphaclaw-model-catalog-fallback-"),
     );
     const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
-    const shellCmd = vi
+    const execFileCmd = vi
       .fn()
       .mockRejectedValueOnce(new Error("boom"))
       .mockResolvedValueOnce("{}");
@@ -540,7 +540,7 @@ describe("server/model-catalog-cache", () => {
     }));
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
       readOpenclawVersion: vi.fn(() => "2026.4.14"),
@@ -559,17 +559,17 @@ describe("server/model-catalog-cache", () => {
       models: kFallbackOnboardingModels,
     });
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     await flushPromises();
 
     await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs - 1);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(1);
     await flushPromises();
-    expect(shellCmd).toHaveBeenCalledTimes(2);
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
 
     const fresh = await cache.getCatalogResponse();
     expect(fresh).toEqual({
@@ -583,13 +583,150 @@ describe("server/model-catalog-cache", () => {
       ]),
     });
   });
+  it("never persists or serves as fresh the configured-only catalog the CLI lists without a gateway", async () => {
+    vi.useFakeTimers();
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-model-catalog-offline-"),
+    );
+    const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
+    const execFileCmd = vi.fn().mockResolvedValue("{}");
+    const parseJsonFromNoisyOutput = vi
+      .fn()
+      .mockReturnValueOnce({
+        models: [{ key: "custom/only-configured", name: "Only Configured" }],
+      })
+      .mockReturnValueOnce({
+        models: [{ key: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7" }],
+      });
+    const isGatewayRunning = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const cache = createModelCatalogCache({
+      cachePath,
+      execFileCmd,
+      parseJsonFromNoisyOutput,
+      normalizeOnboardingModels: normalizeModels,
+      readOpenclawVersion: vi.fn(() => "2026.10.10"),
+      isGatewayRunning,
+      setTimeoutFn: setTimeout,
+      clearTimeoutFn: clearTimeout,
+    });
+
+    await cache.getCatalogResponse();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+
+    const offline = await cache.getCatalogResponse();
+    expect(offline).toMatchObject({ source: "cache", stale: true, refreshing: true });
+    expect(offline.models).toEqual(
+      mergeCatalogModels(
+        normalizeModels([{ key: "custom/only-configured", name: "Only Configured" }]),
+        kFallbackOnboardingModels,
+      ),
+    );
+    expect(fs.existsSync(cachePath)).toBe(false);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
+
+    const fresh = await cache.getCatalogResponse();
+    expect(fresh).toMatchObject({ source: "openclaw", stale: false });
+    expect(fresh.models).toEqual(
+      normalizeModels([{ key: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7" }]),
+    );
+    expect(fs.existsSync(cachePath)).toBe(true);
+  });
+
+  it("treats the catalog as configured-only when the CLI says it found no gateway", async () => {
+    vi.useFakeTimers();
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "alphaclaw-model-catalog-cli-offline-"),
+    );
+    const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
+    const execFileCmd = vi
+      .fn()
+      .mockImplementationOnce(async (_file, _args, opts) => {
+        opts.onOutput("Gateway is not running. Showing the local model catalog.\n", "stderr");
+        return "{}";
+      })
+      .mockResolvedValueOnce("{}");
+    const parseJsonFromNoisyOutput = vi
+      .fn()
+      .mockReturnValueOnce({
+        models: [{ key: "custom/only-configured", name: "Only Configured" }],
+      })
+      .mockReturnValueOnce({
+        models: [{ key: "anthropic/claude-opus-4-7", name: "Claude Opus 4.7" }],
+      });
+    const cache = createModelCatalogCache({
+      cachePath,
+      execFileCmd,
+      parseJsonFromNoisyOutput,
+      normalizeOnboardingModels: normalizeModels,
+      readOpenclawVersion: vi.fn(() => "2026.11.2"),
+      isGatewayRunning: vi.fn(() => true),
+      setTimeoutFn: setTimeout,
+      clearTimeoutFn: clearTimeout,
+    });
+
+    await cache.getCatalogResponse();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    const offline = await cache.getCatalogResponse();
+    expect(offline).toMatchObject({ source: "cache", stale: true, refreshing: true });
+    expect(fs.existsSync(cachePath)).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
+    expect(await cache.getCatalogResponse()).toMatchObject({ source: "openclaw", stale: false });
+    expect(fs.existsSync(cachePath)).toBe(true);
+  });
+
+  it("waits for the gateway without re-running the CLI while the configured-only list is in memory", async () => {
+    vi.useFakeTimers();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-model-catalog-down-"));
+    const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
+    const execFileCmd = vi.fn().mockResolvedValue("{}");
+    const parseJsonFromNoisyOutput = vi.fn(() => ({ models: [{ key: "custom/only-configured", name: "Only Configured" }] }));
+    let gatewayUp = false;
+    const cache = createModelCatalogCache({
+      cachePath,
+      execFileCmd,
+      parseJsonFromNoisyOutput,
+      normalizeOnboardingModels: normalizeModels,
+      readOpenclawVersion: vi.fn(() => "2026.11.2"),
+      isGatewayRunning: vi.fn(async () => gatewayUp),
+      setTimeoutFn: setTimeout,
+      clearTimeoutFn: clearTimeout,
+    });
+
+    await cache.getCatalogResponse();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs * 3);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
+
+    gatewayUp = true;
+    await vi.advanceTimersByTimeAsync(kModelCatalogRefreshBackoffMs);
+    await flushPromises();
+    expect(execFileCmd).toHaveBeenCalledTimes(2);
+    expect(await cache.getCatalogResponse()).toMatchObject({ source: "openclaw", stale: false });
+  });
+
   it("forces a fresh catalog load when requested", async () => {
     const tempRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "alphaclaw-model-catalog-force-refresh-"),
     );
     const cachePath = path.join(tempRoot, "cache", "model-catalog.json");
     let resolveRefresh;
-    const shellCmd = vi
+    const execFileCmd = vi
       .fn()
       .mockResolvedValueOnce("{}")
       .mockImplementationOnce(
@@ -608,7 +745,7 @@ describe("server/model-catalog-cache", () => {
       });
     const cache = createModelCatalogCache({
       cachePath,
-      shellCmd,
+      execFileCmd,
       parseJsonFromNoisyOutput,
       normalizeOnboardingModels: normalizeModels,
       readOpenclawVersion: vi.fn(() => "2026.10.4"),
@@ -620,7 +757,7 @@ describe("server/model-catalog-cache", () => {
     expect(initial).toEqual(
       expect.objectContaining({ source: "openclaw", stale: false, refreshing: false }),
     );
-    expect(shellCmd).toHaveBeenCalledTimes(1);
+    expect(execFileCmd).toHaveBeenCalledTimes(1);
 
     const refreshing = await cache.getCatalogResponse({ forceRefresh: true });
     expect(refreshing).toEqual({
@@ -631,7 +768,7 @@ describe("server/model-catalog-cache", () => {
       refreshing: true,
       models: initial.models,
     });
-    await vi.waitFor(() => expect(shellCmd).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(execFileCmd).toHaveBeenCalledTimes(2));
 
     resolveRefresh("{}");
     await flushPromises();
