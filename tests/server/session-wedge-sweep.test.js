@@ -67,6 +67,36 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     ]);
   });
 
+  it("leaves alone a session whose restarted Doctor turn AlphaClaw stopped, and still resumes or reports a person's turn in another Doctor session", () => {
+    const stopped = "agent:main:doctor:7";
+    const person = "agent:main:doctor:8";
+    const wedgedPerson = "agent:main:doctor:9";
+    const { recoverable, wedged } = classifySessions({
+      rows: [row(stopped, { abortedLastRun: true }), row(person), row(wedgedPerson, { abortedLastRun: true })],
+      recorded: new Map([[stopped, {}], [person, {}], [wedgedPerson, {}]]),
+      launchAtMs: kLaunchAt,
+      nowMs: kLaunchAt + 120_000,
+      skip: (key) => key === stopped,
+    });
+    expect(recoverable.map(({ row: r }) => r.key)).toEqual([person]);
+    expect(wedged.map(({ row: r, reason }) => [r.key, reason])).toEqual([[wedgedPerson, kWedgeReasons.NOT_RESUMED]]);
+  });
+
+  it("never resumes or reports a session skipSession names when it sweeps", async () => {
+    const stopped = "agent:main:doctor:7";
+    const gateway = createGateway({
+      "sessions.list": async (params) => params.activeOnly
+        ? { body: { sessions: [row(stopped, { hasActiveRun: true }), row("a", { hasActiveRun: true })] } }
+        : { body: { sessions: [row(stopped, { abortedLastRun: true }), row("a")] } },
+      "sessions.recover": async ({ key }) => ({ body: { ok: true, key, continuation: { status: "started", runId: "r1" } } }),
+    });
+    const { sweep, notify } = createSweep(gateway, { skipSession: (key) => key === stopped });
+    await sweep.recordRunningSessions();
+    expect(await sweep.onGatewayLaunch({ generation: 3, startedAt: kLaunchAt })).toEqual({ recovered: ["a"], alerted: [] });
+    expect(gateway.calls.filter((c) => c.method === "sessions.recover").map((c) => c.params.key)).toEqual(["a"]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("records the sessions running when a restart is requested, through sessions.list activeOnly", async () => {
     const gateway = createGateway({
       "sessions.list": async () => ({ body: { sessions: [row("a", { hasActiveRun: true }), row("idle")] } }),

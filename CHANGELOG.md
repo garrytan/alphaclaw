@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.233] - 2026-11-09
+
+A Doctor run that a restart cut off no longer starts again on its own. OpenClaw's restart recovery restarts an interrupted turn on the next gateway, after a SIGKILL too, so a Doctor run AlphaClaw had already marked failed ran again on the fresh instance, with nobody waiting for its result.
+
+### Fixed
+- **A restarted Doctor turn is stopped, and only that turn.** After every gateway launch, once it is ready, AlphaClaw looks at active `agent:main:doctor:<n>` sessions at ready and 5, 10, 20, 45, 90, 180 and 300 s later (recovery starts about 4-5 s after ready). It stops a turn only when the session's latest user message is OpenClaw's restart-recovery message for that session (provenance `main_session_restart_recovery`) and the turn it resumes, the last user message before it that is not itself a recovery message, is the Doctor run's own (idempotency key `doctor-run-<n>`), and it names that exact run in `chat.abort`. A person's own turn in a Doctor session is never stopped, whenever it starts and even when a restart cut it off and recovery resumed it, and neither is the run AlphaClaw is driving. A stop counts only when `chat.abort` confirms that run; otherwise it is tried again at the next look. A run AlphaClaw finds still running when it starts now says on its card that it was cut off by a restart and will not resume. The post-restart session sweep no longer resumes or reports a Doctor session whose restarted turn was stopped; a person's stuck turn in any other Doctor session is still resumed or reported.
+
+### Tests
+- New hermetic tests cover the stop (the exact restarted run stopped whenever it shows up; a person's turn, sent before or during the restarted turn or itself resumed by recovery, never stopped; other sessions, agents, sub sessions and transcripts without that Doctor run's message left alone; the live run skipped; an unconfirmed abort retried; ready wait and superseded launches) and the sweep skipping only the sessions the stop stopped. Checked by hand against the pinned OpenClaw 2026.10.9: a SIGKILLed Doctor turn was restarted by recovery and stopped, and a person's turn sent in the same session inside the five minutes answered normally.
+
 ## [0.10.232] - 2026-11-09
 
 ### Changed

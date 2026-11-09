@@ -387,6 +387,7 @@ OpenClaw's own `sessions.list`:
 | what it sees | what it does |
 | --- | --- |
 | live work on the session | nothing |
+| a Doctor session (`agent:main:doctor:<n>`) whose restarted Doctor turn AlphaClaw stopped after this launch (v0.10.232) | nothing: no `sessions.recover`, no alert, so the Doctor run is not started again |
 | idle, not marked interrupted, was running before the restart | `sessions.recover` — OpenClaw decides whether the session holds an orphaned claim; if it does, it resumes the turn in the same session (`session_wedge` `recovered`), otherwise it answers "nothing to recover" and nothing is logged |
 | still marked interrupted (`abortedLastRun`) | alert: `not_resumed` |
 | restart recovery gave up (`restartRecoveryStatus: tombstoned`) | alert: `recovery_gave_up` |
