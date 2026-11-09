@@ -95,6 +95,12 @@ const startProvider = () => {
       return json(404, { error: { message: "no such route" } });
     });
   });
+  // The check's probes run in this process through fetch's keep-alive pool.
+  // With Node's 5 s server default, a probe issued while this process was
+  // busy (the gateway restarting after the fix) could reuse a socket the
+  // server was closing that instant and fail with ECONNRESET before any
+  // request arrived. The client's own idle timeout now always ends first.
+  server.keepAliveTimeout = 60_000;
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, requests })));
 };
 
