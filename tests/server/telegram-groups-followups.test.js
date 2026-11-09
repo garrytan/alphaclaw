@@ -103,6 +103,18 @@ describe("group guard on a fresh gateway over a damaged rules file", () => {
     expect(dispatch(kGuest)).toBeUndefined();
   });
 
+  it("writes the last copy at startup for a rules file saved before the copy existed", () => {
+    box = makeBox({ rules: { owners: [kOwner], blockedSenders: [{ id: kBlocked }], groups: {} } });
+    const { statePath, lastGoodPath } = resolveStatePaths(box.rootDir);
+    expect(fs.existsSync(lastGoodPath)).toBe(false);
+    expect(box.groups.syncOwners()).toBe(false);
+    expect(fs.readFileSync(lastGoodPath, "utf8")).toBe(fs.readFileSync(statePath, "utf8"));
+    fs.writeFileSync(statePath, "{ damaged by hand");
+    const { dispatch } = registerPlugin(box.rootDir, { runtimeConfig: ownerConfig });
+    expect(dispatch(kBlocked)).toEqual({ handled: true });
+    expect(dispatch(kGuest)).toBeUndefined();
+  });
+
   it("reads the owners from the config the plugin was loaded with when no runtime config is offered", () => {
     box = makeBox({ rules: JSON.stringify(["not", "an", "object"]) });
     lastGood({ owners: [], blockedSenders: [{ id: kOtherOwner }, { id: kBlocked }], groups: {} });
