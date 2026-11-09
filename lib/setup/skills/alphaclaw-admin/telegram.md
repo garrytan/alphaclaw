@@ -9,7 +9,7 @@ How the rules behave at the edges:
 
 - **Becoming an owner ends a block for good**: AlphaClaw takes a new owner off the block list, and the block does not come back if they stop being an owner.
 - **Owner changes take up to a minute** to reach the guard plugin (synced at startup, on every rules write and every join watcher check).
-- **A damaged rules file keeps its blocks and never silences the owner.** The routes change nothing (`rules_unreadable`), a running gateway keeps its last rules, and a gateway started over a damaged or unreadable file enforces the blocks in `telegram/group-rules.last-good.json` (the copy AlphaClaw saves beside it on every write) and serves everyone else. With no readable copy either, no block is enforced until the file is fixed. Copying the last-good file over the damaged one restores the last saved rules.
+- **A damaged rules file keeps its blocks and never silences the owner.** The routes change nothing (`rules_unreadable`), a running gateway keeps its last rules, and a gateway started over a damaged or unreadable file enforces the blocks in `telegram/group-rules.last-good.json` (the copy AlphaClaw saves beside it on every write and rewrites when it differs) and serves everyone else. With no readable copy either, no block is enforced until the file is fixed. Copying the last-good file over the damaged one restores the last saved rules.
 - **The join watcher's queue** (`telegram/join-watch-pending.json`): a join that keeps failing is retried for three checks, and a queue file that is not a JSON list stops the watcher (logged) until it is fixed or moved aside.
 - **"Test this group" says when a block is not enforced** (`groupGuard.enforced: false`): the guard plugin entry is missing, not AlphaClaw's, or off.
 - **Anonymous admins** reach the agent as Telegram's GroupAnonymousBot (1087968824), so in Trusted people mode they are not heard, the owner included (`anonymous_admins` warning).
@@ -43,6 +43,7 @@ The change needs the group's current revision. Read GET /api/telegram/groups and
 ### revision_mismatch
 
 The group's rules changed since you read them. Read the groups again, check the new rules, and send the change with the new revision. Retry: after reading the revision.
+
 
 ### owner_required
 

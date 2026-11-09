@@ -127,6 +127,34 @@ describe("group guard on a fresh gateway over a damaged rules file", () => {
     expect(dispatch(kGuest)).toBeUndefined();
   });
 
+  it("saves the rules and logs once when only the last copy cannot be written, and the next owner sync writes it", () => {
+    box = makeBox();
+    const { statePath, lastGoodPath } = resolveStatePaths(box.rootDir);
+    const lines = [];
+    const failing = {
+      ...fs,
+      renameSync: (from, to) => {
+        if (to === lastGoodPath) throw Object.assign(new Error("EIO: copy rename failed"), { code: "EIO" });
+        return fs.renameSync(from, to);
+      },
+    };
+    const groups = createTelegramGroups({ fsModule: failing, openclawDir: box.openclawDir, rootDir: box.rootDir, telegramApi: box.telegramApi, validatePatch: async () => ({ ok: true }), sleep: async () => {}, log: (line) => lines.push(line) });
+    expect(groups.setBlockedSenders({ senders: [{ id: kBlocked }] })).toMatchObject({ changed: true });
+    expect(readState({ rootDir: box.rootDir }).blockedSenders.map((entry) => entry.id)).toEqual([kBlocked]);
+    expect(fs.existsSync(lastGoodPath)).toBe(false);
+    expect(lines.filter((line) => line.includes("could not write the last-good copy"))).toHaveLength(1);
+    box.groups.syncOwners();
+    expect(fs.readFileSync(lastGoodPath, "utf8")).toBe(fs.readFileSync(statePath, "utf8"));
+  });
+
+  it("rewrites a last copy that differs from the rules file at the next owner sync", () => {
+    box = makeBox({ rules: { owners: [kOwner], blockedSenders: [{ id: kBlocked }], groups: {} } });
+    lastGood({ owners: [kOwner], blockedSenders: [], groups: {} });
+    expect(box.groups.syncOwners()).toBe(false);
+    const { statePath, lastGoodPath } = resolveStatePaths(box.rootDir);
+    expect(fs.readFileSync(lastGoodPath, "utf8")).toBe(fs.readFileSync(statePath, "utf8"));
+  });
+
   it("reads the owners from the config the plugin was loaded with when no runtime config is offered", () => {
     box = makeBox({ rules: JSON.stringify(["not", "an", "object"]) });
     lastGood({ owners: [], blockedSenders: [{ id: kOtherOwner }, { id: kBlocked }], groups: {} });
