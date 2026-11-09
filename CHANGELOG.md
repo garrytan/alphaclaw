@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.234] - 2026-11-09
+
+Tools you keep on the persistent disk now work again after every redeploy. A rebuilt container starts with the image's `/usr/local/bin`, so a tool in `$OPENCLAW_STATE_DIR/bin` or `~/.local/bin` (where `uv` installs tools) used to drop off `PATH` until someone relinked it by hand. At boot, before cron starts, AlphaClaw now links those tools into `/usr/local/bin` on root installs: every Docker image, and a host install run as root, where the links land in the host's own `/usr/local/bin`.
+
+### Added
+- **Persistent tools are relinked at boot.** Every executable directly in `<state dir>/bin`, then `~/.local/bin`, gets a `/usr/local/bin/<name>` link; the state dir wins a name both hold, and subdirectories are never walked. A name the image or system already provides elsewhere on `PATH` is skipped (`shadows=<path>`) unless the owner lists it in `alphaclaw.json` `tools.allowShadow`. A short list of names is never linked (`git node npm npx openclaw alphaclaw claude systemctl sh bash dash env sudo python3 curl tar ssh`). AlphaClaw only creates a missing link or replaces a dangling one or one that points into these folders; a file or a link it did not make is left alone (`regular_file`, `foreign_symlink`), and a failed link is `link_failed=<errno>`. Nothing is ever deleted: when a name that now shadows another copy still has its old link (the owner took it out of `tools.allowShadow`), its log line says the persistent copy still runs and how to switch. A `PATH` entry that resolves to the same copy does not count as a shadow. The boot log has one summary line and one line per skipped name with its fix, and `boot-report.json` gets `persistentTools`. A non-root install logs one line and links nothing.
+- **Agent guidance.** The alphaclaw-admin skill's System reference says how to keep a tool across redeploys (a statically linked build in the state dir's `bin`, or `uv tool install`, which keeps its Python on the disk; the image has no Python for `pipx`), that `apt-get` and `npm -g` installs are lost, that cron's default `PATH` is `/usr/bin:/bin`, and to ask the owner when a tool belongs in the image.
+
+### Changed
+- **A tool on the disk no longer hides the image's copy.** A static binary in `$OPENCLAW_STATE_DIR/bin` with the same name as one the image ships (for example `ffmpeg` in `/usr/bin`) is not linked; the image's copy runs unless the owner adds the name to `tools.allowShadow`. A setup that relinks such a tool itself keeps working until that step is removed.
+
+### Tests
+- New `persistent-bins` tests on temp dirs (never `/usr/local/bin`): a new tool is linked, a dangling link and a link into another source folder are repaired, a regular file and a foreign link are never replaced, a name found elsewhere on `PATH` is skipped and `allowShadow` lets it through, reserved and unsafe names, directories, subdirectories and non-executables are skipped, the first folder wins a clash, a failed link records its errno, a link it made stays in place once its name shadows another copy and the log says so, a `PATH` alias of the same copy is not a shadow, a second run keeps every link, and the log lines. The boot-report writer's new `mergeBinPhase`, the `tools.allowShadow` reader, and `alphaclaw start` as root (the link is recorded, never made, on the host) and as non-root are covered too.
+
 ## [0.10.233] - 2026-11-09
 
 A Doctor run that a restart cut off no longer starts again on its own. OpenClaw's restart recovery restarts an interrupted turn on the next gateway, after a SIGKILL too, so a Doctor run AlphaClaw had already marked failed ran again on the fresh instance, with nobody waiting for its result.
