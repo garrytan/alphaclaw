@@ -268,4 +268,98 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
     },
     kTestTimeoutMs,
   );
+
+  // Delegates (GST-1982): a Capy thread whose relay agent the operator
+  // listed works as the owner's hands. The guard reads the same bridge.db
+  // and remote.db rows the bridge writes, so this case seeds them directly
+  // and drives the real gateway: exec and write run, the owner-only and
+  // outbound tools stay refused, an approved send passes the guard once per
+  // named recipient, and a revoke drops the session back to messaging-only
+  // within the same turn sequence. The recorded residual: exec of the
+  // openclaw CLI is not something the guard sees.
+  it(
+    "a delegate session runs exec and write, keeps outbound and owner-only tools refused, spends an approval once, and loses it all on revoke",
+    async () => {
+      const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
+      const { openRemoteStore } = require("../../lib/server/relay/remote-store");
+      const { relayPaths } = require("../../lib/server/relay/constants");
+      const paths = relayPaths(kRootDir);
+      const agent = "capy-delegatelive01";
+      const relay = "agent:main:relay-" + agent;
+      const clientId = "live-capy-client";
+      const remote = openRemoteStore({ dbPath: paths.remoteDb });
+      remote.clients.insert({ client_id: clientId, client_name: "Capy", redirect_uris: ["https://capy.ai/web/callbacks/mcp"] });
+      remote.clients.markConsented(clientId);
+      remote.bindings.upsert({ agent, threadId: "jam_live", clientId, webhookUrl: "https://api.capy.ai/w/live", until: Date.now() + 60 * 60 * 1000, capabilityHash: "h", agentToken: "at" });
+      const bridge = openBridgeStore({ dbPath: paths.bridgeDb });
+      bridge.insert({ messageId: "7001", sender: agent, conversationId: "dm_live", threadRoot: "7001", sessionKey: relay, state: "queued" });
+      bridge.update("7001", {
+        state: "dispatched",
+        runId: "relay-7001",
+        trust: "delegate",
+        approval: JSON.stringify({ words: "do it", action: "Tell the live target", targets: ["@live-target"], thread: "LIVE-1" }),
+        dispatchedAt: Date.now(),
+      });
+      bridge.close();
+
+      const execMarker = path.join(kRootDir, "delegate-exec.marker");
+      const execAnswer = await runTurn(relay, "exec", { command: "touch " + execMarker + " && echo delegate-ran" });
+      console.log("[live] delegate exec: " + execAnswer.slice(0, 200));
+      expect(execAnswer).not.toContain("[relay-guard]");
+      await waitFor(async () => fs.existsSync(execMarker), 30_000, "delegate exec ran");
+
+      const written = path.join(workspace, "delegate-note.md");
+      const writeAnswer = await runTurn(relay, "write", { path: written, content: "saved-by-delegate-4417\n" });
+      console.log("[live] delegate write: " + writeAnswer.slice(0, 200));
+      expect(writeAnswer).not.toContain("[relay-guard]");
+      await waitFor(async () => fs.existsSync(written) && fs.readFileSync(written, "utf8").includes("saved-by-delegate-4417"), 30_000, "delegate write landed");
+
+      const readAnswer = await runTurn(relay, "read", { path: path.join(workspace, "notes.txt") });
+      expect(readAnswer).toContain("workspace-ok-7731");
+
+      const cliAnswer = await runTurn(relay, "exec", { command: "openclaw --version" });
+      console.log("[live] delegate exec of the openclaw CLI (recorded residual): " + cliAnswer.slice(0, 200));
+      expect(cliAnswer).not.toContain("[relay-guard]");
+
+      // The pin defers some of these behind tool_search; a tool it does not
+      // offer directly is called through the tool_call wrapper, which runs
+      // the hook again under the tool's own name.
+      const delegateCall = async (toolName, args) => {
+        const direct = await runTurn(relay, toolName, args);
+        if (!direct.startsWith("NOT-OFFERED")) return direct;
+        const wrapped = await runTurn(relay, "tool_call", { id: toolName, args });
+        return /\bunknown tool\b|not found|not available in this session|No tool/i.test(wrapped) && !wrapped.includes("[relay-guard]") ? direct : wrapped;
+      };
+      const withheld = (toolName) => "[relay-guard] " + toolName + " is not available to a delegate relay session";
+      for (const [toolName, args, refusal] of [
+        ["message", { action: "send", channel: "telegram", target: "@someone-else", message: "hi" }, "[relay-guard] @someone-else is not a recipient the owner's approval names"],
+        ["automations", { action: "list" }, withheld("automations")],
+        ["gateway", { action: "config.get" }, withheld("gateway")],
+        ["sessions_send", { sessionKey: "agent:main:main", message: "hi" }, withheld("sessions_send")],
+      ]) {
+        const answer = await delegateCall(toolName, args);
+        console.log("[live] delegate " + toolName + ": " + answer.slice(0, 200));
+        if (answer.startsWith("NOT-OFFERED")) continue;
+        expect(answer, toolName).toContain(refusal);
+      }
+
+      const approvedArgs = { action: "send", channel: "telegram", target: "@live-target", message: "approved" };
+      const approved = await delegateCall("message", approvedArgs);
+      console.log("[live] delegate approved send: " + approved.slice(0, 200));
+      if (!approved.startsWith("NOT-OFFERED")) {
+        expect(approved).not.toContain("[relay-guard]");
+        const again = await delegateCall("message", approvedArgs);
+        expect(again).toContain("already used for @live-target");
+      }
+
+      remote.clients.revoke(clientId);
+      remote.close();
+      const revokedMarker = path.join(kRootDir, "delegate-revoked.marker");
+      const revoked = await runTurn(relay, "exec", { command: "touch " + revokedMarker });
+      expect(revoked).toContain("[relay-guard]");
+      expect(revoked).toContain("messaging-only");
+      expect(fs.existsSync(revokedMarker)).toBe(false);
+    },
+    kTestTimeoutMs,
+  );
 });
