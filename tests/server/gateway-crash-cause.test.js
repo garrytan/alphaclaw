@@ -53,7 +53,7 @@ const noise = (count, prefix = "log") =>
   Array.from({ length: count }, (_, i) => `[gateway] ${prefix} line ${i} still running fine`);
 
 describe("kGatewayCrashCauses", () => {
-  it("is the frozen 12-value enum in precedence order", () => {
+  it("is the frozen 13-value enum in precedence order", () => {
     expect(Object.isFrozen(kGatewayCrashCauses)).toBe(true);
     expect(kGatewayCrashCauses).toEqual([
       "state_schema_too_new",
@@ -66,6 +66,7 @@ describe("kGatewayCrashCauses", () => {
       "port_in_use",
       "state_dir_owned",
       "oom",
+      "killed_by_signal",
       "config_invalid",
       "unknown",
     ]);
@@ -282,6 +283,30 @@ describe("classifyGatewayCrash — ownership, port, oom, config, unknown, null",
     expect(classifyGatewayCrash({ code: null, signal: "SIGTERM" }).cause).toBe("unknown");
   });
 
+  it("SIGKILL with the cgroup oom_kill counter unchanged → killed_by_signal, never oom", () => {
+    expect(classifyGatewayCrash({ code: null, signal: "SIGKILL", stderrTail: [], kernelOomKill: false })).toEqual({
+      cause: "killed_by_signal",
+      detail:
+        "killed by an outside signal (signal SIGKILL); the cgroup oom_kill counter did not rise, so it was not the kernel OOM killer",
+      matchedLine: null,
+    });
+    expect(classifyGatewayCrash({ code: 137, stderrTail: noise(3), kernelOomKill: false }).cause).toBe(
+      "killed_by_signal",
+    );
+    // The heap abort text still wins: V8 ran out of heap whatever the counter says.
+    expect(classifyGatewayCrash({ code: 137, stderrTail: [kHeapOomLine], kernelOomKill: false }).cause).toBe("oom");
+    // A non-SIGKILL exit never reads as an outside kill.
+    expect(classifyGatewayCrash({ code: 1, stderrTail: [], kernelOomKill: false }).cause).toBe("unknown");
+  });
+
+  it("SIGKILL with the cgroup oom_kill counter risen → oom, stated as the kernel OOM killer", () => {
+    expect(classifyGatewayCrash({ code: 137, stderrTail: [], kernelOomKill: true })).toEqual({
+      cause: "oom",
+      detail: "killed by the kernel OOM killer (exit 137; the cgroup oom_kill counter rose)",
+      matchedLine: null,
+    });
+  });
+
   it("exit 78 without any signature → config_invalid with the tail's error-shaped line (or null)", () => {
     const withCause = classifyGatewayCrash({
       code: 78,
@@ -334,6 +359,7 @@ describe("classifyGatewayCrash — ownership, port, oom, config, unknown, null",
       { code: 1, stderrTail: [kEaddrinuseLine] },
       { code: 1, stderrTail: [kStateWriterLine] },
       { code: 137 },
+      { code: 137, kernelOomKill: false },
       { code: 78 },
       { code: 1 },
     ];
