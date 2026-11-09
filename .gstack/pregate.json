@@ -9,7 +9,8 @@
       "jobs": [
         "test (24)"
       ],
-      "artifact": "tested-tree"
+      "artifact": "tested-tree",
+      "os": "Linux"
     }
   },
   "ship_lanes_from": {
