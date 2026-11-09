@@ -426,6 +426,44 @@ describe("boot-report: writeRefusedBinPhase (a refused second instance never evi
   });
 });
 
+describe("boot-report: mergeBinPhase", () => {
+  let managedDir;
+  let logger;
+  const writerFor = (bootId = kBootId) =>
+    createBootReportWriter({ managedDir, bootId, nowFn: () => 1_700_000_001_000, logger });
+  const persistentTools = { linked: ["yt-dlp"], kept: [], skipped: [{ name: "git", reason: "reserved" }] };
+
+  beforeEach(() => {
+    managedDir = path.join(mkTemp(), ".alphaclaw");
+    logger = { warn: vi.fn() };
+  });
+
+  it("adds a later bin step's fields to this boot's report without rotating, and the server merge keeps them", () => {
+    const writer = writerFor();
+    writer.writeBinPhase(binReport());
+    const merged = writer.mergeBinPhase({ persistentTools });
+
+    expect(merged.persistentTools).toEqual(persistentTools);
+    expect(merged.serverPhase).toEqual({ status: "pending" });
+    expect(readJson(writer.reportPath)).toEqual(merged);
+    expect(fs.existsSync(path.join(managedDir, "boot-report.1.json"))).toBe(false);
+    expect(writer.mergeServerPhase({ legacyExecApprovalsPresent: false }).persistentTools).toEqual(persistentTools);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("leaves a report from another boot, or no report, alone with one warning", () => {
+    writerFor(kOtherBootId).writeBinPhase(binReport({ bootId: kOtherBootId }));
+    const before = fs.readFileSync(path.join(managedDir, kBootReportFileName), "utf8");
+
+    expect(writerFor().mergeBinPhase({ persistentTools })).toBeNull();
+    expect(fs.readFileSync(path.join(managedDir, kBootReportFileName), "utf8")).toBe(before);
+    fs.rmSync(path.join(managedDir, kBootReportFileName));
+    expect(writerFor().mergeBinPhase({ persistentTools })).toBeNull();
+    expect(fs.existsSync(path.join(managedDir, kBootReportFileName))).toBe(false);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("boot-report: markServerPhaseNotReached", () => {
   let managedDir;
   let logger;

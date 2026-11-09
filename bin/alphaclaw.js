@@ -82,6 +82,10 @@ const {
   removeStaleSystemGitShim,
 } = require("../lib/cli/host-bin");
 const {
+  relinkPersistentBins,
+  formatPersistentBinsLog,
+} = require("../lib/cli/persistent-bins");
+const {
   buildSystemCronFile,
   isSafeCronSchedule,
   resolveSyncScheduleOptions,
@@ -1473,6 +1477,43 @@ if (String(process.env.ALPHACLAW_SKIP_PROFILE_ENV || "") === "1") {
     console.log(`[alphaclaw] login-shell env snippet NOT installed (${e.message})`);
   }
   persistOperatorShellEnvOutcome();
+}
+
+// ---------------------------------------------------------------------------
+// 8c. Relink tools kept on the persistent disk
+// ---------------------------------------------------------------------------
+// A rebuilt container starts with the image's /usr/local/bin, so a tool kept
+// in <state dir>/bin or ~/.local/bin (HOME is the root dir since step 7) loses
+// its PATH entry on every redeploy. Runs before cron starts so @reboot jobs
+// see the links. Root installs only: a non-root install has no container
+// layer to lose, and <root>/bin holds AlphaClaw's own shims. Fail-open; the
+// result goes to the boot report.
+if (hostBinDir !== kSystemBinDir) {
+  console.log(
+    "[alphaclaw] persistent tools: not linked (not running as root) — call them by full path or put their folder on PATH",
+  );
+} else {
+  try {
+    const { kOpenclawManagedDir } = require("../lib/server/constants");
+    const { readToolsAllowShadow } = require("../lib/server/alphaclaw-config");
+    const { createBootReportWriter } = require("../lib/server/boot-report");
+    const { getProcessBootId } = require("../lib/server/boot-id");
+    const sourceDirs = [path.join(openclawDir, "bin"), path.join(os.homedir(), ".local", "bin")];
+    const result = relinkPersistentBins({
+      sourceDirs,
+      linkDir: kSystemBinDir,
+      pathDirs: String(process.env.PATH || "").split(path.delimiter),
+      allowShadow: readToolsAllowShadow({ openclawDir }),
+    });
+    for (const line of formatPersistentBinsLog({ result, sourceDirs, linkDir: kSystemBinDir })) {
+      console.log(line);
+    }
+    createBootReportWriter({ managedDir: kOpenclawManagedDir, bootId: getProcessBootId() }).mergeBinPhase({
+      persistentTools: { sourceDirs, linkDir: kSystemBinDir, ...result },
+    });
+  } catch (e) {
+    console.log(`[alphaclaw] persistent tools not linked (fail-open): ${e.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
