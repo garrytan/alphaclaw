@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.238] - 2026-11-09
+## [0.10.241] - 2026-11-09
 
 You can now make a connected Capy thread act as you on the box from the Relay page, and revoke it there, instead of editing `ALPHACLAW_RELAY_DELEGATE_AGENTS` and redeploying. A delegate thread can also hand its connection to a successor thread, run several conversations at once, and fetch long answers in full.
 
@@ -22,6 +22,35 @@ You can now make a connected Capy thread act as you on the box from the Relay pa
 
 ### Fixed
 - **A conversation cut short by a restart names its peer again.** The engine renames a released peer to `<name>#released-<id>`; the Relay conversations list showed such a row as "between two other agents" with no Chat link. It now names the peer, links its session and marks it "released agent" (GST-1995).
+
+## [0.10.240] - 2026-11-09
+
+AlphaClaw now checks the credential on every `/hooks` webhook delivery itself, before the gateway sees it, and closes OpenClaw's two built-in agent hooks to the outside unless you turn them on. Senders keep working unchanged.
+
+### Changed
+- **One credential check at AlphaClaw's edge.** A delivery with a wrong or missing token now gets AlphaClaw's `401` instead of the gateway's, and never reaches the gateway. The check reads the exact headers AlphaClaw would forward (a `?token=` included) and resolves `hooks.token` the way the gateway does, from the environment the gateway was launched with, so an Envars edit takes effect at the next restart as before. If AlphaClaw cannot resolve the token, it leaves the decision to the gateway and logs why once.
+- **Failed credentials are counted per real client.** After 20 failures in a minute from one address (one /64 for IPv6), AlphaClaw answers `429` with `Retry-After`. The gateway sees every caller as `127.0.0.1`, so one bad sender used to share a lockout with every good one. A matching credential is never refused by this count.
+- **Bodies without a credential are not read.** A POST to `/hooks` or `/webhook` with no token, `x-openclaw-token`, `?token=` or signature header is refused before AlphaClaw buffers its body (up to 5 MB).
+- **`/hooks/agent` and `/hooks/wake` are off unless you use them.** These OpenClaw built-ins start or wake an agent run with any text the caller sends. On upgrade they stay on only on a box whose request log shows the gateway accepting them; otherwise they answer `404`, every refused call is logged, and the first one notifies you with a link to turn the hook on. Turned on, each hook takes its own token (Webhooks → OpenClaw built-in hooks, shown once). The shared webhook token keeps working on it until 24 hours after its first own-token delivery or 7 days after it was turned on, whichever comes first; you are told when the shared token is still being used, and you can reopen it for 7 days.
+- **The request log says how each delivery was authenticated** (shared token, own token, OAuth link, refused by AlphaClaw) and how long the gateway took to answer. Refused deliveries write at most one row per hook every 10 seconds, with a count of the rest, so a flood cannot push real deliveries out of the log.
+- The Gmail duplicate filter now runs after the credential check, so a refused delivery cannot mark messages as seen.
+
+### Added
+- A Doctor card and a startup warning when `gateway.bind` is not `loopback`: the gateway then also answers `/hooks` on its own port, where none of these checks run. AlphaClaw never changes the setting.
+
+## [0.10.239] - 2026-11-09
+
+### Fixed
+- **No false "session may be stuck" alert for a Doctor session AlphaClaw already stopped.** The post-restart session sweep looks back 15 minutes, but the record of which Doctor sessions had their restarted turn stopped was cleared on every gateway launch and lived only in memory, so a redeploy minutes after a post-kill boot reported `agent:main:doctor:<n>` as `not_resumed`. The sweep now skips such a session whenever the stop was made no earlier than the session's last change, reading stops from this process and from the `resumed_turn_stopped` watchdog events of earlier ones. A later stuck turn in the same session is still reported.
+
+### Tests
+- A new hermetic test replays the sequence. One AlphaClaw stops the restarted Doctor turn, and a second one started six minutes later runs the real post-restart session sweep against the stopped session and stays silent, while a later stuck turn there is still alerted. On the old code the sweep alerts.
+- A second test reads the recorded stops back from a real watchdog database, the way a new AlphaClaw process finds them.
+
+## [0.10.238] - 2026-11-09
+
+### Changed
+- **gstack's pregate knows which tests cover the lockfile and the browser smoke scripts.** `.gstack/pregate.json` now declares the vitest runner and maps `package-lock.json` to `tests/server/alphaclaw-version.test.js` (the test that reads its version) and `tests/browser/**` to no lane, since those smoke scripts run by hand through `npm run test:ui:*`, not in vitest. A change touching either no longer gets a "no lane policy" warning. CI configuration only; nothing changes for someone running AlphaClaw.
 
 ## [0.10.237] - 2026-11-09
 
