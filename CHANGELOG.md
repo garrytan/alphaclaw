@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.233] - 2026-11-09
+## [0.10.232] - 2026-11-09
 
 ### Changed
 - **gstack's pregate can reuse CI's test run on Linux.** The `ci/test-24` run profile in `.gstack/pregate.json` now names its OS (`"os": "Linux"`), so /ship's pregate tests stage accepts the files CI's `test (24)` run already passed at the same tree instead of running them again locally. CI configuration only; nothing changes for someone running AlphaClaw.
