@@ -1,5 +1,6 @@
 const { runGroupTest } = require("../../lib/server/telegram-group-test");
 const { buildOwnedKeys } = require("../../lib/server/telegram-groups");
+const { applyGroupGuardEntry } = require("../../lib/server/telegram-group-guard-entry");
 
 const kGarry = "6167919517";
 const kGarry2 = "8756803657";
@@ -10,11 +11,15 @@ const kMossab = "435921418";
 const kAlfredGroup = "-1004458560180";
 const kSecurity = "-1003864658058";
 
-const cfgWith = (groups, extra = {}) => ({
-  commands: { ownerAllowFrom: ["telegram:" + kGarry, "telegram:" + kGarry2] },
-  channels: { telegram: { groupPolicy: "allowlist", allowFrom: [kGarry, kGarry2], groupAllowFrom: [kGarry, kGarry2], groups } },
-  ...extra,
-});
+const cfgWith = (groups, extra = {}) => {
+  const cfg = {
+    commands: { ownerAllowFrom: ["telegram:" + kGarry, "telegram:" + kGarry2] },
+    channels: { telegram: { groupPolicy: "allowlist", allowFrom: [kGarry, kGarry2], groupAllowFrom: [kGarry, kGarry2], groups } },
+    ...extra,
+  };
+  applyGroupGuardEntry(cfg, { rootDir: "/data/.alphaclaw", log: () => {} });
+  return cfg;
+};
 const stateWith = (groups = {}, blockedSenders = []) => ({ owners: [kGarry, kGarry2], groups, blockedSenders, seen: {} });
 const bySender = (result) => Object.fromEntries(result.senders.map((sender) => [sender.id ?? "anyone", sender]));
 

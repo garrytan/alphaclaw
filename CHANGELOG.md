@@ -41,6 +41,23 @@ A Doctor run that a restart cut off no longer starts again on its own. OpenClaw'
 
 ### Changed
 - **gstack's pregate can reuse CI's test run on Linux.** The `ci/test-24` run profile in `.gstack/pregate.json` now names its OS (`"os": "Linux"`), so /ship's pregate tests stage accepts the files CI's `test (24)` run already passed at the same tree instead of running them again locally. CI configuration only; nothing changes for someone running AlphaClaw.
+## [0.10.234] - 2026-11-09
+
+Blocked people stay out of your Telegram groups in four edge cases the first version missed. They are a damaged rules file, a box with more than one Telegram bot, owner changes and a join watcher that falls behind.
+
+### Fixed
+- **A damaged rules file never lets a blocked person through.** A gateway that starts while `telegram/group-rules.json` cannot be read used to block nobody. It now drops every Telegram turn except yours (your ids come from OpenClaw's own config) until the file is fixed. A running gateway still keeps the last rules it read.
+- **No bot's owner can be blocked.** On a box with several Telegram accounts and no `commands.ownerAllowFrom`, only the default account's owner was protected. The owners are now read from every account, for the block list and for the plugin.
+- **New groups are never missed.** The join watcher queues each join it reads before it moves on in the log and clears it only once it is handled, so a failed save or a long outage of the rules file no longer loses a join (a re-added Blocked group is still left). A leave or new-group notice that fails is tried again on the next two checks. Its records no longer need openclaw.json to be plain JSON, and a failure of the join check or the owner sync is logged once when it starts and once when it clears, instead of every minute.
+- **Owner changes reach the plugin within a minute,** on the join watcher's next check, instead of at the next rules save or restart.
+- **"Test this group" matches the plugin.** It takes the owner exemption from the same rules file the plugin reads, and it says when a block is not enforced because the group guard plugin entry is missing, not AlphaClaw's or switched off (`groupGuard`, `guard_not_enforced`).
+- A malformed id on the block list is answered `invalid_input` even while no owner id is known (it was `owner_required`).
+
+### Added
+- Trusted people groups carry an `anonymous_admins` warning in the groups list and the save preview. An admin who posts anonymously reaches the agent as Telegram's GroupAnonymousBot, so they are not heard there.
+
+### Changed
+- The admin skill's Telegram reference now says that only adding someone to the block list needs a known owner id, that becoming an owner ends a block for good, and that in an Approved group OpenClaw can still show a blocked person's messages as context in other people's turns (it has no hook to filter them; Trusted people mode does).
 
 ## [0.10.231] - 2026-11-09
 
