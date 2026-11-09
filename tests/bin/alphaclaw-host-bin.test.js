@@ -151,6 +151,36 @@ Module._load = function patchedLoad(request, parent) {
     expect(fs.existsSync(path.join(managedBin, "gog"))).toBe(true);
   });
 
+  it("root: links a tool kept in the state dir's bin into /usr/local/bin and records it in the boot report", () => {
+    const stateBin = path.join(rootDir, ".openclaw", "bin");
+    fs.mkdirSync(stateBin, { recursive: true });
+    fs.writeFileSync(path.join(stateBin, "alphaclaw-test-persistent-tool"), "#!/bin/sh\n", { mode: 0o755 });
+    const { captured, output } = boot({ uid: 0 });
+
+    expect(captured.hostWrites).toContain("symlinkSync /usr/local/bin/alphaclaw-test-persistent-tool");
+    expect(output).toContain(
+      `[alphaclaw] persistent tools: linked=1 kept=0 skipped=0 (${stateBin}, ${path.join(rootDir, ".local", "bin")})`,
+    );
+    const report = JSON.parse(fs.readFileSync(path.join(rootDir, ".openclaw", ".alphaclaw", "boot-report.json"), "utf8"));
+    expect(report.persistentTools).toMatchObject({
+      linkDir: "/usr/local/bin",
+      linked: ["alphaclaw-test-persistent-tool"],
+      skipped: [],
+    });
+  });
+
+  it("non-root: leaves persistent tools unlinked with one log line", () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const stateBin = path.join(rootDir, ".openclaw", "bin");
+    fs.mkdirSync(stateBin, { recursive: true });
+    fs.writeFileSync(path.join(stateBin, "alphaclaw-test-persistent-tool"), "#!/bin/sh\n", { mode: 0o755 });
+    const { captured, output } = boot();
+
+    expect(captured.hostWrites).toEqual([]);
+    expect(output).toContain("[alphaclaw] persistent tools: not linked (not running as root)");
+    expect(fs.existsSync(path.join(rootDir, "bin", "alphaclaw-test-persistent-tool"))).toBe(false);
+  });
+
   it("override as root: the git shim goes to the override, systemctl and gog to /usr/local/bin", () => {
     const customShim = path.join(tmpDir, "custom", "git");
     const { captured } = boot({ uid: 0, gitShimPath: customShim });

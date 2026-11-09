@@ -21,6 +21,7 @@ const {
   updateOpenclawMedicEnabled,
   updateWatchdogOverseerEnabled,
   writeAlphaclawConfig,
+  readToolsAllowShadow,
 } = require("../../lib/server/alphaclaw-config");
 
 const createTempOpenclawDir = () =>
@@ -527,6 +528,32 @@ describe("server/alphaclaw-config", () => {
 
     const noop = updateAutotuneSettings({ openclawDir, enabled: false });
     expect(noop.changed).toBe(false);
+  });
+
+  it("reads tools.allowShadow as a list of names; any other shape is an empty list", () => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "alphaclaw.json");
+
+    expect(readToolsAllowShadow({ openclawDir })).toEqual([]);
+    fs.writeFileSync(configPath, JSON.stringify({ tools: { allowShadow: ["ffmpeg", 7, null, "rg"] } }), "utf8");
+    expect(readToolsAllowShadow({ openclawDir })).toEqual(["ffmpeg", "rg"]);
+    fs.writeFileSync(configPath, JSON.stringify({ tools: { allowShadow: "ffmpeg" } }), "utf8");
+    expect(readToolsAllowShadow({ openclawDir })).toEqual([]);
+    fs.writeFileSync(configPath, "{ not json", "utf8");
+    expect(readToolsAllowShadow({ openclawDir })).toEqual([]);
+  });
+
+  it("keeps the owner's tools.allowShadow through the dashboard's own writes", () => {
+    const openclawDir = createTempOpenclawDir();
+    fs.writeFileSync(
+      path.join(openclawDir, "alphaclaw.json"),
+      JSON.stringify({ tools: { allowShadow: ["ffmpeg"] } }),
+      "utf8",
+    );
+
+    updateWatchdogMemorySettings({ openclawDir, autoRestart: true });
+    updateOpenclawMedicEnabled({ openclawDir, enabled: false });
+    expect(readToolsAllowShadow({ openclawDir })).toEqual(["ffmpeg"]);
   });
 
   it("defaults memory detection ON (opt-out) and autoRestart OFF (strict opt-in)", () => {
