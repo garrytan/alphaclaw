@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.223] - 2026-11-09
+
+A gateway killed with SIGKILL is now reported as out of memory only when the container's kernel OOM counter actually went up. A kill from another process gets its own cause and no memory advice.
+
+### Fixed
+- **SIGKILL is no longer assumed to be an OOM kill.** The watchdog reads the container cgroup's `oom_kill` counter (`memory.events` on cgroup v2, which also counts kills in child cgroups; cgroup v1 counts only its own cgroup, so there the SIGKILL stays unconfirmed as before) when the gateway launches and when it exits. If the counter rose, the crash cause is `oom` and the notice now says plainly that the kernel OOM killer fired. If the counter is readable and did not rise, the cause is the new `killed_by_signal` ("killed by an outside signal"): no "commonly the kernel OOM killer" notice, no "raising the gateway heap will not help" advice, and the rescue prompt points at whatever sent the signal instead of at memory. Before, every bare SIGKILL or exit 137 was recorded as `oom`, so a box whose gateway was killed by another process, with zero kernel OOM kills, showed an OOM incident and memory advice. Where the counter can't be read, a SIGKILL is still reported as a possible, unconfirmed OOM kill, as before. A `killed_by_signal` crash is not critical-class on its own, as `oom` is, so repeated outside kills open ordinary incidents. A V8 "JavaScript heap out of memory" abort is still `oom` whatever the counter says.
+
+### Tests
+- New classifier tests cover a SIGKILL with the counter unchanged (`killed_by_signal`) and risen (`oom`, stated without hedging). New watchdog tests launch and exit a gateway with a fixed counter (no OOM notice, crash rows carry `killed_by_signal`) and with a rising one (the kernel OOM notice). All four fail on the previous code. The cause list test now expects 13 causes.
+
 ## [0.10.222] - 2026-11-09
 
 The Telegram topics page and the Browse stylesheet are split into smaller files by area, with no change to how either page behaves, and the topics page no longer runs words together.

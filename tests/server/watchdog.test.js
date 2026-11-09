@@ -11633,7 +11633,7 @@ describe("server/watchdog", () => {
       });
       crashOnce(watchdog);
       await flushAll();
-      expect(classifier).toHaveBeenCalledWith({ code: 1, signal: null, stderrTail: kSchemaTooNewTail });
+      expect(classifier).toHaveBeenCalledWith({ code: 1, signal: null, stderrTail: kSchemaTooNewTail, kernelOomKill: null });
       const [crashRow] = rowsOf(insertWatchdogEvent, "crash");
       const expectedFingerprint = fingerprintGatewayCrash({
         cause: "state_schema_too_new",
