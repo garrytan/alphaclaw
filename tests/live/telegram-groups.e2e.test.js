@@ -206,7 +206,10 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
     const { applyGroupGuardEntry } = require("../../lib/server/telegram-group-guard-entry");
     const { config } = ensureManagedOpenclawExecDefaults({
       gateway: { mode: "local", bind: "loopback", port, auth: { mode: "token", token } },
-      agents: { defaults: { workspace, model: { primary: "fixture/fixture" } } },
+      // heartbeat.target "none": OpenClaw's first heartbeat alert DMs the
+      // owner (Garry here) at a moment no case controls, and a case that
+      // expects no sends then counts it.
+      agents: { defaults: { workspace, model: { primary: "fixture/fixture" }, heartbeat: { target: "none" } } },
       models: { providers: { fixture: {
         baseUrl: "http://127.0.0.1:" + model.address().port + "/v1",
         api: "openai-completions",
