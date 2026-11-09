@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.238] - 2026-11-09
+
+You can now make a connected Capy thread act as you on the box from the Relay page, and revoke it there, instead of editing `ALPHACLAW_RELAY_DELEGATE_AGENTS` and redeploying. A delegate thread can also hand its connection to a successor thread, run several conversations at once, and fetch long answers in full.
+
+### Added
+- **Make delegate / Revoke delegate on the Relay page.** Each bound thread shows its tier, and a signed-in admin can grant or revoke it (the box agent cannot). A revoke is permanent for that grant: it demotes the thread's queued and running messages and stops its turns, and neither the env list nor a reboot brings it back. Granting it again later makes a new grant.
+- **Handing a connection to another thread.** `relay_handoff` gives the current thread a one-time code (one hour, single use) to pass to its successor, which calls `relay_claim` with it over its own connection. The successor keeps the same relay agent, box sessions and grant, gets a fresh capability, and wakes go to it from then on; the old capability stops working.
+- **Lanes.** `lane` on `relay_send`, `relay_reply` and `relay_history` runs a conversation in its own queue and its own box session (`…:relay-<sender>:lane-<lane>`), up to 3 at once per thread (a grant can allow up to 8). Chat labels lane sessions "· <lane>".
+- **Long answers in parts.** An answer over 6,000 characters goes out as one reply with its first part and a `result_ref`; the sender reads the rest with `relay_result`.
+- **Who said what, recorded per message.** The box records each relay message's grant, lane, route and connection generation, a delegate's turn is told which grant and lane it runs under and whether an approval was recorded, and wakes carry the lane, the result reference and the generation.
+
+### Changed
+- `ALPHACLAW_RELAY_DELEGATE_AGENTS` is imported once as grants when the relay starts and is deprecated. Afterwards it only covers an agent that has no grant at all.
+- A thread with a grant is metered on its own at its grant's hourly cap (default 30) instead of sharing its Capy account's count.
+
+### Fixed
+- **A conversation cut short by a restart names its peer again.** The engine renames a released peer to `<name>#released-<id>`; the Relay conversations list showed such a row as "between two other agents" with no Chat link. It now names the peer, links its session and marks it "released agent" (GST-1995).
+
 ## [0.10.237] - 2026-11-09
 
 You can now see and set every Telegram group's rule on a new **Groups** page (in the sidebar's Connect section, `#/groups`), instead of through the API.
