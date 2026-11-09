@@ -34,8 +34,8 @@ describe("docs/agent-facing TOOLS.md Tabs table", () => {
     expect(missing, `setup-ui.md Tabs table is missing: ${missing.join(", ")}`).toEqual([]);
   });
 
-  // Routes the app serves outside the nav registry: the beta-gated Dashboards
-  // item, the file browser (`#browse/<path>`, reached from the sidebar tree),
+  // Links the table may carry beyond the hash-routed nav items: the Dashboards
+  // launcher (an external href in the nav), the file browser (`#browse/<path>`, reached from the sidebar tree),
   // and Webhooks and Nodes (reached from Integrations since ALPH-69 PR 3a).
   const kNonNavRoutes = new Set(["dashboards", "browse", "webhooks", "nodes"]);
 

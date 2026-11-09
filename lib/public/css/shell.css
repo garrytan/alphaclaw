@@ -1571,27 +1571,31 @@
   }
 }
 
-/* ── Phone tap targets: 40 px everywhere in the app shell ─────── */
+/* ── Phone tap targets: 40 px in the app shell and its dialogs ── */
 
 @media (max-width: 767px) {
-  .app-shell
+  :is(.app-shell, [aria-modal="true"])
     :is(button, select, summary, [role="button"], [role="tab"], input:not([type="checkbox"]):not([type="radio"])) {
     min-height: 40px;
   }
 
-  .app-shell :is(button, [role="button"], [role="tab"]) {
+  :is(.app-shell, [aria-modal="true"]) :is(button, [role="button"], [role="tab"]) {
     min-width: 40px;
   }
 
-  .app-shell
-    :is(a.ac-tip-link, a.status-chip, a.skip-link, a.home-card-link, a.home-card-more, a.home-list-name, a.agents-session-link, a[class*="ac-btn"], .file-tree a) {
+  :is(.app-shell, [aria-modal="true"])
+    :is(a.ac-tip-link, a.status-chip, a.skip-link, a.home-card-link, a.home-card-more, a.home-list-name, a.agents-session-link, a[class*="ac-btn"]) {
     display: inline-flex;
     align-items: center;
     min-height: 40px;
     min-width: 40px;
   }
 
-  .app-shell label:has(> input[type="checkbox"]) {
+  .app-shell .file-tree a {
+    min-height: 40px;
+  }
+
+  :is(.app-shell, [aria-modal="true"]) label:has(> input[type="checkbox"]) {
     min-height: 40px;
     display: inline-flex;
     align-items: center;

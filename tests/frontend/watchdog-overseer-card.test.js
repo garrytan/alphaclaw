@@ -329,8 +329,6 @@ describe("buildWatchdogOverseerModel — changed since (delta line + CTA gating)
     });
     expect(situation.serverPending).toBe(true);
     expect(situation.serverBusy).toBe(false);
-    // An older server's bare boolean still means a running situation report.
-    expect(model({ situation: payload({ inFlight: true }) }).serverBusy).toBe(false);
     const tree = renderCard({
       situation: payload({ inFlight: { kind: "automatic", incidentId: 7, startedAt: kNow - 5_000 } }),
     });
@@ -691,7 +689,10 @@ describe("buildWatchdogOverseerModel — scope line + rate limit", () => {
   });
 
   it("serverPending follows the server's inFlight flag", () => {
-    expect(model({ situation: payload({ inFlight: true }) }).serverPending).toBe(true);
+    expect(
+      model({ situation: payload({ inFlight: { kind: "situation", incidentId: null, startedAt: kNow } }) }).serverPending,
+    ).toBe(true);
+    expect(model({ situation: payload({ inFlight: null }) }).serverPending).toBe(false);
   });
 });
 

@@ -1284,15 +1284,3 @@ textarea:focus {
 [data-theme="light"] .text-cyan-400 {
   color: #0e7490 !important;
 }
-
-[data-theme="light"] .text-blue-400 {
-  color: #1d4ed8 !important;
-}
-
-[data-theme="light"] .text-indigo-300 {
-  color: #4338ca !important;
-}
-
-[data-theme="light"] .text-purple-400 {
-  color: #7e22ce !important;
-}

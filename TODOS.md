@@ -988,9 +988,9 @@
 - **Effort:** M. **Depends on:** verifying the node-onboarding WS handshake on both supported lines.
 
 ## P3 — Launcher focus deep-links into product surfaces
-- **What:** Deep-link Watchdog incidents / Cron runs / Usage rows into the matching OpenClaw dashboard session: a launcher query param `?focus=<sessionKey>`, validated server-side and TRANSLATED to the path-form `/focus/dashboard/...` URL via `buildDashboardFocusUrl` — OpenClaw parses no query-form focus (path grammar only).
+- **What:** Deep-link Watchdog incidents / Cron runs / Usage rows into the matching OpenClaw dashboard session: a launcher query param `?focus=<sessionKey>`, validated server-side and TRANSLATED to the path-form `/focus/dashboard/...` URL — OpenClaw parses no query-form focus (path grammar only).
 - **Why:** "Open this session's dashboard" from an incident/run/usage row is the natural next step once launcher clicks land authenticated; today those surfaces have no jump.
-- **Context:** lib/public/js/lib/app-navigation.js `buildDashboardFocusUrl` (client helper exists); lib/server/routes/dashboard-launch.js (extend the allowlist mapping — raw input never interpolated into Location); focus path grammar cited in docs/designs/openclaw-context-contract.md §5 (Dashboards focus deep links).
+- **Context:** a client helper, `buildDashboardFocusUrl` in lib/public/js/lib/app-navigation.js, was removed as unused in v0.10.221 and can be restored from git history; lib/server/routes/dashboard-launch.js (extend the allowlist mapping — raw input never interpolated into Location); focus path grammar cited in docs/designs/openclaw-context-contract.md §5 (Dashboards focus deep links).
 - **Effort:** S-M. **Depends on:** nothing (the Dashboards launcher shipped in v0.9.56).
 
 ## P3 — Consolidate the two gateway-token resolvers

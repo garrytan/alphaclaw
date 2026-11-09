@@ -61,8 +61,8 @@ import { AppSidebar } from "../../lib/public/js/components/sidebar.js";
 import { StatusChip } from "../../lib/public/js/components/status-chip.js";
 import { Badge } from "../../lib/public/js/components/badge.js";
 import {
-  buildNavSections,
   filterNavSectionsForRole,
+  kNavSections,
 } from "../../lib/public/js/lib/app-navigation.js";
 
 // ALPH-69 PR 2b: the sidebar's groups, labels, agent rows, chip and foot.
@@ -95,7 +95,7 @@ const kAgents = [
 
 const renderSidebar = (props = {}) => {
   harness.beginRender();
-  return AppSidebar({ navSections: buildNavSections(), agents: kAgents, ...props });
+  return AppSidebar({ navSections: kNavSections, agents: kAgents, ...props });
 };
 
 const mainNav = (tree) =>
@@ -128,20 +128,13 @@ describe("frontend/sidebar IA", () => {
       { label: "Agents", rows: ["main Default", "Scout", "Ledger", "Add agent"] },
       {
         label: "Operate",
-        rows: ["Health", "Doctor", "Schedules", "Usage", "Open Claude Code"],
+        rows: ["Health", "Doctor", "Schedules", "Usage", "Open Claude Code", "Dashboards"],
       },
       { label: "Connect", rows: ["Channels", "Integrations", "Relay"] },
       { label: "Settings", rows: ["Models & keys", "Environment", "Team"] },
     ]);
     const tree = renderSidebar();
     expect(collectNodes(mainNav(tree)).some((vnode) => vnode.props?.["aria-expanded"] !== undefined)).toBe(false);
-  });
-
-  it("appends Dashboards at the foot of Operate when the gate is open", () => {
-    const operate = groupsOf(
-      renderSidebar({ navSections: buildNavSections({ features: { sessionDashboards: true } }) }),
-    ).find((group) => group.label === "Operate");
-    expect(operate.rows.slice(-2)).toEqual(["Open Claude Code", "Dashboards"]);
   });
 
   it("marks the default agent with a Default badge and the selected one as current", () => {
@@ -163,7 +156,7 @@ describe("frontend/sidebar IA", () => {
 
   it("shows a member only Usage, Schedules and Team", () => {
     const tree = renderSidebar({
-      navSections: filterNavSectionsForRole(buildNavSections(), "member"),
+      navSections: filterNavSectionsForRole(kNavSections, "member"),
       showAgents: false,
     });
     expect(groupsOf(tree)).toEqual([
