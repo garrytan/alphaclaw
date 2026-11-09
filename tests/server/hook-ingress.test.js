@@ -410,6 +410,26 @@ describe("built-in /hooks/agent and /hooks/wake", () => {
       await h.close();
     }
   });
+
+  it("takes a built-in's own token only on the built-in itself, never on a mapping path under it", async () => {
+    const h = await createHarness();
+    try {
+      h.hookIngress.setBuiltinEnabled("wake", true);
+      const own = h.hookIngress.mintToken("wake");
+      const refused = await request(h.app).post("/hooks/wake/crm?source=crm").set("Authorization", "Bearer " + own).send({});
+      expect(refused.status).toBe(401);
+      expect(h.gateway.calls).toHaveLength(0);
+      const shared = await request(h.app).post("/hooks/wake/crm").set("Authorization", "Bearer " + kShared).send({});
+      expect(shared.status).toBe(200);
+      expect(h.gateway.calls[0].url).toBe("/hooks/wake/crm");
+      expect(h.gateway.calls[0].headers.authorization).toBe("Bearer " + kShared);
+      const underClosedBuiltin = await request(h.app).post("/hooks/agent/crm").set("Authorization", "Bearer " + kShared).send({});
+      expect(underClosedBuiltin.status).toBe(200);
+      expect(h.gateway.calls[1].url).toBe("/hooks/agent/crm");
+    } finally {
+      await h.close();
+    }
+  });
 });
 
 describe("Doctor gateway.bind card", () => {
