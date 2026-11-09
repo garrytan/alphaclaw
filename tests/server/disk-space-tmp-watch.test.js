@@ -393,6 +393,37 @@ describe("/tmp watch", () => {
     expect(h.messages()[1]).toContain("• deleted 2 decompressed session-archive copies (3 MB) from `" + cache + "`; OpenClaw remakes any it reads again");
   });
 
+  it("keeps an archive copy a process opened while the watch was still walking the rest of /tmp", async () => {
+    let hook = null;
+    const h = harness({
+      overrides: {
+        measure: async (root) => {
+          const { measureTmpEntries } = loadTmpWatch();
+          const measured = await measureTmpEntries(root);
+          await hook?.(root);
+          return measured;
+        },
+      },
+    });
+    const cache = path.join(h.root, "openclaw", "session-archive-read-cache");
+    const opened = writeFile(path.join(cache, `${"a".repeat(32)}-1-1.jsonl`), 1.5, kHourMs);
+    const idle = writeFile(path.join(cache, `${"b".repeat(32)}-1-1.jsonl`), 1.5, kHourMs);
+    const busyDir = path.join(h.root, "busy");
+    const busy = writeFile(path.join(busyDir, "in-use.bin"), 1, kHourMs);
+    writeFile(path.join(busyDir, "loose.bin"), 1, 5 * kHourMs);
+    await holdOpen(h, [busy]);
+    let reader = null;
+    hook = async (root) => {
+      if (root !== busyDir || reader) return;
+      reader = await holdOpen(h, [opened]);
+    };
+    await h.watch.tick();
+    expect(reader).not.toBeNull();
+    expect(fs.existsSync(opened)).toBe(true);
+    expect(fs.existsSync(idle)).toBe(false);
+    expect(fs.existsSync(busy)).toBe(true);
+  });
+
   it("keeps an archive copy OpenClaw is still writing or wrote seconds ago", async () => {
     const h = harness();
     const cache = path.join(h.root, "openclaw", "session-archive-read-cache");

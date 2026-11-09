@@ -71,6 +71,61 @@ describe("relocateOpenclawArchiveReadCache", () => {
     expect(fs.readdirSync(roots.tmpRoot).sort()).toEqual(["keep-me", "session-archive-read-cache"]);
   });
 
+  it("still links the cache when an old copy directory cannot be removed, with one warning", () => {
+    const roots = makeRoots();
+    const leftover = path.join(roots.tmpRoot, ".session-archive-read-cache-removing-1731142200000");
+    fs.mkdirSync(leftover, { recursive: true });
+    fs.chmodSync(roots.tmpRoot, 0o700);
+    const log = logger();
+    const fsImpl = {
+      ...fs,
+      rmSync: (target, options) => {
+        if (target === leftover) throw Object.assign(new Error("denied"), { code: "EACCES" });
+        return fs.rmSync(target, options);
+      },
+    };
+    expect(run(roots, { logger: log, fsImpl })).toMatchObject({ status: "linked", changed: true });
+    expect(fs.readlinkSync(path.join(roots.tmpRoot, "session-archive-read-cache"))).toBe(roots.targetDir);
+    expect(log.warn.mock.calls.map((call) => call[0])).toEqual([
+      `[alphaclaw] OpenClaw archive read cache: could not remove an old copy directory in ${roots.tmpRoot}: EACCES`,
+    ]);
+  });
+
+  it("still links the cache when the old cache directory it set aside cannot be removed, and claims nothing freed", () => {
+    const roots = makeRoots();
+    const cache = path.join(roots.tmpRoot, "session-archive-read-cache");
+    fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
+    fs.chmodSync(roots.tmpRoot, 0o700);
+    fs.writeFileSync(path.join(cache, "copy.jsonl"), Buffer.alloc(1024 * 1024, 1));
+    const fsImpl = { ...fs, rmSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } };
+    const log = logger();
+    expect(run(roots, { logger: log, fsImpl })).toMatchObject({ status: "linked", changed: true, clearedBytes: 0 });
+    expect(fs.lstatSync(cache).isSymbolicLink()).toBe(true);
+    expect(lines(log)).toEqual([`[alphaclaw] OpenClaw archive read cache now on the data volume: ${cache} -> ${roots.targetDir}`]);
+  });
+
+  it("never deletes anything outside its own cache directories, through symlinks or a link to the data volume itself", () => {
+    const roots = makeRoots();
+    fs.mkdirSync(roots.tmpRoot, { recursive: true, mode: 0o700 });
+    const outside = path.join(roots.base, "data", "keep");
+    fs.mkdirSync(outside, { recursive: true });
+    const sentinels = ["a.txt", "b.jsonl"].map((name) => path.join(outside, name));
+    for (const file of sentinels) fs.writeFileSync(file, "keep");
+    const tmpName = `${"d".repeat(32)}-1-1.jsonl.4242.0d5a1f3c-9a1b-4c2d-8e3f-1234567890ab.tmp`;
+    const tmpTarget = path.join(outside, tmpName);
+    fs.writeFileSync(tmpTarget, "keep");
+    const oldAt = new Date(kNowMs - 60 * 60_000);
+    fs.utimesSync(tmpTarget, oldAt, oldAt);
+    fs.mkdirSync(roots.targetDir, { recursive: true, mode: 0o700 });
+    fs.symlinkSync(tmpTarget, path.join(roots.targetDir, tmpName.replace("4242", "4243")));
+    fs.symlinkSync(outside, path.join(roots.tmpRoot, ".session-archive-read-cache-removing-1731142200000"));
+    fs.symlinkSync(path.join(roots.base, "data"), path.join(roots.tmpRoot, "session-archive-read-cache"));
+    fs.symlinkSync(path.join(roots.base, "missing"), path.join(roots.tmpRoot, ".session-archive-read-cache-removing-1731142200001"));
+    expect(run(roots, { logger: logger() })).toMatchObject({ status: "linked", changed: true, replacedLink: path.join(roots.base, "data"), orphansRemoved: 0 });
+    for (const file of [...sentinels, tmpTarget]) expect(fs.readFileSync(file, "utf8")).toBe("keep");
+    expect(fs.readdirSync(outside).sort()).toEqual(["a.txt", "b.jsonl", tmpName].sort());
+  });
+
   it("re-points a hand-made link to another directory and names the old target", () => {
     const roots = makeRoots();
     fs.mkdirSync(roots.tmpRoot, { recursive: true, mode: 0o700 });
