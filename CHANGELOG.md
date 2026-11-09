@@ -7,7 +7,7 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.226] - 2026-11-09
 
-The watchdog's out-of-memory verdict for a force-killed gateway gets three follow-up fixes: a relaunch killed while it boots is judged on its own, the wording no longer overstates what the kernel counter proves, and an outside kill still pages like the OOM verdict it was split from.
+The watchdog's out-of-memory verdict for a force-killed gateway gets three follow-up fixes. A relaunch killed while it boots is judged on its own, the wording no longer overstates what the kernel counter proves, and an outside kill still pages like the OOM verdict it was split from.
 
 ### Fixed
 - **A relaunch killed while booting is no longer blamed on its predecessor's OOM.** The kernel `oom_kill` count the next exit is compared with is now also re-read at each gateway exit, not only at the launch notice. The notice comes only once the gateway listens, so a relaunch SIGKILLed during boot used to be compared with its predecessor's launch count and inherited that gateway's OOM kill. A relaunch that does reach its notice is still judged from the notice.
