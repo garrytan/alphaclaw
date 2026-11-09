@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.222] - 2026-11-09
+
+The Telegram topics page and the Browse stylesheet are split into smaller files by area, with no change to how either page behaves, and the topics page no longer runs words together.
+
+### Changed
+- **Telegram topics page.** `telegram-workspace/manage.js` (1,033 lines, 28 pieces of state) is now the page layout only. Loading topics and the topic registry, creating, deleting, renaming and naming topics, and verify, restore and discovery sweep moved to a `useTelegramTopics` hook (`use-telegram-topics.js`). The topics table is `topic-table.js`, and its rows, the health cell, the quiet dot and the agent picker are in `topic-row.js`. The concurrency line's numbers come from `resource-cap-model.js`, a pure function. Its local fallback formula stays: besides an older server, it covers the first paint after you finish onboarding, when the page draws from a cached workspace saved without the server's computed values, until the workspace request returns.
+- **Browse stylesheet.** `explorer.css` (1,896 lines) is replaced by `sidebar.css` (sidebar tabs, Browse layout, agents list, chat sessions and the git panel), `file-tree.css` and `file-viewer.css`, linked in that order from `setup.html`, each with its own light-theme overrides. Every rule is unchanged. The unused `.file-viewer-icon-action` rules (base, hover and disabled) are deleted; `.file-viewer-icon-action-icon`, which the file viewer toolbar uses, stays.
+
+### Fixed
+- **Missing spaces on the Telegram topics page.** The discovery line read "Topic discovery ison · last sweep10m ago(1 discovered…)" and a deleted topic read "deletedNov 7, …", because the template dropped the spaces next to the inline values. Both lines now have their spaces.
+
+### Tests
+- A new `telegram-resource-cap-model` test covers the concurrency preference order, the machine-size claim and the fallback for a cached workspace. The Telegram page component test follows the new hook order and now walks into nested components when it looks for a button. The typography test and the cron history browser fixture read the three new stylesheets instead of `explorer.css`.
+
 ## [0.10.221] - 2026-11-09
 
 The dashboard drops code and styles nothing used any more, shows the Dashboards link in the sidebar without first asking the server whether it may, and the README's page table now matches the sidebar.
