@@ -24,6 +24,21 @@ Each webhook can now check who sent a delivery instead of trusting the one share
 - `hook-ingress-senders.test.js`: exact-bytes forwarding, byte-identical transform input when unsigned headers change, stale and compressed deliveries, the limiter, replay across a DB reopen, the 409 for a concurrent copy, the injected failure after the gateway's 2xx, the 24 h window, own tokens, fail-closed policy and secrets, OAuth aliases on a signed hook, delete and recreate, the backup and restore, and humans-only routes.
 - `tests/live/hook-ingress.e2e.test.js`: a signed delivery reaches the pinned gateway's transform with only the signed body, its replay is not dispatched, a 250 KiB body is admitted and the shared token is refused after the window.
 - `webhook-sender-verification.test.js`: the Sender verification card's states and labels, and that a shown-once secret never reaches the cache.
+A delegate Capy thread can no longer change the box's own controls without you. Changes to config, env, secrets, plugins, the relay guards or AlphaClaw's access now wait for a one-time Approve link, and you get a daily digest of what your delegates did.
+
+### Added
+- **One-tap owner confirmation for a delegate's high-risk calls.** The relay guard works out each call's risk from the call itself: writing `openclaw.json`, `alphaclaw.json`, `exec-approvals.json`, `.env`, the relay's databases or the guards' code, an `alphaclaw admin` write (a new grant included), or an `openclaw config set|unset|apply`, `secrets`, `plugins install|…` or `gateway install|uninstall` command. The first try is refused with a ref (`rc_…`) and AlphaClaw sends you one message naming the sender, lane, action and target with a link to `/relay/confirm/<token>` (signed-in admin, single use, 15 minutes, stored hashed, never the message text). Approve tells the thread, which sends the request again with `confirmation_ref`; that one call is admitted once within 15 minutes. Deny, an expired link, another target, another binding generation, another lane's message or a second use admits nothing. A revoke cancels open confirmations.
+- **Daily delegate digest.** Once a day after 15:00 UTC, when there was activity: each delegate's messages, lanes and grant, confirmations asked, approved, used, denied and expired, and grants revoked. Counts only.
+- `relay_send` and `relay_reply` over `/relay/mcp` take an optional `confirmation_ref`, carried only for a delegate.
+
+### Fixed
+- **A brief `remote.db` error no longer costs a delegate its lanes.** When the bridge could not check a sender's grant it admitted the message with the ungranted single lane, so a delegate's second lane got a final `lane_limit` reply. The message is now read again on the next poll, up to 5 tries.
+- **A delegate grant is refused while a live peer grant holds the agent.** It used to lie dormant and take effect unseen once the peer grant was revoked. Revoke the peer grant first.
+
+### Tests
+- `relay-confirm.test.js`: the risk table (no value ever in the action or target); held, linked, approved and admitted once, then refused on replay; another target, generation or lane; Deny; link and approval expiry; no database; a revoke cancelling; the owner's message naming the key but not the value; the digest once a day; the page's admin, same-origin and CSRF checks and single use.
+- `relay-delegate.test.js`: a failed tier lookup holds the message and retries; a ref in the metadata is kept and named to the agent. `relay-grants.test.js`: a delegate grant beside a live peer grant is refused; `confirmation_ref` rides only a delegate's send.
+- `tests/live/relay-bridge.e2e.test.js`: a granted delegate on a lane, a protected write held, confirmed and run once against the real gateway, and a revoke aborting a running turn.
 
 ## [0.10.244] - 2026-11-09
 

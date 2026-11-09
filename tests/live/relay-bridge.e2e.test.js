@@ -39,6 +39,11 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   let gatewaySends = 0;
   let secrets;
   let remote;
+  // The bound remote caller of the OAuth MCP case, reused by the grant case.
+  let remoteApp;
+  let remoteTool;
+  let remoteBound;
+  const ownerNotices = [];
   const wakePosts = [];
   // The brain archive writes through a gbrain wrapper: the real gbrain when
   // OPENCLAW_LIVE_GBRAIN_BIN names one (a scratch brain with a "relay"
@@ -53,6 +58,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       ? fs.readFileSync(path.join(fakeGbrainDir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
       : [];
 
+  const probePath = () => path.join(require("../../lib/server/constants").OPENCLAW_DIR, "workspace", ".env.relay-probe");
   const relayUrl = (p) => `http://127.0.0.1:${relayPort}${p}`;
   const relayCall = async (method, p, token, body) => {
     const res = await fetch(relayUrl(p), {
@@ -84,6 +90,25 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
         res.writeHead(200, { "content-type": "text/event-stream" });
         const chunk = (delta, finish = null) =>
           `data: ${JSON.stringify({ id: "relay-live", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+        // The grant case: "confirm-probe-N" asks for one write to a
+        // protected file in the workspace, then answers with the guard's
+        // confirmation ref when the write was held.
+        const probe = slow ? null : [...body.matchAll(/confirm-probe-(\d+)/g)].pop();
+        if (probe) {
+          const messages = JSON.parse(body).messages || [];
+          const last = messages[messages.length - 1] || {};
+          if (last.role !== "tool") {
+            res.write(chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: "call_probe_" + probe[1], type: "function", function: { name: "write", arguments: JSON.stringify({ path: probePath(), content: "probe " + probe[1] + "\n" }) } }] }));
+            res.write(chunk({}, "tool_calls"));
+            res.end("data: [DONE]\n\n");
+            return;
+          }
+          const ref = JSON.stringify(last.content).match(/rc_[a-f0-9]{16}/);
+          res.write(chunk({ role: "assistant", content: ref ? "held " + ref[0] : "wrote probe " + probe[1] }));
+          res.write(chunk({}, "stop"));
+          res.end("data: [DONE]\n\n");
+          return;
+        }
         if (!slow) {
           const asked = [...body.matchAll(/ping-(\d+)/g)].pop();
           res.write(chunk({ role: "assistant", content: "pong-" + (asked ? asked[1] : "none") + " from the box" }));
@@ -151,6 +176,9 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       getSupervisor: () => sidecars.find("relay-engine"),
       resolveAgentId: () => "main",
       onRelayMessage: (routed) => remote?.onRelayMessage(routed),
+      notifyOwner: (text, opts) => ownerNotices.push({ text, opts }),
+      // As lib/server.js wires it: the remote side's grants decide the tier.
+      resolveSenderTrust: (sender) => (remote ? remote.resolveDelegate(sender) : { trust: "peer", reason: "not_bound" }),
       createGatewayClient: ({ onEvent, onDisconnect }) => {
         const client = require("../../lib/server/chat/gateway-client").createGatewayClient({
           fs,
@@ -326,6 +354,9 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       };
       const bound = await tool("relay_bind", { thread_id: "jam_live_relay", webhook_url: "https://api.capy.ai/webhooks/automations/live-test-token" });
       expect(bound.isError).toBe(false);
+      remoteApp = app;
+      remoteTool = tool;
+      remoteBound = bound.data;
       const roster = await tool("relay_agents", {});
       expect(roster.data.agents.map((agent) => agent.name)).toEqual(expect.arrayContaining(["wintermute", bound.data.agent]));
       const sent = await tool("relay_send", { as: bound.data.agent, capability: bound.data.capability, to: "wintermute", text: "ping-77 from a remote thread" });
@@ -396,6 +427,65 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       expect(page).toContain("@capy-live (peer)");
       expect(page).not.toContain("Handle it as read-only diagnostics");
       expect(page).not.toContain(secrets.workspaceKey);
+    },
+    kTestTimeoutMs,
+  );
+
+  it(
+    "a granted delegate works on its own lane, a high-risk write waits for the owner's one tap and runs once, and a revoke aborts a running turn",
+    async () => {
+      expect(remoteTool).toBeTruthy();
+      const request = require("supertest");
+      const as = { as: remoteBound.agent, capability: remoteBound.capability };
+      const granted = await request(remoteApp).post("/api/relay/remote/grants").send({ agent: remoteBound.agent });
+      expect(granted.status).toBe(200);
+      // The lane's conversation as the thread reads it (wakes are held to
+      // one a minute, so they are not counted here).
+      const laneText = async () =>
+        (await remoteTool("relay_history", { ...as, with: "wintermute", lane: "gbrain" })).data.messages.map((message) => message.text).join("\n");
+      const occurrences = async (needle) => (await laneText()).split(needle).length - 1;
+
+      const first = await remoteTool("relay_send", { ...as, to: "wintermute", text: "confirm-probe-1", lane: "gbrain" });
+      expect(first.data).toMatchObject({ trust: "delegate", lane: "gbrain" });
+      await waitFor(async () => (await occurrences("held rc_")) === 1, 180_000, "the held write's answer");
+      const ref = (await laneText()).match(/held (rc_[a-f0-9]{16})/)[1];
+      expect(fs.existsSync(probePath())).toBe(false);
+      const row = relay.getStore().get(first.data.message_id);
+      expect(row).toMatchObject({ trust: "delegate", lane: "gbrain", grantId: granted.body.grant.id });
+      expect(row.sessionKey).toMatch(/:lane-gbrain$/);
+
+      await waitFor(async () => ownerNotices.some((notice) => notice.opts?.id === "relay-confirm-" + ref), 30_000, "the owner's confirmation link");
+      const notice = ownerNotices.find((entry) => entry.opts?.id === "relay-confirm-" + ref);
+      expect(notice.text).toContain("wants to write .env.relay-probe");
+      expect(notice.text).not.toContain("confirm-probe-1");
+      const token = notice.text.match(/\/relay\/confirm\/(rcl_[a-f0-9]{48})/)[1];
+      expect(await relay.confirmations.decide({ token, approve: true, by: "owner" })).toMatchObject({ ok: true, state: "confirmed" });
+      await waitFor(async () => (await occurrences("your owner approved")) === 1, 60_000, "the sender is told about the approval");
+
+      const retry = await remoteTool("relay_send", { ...as, to: "wintermute", text: "confirm-probe-2", lane: "gbrain", confirmation_ref: ref });
+      expect(retry.isError).toBe(false);
+      await waitFor(async () => (await occurrences("wrote probe 2")) === 1, 180_000, "the confirmed write's answer");
+      expect(fs.readFileSync(probePath(), "utf8")).toBe("probe 2\n");
+      expect(relay.getStore().confirmations.get(ref)).toMatchObject({ state: "spent", spentMessageId: retry.data.message_id });
+
+      const replay = await remoteTool("relay_send", { ...as, to: "wintermute", text: "confirm-probe-3", lane: "gbrain", confirmation_ref: ref });
+      expect(replay.isError).toBe(false);
+      await waitFor(async () => (await occurrences("held rc_")) === 2, 180_000, "the replayed write held again");
+      expect(fs.readFileSync(probePath(), "utf8")).toBe("probe 2\n");
+
+      // A revoke ends a running turn: the slow turn is aborted and settles.
+      slowNext = true;
+      const slow = await remoteTool("relay_send", { ...as, to: "wintermute", text: "a long job" });
+      await waitFor(async () => relay.getStore().get(slow.data.message_id)?.state === "dispatched", 60_000, "the slow turn running");
+      slowNext = false;
+      const revoked = await request(remoteApp).post("/api/relay/remote/grants/" + granted.body.grant.id + "/revoke");
+      expect(revoked.status).toBe(200);
+      await waitFor(async () => relay.getStore().get(slow.data.message_id)?.trust === "peer", 30_000, "the running turn demoted");
+      await waitFor(
+        async () => !["queued", "dispatched", "completing", "reconciling"].includes(relay.getStore().get(slow.data.message_id)?.state),
+        kSlowTurnSeconds * 1000 - 5_000,
+        "the aborted turn settling before the slow model would have finished",
+      );
     },
     kTestTimeoutMs,
   );
