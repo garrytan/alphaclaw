@@ -2697,6 +2697,26 @@ describe("server/gateway restart behavior", () => {
       }
     });
 
+    it("launches the gateway even when moving OpenClaw's archive read cache off /tmp throws", async () => {
+      const archiveCache = require("../../lib/server/openclaw-archive-read-cache");
+      const original = archiveCache.relocateOpenclawArchiveReadCache;
+      archiveCache.relocateOpenclawArchiveReadCache = vi.fn(() => {
+        throw new Error("relocation blew up");
+      });
+      try {
+        childProcess.spawn = vi.fn(() => createChild());
+        fs.existsSync = vi.fn(() => false);
+        net.createConnection = vi.fn(() => createSocket(false));
+        delete require.cache[modulePath];
+        const gateway = require(modulePath);
+        expect(await gateway.requestGatewayLaunch({ site: "crash restart" })).toMatchObject({ outcome: "launch_requested" });
+        expect(archiveCache.relocateOpenclawArchiveReadCache).toHaveBeenCalledTimes(1);
+        expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+      } finally {
+        archiveCache.relocateOpenclawArchiveReadCache = original;
+      }
+    });
+
     it("a port that answers with no live child is incumbent_present: identity returned, nothing spawned, NO launch handler", async () => {
       installFakeProc(kIncumbentTree);
       const child = createChild();

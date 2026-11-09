@@ -27,6 +27,9 @@ export default async function setupRunTmpdir() {
   // TMP/TEMP are read by nothing on POSIX but cost nothing and keep the
   // three conventional names consistent for any child process the tests spawn.
   for (const key of ["TMPDIR", "TMP", "TEMP"]) process.env[key] = runDir;
+  // A gateway launch links OpenClaw's archive read cache out of
+  // /tmp/openclaw (openclaw-archive-read-cache.js); tests get their own root.
+  if (!process.env.ALPHACLAW_OPENCLAW_TMP_ROOT) process.env.ALPHACLAW_OPENCLAW_TMP_ROOT = path.join(runDir, "openclaw");
   // No session-bus autolaunch from the suite. Tests that execute real host
   // binaries (the bin/ CLI tests run `alphaclaw`, which shells out to `gog`
   // when it is installed) otherwise make libdbus/GLib fork a

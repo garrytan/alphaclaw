@@ -11,6 +11,7 @@
         "tests/live/gateway-downtime-note.e2e.test.js",
         "tests/live/injected-context.e2e.test.js",
         "tests/live/model-check-provider-defaults.e2e.test.js",
+        "tests/live/openclaw-archive-read-cache.e2e.test.js",
         "tests/live/openclaw-file-log.e2e.test.js",
         "tests/live/openclaw-live-cli-contract.e2e.test.js",
         "tests/live/openclaw-live-gateway.e2e.test.js",
