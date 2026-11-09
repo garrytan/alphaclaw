@@ -142,7 +142,7 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       mcp: { servers: { guardfixture: { command: process.execPath, args: [path.join(__dirname, "fixtures", "guard-touch-mcp.js")] } } },
       channels: {},
     });
-    applyRelayGuardEntry(config, buildRelayGuardEntry({ rootDir: kRootDir }), { log: () => {} });
+    applyRelayGuardEntry(config, buildRelayGuardEntry({ rootDir: kRootDir, delegateAgents: ["capy-delegatelive01"] }), { log: () => {} });
     fs.writeFileSync(path.join(OPENCLAW_DIR, "openclaw.json"), JSON.stringify(config));
     fs.writeFileSync(kOnboardingMarkerPath, JSON.stringify({ live: true }));
     process.env.OPENCLAW_GATEWAY_TOKEN = token;
@@ -333,6 +333,7 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       const withheld = (toolName) => "[relay-guard] " + toolName + " is not available to a delegate relay session";
       for (const [toolName, args, refusal] of [
         ["message", { action: "send", channel: "telegram", target: "@someone-else", message: "hi" }, "[relay-guard] @someone-else is not a recipient the owner's approval names"],
+        ["message", { action: "send", channel: "telegram", targets: ["@live-target"], to: "@stranger", message: "hi" }, "[relay-guard] an approved send takes one target and no targets, to field"],
         ["automations", { action: "list" }, withheld("automations")],
         ["gateway", { action: "config.get" }, withheld("gateway")],
         ["sessions_send", { sessionKey: "agent:main:main", message: "hi" }, withheld("sessions_send")],

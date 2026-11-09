@@ -13,6 +13,12 @@
       "rootDir": {
         "type": "string"
       },
+      "delegateAgents": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
       "delegateTools": {
         "type": "array",
         "items": {
