@@ -129,6 +129,23 @@ A Doctor run that a restart cut off no longer starts again on its own. OpenClaw'
 
 ### Changed
 - **gstack's pregate can reuse CI's test run on Linux.** The `ci/test-24` run profile in `.gstack/pregate.json` now names its OS (`"os": "Linux"`), so /ship's pregate tests stage accepts the files CI's `test (24)` run already passed at the same tree instead of running them again locally. CI configuration only; nothing changes for someone running AlphaClaw.
+## [0.10.232] - 2026-11-09
+
+AlphaClaw now runs OpenClaw 2026.11.2, the current stable release, instead of 2026.10.9. The first boot migrates OpenClaw's databases one way; README's OpenClaw Version section says how to back up first and how to go back.
+
+### Changed
+- **OpenClaw pin 2026.10.9 → 2026.11.2.** Its Doctor moves the state database from schema 20 to 22 and agent databases from 25 to 27, and 2026.10.9 refuses the result. README now gives the backup and the restore steps for going back, and warns that 2026.11.2's Doctor refuses a SQLite session that still has its legacy `.jsonl` beside it.
+- **Auth store:** schemas 21 and 22 are read and written through the shared layout, as before. A store newer than 22 is refused with `AUTH_STORE_UNREADABLE` / `unsupported_schema` and a 409 naming the version found, the supported range (12–22) and the fix. The Codex manual exchange now returns that envelope too instead of a 500.
+- **Model catalog without a gateway:** since 2026.10.10, `openclaw models list --all --json` with no gateway lists only the configured models. AlphaClaw no longer persists that list or serves it as fresh. With nothing better cached it is merged over the bundled catalog, and the backoff retry loads the full catalog once the gateway is up.
+- README: a deleted agent's turns now fail with "Agent <id> deletion is in progress; new work is unavailable." (the 2026.10.10 line's wording).
+
+### Tests
+- `auth-profiles-kv.test.js`: schemas 21 and 22 in the matrix; schema 23 refused with a 409 from `/api/codex/exchange`.
+- `model-catalog-cache.test.js`: the configured-only catalog listed without a gateway is never written to disk nor served as fresh, and the retry replaces it.
+- `node-runtime.test.js`: AlphaClaw's engines range must sit inside the pin's (the 2026.10.10 line relaxed to 24.16 / 26.1; AlphaClaw keeps 24.22.1 / 26.12.1).
+- `owned-providers.test.js`: the Particle tripwire checks for a bundled or installed plugin; the 2026.10.10 line's catalog only lists `@openclaw/particle-provider` as installable.
+- Fixtures: `cron-pinned-runtime.mjs` finds `projectCronRunHistoryPage` in `run-history-*.mjs`; `database-fixture.js` records 2026.11.2's schemas (state 22, agent 27).
+- Live tier: the restart ladder and memory telemetry assert one process where Node offers `process.execve` (the launcher execs the gateway in place); the CLI contract row asserts the offline `models list` shape; agent-delete asserts the new wording; the Particle stub skips the runtime-context user message when finding the person's turn and the tool result; the Control UI styles test accepts the hello-ok on the UI's reconnect socket (the gateway refuses a connect during its startup sidecars with a retryable "gateway starting").
 
 ## [0.10.231] - 2026-11-09
 
