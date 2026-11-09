@@ -27,6 +27,13 @@ describe("frontend/phone shell CSS", () => {
     expect(css).not.toMatch(/\.file-tree a\)/);
   });
 
+  it("applies the 40 px floor at the same width the drawer takes over", () => {
+    const start = css.indexOf("/* ── Phone tap targets");
+    expect(start).toBeGreaterThan(-1);
+    expect(css.slice(start, start + 200)).toContain("@media (max-width: 768px)");
+    expect(css).toMatch(/@media \(max-width: 768px\) \{\s*\.app-shell \{\s*--sidebar-width: 0px/);
+  });
+
   it("hides the closed phone drawer from the tab order and the top bar keeps the only status chip", () => {
     expect(ruleBody(String.raw`\.app-sidebar:not\(\.mobile-open\)`)).toContain("visibility: hidden");
     expect(ruleBody(String.raw`\.app-sidebar \.sidebar-status`)).toContain("display: none");

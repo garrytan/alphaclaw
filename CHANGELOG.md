@@ -30,6 +30,12 @@ The dashboard drops code and styles nothing used any more, shows the Dashboards 
 - **CSS.** The light-theme rows for `text-blue-400`, `text-indigo-300` and `text-purple-400` and two unused Schedules list classes are gone. The Schedules calendar grid used an undefined `--bg-surface` variable and so had no background; it now uses the card surface colour.
 - **README.** The Setup UI table follows the sidebar order and adds Chat, Agents, Open Claude Code, Dashboards, Relay and Telegram; Browse is described as a sidebar mode, and Webhooks, Nodes and Telegram say which page opens them. The Team section no longer says it needs an older OpenClaw line.
 
+### Fixed
+- **The phone drawer stays open when you switch its tabs from a page with a query** (for example a Health incident link). The page and the query each re-rendered on their own, so the second render closed the drawer the tab switch had just kept open.
+- **The account menu closes with the drawer** on navigation and on Escape.
+- **The 40 px phone floor starts at the drawer's width** (768 px) instead of one pixel below it.
+- **The time-format browser smoke runs to the end again.** It looked for the gateway card on Home, which Home stopped rendering in the page redesign, and it relied on a missing OpenClaw binary to open an incident, but the pinned OpenClaw now starts. It now checks Home's own heading, reads the gateway details on Health, and crashes the smoke's own gateway to open the incident it inspects.
+
 ### Tests
 - Tests for the removed helpers are removed with them. The sidebar tests now expect Dashboards in Operate for admins and hidden for members. New `api` tests cover the webhook send (accepted, rejected by the hook, a 401 that does not sign you out, an empty error body) and the two shared rule-file reads.
 

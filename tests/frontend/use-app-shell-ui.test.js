@@ -178,6 +178,33 @@ describe("frontend/hooks useAppShellUi phone drawer", () => {
     expect(focus).not.toHaveBeenCalled();
   });
 
+  it("keeps the drawer open for a tab switch from a page whose hash has a query", () => {
+    const win = { location: { hash: "#/health?incident=5" } };
+    vi.stubGlobal("window", win);
+    render("/health", "incident=5");
+    shell.actions.setMobileSidebarOpen(true);
+    render("/health", "incident=5");
+    shell.actions.keepMobileSidebarOnNextLocation();
+    win.location.hash = "#/browse";
+    expect(isOpen("/browse", "incident=5")).toBe(true);
+    expect(isOpen("/browse", "")).toBe(true);
+    win.location.hash = "#/browse?view=diff";
+    expect(isOpen("/browse", "view=diff")).toBe(false);
+  });
+
+  it("closes the account menu with the drawer on navigation and on Escape", () => {
+    render("/home");
+    shell.actions.setMobileSidebarOpen(true);
+    shell.actions.setMenuOpen(true);
+    render("/health");
+    expect(render("/health").state.menuOpen).toBe(false);
+    shell.actions.setMobileSidebarOpen(true);
+    shell.actions.setMenuOpen(true);
+    render("/health");
+    doc.key("Escape");
+    expect(render("/health").state.menuOpen).toBe(false);
+  });
+
   it("leaves Escape to an open dialog or file menu above the drawer", () => {
     render("/home");
     const focus = vi.fn();

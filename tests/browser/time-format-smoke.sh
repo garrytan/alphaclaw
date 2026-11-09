@@ -46,9 +46,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Minimal onboarded fixture. The gateway binary is absent on purpose: the
-# failed spawn degrades the watchdog, which opens a real incident with a real
-# event timeline — exactly the data the time assertions need.
+# Minimal onboarded fixture. The pinned OpenClaw starts a real gateway; the
+# incident section below SIGKILLs it so the watchdog opens a real incident with
+# a real event timeline — exactly the data the time assertions need.
 mkdir -p "$kScratch/.openclaw"
 echo '{"onboardedAt": 0, "source": "time-smoke"}' > "$kScratch/onboarded.json"
 echo '{"gateway": {"mode": "local", "port": 18996, "auth": {"token": "${OPENCLAW_GATEWAY_TOKEN}"}}}' \
@@ -91,9 +91,11 @@ done
 [ "$ok" = "true" ] || fail "login API never accepted (still in the updating phase?)"
 "$B" goto "http://127.0.0.1:$kPort/" >/dev/null
 sleep 2
-assert_page "location.pathname === '/' && document.body.textContent.indexOf('OpenClaw Gateway') >= 0" "logged in, app shell rendered"
+assert_page "location.pathname === '/' && !!document.querySelector('.app-shell') && document.body.textContent.indexOf('Status and next steps') >= 0" "logged in, Home rendered in the app shell"
 
-echo "== gateway card: Last health check equals Intl(medium/short) of the API ISO =="
+echo "== Health gateway details: Last health check equals Intl(medium/short) of the API ISO =="
+"$B" goto "http://127.0.0.1:$kPort/#/health" >/dev/null
+sleep 3
 # Wait for the first watchdog probe (can take ~2-3 min on a fresh boot with a
 # dead gateway), then compare atomically in one evaluation so the value can't
 # move between fetch and DOM read.
@@ -133,8 +135,19 @@ assert_page "Array.from(document.querySelectorAll('button')).some(b=>b.textConte
   "copy action is labeled 'Copy diagnostics (UTC)'"
 
 echo "== incident timeline: seconds visible + dual-register tooltips =="
-# The failed gateway spawn opens incident #1 within the watchdog's first probe
-# window. Poll the API, then expand the incident card in the DOM.
+# SIGKILL the gateway's process group (a crash) so the watchdog opens incident
+# #1. Only descendants of this smoke's own server whose command line runs the
+# OpenClaw gateway are signalled. Poll the API, then expand the incident card.
+descendants() { local c; for c in $(pgrep -P "$1" || true); do echo "$c"; descendants "$c"; done; }
+killed=""
+for pid in $(descendants "$kServerPid"); do
+  if ps -o args= -p "$pid" 2>/dev/null | grep -q "openclaw.*gateway"; then
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pgid" ] && kill -9 -- "-$pgid" 2>/dev/null && killed="$pgid"
+    break
+  fi
+done
+[ -n "$killed" ] || fail "no OpenClaw gateway process under the smoke's server to crash"
 opened=""
 for i in $(seq 1 24); do
   opened=$("$B" js "await fetch('/api/watchdog/incidents').then(r=>r.json()).then(s=>((s.incidents||s.items)||[]).length>0).catch(()=>false)" 2>&1 | tail -1)
