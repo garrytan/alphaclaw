@@ -4,7 +4,7 @@
 // tool result back, so each case reads what the gateway actually did:
 //   - plugins.list reports relay-guard active;
 //   - an agent:main:relay-* session is denied exec, an MCP tool, exec through
-//     the tool_call wrapper, reads of relay/secrets.json and
+//     the dispatch_action wrapper, reads of relay/secrets.json and
 //     /proc/self/environ, and every path tool on its own workspace files
 //     (relay sessions are messaging-only);
 //   - a main session keeps exec and the MCP tool.
@@ -199,10 +199,11 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       expect(workspaceAnswer).not.toContain("workspace-ok-7731");
 
       // The pin defers MCP tools behind tool_search, so a deferred one is
-      // called through the tool_call wrapper.
+      // called through the dispatch_action wrapper (tool_call before
+      // OpenClaw 2026.11.2).
       const mcpCall = async (sessionKey, marker) => {
         const direct = await runTurn(sessionKey, "touch_marker", { path: marker });
-        return direct.startsWith("NOT-OFFERED") ? { via: "tool_call", answer: await runTurn(sessionKey, "tool_call", { id: "guardfixture__touch_marker", args: { path: marker } }) } : { via: "direct", answer: direct };
+        return direct.startsWith("NOT-OFFERED") ? { via: "dispatch_action", answer: await runTurn(sessionKey, "dispatch_action", { id: "guardfixture__touch_marker", args: { path: marker } }) } : { via: "direct", answer: direct };
       };
       const mcpMarker = path.join(kRootDir, "relay-mcp.marker");
       const mcpRelay = await mcpCall(relay, mcpMarker);
@@ -211,8 +212,8 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       expect(fs.existsSync(mcpMarker)).toBe(false);
 
       const wrappedMarker = path.join(kRootDir, "relay-wrapped.marker");
-      const wrappedAnswer = await runTurn(relay, "tool_call", { id: "exec", args: { command: "touch " + wrappedMarker } });
-      console.log("[live] relay-guard tool_call case: " + wrappedAnswer.slice(0, 200));
+      const wrappedAnswer = await runTurn(relay, "dispatch_action", { id: "exec", args: { command: "touch " + wrappedMarker } });
+      console.log("[live] relay-guard dispatch_action case: " + wrappedAnswer.slice(0, 200));
       if (!wrappedAnswer.startsWith("NOT-OFFERED")) expect(wrappedAnswer).toContain("[relay-guard]");
       expect(fs.existsSync(wrappedMarker)).toBe(false);
 
@@ -322,12 +323,12 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       expect(cliAnswer).not.toContain("[relay-guard]");
 
       // The pin defers some of these behind tool_search; a tool it does not
-      // offer directly is called through the tool_call wrapper, which runs
+      // offer directly is called through the dispatch_action wrapper, which runs
       // the hook again under the tool's own name.
       const delegateCall = async (toolName, args) => {
         const direct = await runTurn(relay, toolName, args);
         if (!direct.startsWith("NOT-OFFERED")) return direct;
-        const wrapped = await runTurn(relay, "tool_call", { id: toolName, args });
+        const wrapped = await runTurn(relay, "dispatch_action", { id: toolName, args });
         return /\bunknown tool\b|not found|not available in this session|No tool/i.test(wrapped) && !wrapped.includes("[relay-guard]") ? direct : wrapped;
       };
       const withheld = (toolName) => "[relay-guard] " + toolName + " is not available to a delegate relay session";

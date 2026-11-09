@@ -35,7 +35,7 @@ const findMaterializer = () => {
 
 const materialize = (archivePath, scratch) => {
   const { file, alias } = findMaterializer();
-  const script = `import(${JSON.stringify(file)}).then((m) => { process.stdout.write(JSON.stringify({ path: m[${JSON.stringify(alias)}](${JSON.stringify(archivePath)}) })); });`;
+  const script = `import(${JSON.stringify(file)}).then(async (m) => { process.stdout.write(JSON.stringify({ path: await m[${JSON.stringify(alias)}](${JSON.stringify(archivePath)}) })); });`;
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
     env: { ...scrubTestRunnerEnv(), TMPDIR: path.join(scratch, "proc-tmp") },
     encoding: "utf8",
