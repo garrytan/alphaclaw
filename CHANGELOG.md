@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.226] - 2026-11-09
+
+A Capy thread you made a relay delegate now gets what it asked for: when it asks your agent for files, an export or results, your agent hands them over in its answer instead of asking for your approval, because that answer goes back to your own thread.
+
+### Fixed
+- **Delegates receive what they asked for.** A delegate's relay header now says that its final answer goes back to the requesting Capy thread, so giving that thread file contents, a staged export or results is you receiving them, not a send to another person. Before, an agent could treat the requesting thread as a third party and ask for your own go before handing over an export the thread had asked for. Sending to anyone else still needs an approval you gave in Capy that names them.
+
 ## [0.10.225] - 2026-11-09
 
 Capy threads you choose can now act as you through Agent Relay: their messages to your agent use its normal tools (files, commands, web, memory and the brain) instead of the messaging-only session, while sending to other people, scheduling, and changing the gateway, plugins, config or secrets stay with you.
