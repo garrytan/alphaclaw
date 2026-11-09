@@ -61,6 +61,19 @@ describe("test this group", () => {
     expect(bySender(unlisted)[kGarry]).toMatchObject({ reply: "never", reason: "group-chat-not-allowed" });
   });
 
+  it("applies a group's rule only to its exact chat id: the other id form (-N / -100N) is unlisted", async () => {
+    const approved = buildOwnedKeys({ mode: "approved", owners: [kGarry, kGarry2], trusted: [] });
+    const superRule = await runGroupTest({ cfg: cfgWith({ "-1005297954291": approved }), state: stateWith({ "-1005297954291": { mode: "approved" } }), groupId: "-5297954291" });
+    expect(superRule.rules).toBeNull();
+    expect(superRule.senders.every((sender) => sender.reply === "never" && sender.reason === "group-chat-not-allowed")).toBe(true);
+    const basicRule = await runGroupTest({ cfg: cfgWith({ "-5297954291": approved }), state: stateWith({ "-5297954291": { mode: "approved" } }), groupId: "-1005297954291" });
+    expect(basicRule.rules).toBeNull();
+    expect(basicRule.senders.every((sender) => sender.reply === "never" && sender.reason === "group-chat-not-allowed")).toBe(true);
+    const blockedBasic = await runGroupTest({ cfg: cfgWith({ "-1005297954291": approved, "-5297954291": { enabled: false } }), state: stateWith({ "-5297954291": { mode: "blocked" } }), groupId: "-1005297954291" });
+    expect(bySender(blockedBasic).anyone).toMatchObject({ reason: null });
+    expect(bySender(blockedBasic).anyone.reply).not.toBe("never");
+  });
+
   it("reports mention gating from OpenClaw's resolver", async () => {
     const owners = [kGarry];
     const result = await runGroupTest({ cfg: cfgWith({ [kAlfredGroup]: { requireMention: true, ...buildOwnedKeys({ mode: "approved", owners, trusted: [] }) } }), state: stateWith(), groupId: kAlfredGroup });

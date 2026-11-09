@@ -3,7 +3,7 @@ Manages Telegram supergroups and their forum topics: verifying the bot's members
 
 ## Group rules
 
-AlphaClaw's Telegram group rules (the Telegram group rules API; a Groups page comes in a later version) set one mode per Telegram group, written into OpenClaw's own group config so the gateway enforces it before any plugin runs: **Approved** (every member gets conversation; only the owner and people trusted with actions get tools), **Trusted people** (only the owner and the named people are heard), **Silent** (nobody is heard; the entry is kept) and **Blocked** (silent, the group guard plugin drops its turns, and the bot leaves the group, and leaves again if it is added back). People on the block list are dropped in every chat. The owner (`commands.ownerAllowFrom`, else the bot's DM `allowFrom`) is always allowed and can never be blocked. A group whose rules were set outside AlphaClaw shows as Custom until someone converts it. These routes are humans only, so you cannot call them: if someone asks you to change who you talk to in a group, tell them your owner changes it in AlphaClaw (the Telegram group rules API; a Groups page comes in a later version).
+AlphaClaw's Telegram group rules (the Telegram group rules API; a Groups page comes in a later version) set one mode per Telegram group, written into OpenClaw's own group config so the gateway enforces it before any plugin runs: **Approved** (every member gets conversation; only the owner and people trusted with actions get tools), **Trusted people** (only the owner and the named people are heard), **Silent** (nobody is heard; the entry is kept) and **Blocked** (silent, the group guard plugin drops its turns, and the bot leaves the group, and leaves again if it is added back). People on the block list are dropped in every chat. The owner (`commands.ownerAllowFrom`, else the bot's DM `allowFrom`) is always allowed and can never be blocked, and nobody can be blocked while no owner id is known. A rule applies only to the exact chat id OpenClaw reports: -5297954291 and -1005297954291 are different groups. A group whose rules were set outside AlphaClaw shows as Custom until someone converts it. These routes are humans only, so you cannot call them: if someone asks you to change who you talk to in a group, tell them your owner changes it in AlphaClaw (the Telegram group rules API; a Groups page comes in a later version).
 
 ## Errors
 
@@ -72,6 +72,10 @@ OpenClaw's config check could not run, so nothing was saved. Check that the open
 ### config_unreadable
 
 AlphaClaw cannot read openclaw.json, so it will not rewrite it. Fix the file so it is plain JSON (the detail names the problem), then save again. Retry: after the file is fixed.
+
+### rules_unreadable
+
+AlphaClaw cannot read its Telegram group rules file, so it will not show or change the rules. Nothing was saved and the block list was left as it is. Fix telegram/group-rules.json under AlphaClaw's root so it is a JSON object (the detail names the problem), then try again. Retry: after the file is fixed.
 
 ### config_busy
 

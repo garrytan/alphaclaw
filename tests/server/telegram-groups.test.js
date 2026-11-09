@@ -342,6 +342,53 @@ describe("telegram group rules: mapping onto OpenClaw's group entry", () => {
     expect(readState({ rootDir: kRootDir })).toMatchObject({ owners: [kGarry, kGarry2], blockedSenders: [{ id: kMossab }] });
   });
 
+  it("refuses to block anyone while no owner id is known, and still lets the block list be cleared", () => {
+    const config = boxConfig({ allowFrom: [] });
+    delete config.commands;
+    writeConfig(config);
+    const { groups } = makeGroups();
+    expect(() => groups.setBlockedSenders({ senders: [{ id: kMossab }] })).toThrow(expect.objectContaining({ code: "owner_required" }));
+    expect(fs.existsSync(resolveStatePaths(kRootDir).statePath)).toBe(false);
+    expect(groups.setBlockedSenders({ senders: [] })).toMatchObject({ blockedSenders: [] });
+  });
+
+  it("keeps a rule on its exact chat id: a block on -N never covers -100N, and the other way round", async () => {
+    writeConfig(boxConfig({ groups: { ...boxConfig().channels.telegram.groups, "-1005235086834": { requireMention: false } } }));
+    const { groups } = makeGroups();
+    await groups.setPolicy({ groupId: kTestChat, body: { mode: "blocked", convert: true }, ifMatch: revisionOf(groups, kTestChat) });
+    const listed = Object.fromEntries(groups.list().groups.map((group) => [group.groupId, group.mode]));
+    expect(listed[kTestChat]).toBe("blocked");
+    expect(listed["-1005235086834"]).not.toBe("blocked");
+    expect(groupEntry("-1005235086834")).toEqual({ requireMention: false });
+    await groups.setPolicy({ groupId: kAlfredGroup, body: { mode: "blocked", convert: true }, ifMatch: revisionOf(groups, kAlfredGroup) });
+    expect(Object.keys(readState({ rootDir: kRootDir }).groups).sort()).toEqual([kAlfredGroup, kTestChat].sort());
+    expect(groups.list().groups.find((group) => group.groupId === "-4458560180")).toBeUndefined();
+  });
+
+  it.each([
+    ["an array", "[]\n"],
+    ["a string", JSON.stringify("rules") + "\n"],
+    ["null", "null\n"],
+    ["invalid JSON", "{\"blockedSenders\": [{\"id\": \"435921418\"}\n"],
+    ["an object whose block list is not a list", JSON.stringify({ blockedSenders: { id: kMossab } }) + "\n"],
+  ])("refuses every read and write while group-rules.json is %s, and never rewrites it", async (_label, contents) => {
+    const { statePath } = resolveStatePaths(kRootDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, contents);
+    const { groups, telegramApi } = makeGroups();
+    const configBefore = fs.readFileSync(kConfigPath, "utf8");
+    expect(() => readState({ rootDir: kRootDir })).toThrow(expect.objectContaining({ code: "rules_unreadable" }));
+    expect(() => groups.list()).toThrow(expect.objectContaining({ code: "rules_unreadable" }));
+    expect(() => groups.setBlockedSenders({ senders: [{ id: kMossab }] })).toThrow(expect.objectContaining({ code: "rules_unreadable" }));
+    expect(() => groups.setBlockedSenders({ senders: [] })).toThrow(expect.objectContaining({ code: "rules_unreadable" }));
+    expect(() => groups.noteSeen(kAlfredGroup, { lastJoinAt: "2026-11-09T09:00:00.000Z" })).toThrow(expect.objectContaining({ code: "rules_unreadable" }));
+    expect(() => groups.syncOwners()).toThrow(expect.objectContaining({ code: "rules_unreadable" }));
+    await expectCode(groups.setPolicy({ groupId: kAlfredGroup, body: { mode: "blocked", convert: true }, ifMatch: "0000000000000000" }), "rules_unreadable");
+    expect(fs.readFileSync(statePath, "utf8")).toBe(contents);
+    expect(fs.readFileSync(kConfigPath, "utf8")).toBe(configBefore);
+    expect(telegramApi.leaveChat).not.toHaveBeenCalled();
+  });
+
   it("syncConfigForTelegram keeps the five keys this module owns", async () => {
     const { groups } = makeGroups();
     await groups.setPolicy({ groupId: kSecurity, body: { mode: "trusted", convert: true, trusted: [{ id: kHarj, scope: "actions" }] }, ifMatch: revisionOf(groups, kSecurity) });
@@ -387,6 +434,16 @@ describe("telegram group rules routes", () => {
     expect(res.body.owners).toEqual([kGarry, kGarry2]);
     expect(res.body.groups.map((group) => group.groupId)).toContain(kAlfredGroup);
     expect(res.body.groups.every((group) => /^[0-9a-f]{16}$/.test(group.revision))).toBe(true);
+  });
+
+  it("answers the list and every change with rules_unreadable while group-rules.json is not a JSON object", async () => {
+    const { statePath } = resolveStatePaths(kRootDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, "[]\n");
+    const { app } = createApp();
+    expectProblem(await request(app).get("/api/telegram/groups"), "rules_unreadable");
+    expectProblem(await request(app).put("/api/telegram/blocked-senders").send({ senders: [{ id: kMossab }] }), "rules_unreadable");
+    expect(fs.readFileSync(statePath, "utf8")).toBe("[]\n");
   });
 
   it("sets a policy with If-Match and returns the new revision as an ETag", async () => {

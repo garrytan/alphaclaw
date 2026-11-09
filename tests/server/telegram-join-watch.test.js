@@ -77,6 +77,28 @@ describe("telegram join watch", () => {
     expect(ctx.notify).not.toHaveBeenCalled();
   });
 
+  it("matches a blocked group only by its exact chat id: the other id form is a new group", async () => {
+    ctx = setup();
+    fs.mkdirSync(path.join(ctx.rootDir, "telegram"), { recursive: true });
+    fs.writeFileSync(path.join(ctx.rootDir, "telegram", "group-rules.json"), JSON.stringify({ groups: { [kTestChat]: { mode: "blocked" } } }));
+    fs.writeFileSync(path.join(ctx.logDir, "openclaw-2026-11-09.log"), joinLine("-1005235086834") + "\n");
+    expect((await ctx.watch.check()).outcomes).toEqual([{ groupId: "-1005235086834", action: "notified" }]);
+    expect(ctx.telegramApi.leaveChat).not.toHaveBeenCalled();
+  });
+
+  it("handles no join while the rules file is unreadable, then handles it once the file is fixed", async () => {
+    ctx = setup();
+    const rulesPath = path.join(ctx.rootDir, "telegram", "group-rules.json");
+    fs.mkdirSync(path.dirname(rulesPath), { recursive: true });
+    fs.writeFileSync(rulesPath, "[]\n");
+    fs.writeFileSync(path.join(ctx.logDir, "openclaw-2026-11-09.log"), joinLine(kNewGroup) + "\n");
+    await expect(ctx.watch.check()).rejects.toMatchObject({ code: "rules_unreadable" });
+    expect(fs.readFileSync(rulesPath, "utf8")).toBe("[]\n");
+    expect(ctx.notify).not.toHaveBeenCalled();
+    fs.writeFileSync(rulesPath, "{}\n");
+    expect((await ctx.watch.check()).outcomes).toEqual([{ groupId: kNewGroup, action: "notified" }]);
+  });
+
   it("follows a size rotation: lines in the rotated file are read once, the new file from its start", async () => {
     ctx = setup({ logging: "gateway.log" });
     const file = path.join(ctx.logDir, "gateway.log");

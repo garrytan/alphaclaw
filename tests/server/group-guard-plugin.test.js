@@ -60,12 +60,20 @@ describe("group guard plugin", () => {
     expect(lines.filter((line) => line.includes("dropped"))).toEqual(["[group-guard] dropped a turn reason=blocked_sender sender=" + kMossab]);
   });
 
-  it("drops every turn in a blocked group, under its basic and supergroup ids and in any topic", () => {
+  it("drops every turn in a blocked group under its exact chat id and in any topic, and nowhere else", () => {
     rootDir = makeRoot(kRules);
     const { dispatch } = register(rootDir);
     expect(dispatch(...groupTurn("7100000777", kTestChat))).toEqual({ handled: true });
-    expect(dispatch(...groupTurn("7100000777", "-1005235086834"))).toEqual({ handled: true });
     expect(dispatch(...groupTurn("7100000777", kTestChat, ":topic:12"))).toEqual({ handled: true });
+  });
+
+  it("treats the other id form of a group (-N and -100N) as a different, unlisted chat", () => {
+    rootDir = makeRoot({ groups: { "-5297954291": { mode: "blocked" }, "-1004458560180": { mode: "approved", pendingBlockAt: "2026-11-09T08:00:00.000Z" } } });
+    const { dispatch } = register(rootDir);
+    expect(dispatch(...groupTurn("7100000777", "-5297954291"))).toEqual({ handled: true });
+    expect(dispatch(...groupTurn("7100000777", "-1005297954291"))).toBeUndefined();
+    expect(dispatch(...groupTurn("7100000777", "-1004458560180"))).toEqual({ handled: true });
+    expect(dispatch(...groupTurn("7100000777", "-4458560180"))).toBeUndefined();
   });
 
   it("drops a group whose block is still being saved", () => {
@@ -89,16 +97,36 @@ describe("group guard plugin", () => {
     expect(dispatch({ channel: "discord", senderId: kMossab }, { channelId: "discord", senderId: kMossab })).toBeUndefined();
   });
 
-  it("picks up a new block list without a restart, and blocks nobody when the file is missing or unreadable", () => {
+  it("picks up a new block list without a restart, and blocks nobody when the file is missing", () => {
     rootDir = makeRoot(null);
-    const { dispatch, lines } = register(rootDir);
+    const { dispatch } = register(rootDir);
     expect(dispatch(...groupTurn(kMossab, kAlfredGroup))).toBeUndefined();
     fs.mkdirSync(path.join(rootDir, "telegram"), { recursive: true });
     fs.writeFileSync(path.join(rootDir, "telegram", "group-rules.json"), JSON.stringify(kRules));
     expect(dispatch(...groupTurn(kMossab, kAlfredGroup))).toEqual({ handled: true });
-    fs.writeFileSync(path.join(rootDir, "telegram", "group-rules.json"), "{not json");
+    fs.rmSync(path.join(rootDir, "telegram", "group-rules.json"));
     expect(dispatch(...groupTurn(kMossab, kAlfredGroup))).toBeUndefined();
-    expect(lines.some((line) => line.includes("cannot read the block list"))).toBe(true);
+  });
+
+  it.each([
+    ["an array", JSON.stringify([kRules])],
+    ["a string", JSON.stringify("rules")],
+    ["null", "null"],
+    ["invalid JSON", "{not json"],
+    ["a block list that is not a list", JSON.stringify({ blockedSenders: { id: kMossab } })],
+  ])("keeps the last rules it read when the file becomes %s, and blocks nobody if it never read any", (_label, contents) => {
+    rootDir = makeRoot(kRules);
+    const { dispatch, lines } = register(rootDir);
+    expect(dispatch(...groupTurn(kMossab, kAlfredGroup))).toEqual({ handled: true });
+    fs.writeFileSync(path.join(rootDir, "telegram", "group-rules.json"), contents + "\n");
+    expect(dispatch(...groupTurn(kMossab, kAlfredGroup))).toEqual({ handled: true });
+    expect(dispatch(...groupTurn("7100000777", kTestChat))).toEqual({ handled: true });
+    expect(dispatch(...groupTurn(kGarry, kTestChat))).toBeUndefined();
+    expect(lines.some((line) => line.includes("cannot read the block list; keeping the last rules read"))).toBe(true);
+
+    const fresh = register(rootDir);
+    expect(fresh.dispatch(...groupTurn(kMossab, kAlfredGroup))).toBeUndefined();
+    expect(fresh.lines.some((line) => line.includes("cannot read the block list"))).toBe(true);
   });
 });
 
