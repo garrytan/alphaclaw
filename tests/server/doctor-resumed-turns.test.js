@@ -103,6 +103,47 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect([...new Set(h.calls.filter((call) => call.method === "sessions.get").map((call) => call.params.key))]).toEqual(["agent:main:doctor:6", "agent:main:doctor:8", "agent:main:doctor:9"]);
   });
 
+  it("never stops a person's turn that recovery resumed in a Doctor session after the Doctor run ended", async () => {
+    const key = "agent:main:doctor:7";
+    const h = harness({
+      lists: [[active(key)]],
+      transcripts: { [key]: [doctorMessage(7), assistant, personMessage("person-123"), assistant, recoveryMessage(key, "recov-1")] },
+    });
+    expect(await h.stop.onGatewayLaunch()).toEqual({ stopped: [], missed: [] });
+    expect(h.aborts()).toEqual([]);
+    expect(h.stop.hasStopped(key)).toBe(false);
+  });
+
+  it("looks past earlier recovery messages to the turn they resume, and remembers the sessions it stopped for this launch only", async () => {
+    const key = "agent:main:doctor:6";
+    const h = harness({
+      lists: [[active(key)]],
+      transcripts: { [key]: [doctorMessage(6), recoveryMessage(key, "recov-a"), recoveryMessage(key, "recov-b")] },
+    });
+    expect(await h.stop.onGatewayLaunch({ generation: 1 })).toEqual({ stopped: ["recov-b"], missed: [] });
+    expect(h.stop.hasStopped(key)).toBe(true);
+    expect(h.stop.hasStopped("agent:main:doctor:5")).toBe(false);
+    const next = h.stop.onGatewayLaunch({ generation: 2 });
+    expect(h.stop.hasStopped(key)).toBe(false);
+    await next;
+  });
+
+  it("says so when the gateway never got ready", async () => {
+    let clock = 0;
+    const logger = { log: vi.fn() };
+    const stop = createResumedDoctorTurnStop({
+      clawCmd: vi.fn(),
+      probeReadiness: async () => ({ ok: true, kind: "starting" }),
+      resolveReadyzUrl: () => "http://127.0.0.1:1/readyz",
+      sleep: async (ms) => { clock += ms; },
+      now: () => clock,
+      readyTimeoutMs: 10_000,
+      logger,
+    });
+    expect(await stop.onGatewayLaunch()).toEqual({ skipped: "not_ready" });
+    expect(logger.log).toHaveBeenCalledWith("[alphaclaw] doctor: the gateway was not ready within 10 s, so no restarted Doctor turn was looked for");
+  });
+
   it("never stops the run AlphaClaw is driving now", async () => {
     const key = "agent:main:doctor:4";
     const h = harness({ activeRunId: 4, lists: [[active(key)]], transcripts: { [key]: [doctorMessage(4), recoveryMessage(key, "rec-4")] } });
@@ -156,5 +197,8 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage(key, "doctor-run-2")], key, 2)).toBe("");
     expect(findResumedDoctorRunId([doctorMessage(2), { ...recoveryMessage(key, "r"), idempotencyKey: "r", __openclaw: { idempotencyKey: "r" } }], key, 2)).toBe("");
     expect(findResumedDoctorRunId(null, key, 2)).toBe("");
+    expect(findResumedDoctorRunId([doctorMessage(2), personMessage("p"), recoveryMessage(key, "r")], key, 2)).toBe("");
+    expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage(key, "r0"), recoveryMessage(key, "r")], key, 2)).toBe("r");
+    expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage("agent:main:main", "r0"), recoveryMessage(key, "r")], key, 2)).toBe("");
   });
 });
