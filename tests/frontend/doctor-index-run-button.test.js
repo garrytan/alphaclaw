@@ -245,7 +245,7 @@ describe("frontend/doctor-tab run button", () => {
     const button = runDoctorButton(tree);
     expect(button).toBeTruthy();
     expect(button.props.loading).toBe(true);
-    expect(button.props.loadingLabel).toBe("Loading...");
+    expect(button.props.loadingLabel).toBe("Loading…");
   });
 
   it("shows Starting... from click until the status refresh lands, then Running...", async () => {
@@ -261,7 +261,7 @@ describe("frontend/doctor-tab run button", () => {
 
     tree = renderTab();
     expect(runDoctorButton(tree).props.loading).toBe(true);
-    expect(runDoctorButton(tree).props.loadingLabel).toBe("Starting...");
+    expect(runDoctorButton(tree).props.loadingLabel).toBe("Starting…");
 
     startGate.resolve({ runId: 5 });
     await clickPromise;
@@ -270,7 +270,7 @@ describe("frontend/doctor-tab run button", () => {
     seedLoadedState({ runInProgress: true });
     tree = renderTab();
     expect(runDoctorButton(tree).props.loading).toBe(true);
-    expect(runDoctorButton(tree).props.loadingLabel).toBe("Running...");
+    expect(runDoctorButton(tree).props.loadingLabel).toBe("Running…");
   });
 
   it("shows the context panel beside the empty state before any Drift Doctor run", () => {

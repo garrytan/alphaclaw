@@ -311,7 +311,7 @@ describe("frontend/global-restart-banner (demoted)", () => {
     );
     expect(buildGlobalBannerModel({ shell: { restartOperation: { ...upgrade, phase: "failed" } } }).text).toBe("OpenClaw's data upgrade retry failed");
     expect(buildGlobalBannerModel({ shell: { restartOperation: { ...upgrade, phase: "succeeded", upgrade: { doctor: "failed" } } } }).text).toBe(
-      "OpenClaw is running again, but its data upgrade didn't finish",
+      "The gateway is running again, but OpenClaw's data upgrade didn't finish",
     );
     const alert = { kind: "failed", headline: "OpenClaw's data upgrade didn't finish" };
     expect(buildGlobalBannerModel({ shell: { upgradeAlert: alert } })).toEqual({ kind: "upgrade", text: alert.headline, showView: true });

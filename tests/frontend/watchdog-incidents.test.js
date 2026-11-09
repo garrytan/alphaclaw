@@ -268,7 +268,7 @@ describe("frontend/watchdog incidents card", () => {
     const base = { activeTab: "events", events: [] };
     expect(
       treeText(renderCard({ ...base, eventsLoaded: false, eventsError: null })),
-    ).toContain("Loading events...");
+    ).toContain("Loading events…");
     const failed = renderCard({
       ...base,
       eventsLoaded: false,
@@ -456,7 +456,7 @@ describe("frontend/watchdog incidents card", () => {
     });
     const buttons = findAllByType(busy, "button");
     const refreshButton = buttons.find((vnode) =>
-      collectText(vnode).join(" ").includes("Refreshing..."),
+      collectText(vnode).join(" ").includes("Refreshing…"),
     );
     expect(refreshButton).toBeTruthy();
     expect(refreshButton.props.disabled).toBe(true);

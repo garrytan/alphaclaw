@@ -152,7 +152,7 @@ describe("frontend/telegram-workspace index component", () => {
     api.workspace.mockRejectedValueOnce(new Error("network down"));
 
     let tree = renderWorkspace();
-    expect(renderToText(tree)).toContain("Loading workspace...");
+    expect(renderToText(tree)).toContain("Loading workspace…");
 
     runBootstrapEffect();
     await flushAsync();
@@ -161,7 +161,7 @@ describe("frontend/telegram-workspace index component", () => {
     const text = renderToText(tree);
     expect(text).toContain("Couldn't load your Telegram workspace.");
     expect(text).toContain("network down");
-    expect(text).not.toContain("Loading workspace...");
+    expect(text).not.toContain("Loading workspace…");
 
     const retryButton = findButtonByText(tree, "Retry");
     expect(retryButton).toBeTruthy();

@@ -268,7 +268,7 @@ describe("frontend/agents-tab model card", () => {
       setPrimary.props.onclick();
       harness.beginRender();
       tree = expandTree(AgentModelCard({ agent, onUpdateAgent }));
-      const pendingButton = findButtonByText(tree, "Setting...");
+      const pendingButton = findButtonByText(tree, "Setting…");
       expect(pendingButton).toBeTruthy();
       expect(pendingButton.props.disabled).toBe(true);
 

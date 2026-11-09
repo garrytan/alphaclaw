@@ -828,7 +828,7 @@ describe("frontend/cron-tab component save + toggle wiring", () => {
     expect(toggle.props.value).toBe(false);
     expect(toggle.props.saving).toBe(true);
     const toggleSwitch = findAllByType(toggle.rendered, ToggleSwitch)[0];
-    expect(toggleSwitch.props.label).toBe("Saving...");
+    expect(toggleSwitch.props.label).toBe("Saving…");
 
     gate.reject(new Error("boom"));
     await togglePromise;

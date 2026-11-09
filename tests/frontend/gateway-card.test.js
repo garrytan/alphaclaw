@@ -724,7 +724,7 @@ describe("frontend/gateway card (server-state matrix)", () => {
       onRestart: () => {},
     });
     const text = treeText(tree);
-    expect(text).toContain("OpenClaw Gateway");
+    expect(text).toContain("OpenClaw gateway");
     expect(text).toContain("running");
     expect(findButton(tree, "Repair")).toBeTruthy();
     expect(findButton(tree, "Restart")).toBeTruthy();

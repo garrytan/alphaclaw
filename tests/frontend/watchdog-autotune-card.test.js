@@ -508,7 +508,7 @@ describe("frontend/watchdog autotune card — per-state renders", () => {
     const tree = renderView({ ledger: null, error: null });
     const text = treeText(tree);
     expect(text).toContain("Resource autotune");
-    expect(text).toContain("Loading autotune status...");
+    expect(text).toContain("Loading autotune status…");
     expect(text).not.toContain("Recalculate and apply settings");
   });
 
@@ -694,8 +694,8 @@ describe("frontend/watchdog autotune card — per-state renders", () => {
       restartingGateway: true,
       dismissingResize: true,
     });
-    const busyRestart = buttonByText(busy, "Restarting...");
-    const busyDismiss = buttonByText(busy, "Dismissing...");
+    const busyRestart = buttonByText(busy, "Restarting…");
+    const busyDismiss = buttonByText(busy, "Dismissing…");
     expect(busyRestart.props.disabled).toBe(true);
     expect(busyRestart.props.class).toContain("opacity-50 cursor-not-allowed");
     expect(busyDismiss.props.disabled).toBe(true);

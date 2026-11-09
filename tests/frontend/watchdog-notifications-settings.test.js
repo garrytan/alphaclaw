@@ -272,7 +272,7 @@ describe("frontend/watchdog update-notification settings", () => {
     const tree = renderSection();
 
     const text = treeText(tree);
-    expect(text).toContain("Loading...");
+    expect(text).toContain("Loading…");
     const selects = findAllByType(tree, "select");
     expect(selects.length).toBe(1); // frame present pre-fetch
     expect(selects[0].props.disabled).toBe(true);

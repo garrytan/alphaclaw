@@ -63,29 +63,29 @@ describe("frontend/channel-create-operation", () => {
 
     handlers.onMessage({
       event: "phase",
-      data: { phase: "restarting", label: "Restarting gateway..." },
+      data: { phase: "restarting", label: "Restarting gateway…" },
     });
     handlers.onMessage({
       event: "phase",
-      data: { phase: "finalizing", label: "Finalizing..." },
+      data: { phase: "finalizing", label: "Finalizing…" },
     });
 
     expect(onPhase.mock.calls.map((call) => call[0])).toEqual([
-      "Loading...",
-      "Restarting gateway...",
+      "Loading…",
+      "Restarting gateway…",
     ]);
 
     vi.advanceTimersByTime(1000);
     expect(onPhase.mock.calls.map((call) => call[0])).toEqual([
-      "Loading...",
-      "Restarting gateway...",
+      "Loading…",
+      "Restarting gateway…",
     ]);
 
     vi.advanceTimersByTime(200);
     expect(onPhase.mock.calls.map((call) => call[0])).toEqual([
-      "Loading...",
-      "Restarting gateway...",
-      "Finalizing...",
+      "Loading…",
+      "Restarting gateway…",
+      "Finalizing…",
     ]);
 
     handlers.onMessage({
