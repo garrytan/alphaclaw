@@ -389,6 +389,34 @@ describe("tool-inventory: outstanding names", () => {
   });
 });
 
+describe("tool-inventory: names read back from the state file", () => {
+  it("never lets a markdown-link name planted in tool-inventory.json reach the notice or the Doctor card", async () => {
+    const { buildToolsMissingCard } = require("../../lib/server/doctor/tools-missing-card");
+    const planted = "[repair](https://evil.example)";
+    const box = makeBox();
+    await runFirstContainer(box);
+    const state = box.readState();
+    state.latest.names.push(planted, "evil\nline");
+    state.baseline.names.push(planted);
+    state.outstanding = [
+      { name: planted, kind: "hand_install_lost", missingSince: "2026-11-01T00:00:00.000Z", containerId: kContainerC },
+      { name: "pandoc", kind: "hand_install_lost", missingSince: "2026-11-01T00:00:00.000Z", containerId: kContainerC },
+    ];
+    fs.writeFileSync(box.statePath, JSON.stringify(state));
+    replaceContainer(box);
+    const next = createInventory(box, kContainerB);
+    expect(await next.inventory.onGatewayReady()).toEqual({ newContainer: true, lost: ["tree"], dropped: [] });
+    const [message] = next.notify.mock.calls[0];
+    expect(message).not.toContain("evil.example");
+    expect(message).not.toContain("evil");
+    const status = next.inventory.getStatus();
+    expect(status.outstanding.map((entry) => entry.name)).toEqual(["pandoc", "tree"]);
+    const card = buildToolsMissingCard(status)[0];
+    expect(JSON.stringify(card)).not.toContain("evil.example");
+    expect(fs.readFileSync(box.statePath, "utf8")).not.toContain("evil.example");
+  });
+});
+
 describe("tool-inventory: skills check", () => {
   const failingCases = [
     ["a timeout", () => new Promise(() => {}), "timed out after 20 s"],
