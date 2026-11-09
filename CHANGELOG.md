@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.225] - 2026-11-09
+
+Capy threads you choose can now act as you through Agent Relay: their messages to your agent use its normal tools (files, commands, web, memory and the brain) instead of the messaging-only session, while sending to other people, scheduling, and changing the gateway, plugins, config or secrets stay with you.
+
+### Added
+- **Relay delegates.** List a thread's `capy-…` relay agent in `ALPHACLAW_RELAY_DELEGATE_AGENTS` (deployment env only, empty by default) and its relay messages run as you on this box. The relay guard gives a delegate's turn the file, shell, web, memory and session-list tools and withholds the rest by name: the message tool, starting or messaging other sessions, subagents, automations and cron, the gateway, plugins, secrets and secret drops, nodes, screen, terminal, browser and any tool a later OpenClaw adds. `ALPHACLAW_RELAY_DELEGATE_TOOLS` adds tool names or one MCP server's tools (`nori__*`); it can never unlock a withheld tool. Every other sender stays messaging-only, unchanged.
+- **Approvals carried from Capy.** A delegate's `relay_send` or `relay_reply` can carry the approval you gave in Capy (your words, the action, up to 10 recipients). That message's turn may then send with the message tool to exactly those recipients, one named recipient per call and once each; any other way of naming a recipient (`to`, `channelId`, `targets`, channel-specific fields) is refused. You get one line afterwards when a send went through. Purchases are not covered.
+- **Seeing and ending it.** The Relay page marks delegate bindings, `relay.status` lists the delegate agents, Doctor shows one card naming them, and `relay_send`/`relay_reply` tell the thread its tier and whether its approval counted. Remove, Revoke, unbind or an expired binding drops the thread back to messaging-only and stops its running turn.
+
+### Security
+- A delegate is owner-equivalent on the box: `exec` runs as the gateway's user, so the withheld tools stop the easy path, not a determined one. The gates are who you list (agents, not apps: one Capy connection binds every thread of an account) and that removing it stops the running turn. The design doc's Delegates section lists the residual risks.
+
+### Tests
+- New `relay-delegate` tests cover the shared trust lookup, both guard tiers against the pinned catalog, single-use approvals, settings, the Doctor card, the remote tools' results, and the bridge's delegate prompt, demotion and abort. The live relay-guard test now runs a delegate session against the real pinned gateway: exec and write run, an undeclared recipient and `sessions_send` are refused, an approved send passes the guard once, and a revoke drops the session to messaging-only.
 ## [0.10.224] - 2026-11-09
 
 The dashboard's largest hook, the app-shell controller, and the Channels page code are split by area so each part is easier to read and change, and two quick taps on a drawer tab no longer keep the phone drawer open.
