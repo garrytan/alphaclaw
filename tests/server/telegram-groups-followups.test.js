@@ -115,6 +115,18 @@ describe("group guard on a fresh gateway over a damaged rules file", () => {
     expect(dispatch(kGuest)).toBeUndefined();
   });
 
+  it("keeps enforcing the last copy it read when a later read of the copy fails", () => {
+    box = makeBox({ rules: "{ damaged by hand" });
+    lastGood({ owners: [kOwner], blockedSenders: [{ id: kBlocked }], groups: {} });
+    const { dispatch } = registerPlugin(box.rootDir, { runtimeConfig: ownerConfig });
+    expect(dispatch(kBlocked)).toEqual({ handled: true });
+    const { lastGoodPath } = resolveStatePaths(box.rootDir);
+    fs.rmSync(lastGoodPath);
+    fs.mkdirSync(lastGoodPath);
+    expect(dispatch(kBlocked)).toEqual({ handled: true });
+    expect(dispatch(kGuest)).toBeUndefined();
+  });
+
   it("reads the owners from the config the plugin was loaded with when no runtime config is offered", () => {
     box = makeBox({ rules: JSON.stringify(["not", "an", "object"]) });
     lastGood({ owners: [], blockedSenders: [{ id: kOtherOwner }, { id: kBlocked }], groups: {} });
@@ -546,6 +558,7 @@ describe("the admin skill's Telegram reference", () => {
     expect(reference).toContain("Becoming an owner ends a block for good");
     expect(reference).toContain("Known limit: a blocked person's messages as context.");
   });
+
 });
 
 describe("anonymous admins in Trusted mode", () => {
