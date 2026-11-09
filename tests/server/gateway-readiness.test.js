@@ -58,6 +58,13 @@ describe("classifyReadinessResponse — real 2026.9.8 / 2026.10.2 /readyz shapes
     expect(
       classifyReadinessResponse({ httpStatus: 503, body: { ready: false, failing: ["agent-database:main", "telegram"], agentDatabases: [pending("main")] } }),
     ).toMatchObject({ status: null, unreadyReason: "components" });
+    const many = Array.from({ length: 20 }, (_, i) => `agent-${i}`);
+    expect(
+      classifyReadinessResponse({
+        httpStatus: 503,
+        body: { ready: false, failing: [...many.map((id) => `agent-database:${id}`), "state-database"], agentDatabases: many.map(pending) },
+      }),
+    ).toMatchObject({ status: null, unreadyReason: "components" });
   });
 
   it("only an exact single phase entry is a phase: a real component, a phase beside a component, or a phase without ready:false stays what it was", () => {
