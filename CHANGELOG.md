@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.243] - 2026-11-09
+
+The coverage run on main no longer fails on a timing check that coverage instrumentation slows past its limit.
+
+### Tests
+- `utils-json.test.js`: the pathological-input test still proves the noisy-JSON scanner gives up after its work budget, but its wall-clock bound is now 5 s instead of 500 ms. Under coverage the scan took 632–748 ms; an unbounded scan would take minutes.
+
 ## [0.10.242] - 2026-11-09
 
 AlphaClaw now runs OpenClaw 2026.11.2, the current stable release, instead of 2026.10.9. The first boot migrates OpenClaw's databases one way; README's OpenClaw Version section says how to back up first and how to go back.
