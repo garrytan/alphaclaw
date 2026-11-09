@@ -10,7 +10,7 @@ const {
   kSnapshotIntervalMs,
   kToolInventoryFileName,
   readContainerId,
-  resolvePathDirs,
+  resolveGatewayPathDirs,
   snapshotCommands,
 } = require("../../lib/server/tool-inventory");
 
@@ -149,9 +149,30 @@ describe("tool-inventory: snapshotCommands", () => {
     expect(snapshotCommands([dir], { now: () => (clock += 1000), deadlineAt: 500 })).toBeNull();
   });
 
-  it("reads the gateway's PATH without relative, empty or node_modules entries", () => {
-    expect(resolvePathDirs(["/app/node_modules/.bin", "/usr/local/bin", "", "bin", "/usr/bin", "/usr/local/bin"].join(path.delimiter)))
-      .toEqual(["/usr/local/bin", "/usr/bin"]);
+  it("never records a name that could carry markup or a line break into a notice", () => {
+    const dir = makeDir();
+    for (const name of ["pg_dump", "python3.12", "g++", "evil\nname", "[x](https:", "*bold*", "-flag"]) install(dir, name);
+    expect(snapshotCommands([dir])).toEqual(["g++", "pg_dump", "python3.12"]);
+  });
+
+  it("reads the gateway's PATH plus the dirs OpenClaw appends for skills, without relative, empty or node_modules entries", () => {
+    const dirs = resolveGatewayPathDirs({
+      PATH: ["/app/node_modules/.bin", "/usr/local/bin", "", "bin", "/usr/bin"].join(path.delimiter),
+      HOME: "/data",
+      PNPM_HOME: "/opt/pnpm",
+    });
+    expect(dirs.slice(0, 3)).toEqual(["/usr/bin", "/bin", "/usr/local/bin"]);
+    expect(dirs).toEqual(expect.arrayContaining([
+      "/home/linuxbrew/.linuxbrew/bin",
+      "/data/.linuxbrew/bin",
+      "/opt/pnpm",
+      "/opt/pnpm/bin",
+      "/data/.local/bin",
+      "/data/.npm-global/bin",
+      "/data/.bun/bin",
+    ]));
+    expect(dirs.some((dir) => dir.includes("node_modules") || !path.isAbsolute(dir))).toBe(false);
+    expect(new Set(dirs).size).toBe(dirs.length);
   });
 });
 
@@ -190,6 +211,20 @@ describe("tool-inventory: baseline and snapshots", () => {
     expect(box.readState().latest.names).not.toContain("pandoc");
   });
 
+  it("retries a baseline that ran over budget at the next tick", async () => {
+    const box = makeBox();
+    let slow = false;
+    const { inventory } = createInventory(box, kContainerA, { now: () => (slow ? (box.clock += 1000) : box.clock) });
+    await inventory.onGatewayReady();
+    box.clock += kBaselineDelayMs;
+    slow = true;
+    expect(inventory.recordSnapshot({ reason: "baseline" })).toEqual({ recorded: false, reason: "over_budget" });
+    slow = false;
+    box.clock += kSnapshotIntervalMs;
+    expect(inventory.recordSnapshot({ reason: "tick" })).toMatchObject({ recorded: true });
+    expect(box.readState().baseline.names).toEqual(["git", "node", "rg", "sh"]);
+  });
+
   it("records nothing for a container whose check has not run", () => {
     const box = makeBox();
     const { inventory } = createInventory(box, kContainerA);
@@ -210,6 +245,7 @@ describe("tool-inventory: the rebuild diff and notice", () => {
           { name: "transcribe", missing: { bins: ["tree"], anyBins: [], os: [] } },
           { name: "search", missing: { bins: [], anyBins: ["rg", "ag"], os: [] } },
           { name: "apple-notes", missing: { bins: ["tree"], anyBins: [], os: ["darwin"] } },
+          { name: "[click](https://evil.example)", missing: { bins: ["tree"], anyBins: [], os: [] } },
         ],
       }),
     });
@@ -230,6 +266,21 @@ describe("tool-inventory: the rebuild diff and notice", () => {
       { name: "rg", kind: "image_dropped", missingSince: new Date(box.clock).toISOString(), containerId: kContainerB },
     ]);
     expect(box.logs).toContain("[alphaclaw] tool inventory: new container, lost=1 dropped=1 outstanding=2");
+  });
+
+  it("sends nothing and keeps the old record when the new container's first scan runs over budget, then compares at the next start", async () => {
+    const box = makeBox();
+    await runFirstContainer(box);
+    replaceContainer(box);
+    const before = fs.readFileSync(box.statePath, "utf8");
+    const slow = createInventory(box, kContainerB, { now: () => (box.clock += 1000) });
+    expect(await slow.inventory.onGatewayReady()).toEqual({ newContainer: true, skipped: "over_budget" });
+    expect(slow.notify).not.toHaveBeenCalled();
+    expect(fs.readFileSync(box.statePath, "utf8")).toBe(before);
+    expect(box.logs).toContain("[alphaclaw] tool inventory: the new container's first scan ran over budget; comparing at the next start");
+    const restarted = createInventory(box, kContainerB);
+    expect(await restarted.inventory.onGatewayReady()).toEqual({ newContainer: true, lost: ["tree"], dropped: [] });
+    expect(restarted.notify).toHaveBeenCalledTimes(1);
   });
 
   it("sends nothing on a restart of the same container, even with a tool missing", async () => {

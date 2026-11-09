@@ -102,20 +102,25 @@ describe("doctor routes: dismissing the tools-missing card", () => {
     expect(dismissToolsMissing).not.toHaveBeenCalled();
   });
 
-  it("leaves other cards and other statuses to the plain status route", async () => {
+  it("refuses the agent any other status on it too, so it cannot hide the card as fixed", async () => {
+    const { app, doctorService } = createApp({ actorType: "agent" });
+    expect((await request(app).post("/api/doctor/cards/9/status").send({ status: "fixed" })).status).toBe(403);
+    expect(doctorService.setCardStatus).not.toHaveBeenCalled();
+  });
+
+  it("forgets the names only on a dismissal, and leaves other cards to the plain status route", async () => {
+    const fixed = createApp();
+    expect((await request(fixed.app).post("/api/doctor/cards/9/status").send({ status: "fixed" })).status).toBe(200);
+    expect(fixed.dismissToolsMissing).not.toHaveBeenCalled();
     const other = createApp({ actorType: "agent", sourceKey: "det:disk-space-low:disk-state-1" });
     expect((await request(other.app).post("/api/doctor/cards/9/status").send({ status: "dismissed" })).status).toBe(200);
     expect(other.dismissToolsMissing).not.toHaveBeenCalled();
-    const fixed = createApp({ actorType: "agent" });
-    expect((await request(fixed.app).post("/api/doctor/cards/9/status").send({ status: "fixed" })).status).toBe(200);
-    expect(fixed.doctorService.getDoctorCard).not.toHaveBeenCalled();
-    expect(fixed.dismissToolsMissing).not.toHaveBeenCalled();
   });
 
   it("tells the agent in the manifest that this dismissal is for a person", () => {
     const op = listOps().find((item) => item.id === "doctor.card-status");
     expect(op.path).toBe("/api/doctor/cards/:id/status");
-    expect(op.params.fields.find((field) => field.name === "status").description).toContain("(sourceKey det:tools-missing:*) is for a person only (403).");
+    expect(op.params.fields.find((field) => field.name === "status").description).toContain("The missing-tools card (sourceKey det:tools-missing:*) is changed by a person only (403).");
   });
 });
 
@@ -132,7 +137,7 @@ describe("lib/server.js wiring of the rebuild notice", () => {
   it("reads the gateway's PATH, sends through the owner outbox and runs the skills check through execFileCmd", () => {
     const block = serverSource.slice(serverSource.indexOf("const toolInventory = createToolInventory({"), serverSource.indexOf("// Operator sidecars (ALPHACLAW_SIDECARS)"));
     expect(block).toContain("containerId: readContainerId(),");
-    expect(block).toContain("getPathDirs: () => resolvePathDirs(gatewayEnv().PATH),");
+    expect(block).toContain("getPathDirs: () => resolveGatewayPathDirs(gatewayEnv()),");
     expect(block).toContain('execFileCmd("openclaw", ["skills", "check", "--json"], {');
     expect(block).toContain("timeout: kSkillsCheckTimeoutMs,");
     expect(block).toContain("notify: (message, opts) => upgradeNotifier.notify(message, opts),");
