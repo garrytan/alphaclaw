@@ -135,6 +135,7 @@ const kExpectedApiExports = [
   "fetchWebhooks",
   "finishAgentDelete",
   "getTelegramTopics",
+  "grantRelayDelegate",
   "logout",
   "logoutClaudeCodeLocal",
   "mintBuiltinHookToken",
@@ -159,6 +160,7 @@ const kExpectedApiExports = [
   "retryRelayArchive",
   "retryUpgradeAsync",
   "revokeRelayClient",
+  "revokeRelayGrant",
   "revokeTeamInvite",
   "rotateAgentAdminToken",
   "rotateWebhookOauthCallback",
@@ -225,7 +227,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(214);
+    expect(kExpectedApiExports).toHaveLength(216);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

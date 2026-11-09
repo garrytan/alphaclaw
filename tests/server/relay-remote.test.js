@@ -227,6 +227,9 @@ describe("relay remote: OAuth and the /relay/mcp endpoint", () => {
       "relay_reply",
       "relay_inbox",
       "relay_history",
+      "relay_handoff",
+      "relay_claim",
+      "relay_result",
       "relay_agents",
     ]);
 

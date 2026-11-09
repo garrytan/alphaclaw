@@ -272,6 +272,8 @@ describe("relay delegates: settings", () => {
     expect(card.summary).toContain(kAgent);
     expect(card.summary).toContain("1 entry in ALPHACLAW_RELAY_DELEGATE_AGENTS or ALPHACLAW_RELAY_DELEGATE_TOOLS did not fit and was ignored.");
     expect(card.fixPrompt).toContain("never add, remove or edit ALPHACLAW_RELAY_DELEGATE_AGENTS");
+    expect(card.recommendation).toContain("press Revoke delegate or Remove on its binding");
+    expect(card.recommendation).not.toContain("take its agent out of ALPHACLAW_RELAY_DELEGATE_AGENTS");
   });
 
   it("reads the delegate client and tool lists from the deployment env, dropping entries that do not fit", () => {
@@ -365,15 +367,15 @@ describe("relay delegates: remote tools and the remote side", () => {
     box = makeBox();
     const delegate = tools();
     const plain = await delegate.send({});
-    expect(plain.body).toMatchObject({ trust: "delegate", reason: "delegate", approval: "none" });
-    expect(delegate.engine.sent[0].metadata).toEqual({ relay_hop: 0 });
+    expect(plain.body).toMatchObject({ trust: "delegate", reason: "env_fallback", approval: "none" });
+    expect(delegate.engine.sent[0].metadata).toEqual({ relay_route: "public", relay_generation: 1, relay_hop: 0 });
     const approved = await delegate.send({ approval: kApproval });
     expect(approved.body).toMatchObject({ trust: "delegate", approval: "recorded" });
-    expect(delegate.engine.sent[1].metadata).toEqual({ relay_approval: kApproval, relay_hop: 0 });
+    expect(delegate.engine.sent[1].metadata).toEqual({ relay_route: "public", relay_generation: 1, relay_approval: kApproval, relay_hop: 0 });
     const peer = tools({ delegateAgents: [] });
     const ignored = await peer.send({ approval: kApproval });
-    expect(ignored.body).toMatchObject({ trust: "peer", reason: "delegates_off", approval: "ignored" });
-    expect(peer.engine.sent[0].metadata).toEqual({ relay_hop: 0 });
+    expect(ignored.body).toMatchObject({ trust: "peer", reason: "no_grant", approval: "ignored" });
+    expect(peer.engine.sent[0].metadata).toEqual({ relay_route: "public", relay_generation: 1, relay_hop: 0 });
     const bad = await delegate.send({ approval: { words: "do it" } });
     expect(bad.result.isError).toBe(true);
     expect(bad.body).toMatchObject({ error: "invalid_input" });
@@ -410,9 +412,10 @@ describe("relay delegates: remote tools and the remote side", () => {
       for (const agent of [kAgent, "capy-000000000002"]) {
         store.bindings.upsert({ agent, threadId: "jam_" + agent, clientId: kClient, webhookUrl: "https://api.capy.ai/w/x", until: Date.now() + kHour, capabilityHash: "h", agentToken: "t" });
       }
-      expect(remote.resolveDelegate(kAgent)).toEqual({ trust: "delegate", reason: "delegate" });
+      // The env list was imported as a grant when the store opened (GST-2090).
+      expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "delegate", reason: "grant" });
       expect(remote.resolveDelegate("wintermute")).toMatchObject({ trust: "peer", reason: "not_bound" });
-      expect(remote.resolveDelegate("capy-000000000002")).toEqual({ trust: "peer", reason: "agent_not_delegate" });
+      expect(remote.resolveDelegate("capy-000000000002")).toMatchObject({ trust: "peer", reason: "no_grant" });
       const status = remote.getStatus();
       expect(status.delegateAgents).toBe(1);
       expect(Object.fromEntries(status.bindings.map((binding) => [binding.agent, binding.tier]))).toEqual({ [kAgent]: "delegate", "capy-000000000002": "peer" });
@@ -422,7 +425,7 @@ describe("relay delegates: remote tools and the remote side", () => {
       expect(demoted).toEqual([["capy-000000000002", "removed"], [kAgent, "revoked"]]);
       expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "peer", reason: "not_bound" });
       relayService.config = readRelayConfig({ env: {} });
-      expect(remote.resolveDelegate(kAgent)).toEqual({ trust: "peer", reason: "delegates_off" });
+      expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "peer", reason: "not_bound" });
     } finally {
       remote.stop();
       fs.rmSync(rootDir, { recursive: true, force: true });
