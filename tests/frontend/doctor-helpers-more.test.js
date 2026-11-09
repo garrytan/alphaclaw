@@ -13,7 +13,6 @@ import {
   getDoctorPriorityTone,
   getDoctorRunDisabledReason,
   getDoctorRunPillDetail,
-  getDoctorStatusTone,
   getGatewayNotReadyMessage,
   getDoctorWarningMessage,
   shouldShowDoctorWarning,
@@ -32,14 +31,6 @@ describe("frontend/doctor helpers (extended)", () => {
     expect(getDoctorPriorityTone(" p1 ")).toBe("warning");
     expect(getDoctorPriorityTone("P2")).toBe("neutral");
     expect(getDoctorPriorityTone()).toBe("neutral");
-  });
-
-  it("maps statuses to tones", () => {
-    expect(getDoctorStatusTone("Fixed")).toBe("success");
-    expect(getDoctorStatusTone("working")).toBe("info");
-    expect(getDoctorStatusTone("dismissed")).toBe("neutral");
-    expect(getDoctorStatusTone("open")).toBe("warning");
-    expect(getDoctorStatusTone()).toBe("warning");
   });
 
   it("maps categories to tones with a default", () => {

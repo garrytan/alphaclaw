@@ -579,7 +579,6 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
       },
       phrase: "up, not ready",
       tone: "warning",
-      dotLabel: "Up, not ready",
       detail: "up, not ready · secrets",
     },
     {
@@ -592,7 +591,6 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
       },
       phrase: "up, replacement unverified",
       tone: "warning",
-      dotLabel: "Up, replacement unverified",
       detail: "up, replacement unverified",
     },
     {
@@ -605,7 +603,6 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
       },
       phrase: "relaunch requested",
       tone: "info",
-      dotLabel: "Relaunch requested",
       detail: "relaunch requested · pid 4242",
     },
     {
@@ -618,7 +615,6 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
       },
       phrase: "replacement verified",
       tone: "success",
-      dotLabel: "Replacement verified",
       detail: "replacement verified · pid 4242",
     },
     {
@@ -631,42 +627,31 @@ describe("incidents timeline outcome labels (eng review 8A)", () => {
       },
       phrase: "process vanished without an exit event",
       tone: "danger",
-      // The status dot keeps "Failed" for any failed row; the phrase is the
-      // row detail.
-      dotLabel: "Failed",
       detail: "process vanished without an exit event · pid 4242",
     },
   ];
 
   it.each(kCases)(
     "$name renders its outcome phrase, not the raw status",
-    async ({ event, phrase, tone, dotLabel, detail }) => {
+    async ({ event, phrase, tone, detail }) => {
       const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
-      const { getIncidentStatusTone } = await loadHelpers();
       expect(describeEventOutcome(event)).toEqual({ phrase, tone });
       const described = describeEvent(event);
       expect(described.detail).toBe(detail);
       expect(described.tone).toBe(tone);
       expect(described.summary).toContain(phrase);
       expect(described.summary.toLowerCase()).not.toMatch(/\bok\b/);
-      const dot = getIncidentStatusTone(event);
-      expect(dot.label).toBe(dotLabel);
-      expect(dot.label).not.toBe("Unknown");
-      expect(dot.label).not.toBe("Healthy");
     },
   );
 
   it("plain rows are untouched: a green probe is Healthy, a legacy restart ok stays Unknown, other requested statuses keep their tone", async () => {
     const { describeEvent, describeEventOutcome } = await loadIncidentHelpers();
-    const { getIncidentStatusTone } = await loadHelpers();
     const healthy = { eventType: "health_check", status: "ok", details: {} };
     expect(describeEventOutcome(healthy)).toBeNull();
-    expect(getIncidentStatusTone(healthy).label).toBe("Healthy");
     expect(describeEvent(healthy).tone).toBe("success");
 
     const legacyRestartOk = { eventType: "restart", status: "ok", details: { pid: 1 } };
     expect(describeEventOutcome(legacyRestartOk)).toBeNull();
-    expect(getIncidentStatusTone(legacyRestartOk).label).toBe("Unknown");
     expect(describeEvent(legacyRestartOk).detail).toBe("pid 1");
 
     // "requested" is also written by channel_rollback / forward_recovery rows —
@@ -777,24 +762,6 @@ describe("drift pins (v0.9.75 ship review): vocabularies the UI mirrors by hand"
     expect(kTriggerTitles.gateway_readiness).toBe("Gateway not ready");
     expect(keys.has("version_mismatch")).toBe(true);
     expect(kTriggerTitles.version_mismatch).toBe("Version mismatch");
-  });
-
-  it("the watchdog-tab status dot and the incidents timeline share ONE tone table", async () => {
-    const { getIncidentStatusTone } = await loadHelpers();
-    const { kDotClassByTone } = await loadIncidentHelpers();
-    const dot = getIncidentStatusTone({
-      eventType: "restart",
-      status: "requested",
-      details: { pid: 1, intent: "relaunch_if_absent" },
-    });
-    expect(Object.values(kDotClassByTone)).toContain(dot.dotClass);
-    expect(kDotClassByTone).toEqual({
-      success: "bg-green-500/90",
-      danger: "bg-red-500/90",
-      warning: "bg-yellow-400/90",
-      info: "bg-cyan-400/90",
-      neutral: "bg-gray-500/60",
-    });
   });
 
   it("a crash_loop phase under a latched owner lease (2026.9.4+) names the renewing lease and its holder, never doctor", async () => {

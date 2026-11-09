@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isKnownTimeZone,
-  readZonedDateParts,
-} from "../../lib/public/js/lib/format.js";
+import { readZonedDateParts } from "../../lib/public/js/lib/format.js";
 
 // Fix wave F167: the cron calendar evaluates a job's `schedule.tz`, so the
 // shared formatter module owns the one Intl.DateTimeFormat field reader.
@@ -42,9 +39,6 @@ describe("frontend/lib format readZonedDateParts", () => {
     };
     expect(readZonedDateParts(instant, "")).toEqual(expected);
     expect(readZonedDateParts(instant, "Not/AZone")).toEqual(expected);
-    expect(isKnownTimeZone("Not/AZone")).toBe(false);
-    expect(isKnownTimeZone("Europe/Berlin")).toBe(true);
-    expect(isKnownTimeZone("")).toBe(false);
   });
 
   it("handles DST transitions in the zone, not the browser's", () => {

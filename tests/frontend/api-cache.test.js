@@ -3,7 +3,6 @@ import {
   cachedFetch,
   getCached,
   invalidateCache,
-  invalidateCachePrefix,
   setCached,
 } from "../../lib/public/js/lib/api-cache.js";
 
@@ -242,27 +241,6 @@ describe("frontend/api-cache generation guards", () => {
     resolveOld("stale");
     await expect(oldPromise).resolves.toBe("stale");
     expect(getCached("gen-poll-key")).toBe("poll-write");
-  });
-
-  it("invalidateCachePrefix drops every query-scoped variant of a key", async () => {
-    setCached("prefix-key", "global");
-    setCached("prefix-key?agentId=a", "scoped-a");
-    setCached("prefix-key?agentId=b", "scoped-b");
-    setCached("prefix-key-sibling", "sibling");
-
-    invalidateCachePrefix("prefix-key?");
-    expect(getCached("prefix-key")).toBe("global");
-    expect(getCached("prefix-key?agentId=a")).toBe(null);
-    expect(getCached("prefix-key?agentId=b")).toBe(null);
-
-    invalidateCachePrefix("prefix-key");
-    expect(getCached("prefix-key")).toBe(null);
-    expect(getCached("prefix-key-sibling")).toBe(null);
-
-    // Empty prefix is a no-op, never a cache wipe.
-    setCached("prefix-key", "back");
-    invalidateCachePrefix("");
-    expect(getCached("prefix-key")).toBe("back");
   });
 
   it("plain reads do not dedupe onto an in-flight promise made obsolete by invalidateCache", async () => {

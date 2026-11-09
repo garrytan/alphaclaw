@@ -1837,21 +1837,6 @@ describe("frontend/api openclaw endpoints", () => {
     expect(rejection.result).toBeUndefined();
   });
 
-  it("fetchOpenclawFeatures gets the fail-closed feature map", async () => {
-    const payload = {
-      ok: true,
-      version: "2026.8.1-beta.3",
-      features: { multiUser: true, sqliteBackup: true },
-    };
-    global.fetch.mockResolvedValue(mockJsonResponse(200, payload));
-    const api = await loadApiModule();
-
-    const result = await api.fetchOpenclawFeatures();
-
-    expect(global.fetch.mock.calls[0][0]).toBe("/api/openclaw/features");
-    expect(result).toEqual(payload);
-  });
-
   it("createOpenclawBackup POSTs /api/openclaw/backup with no body and keeps the 409 code", async () => {
     global.fetch.mockResolvedValue(mockJsonResponse(202, { ok: true, started: true }));
     const api = await loadApiModule();
@@ -2234,5 +2219,50 @@ describe("frontend/api claude-code local helpers", () => {
     await expect(api.fetchClaudeCodeLocalTail()).rejects.toMatchObject({
       code: "no_buffer",
     });
+  });
+});
+
+describe("frontend/api requests outside /api", () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+    global.window = { location: { href: "http://localhost/" } };
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+    delete global.window;
+  });
+
+  it("sendWebhookRequest sends with plain fetch and returns the hook's rejection message", async () => {
+    const api = await loadApiModule();
+    const options = { method: "POST", headers: { Authorization: "Bearer t" }, body: "{}" };
+
+    global.fetch.mockResolvedValueOnce(mockJsonResponse(200, { ok: true }));
+    await expect(api.sendWebhookRequest("/hooks/demo", options)).resolves.toBe("");
+    expect(global.fetch).toHaveBeenCalledWith("/hooks/demo", options);
+
+    global.fetch.mockResolvedValueOnce(mockJsonResponse(200, { ok: false, error: "bad payload" }));
+    await expect(api.sendWebhookRequest("/hooks/demo", options)).resolves.toBe("bad payload");
+
+    global.fetch.mockResolvedValueOnce(mockJsonResponse(200, { ok: false }));
+    await expect(api.sendWebhookRequest("/hooks/demo", options)).resolves.toBe("Webhook rejected");
+
+    global.fetch.mockResolvedValueOnce({ status: 401, ok: false, text: async () => "Unauthorized" });
+    await expect(api.sendWebhookRequest("/hooks/demo", options)).resolves.toBe("Unauthorized");
+    expect(global.window.location.href).toBe("http://localhost/");
+
+    global.fetch.mockResolvedValueOnce({ status: 502, ok: false, text: async () => "" });
+    await expect(api.sendWebhookRequest("/hooks/demo", options)).resolves.toBe("HTTP 502");
+  });
+
+  it("fetchBrowseFilePolicies and fetchBrowseRestartRules read the shared rule files", async () => {
+    const api = await loadApiModule();
+    global.fetch.mockResolvedValueOnce(mockJsonResponse(200, { protectedPaths: ["a"] }));
+    await expect(api.fetchBrowseFilePolicies()).resolves.toEqual({ protectedPaths: ["a"] });
+    expect(String(global.fetch.mock.calls[0][0])).toMatch(/\/shared\/browse-file-policies\.json$/);
+
+    global.fetch.mockResolvedValueOnce(mockJsonResponse(404, {}));
+    await expect(api.fetchBrowseRestartRules()).resolves.toBeNull();
+    expect(String(global.fetch.mock.calls[1][0])).toMatch(/\/shared\/browse-restart-rules\.json$/);
   });
 });
