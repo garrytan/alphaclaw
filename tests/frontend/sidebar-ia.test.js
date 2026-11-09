@@ -130,7 +130,7 @@ describe("frontend/sidebar IA", () => {
         label: "Operate",
         rows: ["Health", "Doctor", "Schedules", "Usage", "Open Claude Code", "Dashboards"],
       },
-      { label: "Connect", rows: ["Channels", "Integrations", "Relay"] },
+      { label: "Connect", rows: ["Channels", "Groups", "Integrations", "Relay"] },
       { label: "Settings", rows: ["Models & keys", "Environment", "Team"] },
     ]);
     const tree = renderSidebar();

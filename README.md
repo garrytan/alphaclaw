@@ -141,7 +141,7 @@ there are more.
 
 ## Setup UI
 
-The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage, plus the Open Claude Code and Dashboards launchers, admins only), **Connect** (Channels, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). The icon tabs at the top of the sidebar switch it between this menu, the Browse file tree and the Chat session list. Webhooks, Nodes and the Telegram workspace are opened from the pages that own them. Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
+The sidebar groups pages by task. Home and Chat come first, then your agents, **Operate** (Health, Doctor, Schedules, Usage, plus the Open Claude Code and Dashboards launchers, admins only), **Connect** (Channels, Groups, Integrations, Relay) and **Settings** (Models & keys, Environment, Team). The icon tabs at the top of the sidebar switch it between this menu, the Browse file tree and the Chat session list. Webhooks, Nodes and the Telegram workspace are opened from the pages that own them. Links to the old names (`#/general`, `#/watchdog`, `#/cron`, `#/envars`) still open the renamed pages, query included.
 
 | Page          | What it manages                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -155,6 +155,7 @@ The sidebar groups pages by task. Home and Chat come first, then your agents, **
 | **Open Claude Code** | (launcher, admins only) Opens a Claude Code session in a new tab: the local rescue session on the box when it is set up, otherwise a claude.ai routine or plain claude.ai/code (see [Open Claude Code Launcher](#open-claude-code-launcher)) |
 | **Dashboards** | (launcher, admins only) Opens OpenClaw's session dashboards in a new tab, signed in                                     |
 | **Channels**  | Channel accounts (add, edit, delete, WhatsApp QR linking), chat pairing approvals and device approvals |
+| **Groups**    | Telegram groups your agent is in, sorted by rule (waiting for you, custom, approved, trusted people, silent, blocked): change a group's rule with a preview of the openclaw.json change, test who the agent would answer, and the people blocked in every group |
 | **Integrations** | Google Workspace, feature health (memory embeddings, audio transcription), the OpenAI-compatible API and Agent Administration toggles, and links to Webhooks and Nodes |
 | **Relay**     | The [Agent Relay](#agent-relay): its health, the agents on it, anything waiting on you or failed, the message log, and the approved remote connections |
 | **Models & keys** | AI provider credentials (Anthropic, OpenAI, Gemini, Particle, Mistral, Voyage, Groq, Deepgram) and model selection       |

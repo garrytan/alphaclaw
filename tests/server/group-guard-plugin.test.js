@@ -115,7 +115,7 @@ describe("group guard plugin", () => {
     ["null", "null"],
     ["invalid JSON", "{not json"],
     ["a block list that is not a list", JSON.stringify({ blockedSenders: { id: kMossab } })],
-  ])("keeps the last rules it read when the file becomes %s, and serves only the owners if it never read any", (_label, contents) => {
+  ])("keeps the last rules it read when the file becomes %s, and enforces only the saved copy's blocks if it never read any", (_label, contents) => {
     rootDir = makeRoot(kRules);
     const { dispatch, lines } = register(rootDir);
     expect(dispatch(...groupTurn(kMossab, kAlfredGroup))).toEqual({ handled: true });
@@ -125,9 +125,11 @@ describe("group guard plugin", () => {
     expect(dispatch(...groupTurn(kGarry, kTestChat))).toBeUndefined();
     expect(lines.some((line) => line.includes("cannot read the block list; keeping the last rules read"))).toBe(true);
 
+    fs.writeFileSync(path.join(rootDir, "telegram", "group-rules.last-good.json"), JSON.stringify(kRules));
     const fresh = register(rootDir, {}, { config: { commands: { ownerAllowFrom: ["telegram:" + kGarry] } } });
     expect(fresh.dispatch(...groupTurn(kMossab, kAlfredGroup))).toEqual({ handled: true });
-    expect(fresh.dispatch(...groupTurn("8460266606", kAlfredGroup))).toEqual({ handled: true });
+    expect(fresh.dispatch(...groupTurn("8460266606", kAlfredGroup))).toBeUndefined();
+    expect(fresh.dispatch(...groupTurn("8460266606", kTestChat))).toEqual({ handled: true });
     expect(fresh.dispatch(...groupTurn(kGarry, kAlfredGroup))).toBeUndefined();
     expect(fresh.lines.some((line) => line.includes("cannot read the block list; no rules were read yet"))).toBe(true);
   });

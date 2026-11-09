@@ -37,6 +37,8 @@ const kTodaysHashes = [
   ["/usage/sess-1", "usage", { sessionId: "sess-1" }],
   ["/relay", "relay", {}],
   ["/relay?tab=log", "relay", {}],
+  ["/groups", "groups", {}],
+  ["/groups/ops", "groups", { accountId: "ops" }],
   ["/webhooks", "webhooks", {}],
   ["/webhooks/gmail", "webhooks", { hookName: "gmail" }],
   ["/telegram/default", "telegram", { accountId: "default" }],
@@ -112,8 +114,8 @@ describe("route table shape", () => {
     expect(groupOf("chat")).toBe("chat");
     expect(groupOf("agents")).toBe("agents");
     expect(["health", "doctor", "schedules", "usage"].map(groupOf)).toEqual(Array(4).fill("operate"));
-    expect(["channels", "integrations", "relay", "webhooks", "nodes", "telegram"].map(groupOf)).toEqual(
-      Array(6).fill("connect"),
+    expect(["channels", "groups", "integrations", "relay", "webhooks", "nodes", "telegram"].map(groupOf)).toEqual(
+      Array(7).fill("connect"),
     );
     expect(["models", "environment", "team"].map(groupOf)).toEqual(Array(3).fill("settings"));
   });
@@ -294,6 +296,7 @@ describe("sidebar lists and highlight from the route table", () => {
         label: "Connect",
         items: [
           { id: "channels", label: "Channels", path: "/channels" },
+          { id: "groups", label: "Groups", path: "/groups" },
           { id: "integrations", label: "Integrations", path: "/integrations" },
           { id: "relay", label: "Relay", path: "/relay" },
         ],
@@ -340,6 +343,8 @@ describe("sidebar lists and highlight from the route table", () => {
     ["/usage/sess-1", "usage"],
     ["/doctor", "doctor"],
     ["/relay", "relay"],
+    ["/groups", "groups"],
+    ["/groups/ops", "groups"],
     ["/models", "models"],
     ["/providers", "models"],
     ["/environment", "environment"],

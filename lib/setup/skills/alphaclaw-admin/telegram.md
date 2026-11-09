@@ -3,13 +3,14 @@ Manages Telegram supergroups and their forum topics: verifying the bot's members
 
 ## Group rules
 
-AlphaClaw's Telegram group rules (the Telegram group rules API; a Groups page comes in a later version) set one mode per Telegram group, written into OpenClaw's own group config so the gateway enforces it before any plugin runs: **Approved** (every member gets conversation; only the owner and people trusted with actions get tools), **Trusted people** (only the owner and the named people are heard), **Silent** (nobody is heard; the entry is kept) and **Blocked** (silent, the group guard plugin drops its turns, and the bot leaves the group, and leaves again if it is added back). People on the block list are dropped in every chat. The owner (`commands.ownerAllowFrom`, else the DM `allowFrom` of every Telegram account on the box) is always allowed and can never be blocked. Adding someone to the block list needs a known owner id; shrinking or clearing the list does not. A rule applies only to the exact chat id OpenClaw reports: -5297954291 and -1005297954291 are different groups. A group whose rules were set outside AlphaClaw shows as Custom until someone converts it. These routes are humans only, so you cannot call them: if someone asks you to change who you talk to in a group, tell them your owner changes it in AlphaClaw (the Telegram group rules API; a Groups page comes in a later version).
+AlphaClaw's Telegram group rules (the Groups page) set one mode per Telegram group, written into OpenClaw's own group config so the gateway enforces it before any plugin runs: **Approved** (every member gets conversation; only the owner and people trusted with actions get tools), **Trusted people** (only the owner and the named people are heard), **Silent** (nobody is heard; the entry is kept) and **Blocked** (silent, the group guard plugin drops its turns, and the bot leaves the group, and leaves again if it is added back). People on the block list are dropped in every chat. The owner (`commands.ownerAllowFrom`, else the DM `allowFrom` of every Telegram account on the box) is always allowed and can never be blocked. Adding someone to the block list needs a known owner id; shrinking or clearing the list does not. A rule applies only to the exact chat id OpenClaw reports: -5297954291 and -1005297954291 are different groups. A group whose rules were set outside AlphaClaw shows as Custom until someone converts it. These routes are humans only, so you cannot call them: if someone asks you to change who you talk to in a group, tell them your owner changes it on the Groups page in AlphaClaw.
 
 How the rules behave at the edges:
 
 - **Becoming an owner ends a block for good**: AlphaClaw takes a new owner off the block list, and the block does not come back if they stop being an owner.
 - **Owner changes take up to a minute** to reach the guard plugin (synced at startup, on every rules write and every join watcher check).
-- **A damaged rules file never lets a blocked person through.** The routes change nothing (`rules_unreadable`), a running gateway keeps its last rules, and a gateway started over the damaged file drops every Telegram turn except the owners' until it is fixed.
+- **A damaged rules file keeps its blocks and never silences the owner.** The routes change nothing (`rules_unreadable`), a running gateway keeps its last rules, and a gateway started over a damaged or unreadable file enforces the blocks in `telegram/group-rules.last-good.json` (the copy AlphaClaw saves beside it on every write and rewrites when it differs) and serves everyone else. With no readable copy either, no block is enforced until the file is fixed. Copying the last-good file over the damaged one restores the last saved rules.
+- **The join watcher's queue** (`telegram/join-watch-pending.json`): a join that keeps failing is dropped after three checks, and a queue file that is not a JSON list stops the watcher (logged) until it is fixed or moved aside.
 - **"Test this group" says when a block is not enforced** (`groupGuard.enforced: false`): the guard plugin entry is missing, not AlphaClaw's, or off.
 - **Anonymous admins** reach the agent as Telegram's GroupAnonymousBot (1087968824), so in Trusted people mode they are not heard, the owner included (`anonymous_admins` warning).
 - **Known limit: a blocked person's messages as context.** OpenClaw filters a group turn's context (recent and replied-to messages) only by the group's own rules, with no plugin hook, so in an Approved group they can appear in other people's turns. Trusted people mode filters them out.
@@ -42,6 +43,8 @@ The change needs the group's current revision. Read GET /api/telegram/groups and
 ### revision_mismatch
 
 The group's rules changed since you read them. Read the groups again, check the new rules, and send the change with the new revision. Retry: after reading the revision.
+
+Block-list saves use their own revision: send `blockedSendersRevision` from GET /api/telegram/groups as If-Match on PUT /api/telegram/blocked-senders.
 
 ### owner_required
 
