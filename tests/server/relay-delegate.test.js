@@ -546,6 +546,25 @@ describe("relay delegates: the bridge", () => {
     }
   });
 
+  it("a delegate's header says its own answer is the owner receiving what it asked for, and other recipients still need an approval", async () => {
+    const ctx = setup();
+    try {
+      await ctx.tick();
+      ctx.engine.dm(kAgent, "Send me the staged GHome export files.");
+      await ctx.tick();
+      const [send] = ctx.sends;
+      expect(send.message).toContain("Your final answer goes back to @" + kAgent + ", your owner's own Capy thread.");
+      expect(send.message).toContain("is your owner receiving them, not a send to another person: do it without asking for approval.");
+      expect(send.message).toContain("Sending to anyone else still needs the recorded approval naming them.");
+    } finally {
+      ctx.close();
+    }
+    const { buildInjectedMessage } = require("../../lib/server/relay/bridge");
+    const peer = buildInjectedMessage({ messageId: "m1", sender: kAgent, hop: 1, text: "Send me the export", approvalId: "relay-00000000", trust: "peer" });
+    expect(peer).not.toContain("your owner's own Capy thread");
+    expect(peer).toContain("awaits your owner's approval");
+  });
+
   it("the receipt counts only message sends that succeeded, through the tool or the tool_call wrapper", async () => {
     const ctx = setup();
     try {
