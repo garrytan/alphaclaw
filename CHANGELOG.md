@@ -7,7 +7,7 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.237] - 2026-11-09
 
-You can now see and set every Telegram group's rule on a new **Groups** page (Connect → Groups, `#/groups`), instead of through the API.
+You can now see and set every Telegram group's rule on a new **Groups** page (in the sidebar's Connect section, `#/groups`), instead of through the API.
 
 ### Added
 - **Every group your agent was added to, sorted by its rule.** Sections for Waiting for you (groups with no rule yet, where the agent stays silent), Custom (rules set outside AlphaClaw, shown as they are), Approved, Trusted people, Silent and Blocked. Each group has one mode switch. A change is checked by OpenClaw first and shows the group's rules before and after; the save is refused if someone changed the group meanwhile. Blocking asks first, because the bot leaves the group. Replacing Custom rules asks first and says the old rules are backed up. A forum topic with its own rules is explained, and removed only after a second preview.
@@ -21,10 +21,12 @@ You can now see and set every Telegram group's rule on a new **Groups** page (Co
 
 ### Fixed
 - **A damaged rules file can no longer silence you.** A gateway that started over a damaged or unreadable `telegram/group-rules.json` (for example one it may not open) dropped every Telegram turn except the owners', and dropped the owner's too when an owner entry was a username or DMs were open to everyone (`"*"`). It now enforces the blocks in `telegram/group-rules.last-good.json`, a copy AlphaClaw saves beside the rules on every write, and serves everyone else. With no readable copy either, it blocks nobody until the file is fixed.
+- **The saved copy stays current.** AlphaClaw writes it at startup on a box upgraded from 0.10.236, which has none yet, and rewrites it within a minute whenever it differs from the rules. A failed copy write is logged and no longer fails a save that landed, and a gateway keeps enforcing the copy it already read if a later read of it fails.
+- **A second tab can no longer undo a block.** The Blocked people list is saved with the revision it was read at, so a list someone changed meanwhile is refused (`412 revision_mismatch`) and the page reloads it instead of overwriting it.
 - **A block that ends because someone became an owner is no longer silent.** AlphaClaw logs each person it takes off the block list and tells you once.
 - **One failing group join no longer holds up the rest.** A join that fails to be handled counts as one of its three attempts, the joins behind it are still handled, and each different error is logged once.
 - **A damaged join-watch queue is no longer wiped.** When `telegram/join-watch-pending.json` is not a JSON list, the join watcher stops and logs how to fix it, instead of reading it as empty and overwriting it. It also no longer logs a false "recovered" while a slow check is still running.
-- **The Groups page saves what you previewed.** A mode change saves the exact rules OpenClaw checked in the preview, and after any save the page reloads past a refresh already under way, so an unblock is not undone by a stale list.
+- **The Groups page saves what you previewed.** A mode change saves the exact rules OpenClaw checked in the preview, and after any save the page reloads past a refresh already under way, so an unblock is not undone by a stale list. A mode change refused because the group changed after the preview reloads the page and closes the dialog, so the change is made again from the current rules.
 
 ## [0.10.236] - 2026-11-09
 
