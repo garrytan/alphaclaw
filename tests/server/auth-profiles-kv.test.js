@@ -147,6 +147,11 @@ it("refuses a newer shared schema with its version and the fix, as a 409 from th
     expect(exchange.status).toBe(409);
     expect(exchange.body).toMatchObject({ ok: false, code: "config_unreadable", reason: "unsupported_schema", userVersion: 23, supportedSchemas: { min: 12, max: 22 } });
     expect(exchange.body.error).toContain("Do not downgrade OpenClaw");
+    expect(exchange.body.error).toContain("Nothing was saved; after updating AlphaClaw, sign in to Codex again.");
+    expect(exchange.body).toMatchObject({
+      hint: "Nothing was saved; after updating AlphaClaw, sign in to Codex again.",
+      docsUrl: "https://github.com/garrytan/alphaclaw#openclaw-version",
+    });
   } finally { fetchSpy.mockRestore(); }
   expect(read(23).store).toEqual(secrets());
 });

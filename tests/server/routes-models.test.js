@@ -72,7 +72,7 @@ const createApp = (deps) => {
   kTempDirs.push(tempRoot);
   const modelCatalogCache = createModelCatalogCache({
     cachePath: path.join(tempRoot, "cache", "model-catalog.json"),
-    shellCmd: deps.shellCmd,
+    execFileCmd: deps.execFileCmd,
     gatewayEnv: deps.gatewayEnv,
     parseJsonFromNoisyOutput: deps.parseJsonFromNoisyOutput,
     normalizeOnboardingModels: deps.normalizeOnboardingModels,
@@ -110,7 +110,7 @@ describe("server/routes/models", () => {
 
   it("POST /api/models/refresh starts a catalog load even when the cache is fresh", async () => {
     const deps = createModelDeps();
-    deps.shellCmd.mockResolvedValue("noise");
+    deps.execFileCmd.mockResolvedValue("noise");
     deps.parseJsonFromNoisyOutput.mockReturnValue({
       models: [{ key: "openai/gpt-6-astra", name: "GPT-6 Astra" }],
     });
@@ -123,7 +123,7 @@ describe("server/routes/models", () => {
     await flushPromises();
     const fresh = await request(app).get("/api/models");
     expect(fresh.body).toEqual(expect.objectContaining({ source: "openclaw", stale: false }));
-    expect(deps.shellCmd).toHaveBeenCalledTimes(1);
+    expect(deps.execFileCmd).toHaveBeenCalledTimes(1);
 
     const res = await request(app).post("/api/models/refresh");
 
@@ -131,12 +131,12 @@ describe("server/routes/models", () => {
     expect(res.body).toEqual(
       expect.objectContaining({ ok: true, source: "cache", stale: true, refreshing: true }),
     );
-    await vi.waitFor(() => expect(deps.shellCmd).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(deps.execFileCmd).toHaveBeenCalledTimes(2));
   });
 
   it("bootstraps with the bundled catalog, then returns normalized models from openclaw output", async () => {
     const deps = createModelDeps();
-    deps.shellCmd.mockResolvedValue("noise");
+    deps.execFileCmd.mockResolvedValue("noise");
     deps.parseJsonFromNoisyOutput.mockReturnValue({
       models: [{ key: "openai/gpt-5.1-codex", name: "GPT" }],
     });
@@ -156,10 +156,11 @@ describe("server/routes/models", () => {
       refreshing: true,
       models: kFallbackOnboardingModels,
     });
-    expect(deps.shellCmd).toHaveBeenCalledWith("openclaw models list --all --json", {
+    expect(deps.execFileCmd).toHaveBeenCalledWith("openclaw", ["models", "list", "--all", "--json"], expect.objectContaining({
       env: { OPENCLAW_GATEWAY_TOKEN: "token" },
-      timeout: kModelCatalogLoadTimeoutMs,
-    });
+      timeoutMs: kModelCatalogLoadTimeoutMs,
+      processGroup: true,
+    }));
 
     await flushPromises();
 
@@ -180,7 +181,7 @@ describe("server/routes/models", () => {
 
   it("serves the bundled catalog while a dynamic refresh resolves empty", async () => {
     const deps = createModelDeps();
-    deps.shellCmd.mockResolvedValue("{}");
+    deps.execFileCmd.mockResolvedValue("{}");
     deps.parseJsonFromNoisyOutput.mockReturnValue({ models: [] });
     deps.normalizeOnboardingModels.mockReturnValue([]);
     const app = createApp(deps);
@@ -200,7 +201,7 @@ describe("server/routes/models", () => {
 
   it("serves the bundled catalog when the dynamic refresh command throws", async () => {
     const deps = createModelDeps();
-    deps.shellCmd.mockRejectedValue(new Error("boom"));
+    deps.execFileCmd.mockRejectedValue(new Error("boom"));
     const app = createApp(deps);
 
     const res = await request(app).get("/api/models");
@@ -232,7 +233,7 @@ describe("server/routes/models", () => {
       refreshing: false,
       models: kFallbackOnboardingModels,
     });
-    expect(deps.shellCmd).not.toHaveBeenCalled();
+    expect(deps.execFileCmd).not.toHaveBeenCalled();
   });
 
   it("returns thinking options for a model key on GET /api/models/thinking-options", async () => {

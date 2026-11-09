@@ -72,6 +72,18 @@ describe("openclaw-upgrade-status: the alert matrix", () => {
     expect(status.retry.available).toBe(false);
   });
 
+  it("leftover session .jsonl stop: OpenClaw's recover steps and Retry", () => {
+    const status = buildUpgradeStatus({
+      record: { lastOutcome: failed({ reason: "session_jsonl_pending", detail: "SQLite-backed session has a legacy JSONL transcript awaiting verification" }) },
+      installedVersion: kPin,
+      isAdmin: true,
+    });
+    expect(status.alert.sentence).toContain("old .jsonl transcript files under agents/<id>/sessions/");
+    expect(status.alert.steps).toHaveLength(3);
+    expect(status.alert.steps[1]).toContain("openclaw doctor --session-sqlite recover");
+    expect(status.alert.actions).toContain("retry_upgrade");
+  });
+
   it("transient failure: 'interrupted' with Retry upgrade now and the next-restart sentence", () => {
     const status = buildUpgradeStatus({ record: { lastOutcome: failed({ class: "transient", reason: "timed_out" }) }, installedVersion: kPin, isAdmin: true });
     expect(status.alert).toMatchObject({ kind: "interrupted", tone: "warning", headline: "OpenClaw's data upgrade was interrupted" });

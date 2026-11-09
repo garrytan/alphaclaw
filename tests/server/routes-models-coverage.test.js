@@ -466,12 +466,13 @@ describe("server/routes/models coverage", () => {
 
   it("defaults isOnboarded to true and builds its own catalog cache when omitted", async () => {
     const deps = createModelDeps();
-    const shellCmd = vi.fn(async () => "{}");
+    const execFileCmd = vi.fn(async () => "{}");
     const app = express();
     app.use(express.json());
     registerModelRoutes({
       app,
-      shellCmd,
+      shellCmd: deps.shellCmd,
+      execFileCmd,
       gatewayEnv: () => ({}),
       parseJsonFromNoisyOutput: () => ({ models: [] }),
       normalizeOnboardingModels: (items) => items,
@@ -484,7 +485,7 @@ describe("server/routes/models coverage", () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     // The default isOnboarded gate reports true, so a dynamic refresh runs.
-    await vi.waitFor(() => expect(shellCmd).toHaveBeenCalled());
+    await vi.waitFor(() => expect(execFileCmd).toHaveBeenCalled());
   });
 
   it("guards against empty profile ids on auth upsert and delete handlers", async () => {

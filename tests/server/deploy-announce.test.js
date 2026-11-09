@@ -162,6 +162,12 @@ describe("deploy announcements", () => {
     expect(quiet.notices[0].message).toBe("⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.10.8; replies resume when it finishes.");
     expect(quiet.notices[0].opts.expiresAt).toBe(T0 + 600 * 1000 + 5 * 60 * 1000);
 
+    const kept = makeAnnouncer({ clock });
+    await kept.announcer.onDataUpgradeStart({ toVersion: "2026.11.2", preUpgradeConfigPath: "/data/.openclaw/.alphaclaw/openclaw.json.pre-2026.11.2" });
+    expect(kept.notices[0].message).toBe(
+      "⏳ AlphaClaw is upgrading OpenClaw's data after the update to 2026.11.2; replies resume when it finishes. openclaw.json from before the upgrade is kept at /data/.openclaw/.alphaclaw/openclaw.json.pre-2026.11.2.",
+    );
+
     const stopping = makeAnnouncer({ clock });
     await stopping.announcer.onShutdown({ reason: "SIGINT" });
     expect(await stopping.announcer.onDataUpgradeStart({ toVersion: "2026.10.8" })).toEqual({ notified: false });
