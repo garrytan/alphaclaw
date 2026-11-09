@@ -217,6 +217,16 @@ describe("server/routes/auth", () => {
     expect(res.headers.location).toBe("/login.html");
   });
 
+  it("sends a signed-out OpenClaw credential prompt link to the login page with a return path", async () => {
+    const { app } = createTestApp({ setupPassword: "secret" });
+    const id = "ask_" + "0123456789abcdef".repeat(2);
+    const res = await request(app).get(`/openclaw/ask/${id}`).set("Sec-Fetch-Dest", "document");
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`/login.html?next=${encodeURIComponent(`/openclaw/ask/${id}`)}`);
+    const odd = await request(app).get("/openclaw/ask/not-an-id").set("Sec-Fetch-Dest", "document");
+    expect(odd.headers.location).toBe("/login.html");
+  });
+
   it("the auth status carries the disk-full notice for the login page, without a session", async () => {
     process.env.SETUP_PASSWORD = "secret";
     const { registerAuthRoutes } = loadAuthRoutes();

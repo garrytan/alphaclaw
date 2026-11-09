@@ -1,11 +1,10 @@
 ## Quick Recipes
 
-**Rotate a provider key** (secret via stdin, restart after):
+**Get a key from the person** (a new key, or replacing one they asked to replace; never rotate unasked):
 ```
-printf '%s' '{"key":"ANTHROPIC_API_KEY","value":"<new-key>"}' \
-  | alphaclaw admin PATCH /api/env --data-stdin
+alphaclaw admin POST /api/secrets/requests --data '{"name":"ANTHROPIC_API_KEY","reason":"model provider"}'
 ```
-Then tell the user a restart is required, naming any `staleProcesses`.
+Send them the returned `url` as is and nothing else about the value. When they say it is done, read `alphaclaw admin GET /api/secrets/requests/<id>`: `stores` names the stores and `reach.env` says when it is usable (`gateway_env`: after a gateway restart they choose; offer it, do not restart on your own).
 
 **Check upgrade status:** `alphaclaw admin GET /api/openclaw/channel` (current build/channel) and `GET /api/status --summary`.
 

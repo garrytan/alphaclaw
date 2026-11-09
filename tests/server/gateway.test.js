@@ -717,6 +717,54 @@ describe("server/gateway restart behavior", () => {
     expect(currentConfig.gateway.http).toBeUndefined();
   });
 
+  it("writes gateway.publicOrigin once from the configured https setup URL", () => {
+    let currentConfig = { gateway: {} };
+    fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
+    const configWrite = mockAtomicConfigWrites((targetPath, contents) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) currentConfig = JSON.parse(contents);
+    });
+    const previous = process.env.ALPHACLAW_SETUP_URL;
+    process.env.ALPHACLAW_SETUP_URL = "https://box.example.com";
+    try {
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      fs.readFileSync = vi.fn((targetPath) =>
+        targetPath === `${OPENCLAW_DIR}/openclaw.json` ? JSON.stringify(currentConfig) : "{}",
+      );
+      expect(gateway.ensureGatewayProxyConfig("https://box.example.com")).toBe(true);
+      expect(currentConfig.gateway.publicOrigin).toBe("https://box.example.com");
+      process.env.ALPHACLAW_SETUP_URL = "https://moved.example.com";
+      expect(gateway.ensureGatewayProxyConfig("https://box.example.com")).toBe(false);
+      expect(currentConfig.gateway.publicOrigin).toBe("https://box.example.com");
+      expect(configWrite).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previous === undefined) delete process.env.ALPHACLAW_SETUP_URL;
+      else process.env.ALPHACLAW_SETUP_URL = previous;
+    }
+  });
+
+  it("leaves gateway.publicOrigin unset for an http LAN setup URL", () => {
+    let currentConfig = { gateway: {} };
+    fs.existsSync = vi.fn((targetPath) => targetPath === kOnboardingMarkerPath);
+    mockAtomicConfigWrites((targetPath, contents) => {
+      if (targetPath === `${OPENCLAW_DIR}/openclaw.json`) currentConfig = JSON.parse(contents);
+    });
+    const previous = process.env.ALPHACLAW_SETUP_URL;
+    process.env.ALPHACLAW_SETUP_URL = "http://192.168.1.20:3000";
+    try {
+      delete require.cache[modulePath];
+      const gateway = require(modulePath);
+      fs.readFileSync = vi.fn((targetPath) =>
+        targetPath === `${OPENCLAW_DIR}/openclaw.json` ? JSON.stringify(currentConfig) : "{}",
+      );
+      gateway.ensureGatewayProxyConfig("http://192.168.1.20:3000");
+      expect(currentConfig.gateway.publicOrigin).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.ALPHACLAW_SETUP_URL;
+      else process.env.ALPHACLAW_SETUP_URL = previous;
+    }
+  });
+
   it("preserves existing allowed origins and remains idempotent", () => {
     let currentConfig = {
       gateway: {

@@ -27,7 +27,7 @@
     },
     "leg2": {
       "browser": false,
-      "budgetSeconds": 1173,
+      "budgetSeconds": 1213,
       "files": [
         "tests/live/agent-delete.e2e.test.js",
         "tests/live/boot-native-maintenance-once.e2e.test.js",
@@ -40,7 +40,8 @@
         "tests/live/openclaw-live-memory.e2e.test.js",
         "tests/live/particle-provider.e2e.test.js",
         "tests/live/particle-real-api.e2e.test.js",
-        "tests/live/proxy-a2a.e2e.test.js"
+        "tests/live/proxy-a2a.e2e.test.js",
+        "tests/live/secret-drop-store.e2e.test.js"
       ],
       "maxTestTimeoutSeconds": 3900,
       "timeoutMinutes": 75
