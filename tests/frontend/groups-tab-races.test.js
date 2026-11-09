@@ -26,6 +26,7 @@ vi.mock("../../lib/public/js/lib/api.js", () => ({
 vi.mock("../../lib/public/js/components/toast.js", () => ({ showToast: vi.fn() }));
 
 import { setTelegramGroupPolicy } from "../../lib/public/js/lib/api.js";
+import { showToast } from "../../lib/public/js/components/toast.js";
 import { GroupsTab } from "../../lib/public/js/components/groups-tab/index.js";
 import { BlockedPeople } from "../../lib/public/js/components/groups-tab/blocked-people.js";
 import { ModeChangeDialog } from "../../lib/public/js/components/groups-tab/mode-change-dialog.js";
@@ -84,5 +85,24 @@ describe("groups page races", () => {
     const [, body, options] = setTelegramGroupPolicy.mock.calls[1];
     expect(body).toEqual({ mode: "approved", trusted: [{ id: "300000001", scope: "conversation" }], title: "Placeholder group" });
     expect(options).toEqual({ revision: "rev-at-preview", accountId: "default" });
+  });
+
+  it("refreshes the page and closes the dialog when the group changed after the preview", async () => {
+    const group = { groupId: "-1001111111111", title: "Placeholder group", mode: "silent", revision: "rev-old", trusted: [] };
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+    const render = () => {
+      hooks.index = 0;
+      return ModeChangeDialog({ group, mode: "approved", accountId: "default", onClose, onSaved });
+    };
+    render();
+    for (const effect of hooks.effects.splice(0)) effect();
+    await vi.waitFor(() => expect(setTelegramGroupPolicy).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setTelegramGroupPolicy.mockRejectedValueOnce(Object.assign(new Error("changed"), { problem: { code: "revision_mismatch", revision: "rev-new" } }));
+    await render().props.onConfirm();
+    expect(onSaved).toHaveBeenCalledWith(null);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Someone changed this group"), "error");
   });
 });
