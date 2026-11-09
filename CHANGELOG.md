@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.243] - 2026-11-09
+## [0.10.244] - 2026-11-09
 
 Three fixes to how AlphaClaw reports a long OpenClaw upgrade boot, from a 16-agent cold-boot test of the 2026.11.2 upgrade.
 
@@ -20,6 +20,13 @@ Three fixes to how AlphaClaw reports a long OpenClaw upgrade boot, from a 16-age
 - `gateway-readiness.test.js` and `watchdog.test.js`: the 2026.11.2 pending-inspection body is the starting phase for 30 s and never `readiness_degraded`; another refusal code, a second failing component, or a real failure after 20 pending agents stays a component failure.
 - `openclaw-boot-migration.test.js`: wrapped warnings for two agents with a duplicate count two sessions and quote the whole warning; a trailing OpenClaw error line is still quoted instead; 2026.11.2's real `<storePath>: [code] …` shape, wrapped, with a stderr line between stdout chunks and a short store path after it, counts three.
 - `deploy-announce.test.js`: the upgrading notice carries a warn verdict's sentences and nothing for ok or refuse.
+
+## [0.10.243] - 2026-11-09
+
+The coverage run on main no longer fails on a timing check that coverage instrumentation slows past its limit.
+
+### Tests
+- `utils-json.test.js`: the pathological-input test still proves the noisy-JSON scanner gives up after its work budget, but its wall-clock bound is now 5 s instead of 500 ms. Under coverage the scan took 632–748 ms; an unbounded scan would take minutes.
 
 ## [0.10.242] - 2026-11-09
 
