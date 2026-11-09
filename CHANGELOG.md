@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.219] - 2026-11-09
+
+The gateway now gets one Node heap flag when you set ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE, instead of autotune's flag followed by yours.
+
+### Fixed
+- **One heap flag for the gateway.** Autotune sizes the gateway heap from the container (at most 8192 MB) and adds `--max-old-space-size` to the gateway's `NODE_OPTIONS`. When `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE` was also set, AlphaClaw appended it after autotune's flag, so the gateway ran with `--max-old-space-size=8192 --max-old-space-size=16384`. The last flag wins in Node, so the limit was right, but the line misled anyone reading it. The operator's cap now replaces autotune's flag in the long-running gateway's environment. Short-lived `openclaw` CLI calls keep autotune's flag, and nothing changes when the variable is unset.
+
+### Tests
+- A new gateway test sets an autotune heap and `ALPHACLAW_GATEWAY_MAX_OLD_SPACE_SIZE` together and expects one flag in the gateway's launch environment. It fails on the previous code.
+
 ## [0.10.218] - 2026-11-08
 
 The /tmp safety net now always evicts at its eviction line, even when the alert line is set higher.
