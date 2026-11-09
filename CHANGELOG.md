@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 The watchdog's out-of-memory verdict for a force-killed gateway gets three follow-up fixes: a relaunch killed while it boots is judged on its own, the wording no longer overstates what the kernel counter proves, and an outside kill still pages like the OOM verdict it was split from.
 
 ### Fixed
-- **A relaunch killed while booting is no longer blamed on its predecessor's OOM.** The kernel `oom_kill` count the next exit is compared with is now taken at the previous gateway's exit. Before, it was read at the launch notice, which only comes after `/readyz`, so a relaunch SIGKILLed during boot was compared with its predecessor's launch count and inherited that gateway's OOM kill.
+- **A relaunch killed while booting is no longer blamed on its predecessor's OOM.** The kernel `oom_kill` count the next exit is compared with is now also re-read at each gateway exit, not only at the launch notice. The notice comes only once the gateway listens, so a relaunch SIGKILLed during boot used to be compared with its predecessor's launch count and inherited that gateway's OOM kill. A relaunch that does reach its notice is still judged from the notice.
 - **The OOM verdict says "most likely".** A risen counter shows the kernel OOM killer fired in the container while the gateway ran, not that it was the gateway's killer. Over a gateway life of days another process may have been the victim, so the crash detail and the owner notice now say the kernel OOM killer most likely did it.
 - **An outside SIGKILL stays critical.** `killed_by_signal` (a SIGKILL with no kernel OOM kill) is critical-class for automatic review and quiet mode, as `oom` was before the split.
 

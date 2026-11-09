@@ -197,7 +197,7 @@ describe("server/watchdog autotune OOM classification", () => {
     expect(autotuneEvents(insertWatchdogEvent).map((event) => event.details.kind)).toEqual(["outside_signal"]);
   });
 
-  it("a relaunch spawned right after the exit keeps that exit's count through its launch notice", async () => {
+  it("a relaunch that reached its launch notice is judged from that notice, not from its predecessor's exit", async () => {
     const { classifyGatewayCrash } = require("../../lib/server/gateway-crash-cause");
     let oomKills = 3;
     const { watchdog, insertWatchdogEvent } = createHarness({ readOomKillCount: () => oomKills, classifyGatewayCrash });
@@ -205,25 +205,7 @@ describe("server/watchdog autotune OOM classification", () => {
     watchdog.onGatewayExit({ code: 0, expectedExit: true, stderrTail: [], pid: 4242, generation: 1 });
     await flush();
     oomKills = 4;
-    watchdog.onGatewayLaunch({ pid: 4343, generation: 2, launchedAt: Date.now() });
-    insertWatchdogEvent.mockClear();
-
-    watchdog.onGatewayExit({ code: null, signal: "SIGKILL", expectedExit: false, stderrTail: [], pid: 4343, generation: 2 });
-    await flush();
-
-    const causes = insertWatchdogEvent.mock.calls.map(([event]) => event.details?.cause).filter(Boolean);
-    expect(causes).toContain("oom");
-  });
-
-  it("an OOM kill while no gateway ran is not charged to a relaunch spawned long after the exit", async () => {
-    const { classifyGatewayCrash } = require("../../lib/server/gateway-crash-cause");
-    let oomKills = 3;
-    const { watchdog, insertWatchdogEvent } = createHarness({ readOomKillCount: () => oomKills, classifyGatewayCrash });
-    watchdog.onGatewayLaunch({ pid: 4242, generation: 1 });
-    watchdog.onGatewayExit({ code: 0, expectedExit: true, stderrTail: [], pid: 4242, generation: 1 });
-    await flush();
-    oomKills = 4;
-    watchdog.onGatewayLaunch({ pid: 4343, generation: 2, launchedAt: Date.now() + 5 * 60 * 1000 });
+    watchdog.onGatewayLaunch({ pid: 4343, generation: 2 });
     insertWatchdogEvent.mockClear();
 
     watchdog.onGatewayExit({ code: null, signal: "SIGKILL", expectedExit: false, stderrTail: [], pid: 4343, generation: 2 });
