@@ -14,6 +14,7 @@ const {
   recordDoctorOutcome,
   runBootMigration,
 } = require("../../lib/server/openclaw-boot-migration");
+const { summarizeDoctorResult } = require("../../lib/server/doctor-outcome");
 
 const kNow = 1_788_681_600_000;
 const silentLogger = () => ({ log: vi.fn(), warn: vi.fn() });
@@ -232,6 +233,16 @@ describe("server/openclaw-boot-migration", () => {
     expect(message).toContain("a restart won't clear it");
     expect(message).toContain("openclaw doctor --session-sqlite recover");
     expect(message).toContain("press Retry upgrade");
+  });
+
+  it("a leftover .jsonl warning names the failure only when nothing more specific does, and counts each transcript once", () => {
+    const line = (n) => `[active_sqlite_transcript_jsonl] agent:main:s-${n}: SQLite-backed session has a legacy JSONL transcript awaiting verification: /data/agents/main/sessions/s-${n}.jsonl. Run openclaw doctor --fix or openclaw doctor --session-sqlite recover with the Gateway stopped.`;
+    const warnings = `${line(1)}\n${line(2)}\n${line(1)}\n`;
+    expect(summarizeDoctorResult({ ok: false, code: 1, stdout: warnings })).toMatchObject({ reason: "session_jsonl_pending", sessionJsonlCount: 2, detail: expect.stringContaining("s-1.jsonl") });
+    expect(summarizeDoctorResult({ ok: false, code: 1, stdout: `${warnings}Failing check plugins: broken\n` })).toMatchObject({ reason: "failing_check", detail: "Failing check plugins: broken" });
+    const timedOut = summarizeDoctorResult({ ok: false, timedOut: true, stdout: `${warnings}still migrating agent main\n` });
+    expect(timedOut).toMatchObject({ reason: "timed_out", detail: "still migrating agent main" });
+    expect(timedOut.sessionJsonlCount).toBeUndefined();
   });
 
   it("counts leftover session .jsonl files read-only before a pin change's Doctor", async () => {
