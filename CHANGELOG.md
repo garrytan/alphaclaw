@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.223] - 2026-11-09
+## [0.10.225] - 2026-11-09
 
 Capy threads you choose can now act as you through Agent Relay: their messages to your agent use its normal tools (files, commands, web, memory and the brain) instead of the messaging-only session, while sending to other people, scheduling, and changing the gateway, plugins, config or secrets stay with you.
 
@@ -19,6 +19,30 @@ Capy threads you choose can now act as you through Agent Relay: their messages t
 
 ### Tests
 - New `relay-delegate` tests cover the shared trust lookup, both guard tiers against the pinned catalog, single-use approvals, settings, the Doctor card, the remote tools' results, and the bridge's delegate prompt, demotion and abort. The live relay-guard test now runs a delegate session against the real pinned gateway: exec and write run, an undeclared recipient and `sessions_send` are refused, an approved send passes the guard once, and a revoke drops the session to messaging-only.
+## [0.10.224] - 2026-11-09
+
+The dashboard's largest hook, the app-shell controller, and the Channels page code are split by area so each part is easier to read and change, and two quick taps on a drawer tab no longer keep the phone drawer open.
+
+### Changed
+- **The app-shell controller is split by concern.** `hooks/use-app-shell-controller.js` (1,228 lines) is now a 113-line composer over eight files in `hooks/app-shell-controller/`: `use-auth-bootstrap.js` (onboarded, login and role), `use-connectivity.js` (the outage monitor, AlphaClaw's self-restart reconnect and the boot progress probe), `use-status-feed.js` (the status stream, its polling fallback and freshness), `use-upgrade-alert.js` (the OpenClaw data upgrade alert), `use-restart-operation.js` (the restart and upgrade operation and the restart-required banner), `use-alphaclaw-update.js` (the Update action), `use-gateway-shell-publisher.js` (what the Gateway card and banner read) and the pure `restart-operation-model.js` (refusal codes, timings and the record mapping). `useAppShellController` returns the same `{ state, actions }`, so `app.js` is unchanged. The Gateway-surface route check moved to `lib/routes.js` as `isGatewaySurfaceLocation`.
+- **The Channels components live in one folder.** `components/channels.js` moved to `components/channels/index.js` beside the Buzz wizard, with the account list card in `channels-card.js` and the WhatsApp QR login modal's state and polling in `use-channel-login.js`. `index.js` exports the same names, and every import now points at the folder.
+
+### Fixed
+- **Two quick taps on the drawer's Chat or Browse tab no longer keep the drawer open through your next navigation.** The second tap, made before the page re-rendered, counted as a navigation to the page you were already going to.
+
+### Tests
+- Tests that import or mock `components/channels.js` now use `components/channels/index.js`, with no other change to them. The gateway-recovery and reliability Chromium smokes, which drive the real controller, pass.
+- New tests cover a second drawer tab tap before the page re-renders, the request-history refresh after a test webhook (accepted, rejected, or its answer fails to read) and the spaces on the Telegram topics page's discovery and deleted lines. Each fails on the code before its fix.
+
+## [0.10.223] - 2026-11-09
+
+A gateway killed with SIGKILL is now reported as out of memory only when the container's kernel OOM counter actually went up. A kill from another process gets its own cause and no memory advice.
+
+### Fixed
+- **SIGKILL is no longer assumed to be an OOM kill.** The watchdog reads the container cgroup's `oom_kill` counter (`memory.events` on cgroup v2, which also counts kills in child cgroups; cgroup v1 counts only its own cgroup, so there the SIGKILL stays unconfirmed as before) when the gateway launches and when it exits. If the counter rose, the crash cause is `oom` and the notice now says plainly that the kernel OOM killer fired. If the counter is readable and did not rise, the cause is the new `killed_by_signal` ("killed by an outside signal"): no "commonly the kernel OOM killer" notice, no "raising the gateway heap will not help" advice, and the rescue prompt points at whatever sent the signal instead of at memory. Before, every bare SIGKILL or exit 137 was recorded as `oom`, so a box whose gateway was killed by another process, with zero kernel OOM kills, showed an OOM incident and memory advice. Where the counter can't be read, a SIGKILL is still reported as a possible, unconfirmed OOM kill, as before. A `killed_by_signal` crash is not critical-class on its own, as `oom` is, so repeated outside kills open ordinary incidents. A V8 "JavaScript heap out of memory" abort is still `oom` whatever the counter says.
+
+### Tests
+- New classifier tests cover a SIGKILL with the counter unchanged (`killed_by_signal`) and risen (`oom`, stated without hedging). New watchdog tests launch and exit a gateway with a fixed counter (no OOM notice, crash rows carry `killed_by_signal`) and with a rising one (the kernel OOM notice). All four fail on the previous code. The cause list test now expects 13 causes.
 
 ## [0.10.222] - 2026-11-09
 

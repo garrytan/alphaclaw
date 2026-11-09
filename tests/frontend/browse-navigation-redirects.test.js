@@ -65,6 +65,20 @@ describe("sidebar tab switch", () => {
     expect(actions.handleSelectSidebarTab("browse")).toBe(true);
     expect(setLocation).toHaveBeenCalledTimes(2);
   });
+
+  it("reports no navigation for a second tap before the page re-renders", () => {
+    storedSettings = {};
+    const originalWindow = globalThis.window;
+    globalThis.window = { location: { hash: "#/chat" } };
+    try {
+      const setLocation = vi.fn();
+      const { actions } = useBrowseNavigation({ location: "/health", setLocation });
+      expect(actions.handleSelectSidebarTab("chat")).toBe(false);
+      expect(setLocation).not.toHaveBeenCalled();
+    } finally {
+      globalThis.window = originalWindow;
+    }
+  });
 });
 
 describe("sidebar items", () => {

@@ -21,7 +21,7 @@ const {
 
 const kMb = 1024 * 1024;
 
-const createHarness = ({ gatewayLifecycleLock = null } = {}) => {
+const createHarness = ({ gatewayLifecycleLock = null, readOomKillCount = null, classifyGatewayCrash = null } = {}) => {
   process.env.WATCHDOG_AUTO_REPAIR = "false";
   process.env.WATCHDOG_NOTIFICATIONS_DISABLED = "false";
   const insertWatchdogEvent = vi.fn();
@@ -38,6 +38,8 @@ const createHarness = ({ gatewayLifecycleLock = null } = {}) => {
     reloadEnv: vi.fn(),
     resolveSetupUrl: () => "http://localhost:3000",
     sleepImpl: () => Promise.resolve(),
+    readOomKillCount,
+    classifyGatewayCrash,
   });
   return { watchdog, insertWatchdogEvent, notifier };
 };
@@ -153,6 +155,43 @@ describe("server/watchdog autotune OOM classification", () => {
       .find((m) => m.includes("force-killed"));
     // Honest evidence: 137/SIGKILL is commonly-but-not-conclusively OOM.
     expect(message).toContain("commonly the kernel OOM killer");
+    expect(message).toContain("raising the gateway heap will not help");
+  });
+
+  it("a SIGKILL with the cgroup oom_kill counter unchanged is an outside kill: no OOM notice, no heap advice", async () => {
+    const { classifyGatewayCrash } = require("../../lib/server/gateway-crash-cause");
+    const { watchdog, insertWatchdogEvent, notifier } = createHarness({
+      readOomKillCount: () => 3,
+      classifyGatewayCrash,
+    });
+    watchdog.onGatewayLaunch({ pid: 4242, generation: 1 });
+    watchdog.onGatewayExit({ code: null, signal: "SIGKILL", expectedExit: false, stderrTail: [], pid: 4242, generation: 1 });
+    await flush();
+
+    const events = autotuneEvents(insertWatchdogEvent);
+    expect(events).toHaveLength(1);
+    expect(events[0].details).toMatchObject({ kind: "outside_signal" });
+    const messages = notifier.notify.mock.calls.map(([m]) => m).join("\n");
+    expect(messages).not.toMatch(/OOM killer|raising the gateway heap/);
+    const causes = insertWatchdogEvent.mock.calls.map(([event]) => event.details?.cause).filter(Boolean);
+    expect(causes).toContain("killed_by_signal");
+    expect(causes).not.toContain("oom");
+  });
+
+  it("a SIGKILL with the cgroup oom_kill counter risen is a kernel OOM kill, stated without hedging", async () => {
+    let oomKills = 3;
+    const { watchdog, insertWatchdogEvent, notifier } = createHarness({ readOomKillCount: () => oomKills });
+    watchdog.onGatewayLaunch({ pid: 4242, generation: 1 });
+    oomKills = 4;
+    watchdog.onGatewayExit({ code: 137, expectedExit: false, stderrTail: [], pid: 4242, generation: 1 });
+    await flush();
+
+    const events = autotuneEvents(insertWatchdogEvent);
+    expect(events).toHaveLength(1);
+    expect(events[0].details).toMatchObject({ kind: "container_oom", kernelOomKill: true });
+    const message = notifier.notify.mock.calls.map(([m]) => m).find((m) => m.includes("OOM killer"));
+    expect(message).toContain("oom_kill counter rose");
+    expect(message).not.toContain("commonly");
     expect(message).toContain("raising the gateway heap will not help");
   });
 

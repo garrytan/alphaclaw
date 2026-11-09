@@ -43,7 +43,7 @@ vi.mock("preact/hooks", () => {
     __harness: harness,
   };
 });
-vi.mock("../../lib/public/js/components/channels.js", () => ({
+vi.mock("../../lib/public/js/components/channels/index.js", () => ({
   ALL_CHANNELS: ["telegram", "discord", "slack", "whatsapp"],
   ChannelsCard: () => null,
   getChannelMeta: (id) => ({ label: String(id || "") }),
