@@ -114,7 +114,7 @@ describe("ci/merge-gate workflow contract", () => {
     expect(step).toContain("node scripts/ci/tested-tree.mjs --out \"$RUNNER_TEMP/tested-tree/tree.json\" test-reports/vitest.json");
     expect(step).toMatch(/upload-artifact@v4\n\s+if: success\(\) && matrix\.node-version == 24\n\s+with:\n\s+name: tested-tree\n\s+path: \$\{\{ runner\.temp \}\}\/tested-tree\/tree\.json/);
     const policy = JSON.parse(readFileSync(path.join(__dirname, "..", "..", ".gstack", "pregate.json"), "utf8"));
-    expect(policy.run_profiles["ci/test-24"]).toEqual({ workflow: "ci.yml", events: ["pull_request", "push"], jobs: ["test (24)"], artifact: "tested-tree" });
+    expect(policy.run_profiles["ci/test-24"]).toEqual({ workflow: "ci.yml", events: ["pull_request", "push"], jobs: ["test (24)"], artifact: "tested-tree", os: "Linux" });
     expect(Object.keys(policy.ship_lanes_from).sort()).toEqual(["npm test", "npx vitest run tests/server/guards"]);
     for (const lane of Object.values(policy.ship_lanes_from)) expect(lane.profiles).toEqual(["ci/test-24"]);
   });
