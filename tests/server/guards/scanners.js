@@ -567,8 +567,9 @@ const scanLooseSecretWriters = (rawText, relPath) => {
     const mode = args.match(/\bmode\s*:\s*([A-Za-z_$][\w$]*|0o[0-7]+|\d+)/)?.[1];
     const literal = mode && /^[A-Za-z_$]/.test(mode) ? (bindings.get(mode) || "").trim() : mode;
     if (literal && isPrivateModeLiteral(literal)) continue;
+    const id = `${relPath}::${firstArg.replace(/\s+/g, " ").slice(0, 60)}`;
     hits.push({
-      key: `${relPath}::${firstArg.replace(/\s+/g, " ").slice(0, 60)}`,
+      key: id,
       file: relPath,
       line: lineOf(text, m.index),
     });

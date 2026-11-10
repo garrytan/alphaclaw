@@ -317,7 +317,7 @@ const realCloseSync = fs.closeSync;
 const realFstatSync = fs.fstatSync;
 const realFchmodSync = fs.fchmodSync;
 const realFchownSync = fs.fchownSync;
-const kCronTempFd = 2147483000;
+const kCronTempFd = 1 << 30;
 
 const capturePath = process.env.ALPHACLAW_CAPTURE_CRON_PATH;
 const testHome = process.env.ALPHACLAW_TEST_HOME;
