@@ -5,7 +5,7 @@ const request = require("supertest");
 const { registerRelayRoutes } = require("../../lib/server/routes/relay");
 const { relayPaths } = require("../../lib/server/relay/constants");
 const { kRelayGuardPluginId } = require("../../lib/server/relay/guard-entry");
-const { classifyAnchor, classifyRisk, gatewayRestartOf } = require("../../lib/plugin/relay-guard/confirm");
+const { classifyAnchor, classifyRisk, gatewayRestartOf, mainOpenclawAnchorOf } = require("../../lib/plugin/relay-guard/confirm");
 const { kOwnerThreadPluginActions } = require("../../lib/plugin/relay-guard/policy");
 const { kOtherOwner, guardedConfig, setup, expectHeld, expectHeldWithTap } = require("./helpers/relay-attested-harness");
 
@@ -385,14 +385,13 @@ describe("relay owner threads (GST-2323 PR2): over-refusals fixed", () => {
     expect(ctx.confirmationCount()).toBe(0);
   });
 
-  it("reads openclaw as an argument only in a command made of read-only commands, and fails closed otherwise", async () => {
+  it("reads openclaw as an argument only in one simple read-only command, and fails closed otherwise", async () => {
     ctx = setup();
     const argumentCommands = [
       "grep -rn openclaw $DIR",
-      'journalctl -u openclaw --since "$(date)"',
       "echo openclaw $HOME",
       "ls /usr/lib/node_modules/openclaw $X",
-      'grep openclaw "$LOG" | wc -l',
+      'cat "/var/log/openclaw" $F',
     ];
     for (const command of argumentCommands) {
       expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).toBeNull();
@@ -418,6 +417,26 @@ describe("relay owner threads (GST-2323 PR2): over-refusals fixed", () => {
       "( openclaw config set $K false )",
       "npx openclaw config $V plugins.entries.relay-guard.enabled false",
     ]) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expect((await ctx.call(run, "exec", { command })).blockReason, command).toContain("would change what decides relay trust on this box");
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("refuses the six guard-off shapes main refused, which a quote-blind tokenizer let through", async () => {
+    ctx = setup();
+    const off = "openclaw config set plugins.entries.relay-guard.enabled false";
+    const shapes = [
+      "openclaw >/dev/null config set plugins.entries.relay-guard.enabled false",
+      "echo >(" + off + ")",
+      'echo "$' + '{X:= ' + off + '}" $($X)',
+      'echo $(env -u "x;true" ' + off + ")",
+      "true()( " + off + " ); true",
+      "echo $(true)$(" + off + ")",
+    ];
+    const run = await ctx.deliver((await ctx.attestedAgent()).agent);
+    for (const command of shapes) {
+      expect(mainOpenclawAnchorOf(command), "main: " + command).not.toBeNull();
       expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
       expect((await ctx.call(run, "exec", { command })).blockReason, command).toContain("would change what decides relay trust on this box");
     }
