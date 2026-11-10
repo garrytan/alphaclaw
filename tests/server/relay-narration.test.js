@@ -3,7 +3,7 @@ const os = require("os");
 const path = require("path");
 const { DatabaseSync } = require("node:sqlite");
 const { openBridgeStore, kOpenStates, kTerminalStates } = require("../../lib/server/relay/bridge-store");
-const { createRelayBridge } = require("../../lib/server/relay/bridge");
+const { createRelayBridge, relaySessionKey } = require("../../lib/server/relay/bridge");
 const { createRelayMasker } = require("../../lib/server/relay/mask");
 const { createRelayService } = require("../../lib/server/relay");
 const { checkConfirmation } = require("../../lib/plugin/relay-guard/confirm");
@@ -15,6 +15,7 @@ const {
   kNarrationStates,
 } = require("../../lib/server/relay/narration");
 const { createNotifyOutbox } = require("../../lib/server/notify-outbox");
+const { formatSlackMessage } = require("../../lib/server/watchdog-notify");
 const { createUpgradeNotifier } = require("../../lib/server/upgrade-notifier");
 const { kDeploymentOnlyEnvKeys, resolveEnvFileOverlay } = require("../../lib/server/deployment-only-env");
 const { kSetupDir } = require("../../lib/server/constants");
@@ -58,7 +59,7 @@ const setup = ({ env = {}, resolveThread = () => null, notify = null, windows = 
       sender: kAgent,
       conversationId: "dm_1",
       threadRoot: id,
-      sessionKey: "agent:main:relay-" + (fields.sender || kAgent),
+      sessionKey: relaySessionKey("main", fields.sender || kAgent),
       state: "queued",
       intakeTrust: "peer",
       bodyChars: 42,
@@ -402,10 +403,18 @@ describe("relay narration: intake through the bridge", () => {
     ctx.narration.tick();
     const text = ctx.notices[0].text;
     expect(text).not.toContain(secret);
-    expect(text).toContain("\"`line one line two *bold* 'code' [click](https://evil.example)`\"");
+    expect(text).toContain("\"`line one line two *bold* 'code' (click)(https://evil.example)`\"");
     expect(text).toContain("(no summary given, 9 characters)");
     for (const line of linesOf(ctx.notices[0])) expect(line.split("`").length % 2).toBe(1);
     fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  it("a summary cannot mint a Slack link or mention: the notice keeps it inert on every transport", () => {
+    const summary = "see [details](https://example.com/x) and <https://example.com/y|Approve> <!channel>";
+    const line = describeAsk({ sender: kAgent, summary, state: "queued", intakeTrust: "peer", bodyChars: 42 }, null);
+    const slack = formatSlackMessage(line);
+    expect(slack).not.toMatch(/<[^>]*>/);
+    expect(slack).toContain("(details)(https://example.com/x)");
   });
 
   it("never calls the relay engine or the gateway", async () => {
