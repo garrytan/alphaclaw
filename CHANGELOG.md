@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.268] - 2026-11-11
+
+The relay's tailnet route no longer floods the log when something on the box keeps poking its local port. A hosting platform's port scanner was hitting the route's loopback listener about once a second, and each refused connection wrote a log line, about 86,000 lines a day.
+
+### Fixed
+- The tailnet ingress logs the first refusal of each kind, then counts repeats and writes one line with the count when the window ends: an hour for local clients that send no PROXY header or time out (port probes), a minute for tailnet peers that are refused. The connection is still closed every time; only the logging changed.
+
 ## [0.10.267] - 2026-11-11
 
 The relay's tailnet route now keeps tailscaled's log files inside its own directory. Before, on a box that already runs Tailscale, the relay's tailscaled wrote its logs into the existing daemon's directory and shared its log identity.

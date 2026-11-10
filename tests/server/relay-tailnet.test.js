@@ -233,6 +233,39 @@ describe("relay over the tailnet route (GST-2368)", () => {
     expect(ctx.remoteSends).toHaveLength(0);
   });
 
+  it("logs the first refusal of each kind and counts the repeats, so a local port prober cannot flood the log", async () => {
+    const lines = [];
+    const logger = { log() {}, warn: (line) => lines.push(line), error() {} };
+    ingress = createTailnetIngress({
+      handler: (req, res) => res.end(),
+      whois: whoisStub({ [kPeer]: { node: "laptop", nodeId: "n2", tags: [], user: "someone@example.com" } }),
+      allowedTags: ["tag:relay-liaison"],
+      logger,
+      probeLogWindowMs: 150,
+    });
+    const port = await ingress.listen();
+    const raw = (payload) =>
+      new Promise((resolve) => {
+        const socket = net.connect(port, "127.0.0.1", () => socket.write(payload));
+        socket.on("close", resolve);
+        socket.on("error", resolve);
+      });
+    const get = Buffer.from("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    for (let i = 0; i < 5; i += 1) await raw(get);
+    await raw(Buffer.concat([proxyHeaderV4(kPeer), get]));
+    await raw(Buffer.concat([proxyHeaderV4(kPeer), get]));
+    expect(lines).toEqual([
+      "[relay] tailnet ingress refused not_proxy_v2 (a local client that is not tailscaled's serve; repeats are counted)",
+      "[relay] tailnet ingress refused tag_not_allowed node=laptop tags=-",
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(lines.slice(2)).toEqual(["[relay] tailnet ingress refused not_proxy_v2 4 more times in 0s"]);
+    await raw(get);
+    expect(lines.at(-1)).toMatch(/refused not_proxy_v2 \(a local client/);
+    await ingress.close();
+    expect(lines.slice(-1)).toEqual(["[relay] tailnet ingress refused tag_not_allowed 1 more time in 60s"]);
+  });
+
   it("goes through a userspace tailscaled's loopback HTTP proxy with --proxy", async () => {
     const { box, keyFile, tailnet } = await start();
     const seen = [];
