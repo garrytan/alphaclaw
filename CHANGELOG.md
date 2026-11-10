@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.265] - 2026-11-10
+
+You can now require both checks for the one relay connection you trust: with `ALPHACLAW_RELAY_TRUSTED_BINDINGS_REQUIRE_ATTESTATION=true`, a pinned connection skips the confirmation links only while each message also carries a fresh Capy token for an owner you listed. Before, a pin alone was enough, so anything holding the connection's capability was trusted.
+
+### Added
+- **Pin plus attestation.** With the setting on, owner trust needs a binding on `ALPHACLAW_RELAY_TRUSTED_BINDINGS` whose message is Capy-attested for an owner on `ALPHACLAW_RELAY_CAPY_OWNERS`. A pin alone, or an attestation alone, is a plain delegate and keeps the links. Revoking the Capy grant or taking the name off the list ends it for a running turn too. A rotation to the thread's successor keeps the agent name, and so the pin; the successor must be attested for the same Capy project and owner. Off by default, deployment env only, and no relay session can change it.
+
+### Tests
+- `relay-pinned-attested.test.js` covers both directions: pinned and attested runs with zero rows, a pinned binding with no attestation and an unpinned attested thread tap, a revoked Capy grant or an un-pinned name ends the trust of a running turn, an attested rotation keeps the name and pin while another owner's successor cannot claim, an unattested pinned binding moves to attestation with its handoff code, and the setting itself is refused to relay sessions.
+
 ## [0.10.264] - 2026-11-10
 
 You can now trust one relay connection like your own Capy threads, without a Capy token: name it in `ALPHACLAW_RELAY_TRUSTED_BINDINGS` and its changes run with no confirmation links, while every other connection keeps them. Before, only attested threads of an owner on `ALPHACLAW_RELAY_CAPY_OWNERS` could skip the links, which trusts every thread that owner has.
