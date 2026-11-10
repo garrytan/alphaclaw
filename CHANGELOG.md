@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.261] - 2026-11-10
+
+The relay tests for attested Capy threads pass again at any time of day. They pinned a fake clock to 10:00 UTC on November 10, but the OAuth library checks token expiry against the real clock, so from 11:00 UTC that day 18 of the 30 tests failed on every branch. The fake clock now starts at the real time.
+
+### Fixed
+- `tests/server/relay-attested-delegate.test.js`: the fake clock starts at the current time, so access tokens it mints are not already expired by the real clock.
+
 ## [0.10.260] - 2026-11-10
 
 Your own Capy threads no longer send you confirmation links. When a Capy thread you own connects to Agent Relay with the token Capy signs for its machine, AlphaClaw now treats it as you: its changes to config, env, secrets, plugins and guards run at once, with no 🔐 link, no confirmation row and no message to you. Before, every such change waited for your tap, even though you had already asked for it in Capy.
