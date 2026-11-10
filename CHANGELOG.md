@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.253] - 2026-11-10
+
+A delegate thread can no longer change the relay's signing key, or the relay's own files, without your Approve tap by writing to them through a relative path, a `..` or a symlink.
+
+### Fixed
+- **Writes are judged by where they land.** Before it decides whether a `write`, `edit` or `apply_patch` touches a protected file, the relay guard now folds `.` and `..`, resolves a relative path against the agent's workspace, and follows symlinks. A write to `relay/provenance-key.json` or a relay database through `../../relay/./provenance-key.json`, a symlink in the workspace, or a linked directory over `relay/` now waits for the owner's confirmation, and the notice names the real file. `provenance-key.json` is also protected by name anywhere, like `secrets.json`.
+
+### Tests
+- `relay-confirm.test.js`: the key and a relay database reached through `..`, a workspace symlink, a linked directory and a linked root, for `write`, `edit` and `apply_patch`, plus ordinary workspace files left unheld.
+
 ## [0.10.252] - 2026-11-10
 
 A delegate thread can now read your automations and look back through its own relay conversations, and when your agent messages a Capy thread during a turn you started on Telegram, the message carries a statement signed by the box saying which of your Telegram messages asked. Messages between the box and a Capy thread can also be up to 64,000 characters in either direction.

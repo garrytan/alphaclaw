@@ -20,6 +20,53 @@ const kAgent = "capy-25cf4e98b5b6";
 const kHour = 60 * 60 * 1000;
 const quiet = { log: () => {}, warn: () => {}, info: () => {}, error: () => {} };
 
+describe("relay confirmations: the signing key and relay files by any path that lands on them", () => {
+  let root;
+  let workspace;
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-keypath-")));
+    workspace = path.join(root, ".openclaw", "workspace-scout");
+    fs.mkdirSync(path.join(root, "relay"), { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(root, "relay", "provenance-key.json"), "{}");
+    fs.writeFileSync(path.join(root, "relay", "bridge.db"), "");
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "notes.txt"));
+    fs.symlinkSync(path.join(root, "relay"), path.join(workspace, "box"));
+    fs.symlinkSync(root, path.join(root, "..", path.basename(root) + "-link"));
+  });
+  afterEach(() => {
+    fs.rmSync(path.join(root, "..", path.basename(root) + "-link"), { force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const write = (filePath, toolName = "write") => classifyRisk({ toolName, params: toolName === "apply_patch" ? { input: "*** Begin Patch\n*** Update File: " + filePath + "\n*** End Patch" } : { path: filePath }, rootDir: root, agentId: "scout" });
+
+  it.each([
+    ["a relative path with . and ..", "../../relay/./provenance-key.json"],
+    ["a relative path through a sibling directory", "../workspace/../../relay/provenance-key.json"],
+    ["a symlink in the workspace to the key", "notes.txt"],
+    ["a linked directory over relay/", "box/provenance-key.json"],
+    ["a linked directory over a relay database", "box/bridge.db"],
+    ["an absolute path through a linked root", "ROOTLINK/relay/provenance-key.json"],
+    ["an absolute path to the key with a .. in it", "ROOT/relay/../relay/provenance-key.json"],
+    ["the key by name anywhere", "some/dir/provenance-key.json"],
+  ])("holds %s", (_name, given) => {
+    const filePath = given.replace("ROOTLINK", path.join(root, "..", path.basename(root) + "-link")).replace("ROOT", root);
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const risk = write(filePath, tool);
+      expect(risk.kind, tool + " " + filePath).toBe("high");
+    }
+  });
+
+  it("names the file the write lands on, and leaves ordinary workspace files alone", () => {
+    expect(write("notes.txt").action).toBe("write provenance-key.json");
+    expect(write("box/bridge.db").target).toContain("/relay/bridge.db");
+    fs.writeFileSync(path.join(workspace, "plain.md"), "x");
+    for (const given of ["plain.md", "drafts/new.md", "../workspace-scout/plain.md", "relay-notes/key.txt"]) {
+      expect(write(given).kind, given).toBe("low");
+    }
+  });
+});
+
 describe("relay confirmations: the risk kinds", () => {
   const root = "/data/.alphaclaw";
   it.each([
