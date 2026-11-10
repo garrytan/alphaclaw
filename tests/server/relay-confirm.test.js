@@ -370,12 +370,25 @@ describe("relay confirmations: only a command that can change a protected file i
     try {
       fs.writeFileSync(path.join(dir, "cat"), "#!/bin/sh\n");
       fs.chmodSync(path.join(dir, "cat"), 0o755);
+      fs.writeFileSync(path.join(dir, "tool.txt"), "#!/bin/sh\n");
+      fs.chmodSync(path.join(dir, "tool.txt"), 0o755);
       fs.writeFileSync(path.join(dir, "plain.txt"), "");
       expect(exec("echo openclaw.json > " + path.join(dir, "cat")).kind).toBe("high");
+      expect(exec("echo openclaw.json > " + path.join(dir, "tool.txt")).kind).toBe("high");
       expect(exec("echo openclaw.json > " + path.join(dir, "plain.txt")).kind).toBe("low");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("reads a double-quoted line continuation and a quoted ~ as bash does", () => {
+    expect(exec('echo openclaw.json >> "/data/.alphaclaw/rel\\\nay/x.md"').kind).toBe("high");
+    expect(exec('echo openclaw.json > "/data/.openclaw/plugins/relay-\\\nguard/notes.md"').kind).toBe("high");
+    expect(exec('rm "open\\\nclaw.json"').kind).toBe("high");
+    expect(exec('cd /data/.alphaclaw/relay && mkdir "~" && echo openclaw.json > "~/x.md"').kind).toBe("high");
+    expect(exec('cd "~/x" && echo openclaw.json >> notes.md').kind).toBe("high");
+    expect(exec('echo "a\\\nb" openclaw.json >> /data/tmp/notes.md').kind).toBe("low");
+    expect(exec("echo openclaw.json >> ~/notes.md").kind).toBe("low");
   });
 
   it("holds a read run with exec env overrides", () => {
