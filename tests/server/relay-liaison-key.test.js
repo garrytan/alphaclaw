@@ -197,6 +197,12 @@ describe("relay liaison key (GST-2323 PR4)", () => {
     expect(after.until).toBeGreaterThan(before.until);
     const refused = await runClient(["renew", "--box", box, "--key-file", keyFile, "--webhook-url", "https://evil.example/hook"], { HOME: home });
     expect(refused.code).toBe(1);
+    const grant = ctx.store().grants.forAgent(kAgent)[0];
+    ctx.store().db.prepare("UPDATE relay_grants SET require_route = 'tailnet' WHERE id = ?").run(grant.id);
+    const offRoute = await runClient(["renew", "--box", box, "--key-file", keyFile], { HOME: home });
+    expect(offRoute.code).toBe(1);
+    expect(JSON.parse(offRoute.stderr).error).toBe("route_required");
+    ctx.store().db.prepare("UPDATE relay_grants SET require_route = 'any' WHERE id = ?").run(grant.id);
     ctx.setConfig({});
     expect((await capabilityCall("relay_history", { with: "wintermute" })).isError).toBeFalsy();
   });
@@ -204,6 +210,8 @@ describe("relay liaison key (GST-2323 PR4)", () => {
   it("serves send, history, result and renew only, and never the binding's other tools", async () => {
     await start();
     const privateKey = holderKey();
+    const unbound = await post(signed({ privateKey, body: JSON.stringify({ tool: "relay_result", args: { result_ref: "rr_nope" } }) }));
+    expect(unbound.status).toBe(404);
     for (const tool of ["relay_bind", "relay_unbind", "relay_handoff", "relay_claim", "relay_inbox", "relay_reply", "relay_agents"]) {
       const res = await post(signed({ privateKey, body: JSON.stringify({ tool, args: {} }) }));
       expect(res.status, tool).toBe(400);
