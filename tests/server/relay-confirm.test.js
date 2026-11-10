@@ -210,7 +210,6 @@ describe("relay confirmations: only a command that can change a protected file i
 
   it.each([
     ["a hash and a listing", "sha256sum /data/.openclaw/openclaw.json && ls -la /data/.env*"],
-    ["a printf note", "printf '%s\\n' 'see openclaw.json' >> notes/today.md"],
     ["tests and a cut of .env", "test -f .env && cat .env | cut -d= -f1"],
     ["a copy out into a text note", "cat openclaw.json > /tmp/copy.txt"],
     ["a note then a read of it", 'echo "checked alphaclaw.json" >> memory/n.md && tail -3 memory/n.md'],
@@ -257,6 +256,8 @@ describe("relay confirmations: only a command that can change a protected file i
 
   it.each([
     ["a script piped into sh", "printf 'rm openclaw.json' | sh"],
+    ["a printf note", "printf '%s\\n' 'see openclaw.json' >> notes/today.md"],
+    ["a PATH set by printf %n", "printf '%s%n' xxxx PATH; cat openclaw.json"],
     ["a here-document fed to bash", "cat <<'EOF' | bash\nrm openclaw.json\nEOF"],
     ["a here-string fed to sh", 'sh <<< "rm openclaw.json"'],
     ["a delete inside $( )", "echo $(rm openclaw.json)"],
