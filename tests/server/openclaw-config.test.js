@@ -130,6 +130,17 @@ describe("server/openclaw-config", () => {
       expect(leftovers).toEqual([]);
     });
 
+    it("keeps a 0600 openclaw.json at 0600 and creates a new one at 0600", () => {
+      if (process.platform === "win32") return;
+      fs.writeFileSync(configPath(), JSON.stringify({ keep: true }));
+      fs.chmodSync(configPath(), 0o600);
+      updateOpenclawConfig({ openclawDir, mutate: (cfg) => { cfg.added = "yes"; } });
+      expect(fs.statSync(configPath()).mode & 0o777).toBe(0o600);
+      fs.rmSync(configPath());
+      updateOpenclawConfig({ openclawDir, mutate: (cfg) => { cfg.created = true; } });
+      expect(fs.statSync(configPath()).mode & 0o777).toBe(0o600);
+    });
+
     it("bootstraps a missing config through the mutate callback", () => {
       const result = updateOpenclawConfig({
         openclawDir,
@@ -140,6 +151,22 @@ describe("server/openclaw-config", () => {
       expect(result.config).toEqual({ fresh: true });
       expect(JSON.parse(fs.readFileSync(configPath(), "utf8"))).toEqual({
         fresh: true,
+      });
+    });
+
+    describe("file permissions (GST-2299)", () => {
+      let previousUmask;
+      beforeEach(() => {
+        previousUmask = process.umask(0o022);
+      });
+      afterEach(() => {
+        process.umask(previousUmask);
+      });
+
+      it.skipIf(process.platform === "win32")("tightens a world-readable openclaw.json back to 0600 on the next write", () => {
+        fs.writeFileSync(configPath(), JSON.stringify({ keep: true }), { mode: 0o644 });
+        writeOpenclawConfig({ openclawDir, config: { keep: true } });
+        expect(fs.statSync(configPath()).mode & 0o777).toBe(0o600);
       });
     });
 

@@ -491,7 +491,94 @@ const scanRawMarked = (rawText, relPath) => {
   ];
 };
 
+// Guard (f): a credential file is never written looser than 0600. Every
+// writeFileAtomic / writeFileAtomicIfChanged call whose target names a
+// credential path (the managed configs, .env, secrets, tokens, credentials,
+// auth profiles, the relay provenance key), or that sits in a module whose
+// whole job is storing secrets, must pass a mode with no group or other
+// bits: a literal like 0o600, or an identifier the file binds to one.
+// writeFileAtomic keeps an existing file's bits when no mode is named
+// (GST-2299), but a NEW file would land at the umask default (0644).
+const kSecretPathRe =
+  /(openclaw|alphaclaw|exec-approvals|auth-profiles|provenance-key)\.json|resolve(Openclaw|Alphaclaw|ExecApprovals)ConfigPath|k(Openclaw|Alphaclaw)ConfigPath|OPENCLAW_CONFIG_PATH|ENV_FILE_PATH|[/"'`]\.env\b|secret|credential|token/i;
+const kSecretModules = new Set([
+  "lib/server/agent-admin/token-store.js",
+  "lib/server/alphaclaw-config.js",
+  "lib/server/auth-store.js",
+  "lib/server/env.js",
+  "lib/server/google-state.js",
+  "lib/server/hook-ingress/policy.js",
+  "lib/server/openclaw-codex-migration.js",
+  "lib/server/openclaw-config.js",
+  "lib/server/operators-store.js",
+  "lib/server/relay/provenance.js",
+  "lib/server/relay/provision.js",
+  "lib/server/team/state.js",
+]);
+
+const callArgumentsAt = (text, from) => {
+  let depth = 0;
+  let quote = null;
+  for (let i = from; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return text.slice(from, i);
+      depth -= 1;
+    }
+  }
+  return text.slice(from);
+};
+
+const isPrivateModeLiteral = (literal) => {
+  const value = /^0o[0-7]+$/.test(literal)
+    ? Number.parseInt(literal.slice(2), 8)
+    : /^\d+$/.test(literal)
+      ? Number(literal)
+      : NaN;
+  return Number.isInteger(value) && (value & 0o077) === 0;
+};
+
+const scanLooseSecretWriters = (rawText, relPath) => {
+  if (relPath === "lib/server/utils/safe-file.js") return [];
+  const text = stripComments(rawText);
+  const bindings = new Map();
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*)/g)) {
+    bindings.set(m[1], bindings.has(m[1]) ? `${bindings.get(m[1])}\n${m[2]}` : m[2]);
+  }
+  const managedConfigFile = kManagedBasenames.test(text);
+  const hits = [];
+  for (const m of text.matchAll(/\bwriteFileAtomic(?:IfChanged)?\(/g)) {
+    const args = callArgumentsAt(text, m.index + m[0].length);
+    const firstArg = firstArgumentAt(text, m.index + m[0].length).trim();
+    const ident = firstArg.match(/^([A-Za-z_$][\w$]*)$/)?.[1];
+    const secret =
+      kSecretModules.has(relPath) ||
+      kSecretPathRe.test(firstArg) ||
+      (ident && kSecretPathRe.test(bindings.get(ident) || "")) ||
+      (ident === "configPath" && managedConfigFile);
+    if (!secret) continue;
+    const mode = args.match(/\bmode\s*:\s*([A-Za-z_$][\w$]*|0o[0-7]+|\d+)/)?.[1];
+    const literal = mode && /^[A-Za-z_$]/.test(mode) ? (bindings.get(mode) || "").trim() : mode;
+    if (literal && isPrivateModeLiteral(literal)) continue;
+    const id = `${relPath}::${firstArg.replace(/\s+/g, " ").slice(0, 60)}`;
+    hits.push({
+      key: id,
+      file: relPath,
+      line: lineOf(text, m.index),
+    });
+  }
+  return hits;
+};
+
 module.exports = {
+  scanLooseSecretWriters,
   scanRawMarked,
   scanEnvValueLogs,
   scanUnattributedRestarts,
