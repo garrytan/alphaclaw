@@ -9,13 +9,14 @@ const { createRelayService } = require("../../lib/server/relay");
 const { checkConfirmation } = require("../../lib/plugin/relay-guard/confirm");
 const {
   createRelayNarration,
+  planNarrationPass,
   describeAsk,
   narrationFooter,
   kStateWords,
   kNarrationStates,
 } = require("../../lib/server/relay/narration");
 const { createNotifyOutbox } = require("../../lib/server/notify-outbox");
-const { formatSlackMessage } = require("../../lib/server/watchdog-notify");
+const { formatSlackMessage, formatDiscordMessage } = require("../../lib/server/watchdog-notify");
 const { createUpgradeNotifier } = require("../../lib/server/upgrade-notifier");
 const { kDeploymentOnlyEnvKeys, resolveEnvFileOverlay } = require("../../lib/server/deployment-only-env");
 const { kSetupDir } = require("../../lib/server/constants");
@@ -226,6 +227,29 @@ describe("relay narration: batching, folding and the hourly cap", () => {
     expect(ctx.notices[1].opts.id).toBe("relay-narration-" + ids[listed.length]);
     expect(linesOf(ctx.notices[1])[0]).toContain("`" + String(listed.length) + "w");
     expect(ids.map((id) => ctx.store.get(id).narration).filter((outcome) => outcome === "sent").length).toBe(Math.min(10, 2 * listed.length));
+  });
+
+  it("keeps ten star-packed asks under Discord's 2,000 characters once Discord's formatter has run", () => {
+    ctx = setup({ resolveThread: () => "ALPH-92" });
+    const full = { intakeTrust: "delegate", lane: "gbrain-import", route: "public", bodyChars: 12345 };
+    for (let n = 0; n < 10; n += 1) ctx.ask({ ...full, summary: "*a* ".repeat(19).trim() });
+    ctx.advance(31 * kSecond);
+    ctx.narration.tick();
+    expect(ctx.notices).toHaveLength(1);
+    const { text } = ctx.notices[0];
+    expect(formatDiscordMessage(text).length).toBeLessThanOrEqual(1900);
+    expect(text).not.toContain("*a*");
+    expect(text).toContain("\u2217a\u2217");
+  });
+
+  it("measures the 1,900 cap on the text each transport sends, so a line a formatter lengthens still fits", () => {
+    const rows = Array.from({ length: 10 }, (_, n) => ({ messageId: "m" + n, sender: kAgent, isAck: false, state: "queued" }));
+    const describe = (row) => "\u{1F6F0} " + row.messageId + " " + "*b* ".repeat(45).trim();
+    const plan = planNarrationPass(rows, {}, { at: Date.parse("2026-11-09T10:00:00Z"), on: true, describe, footer: () => kFooter });
+    expect(formatDiscordMessage(plan.result.text).length).toBeLessThanOrEqual(1900);
+    expect(formatSlackMessage(plan.result.text).length).toBeLessThanOrEqual(1900);
+    expect(plan.result.listed + plan.result.pending).toBe(10);
+    expect(plan.stamps.filter((stamp) => stamp.outcome === "sent")).toHaveLength(plan.result.listed);
   });
 
   it("sends at most 20 notices an hour, counts the asks past that once, and a restart in the middle keeps the count", () => {
@@ -441,7 +465,7 @@ describe("relay narration: intake through the bridge", () => {
     ctx.narration.tick();
     const text = ctx.notices[0].text;
     expect(text).not.toContain(secret);
-    expect(text).toContain("\"`line one line two *bold* 'code' (click)(https://evil.example)`\"");
+    expect(text).toContain("\"`line one line two \u2217bold\u2217 'code' (click)(https://evil.example)`\"");
     expect(text).toContain("(no summary given, 9 characters)");
     for (const line of linesOf(ctx.notices[0])) expect(line.split("`").length % 2).toBe(1);
     fs.rmSync(rootDir, { recursive: true, force: true });
