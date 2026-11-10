@@ -5,9 +5,8 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.255] - 2026-11-10
+## [0.10.256] - 2026-11-10
 
-<<<<<<< HEAD
 A delegate thread that only reads one of the box's protected files, or writes a note that mentions one, no longer sends you an Approve tap. Real changes to those files are still held, and so is any command the guard can't read word for word.
 
 ### Fixed
@@ -16,7 +15,9 @@ A delegate thread that only reads one of the box's protected files, or writes a 
 
 ### Tests
 - `relay-confirm.test.js`: the three commands behind the holds on the box and eight other reads and notes are not held; the nine kinds of real write against each of the 15 protected files and relay databases are held; 35 ways of hiding a change and 46 more found in review (variables, functions, `eval`, `PATH` and `LD_PRELOAD`, `printf -v`, `sort -o`, programs outside `/bin`, comments, escaped quotes, globbed targets) are held; and a note through a symlink onto the signing key, a note over an executable, exec `env` overrides, the exec `workdir` and `cd`, and a `/tmp/cat` typed into a process are each covered.
-=======
+
+## [0.10.255] - 2026-11-10
+
 AlphaClaw no longer makes credential files readable by other users of the machine when it saves them. Saving a config change used to replace a 0600 `openclaw.json` with a 0644 copy, so any local account could read the gateway's credentials until someone fixed the mode by hand.
 
 ### Fixed
@@ -24,7 +25,6 @@ AlphaClaw no longer makes credential files readable by other users of the machin
 - **Credential files are always 0600.** AlphaClaw's atomic writers of `openclaw.json`, `alphaclaw.json`, the pre-Doctor config backup, the restored config from git, the Google account state and the gog config writes them 0600, new or replaced, so a box that already has a world-readable copy is tightened on its next save. `.env`, the relay secrets and provenance key, the webhook ingress secrets, the auth, team and operator stores and the agent admin token already did.
 - **Running as root no longer takes over files.** When AlphaClaw runs as root and saves a file another account owns, the file keeps its owner and group instead of becoming root's. The owner and mode are set on the file AlphaClaw just wrote, never looked up again by name, so another account that can write the directory cannot swap in a link and have the save change some other file.
 - A new structural guard fails CI when a writer of a credential file can leave it looser than 0600.
->>>>>>> origin/main
 
 ## [0.10.254] - 2026-11-10
 
