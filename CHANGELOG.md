@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.254] - 2026-11-10
+## [0.10.255] - 2026-11-10
 
 AlphaClaw no longer makes credential files readable by other users of the machine when it saves them. Saving a config change used to replace a 0600 `openclaw.json` with a 0644 copy, so any local account could read the gateway's credentials until someone fixed the mode by hand.
 
@@ -14,6 +14,18 @@ AlphaClaw no longer makes credential files readable by other users of the machin
 - **Credential files are always 0600.** AlphaClaw's atomic writers of `openclaw.json`, `alphaclaw.json`, the pre-Doctor config backup, the restored config from git, the Google account state and the gog config writes them 0600, new or replaced, so a box that already has a world-readable copy is tightened on its next save. `.env`, the relay secrets and provenance key, the webhook ingress secrets, the auth, team and operator stores and the agent admin token already did.
 - **Running as root no longer takes over files.** When AlphaClaw runs as root and saves a file another account owns, the file keeps its owner and group instead of becoming root's. The owner and mode are set on the file AlphaClaw just wrote, never looked up again by name, so another account that can write the directory cannot swap in a link and have the save change some other file.
 - A new structural guard fails CI when a writer of a credential file can leave it looser than 0600.
+
+## [0.10.254] - 2026-11-10
+
+A delegate thread can no longer change the relay's signing key, or the relay's own files, without your Approve tap by writing to them through a relative path, a `..` or a symlink.
+
+### Fixed
+- **Writes are judged by where they land.** Before it decides whether a `write`, `edit` or `apply_patch` touches a protected file, the relay guard now folds `.` and `..`, resolves a relative path against the agent's workspace, and follows symlinks. A write to `relay/provenance-key.json` or a relay database through `../../relay/./provenance-key.json`, a symlink in the workspace, or a linked directory over `relay/` now waits for the owner's confirmation, and the notice names the real file. `provenance-key.json` is also protected by name anywhere, like `secrets.json`.
+- **No gaps around the edges.** A symlink to a protected file that does not exist yet is held too (the write would create it, so a delegate could not plant its own signing key before the box first signs). A relative path is also resolved against the workspace and working directory `openclaw.json` sets for the agent, not only the default workspace. A patch header with leading spaces, which OpenClaw trims and applies, is read like any other. And when a write names more files than the owner's notice can show, the notice says how many and the approval is bound to the whole list, so it cannot cover a file the notice left out.
+- **Paths are read the way OpenClaw reads them, then compared.** The guard drops one leading `@` (OpenClaw's file-reference prefix), decodes a `file:` URL (so `%2D` and `%2E` spell nothing new), keeps trailing spaces, and lands every path two ways: with `..` folded first and links followed after, which is what OpenClaw's `write`, `edit` and `apply_patch` do with a relative path, and with `..` taken from the real directory a link reaches, as the kernel does. A path held either way is held, and the notice names every protected file it reaches. So `@keylink`, `file:///…/relay/provenance%2Dkey.json`, `<workspace>/child/../bridge.db` through a linked `child`, `child/../notes.txt` when `child` links elsewhere and `notes.txt` links to the key, and a link named `notes.txt ` (with the space) are all held, and `L/../../openclaw.json` through a linked `L` names the gateway's own `openclaw.json`, the file OpenClaw would write. The decoding also closes an older gap for every file protected by name: `file:///…/openclaw%2Ejson`, `secrets%2Ejson` or `%2Eenv` used to slip past the name rules. A link with a protected name, such as `.env`, that points somewhere else now names the file it really lands on, so the owner approves the right file.
+
+### Tests
+- `relay-confirm.test.js`: the key and a relay database reached through `..`, a workspace symlink, a linked directory and a linked root, for `write`, `edit` and `apply_patch`, plus ordinary workspace files left unheld; a link to a protected file that does not exist yet; indented patch headers; the main workspace, a workspace set in `openclaw.json` and the agent named in the session key; a long file list; a leading `@`, percent-encoded `file:` URLs, `..` after a linked directory, `..` that OpenClaw folds before a link is followed, trailing spaces and a protected-named link; and a check that the `@` rule matches the pinned OpenClaw's own `normalizeFileReferencePrefix`.
 
 ## [0.10.253] - 2026-11-10
 
