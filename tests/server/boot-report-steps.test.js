@@ -322,6 +322,32 @@ describe("boot-report-steps: finalizeBootReport", () => {
     ]);
   });
 
+  it("a deliberate hold (GST-2293): a consistent boot that says it is held and at which version, notifies nobody and hands the watchdog no mismatch", async () => {
+    const { steps, bootReport, postBootWebhook, insertWatchdogEvent, notify, logger, watchdog } = createFixture({
+      openclaw: { installedAtBoot: "2026.10.9", declaredPin: "2026.11.2", heldVersion: "2026.10.9" },
+      schema: { ...kSchema, installedVersion: "2026.10.9" },
+      runtimeInfo: {
+        installedVersion: "2026.10.9", pinnedVersion: "2026.11.2", installedDiverged: true, heldVersion: "2026.10.9", installedHeld: true,
+      },
+    });
+    await steps.recordBootReportServerPhase();
+    const outcome = await steps.finalizeBootReport({ migration: { status: "ok", ran: false } });
+
+    expect(outcome).toEqual(expect.objectContaining({ verdict: [], inconsistent: false, pinned: false }));
+    expect(readJson(bootReport.reportPath).serverPhase).toEqual(expect.objectContaining({ heldVersion: "2026.10.9", verdict: [] }));
+    expect(logger.log).toHaveBeenCalledWith(
+      "[boot-report] consistent — OpenClaw is held at 2026.10.9 by this deployment (this AlphaClaw pins 2026.11.2)",
+    );
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(fs.existsSync(bootReport.incidentPath)).toBe(false);
+    expect(notify).not.toHaveBeenCalled();
+    expect(postBootWebhook).not.toHaveBeenCalled();
+    expect(bootEvents(insertWatchdogEvent)).toEqual([
+      expect.objectContaining({ status: "ok", details: expect.objectContaining({ verdict: [], held: "2026.10.9", installed: "2026.10.9", expected: "2026.11.2" }) }),
+    ]);
+    expect(watchdog.setBootVerdict).toHaveBeenCalledWith(expect.objectContaining({ serverPhase: expect.objectContaining({ verdict: [] }) }));
+  });
+
   it("a legacy exec-approvals.json reaped between the record step and finalize (ensureManagedExecDefaults) is a self-healed boot: consistent, `legacyExecApprovalsReaped: true`", async () => {
     const { steps, bootReport, openclawDir, insertWatchdogEvent, notify, postBootWebhook } = createFixture({
       legacyApprovalsFile: true,

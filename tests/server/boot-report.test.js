@@ -70,6 +70,7 @@ describe("boot-report: buildBinPhaseReport", () => {
         declaredPin: "2026.9.2",
         installedAtBoot: null,
         installedDiverged: null,
+        heldVersion: null,
         retiredChannel: { channel: "beta", version: "2026.9.3-beta.1", sha: null },
         bootSync: {
           action: "skipped_concurrent",
@@ -587,6 +588,27 @@ describe("boot-report: computeVerdict", () => {
     });
     expect(describeReportVersions({ openclaw: { installedAtBoot: "z" } })).toEqual({ expected: null, running: "z", diverged: null });
     expect(describeReportVersions(null)).toEqual({ expected: null, running: null, diverged: null });
+  });
+
+  it("installed_not_expected spares a deliberate hold only: held, unexpected and too-old installs (GST-2293)", () => {
+    const bin = (installedAtBoot, heldVersion) => ({
+      openclaw: { declaredPin: "2026.11.2", installedAtBoot, installedDiverged: installedAtBoot !== "2026.11.2", heldVersion },
+      serverPhase: { status: "recorded" },
+    });
+    expect(describeReportVersions(bin("2026.10.9", "2026.10.9"))).toEqual({
+      expected: "2026.11.2", running: "2026.10.9", diverged: true, held: "2026.10.9",
+    });
+    expect(computeVerdict(bin("2026.10.9", "2026.10.9"))).toEqual([]);
+    expect(computeVerdict(bin("2026.10.9", null))).toEqual(["installed_not_expected"]);
+    expect(computeVerdict(bin("2026.10.10", "2026.10.9"))).toEqual(["installed_not_expected"]);
+    expect(computeVerdict(bin("2026.10.4", "2026.10.4"))).toEqual(["installed_not_expected"]);
+    // No bin phase: the server phase's snapshot carries the hold.
+    expect(
+      computeVerdict({
+        openclaw: null,
+        serverPhase: { status: "recorded", installedVersion: "2026.10.9", expectedVersion: "2026.11.2", heldVersion: "2026.10.9" },
+      }),
+    ).toEqual([]);
   });
 
   it("state_schema_too_new / agent_schema_too_new: any entry of that kind above the supported schema", () => {

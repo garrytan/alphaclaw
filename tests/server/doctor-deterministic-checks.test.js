@@ -1254,6 +1254,16 @@ describe("server/doctor/deterministic-checks det:openclaw-pin-* (the pin boundar
     expect(cards[0].summary).toContain("pins OpenClaw 2026.10.4");
   });
 
+  it("a deliberate hold gets no card; a declared hold that does not cover the install says why (GST-2293)", () => {
+    expect(pinCards({ state: "held", installed: "2026.10.9", pinned: "2026.11.2", held: "2026.10.9" })).toEqual([]);
+    const [tooOld] = pinCards({
+      state: "diverged", installed: "2026.10.4", pinned: "2026.11.2", held: "2026.10.4", floor: "2026.10.9", reason: "below_floor",
+    });
+    expect(tooOld).toMatchObject({ sourceKey: "det:openclaw-pin-diverged:2026.10.4", priority: "P1" });
+    expect(tooOld.summary).toContain("holds OpenClaw at 2026.10.4, older than 2026.10.9");
+    expect(tooOld.evidence).toContainEqual({ type: "text", text: "held by the deployment: 2026.10.4" });
+  });
+
   it("emits nothing for a matching install, an undeclared pin, or no runtime info", () => {
     expect(pinCards({ state: "match", installed: "2026.10.4", pinned: "2026.10.4" })).toEqual([]);
     expect(pinCards({ state: "unknown", installed: "2026.10.4", pinned: null })).toEqual([]);

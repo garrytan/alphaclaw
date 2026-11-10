@@ -102,6 +102,7 @@ describe("server/boot-instance-guard", () => {
       declaredPin: kPin,
       installedAtBoot: kInstalled,
       installedDiverged: kInstalled ? kInstalled !== kPin : null,
+      heldVersion: null,
       retiredChannel: { channel: "beta", version: "2026.9.9-beta.2", sha: null },
       bootSync: { action: "none", reason: null, warnings: [] },
     });
