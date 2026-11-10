@@ -1,6 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const express = require("express");
 const request = require("supertest");
 
@@ -49,6 +50,11 @@ describe("relay confirmations: the signing key and relay files by any path that 
     ["an absolute path through a linked root", "ROOTLINK/relay/provenance-key.json"],
     ["an absolute path to the key with a .. in it", "ROOT/relay/../relay/provenance-key.json"],
     ["the key by name anywhere", "some/dir/provenance-key.json"],
+    ["a file reference with a leading @", "@notes.txt"],
+    ["an @ path through a linked directory", "@box/bridge.db"],
+    ["an @ path under relay/", "@ROOT/relay/sub/x"],
+    ["a percent-encoded file: URL to the key", "file://ROOT/relay/provenance%2Dkey.json"],
+    ["a percent-encoded file: URL to a relay database", "file://ROOT/relay/bridge%2Edb"],
   ])("holds %s", (_name, given) => {
     const filePath = given.replace("ROOTLINK", path.join(root, "..", path.basename(root) + "-link")).replace("ROOT", root);
     for (const tool of ["write", "edit", "apply_patch"]) {
@@ -63,6 +69,51 @@ describe("relay confirmations: the signing key and relay files by any path that 
     fs.writeFileSync(path.join(workspace, "plain.md"), "x");
     for (const given of ["plain.md", "drafts/new.md", "../workspace-scout/plain.md", "relay-notes/key.txt"]) {
       expect(write(given).kind, given).toBe("low");
+    }
+  });
+
+  it("walks .. from the real directory a link reaches, not from the link's own parent", () => {
+    fs.mkdirSync(path.join(root, "relay", "child"));
+    fs.symlinkSync(path.join(root, "relay", "child"), path.join(workspace, "child"));
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const risk = write(workspace + "/child/../bridge.db", tool);
+      expect(risk.kind, tool).toBe("high");
+      expect(risk.target, tool).toBe(path.join(root, "relay", "bridge.db"));
+    }
+  });
+
+  it("keeps trailing spaces in a path, as the write tool does", () => {
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "notes.md "));
+    for (const tool of ["write", "edit"]) expect(write("notes.md ", tool).kind, tool).toBe("high");
+  });
+
+  it("binds a link with a protected name to the file it lands on", () => {
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, ".env"));
+    const risk = write(".env");
+    expect(risk.action).toBe("write provenance-key.json");
+    expect(risk.target).toBe(path.join(root, "relay", "provenance-key.json"));
+    fs.writeFileSync(path.join(root, "elsewhere.txt"), "");
+    fs.symlinkSync(path.join(root, "elsewhere.txt"), path.join(workspace, "secrets.json"));
+    expect(write("secrets.json")).toMatchObject({ kind: "high", action: "write elsewhere.txt", target: path.join(root, "elsewhere.txt") });
+  });
+
+  it("decodes a file: URL before the name rules, for every protected name", () => {
+    for (const given of ["file:///data/.openclaw/openclaw%2Ejson", "file:///data/secrets%2Ejson", "file:///data/%2Eenv", "file:///data/exec-approvals%2Ejson"]) {
+      expect(write(given).kind, given).toBe("high");
+    }
+  });
+
+  it("reads a leading @ the way the pinned OpenClaw does", async () => {
+    const dist = path.resolve(__dirname, "../../node_modules/openclaw/dist");
+    const file = fs.readdirSync(dist).find((name) => name.endsWith(".mjs") && fs.readFileSync(path.join(dist, name), "utf8").includes("function normalizeFileReferencePrefix("));
+    expect(file, "OpenClaw's normalizeFileReferencePrefix moved; recheck openclawPathOf in confirm.js").toBeTruthy();
+    const mod = await import(pathToFileURL(path.join(dist, file)).href);
+    const normalize = Object.values(mod).find((value) => typeof value === "function" && value.name === "normalizeFileReferencePrefix");
+    expect(normalize).toBeTypeOf("function");
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "@lit"));
+    for (const [given, lands] of [["@notes.txt", "notes.txt"], ["@@lit", "./@lit"], ["notes.txt", "notes.txt"], ["@box/bridge.db", "box/bridge.db"]]) {
+      expect(normalize(given), given).toBe(lands);
+      expect(write(given).kind, given).toBe("high");
     }
   });
 
