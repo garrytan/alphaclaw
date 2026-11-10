@@ -110,7 +110,7 @@ describe("standard_webhooks", () => {
       scheme: "standard_webhooks",
       replayKey: kSpecMsgId,
       deliveryId: kSpecMsgId,
-      signedHeaders: { "webhook-id": kSpecMsgId, "webhook-timestamp": kSpecTimestamp },
+      signedHeaders: { "webhook-id": kSpecMsgId, "webhook-timestamp": kSpecTimestamp, "webhook-signature": kSpecSignature },
     });
   });
 
@@ -128,7 +128,7 @@ describe("standard_webhooks", () => {
       scheme: "standard_webhooks",
       replayKey: kDeliveryId,
       deliveryId: kDeliveryId,
-      signedHeaders: { "webhook-id": kDeliveryId, "webhook-timestamp": String(kNowSec) },
+      signedHeaders: { "webhook-id": kDeliveryId, "webhook-timestamp": String(kNowSec), "webhook-signature": swHeaders()["webhook-signature"] },
     });
   });
 
@@ -264,7 +264,7 @@ describe("quo", () => {
       scheme: "quo",
       replayKey: kDeliveryId,
       deliveryId: kDeliveryId,
-      signedHeaders: { "webhook-id": kDeliveryId, "webhook-timestamp": String(kNowSec) },
+      signedHeaders: { "webhook-id": kDeliveryId, "webhook-timestamp": String(kNowSec), "webhook-signature": swHeaders()["webhook-signature"] },
     });
   });
 
@@ -294,7 +294,7 @@ describe("quo", () => {
       scheme: "quo_legacy",
       replayKey: digest,
       deliveryId: null,
-      signedHeaders: {},
+      signedHeaders: { "openphone-signature": headers["openphone-signature"] },
     });
     expect(verify({ preset: "quo", secret: kSwSecret, headers }).ok).toBe(true);
   });
@@ -386,7 +386,7 @@ describe("circleback", () => {
       scheme: "circleback",
       replayKey: headers["x-signature"],
       deliveryId: null,
-      signedHeaders: {},
+      signedHeaders: { "x-signature": headers["x-signature"] },
     });
   });
 
@@ -456,7 +456,7 @@ describe("verkada", () => {
       scheme: "verkada",
       replayKey: hex,
       deliveryId: null,
-      signedHeaders: { "webhook-timestamp": String(kNowSec) },
+      signedHeaders: { "webhook-timestamp": String(kNowSec), "verkada-signature": headers["verkada-signature"] },
     });
   });
 

@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.258] - 2026-11-10
+## [0.10.259] - 2026-11-10
 
 You now hear what your Capy threads ask your agent to do over Agent Relay. Before, an ask ran silently unless it needed your 🔐 tap, and the daily digest only counted them.
 
@@ -21,7 +21,7 @@ You now hear what your Capy threads ask your agent to do over Agent Relay. Befor
 - `relay-narration.test.js`: the 30-second and 60-second windows, the 10-line fold on a 37-ask burst, the hourly cap and its count across a restart, no repeat or loss after a restart, acknowledgments skipped (a summary of "ack" on a long message still narrated), callbacks never stored, tier, thread, lane and route labels, a word for every message state, summary cleaning (a secret, a base64 or zero-width hidden secret, line breaks, Markdown, a link, 500 characters), a long message's whole length, the off switch with no backlog, deployment env only, delivery through the outbox to Telegram and Slack and silence under "Important only" and "Disabled", the upgrade on a database with history, a failing narration pass that still lets a confirmation link out, no call to the relay engine or the gateway, and the footer and prompt rule. The bootstrap protected-clause test pins the updated approval rule (P1) and the new Telegram relay-line rule (P13) within the existing size budgets.
 - The remote tools, bridge intake and relay client tests cover `summary`, and the relay live tier checks one narration notice for an ask with a summary and none for an acknowledgment against the real engine and gateway.
 
-## [0.10.257] - 2026-11-10
+## [0.10.258] - 2026-11-10
 
 Messages from other agents over Agent Relay no longer run as the box owner. OpenClaw treats any turn sent by a gateway client with admin rights as the owner's, and the relay bridge sent every relay turn, a stranger's included, over one admin connection.
 
@@ -33,6 +33,21 @@ Messages from other agents over Agent Relay no longer run as the box owner. Open
 ### Tests
 - `relay-two-sockets.test.js`: a peer turn goes to the peer connection and a delegate turn to the admin one; one test fails if a peer turn ever uses the admin connection, for no grant, `generation_stale`, `attestation_stale` and `check_failed`, with the peer connection down, and with none configured; every turn's session key is `agent:<id>:relay-<sender>` or `…:lane-<name>`, built from the bridge's own constants, never `:main`; events received on both connections are handled once; a turn waits when the admin connection drops while the bridge is sending; both close on stop; the gateway client connects with exactly the scopes it is given and backs off per connection.
 - The relay live tier now checks, for one peer turn and one delegate turn against the pinned OpenClaw, the trust the bridge stamped, the connection the turn used, and OpenClaw's own `senderIsOwner` from `chat.history`.
+
+## [0.10.257] - 2026-11-10
+
+A webhook that verifies its sender can now hold several signing keys, so a sender like Quo, which signs each of its webhooks with its own key, can move every webhook onto one hook. A signed delivery also reaches the hook's transform with the sender's signature header, so a transform that checks the signature itself keeps working.
+
+### Added
+- **Several signing keys per hook.** A hook on Circleback, Quo, Verkada or Standard Webhooks verification takes up to 8 signing keys and accepts a delivery that any one of them verifies. Quo needs a separate webhook for messages, calls, summaries and transcripts, and each has its own key, so one key per hook dropped three of the four. Add or remove keys under Webhooks → a hook → Sender verification → Signing keys (humans only, like every other secret on that card; the agent gets 403). Keys are stored with the hook's other secrets in `hook-ingress/secrets.json` and are never returned, and the request log records which key verified each delivery (`authKey`), never the key. Adding or removing a key keeps the hook's shared-token window where it was. Pasting or generating a new secret on the same method replaces key 1 only and keeps the others, and each key is removed by its own id, so a page opened before another removal can't revoke the wrong key. The same Quo key with or without its `whsec_` prefix counts as one key. On a hook with several keys, replay suppression and the gateway's `Idempotency-Key` are kept per key, so two senders that reuse a delivery id don't swallow each other's deliveries.
+- **Verkada takes a pasted secret.** Besides generating a secret, Verkada verification now accepts the shared secret your Verkada webhooks already use. Verkada's API has no webhook endpoints, and its webhooks can only be deleted and re-created, so reusing the existing secret moves a hook without touching them.
+
+### Changed
+- **Signed deliveries keep the sender's signature.** After AlphaClaw verifies a delivery it now also forwards the sender's own signature header unchanged (`x-signature`, `webhook-signature`, `openphone-signature` or `verkada-signature`). The body is still forwarded byte for byte and the query string is still dropped, so a transform that checks the HMAC again over the body and headers still verifies. Before, a transform that checked Verkada's signature itself refused every alert once its hook moved to signed delivery.
+
+### Tests
+- `hook-ingress-senders.test.js`: for each signed scheme (Circleback, Quo, legacy Quo, Verkada, Standard Webhooks), the signature still verifies over the forwarded body and headers, and no query string (so no `token=`) reaches the gateway; two keys whose senders reuse a delivery id both get through; a hook with several keys accepts each of them, records which one matched and refuses an unknown one; duplicate, extra and last-key removals are refused and the shared-token window survives key changes; a pasted Verkada secret verifies; agents get 403 on the new key routes.
+- `hook-ingress-signatures.test.js` and the live `hook-ingress.e2e.test.js` check the forwarded signature header, and that no query string arrives, against the pinned gateway; `webhook-sender-verification.test.js` covers the new card rules.
 
 ## [0.10.256] - 2026-11-10
 
