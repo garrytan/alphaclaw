@@ -645,7 +645,15 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     const held = box.call(run, "write", { path: "box/bridge.db", content: "x" });
     expect(held.block).toBe(true);
     expect(held.blockReason).toContain("write bridge.db needs your owner's confirmation");
-    expect(box.call(run, "write", { path: "notes.md", content: "x" })).toEqual({});
+    // The guard also resolves a relative path against its own working
+    // directory; here that is this repository, AlphaClaw's installed code,
+    // so it is moved out of the anchor for the note write.
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(box.rootDir);
+    try {
+      expect(box.call(run, "write", { path: "notes.md", content: "x" })).toEqual({});
+    } finally {
+      cwd.mockRestore();
+    }
   });
 
   it("an approved automations change is admitted once for the same call, and the next one asks again (PR4)", async () => {

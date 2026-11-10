@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.263] - 2026-11-10
+
+A Capy thread connected as a delegate can no longer read the relay's own keys and databases, or quietly delete or overwrite the relay's files with a command the guard rated harmless. Before, `cat relay/secrets.json` or `cd relay && rm bridge.db` ran with no tap.
+
+### Fixed
+- **The relay's keys and databases stay out of relay turns.** A `read` of `relay/secrets.json`, `provenance-key.json`, `internal.secret` or a relay database, or a plain read command naming one, is refused in every relay session, your own attested threads included. Nothing is asked of you. Other reads, `ls relay/` included, run as before.
+- **Changes inside `relay/` always ask.** The trust-anchor check now runs on every delegate call. A delegate on the plain connector that deletes or overwrites a relay file (`cd relay && rm bridge.db`, a command whose working directory is `relay/`) now needs your one-tap confirmation. Your own attested threads still get a plain refusal.
+
+### Tests
+- `relay-anchor-every-tier.test.js` covers both tiers in both directions: the key and database reads are refused with no row and no notice, the relay writes are held with a tap or refused, and ordinary reads and notes still run. Two existing tests changed with the behavior: the owner thread's anchor test now expects the key reads refused, and the relative-note test pins the guard's working directory outside AlphaClaw's own code.
+
 ## [0.10.262] - 2026-11-10
 
 Your own Capy threads can now do on the box everything you could, short of changing who is trusted: send messages, schedule work, install plugins, list the secret store and restart the gateway. Before, a thread you owned could change config without a link (since 0.10.260) but still could not send, schedule, install a plugin or restart, so it had to ask you to do those by hand. A restart it asks for runs through AlphaClaw's own restart ladder and is recorded for that thread.

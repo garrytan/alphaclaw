@@ -325,9 +325,12 @@ describe("relay attested delegates (GST-2323): the trust anchor is refused outri
     expect(ctx.confirmationCount()).toBe(0);
     ctx.confirmations.tick();
     expect(ctx.notices).toEqual([]);
-    // Reads of the anchor are not changes.
-    expect(ctx.call(run, "exec", { command: "cat " + path.join(ctx.rootDir, "relay", "secrets.json") })).toEqual({});
-    expect(ctx.call(run, "read", { path: path.join(ctx.rootDir, "relay", "remote.db") })).toEqual({});
+    // The relay's keys and databases are never read in a relay turn
+    // (GST-2336), also with no row and no notice; other reads still run.
+    expect(ctx.call(run, "exec", { command: "cat " + path.join(ctx.rootDir, "relay", "secrets.json") }).blockReason).toContain("is refused in every relay session");
+    expect(ctx.call(run, "read", { path: path.join(ctx.rootDir, "relay", "remote.db") }).blockReason).toContain("is refused in every relay session");
+    expect(ctx.call(run, "exec", { command: "ls " + path.join(ctx.rootDir, "relay") })).toEqual({});
+    expect(ctx.confirmationCount()).toBe(0);
   });
 
   it("keeps today's holds, taps included, for the same anchor calls from an unattested delegate", async () => {
