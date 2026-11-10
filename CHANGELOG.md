@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.256] - 2026-11-10
+
+A webhook that verifies its sender can now hold several signing keys, so a sender like Quo, which signs each of its webhooks with its own key, can move every webhook onto one hook. A signed delivery also reaches the hook's transform with the sender's signature header and the query string, so a transform that checks the signature itself keeps working.
+
+### Added
+- **Several signing keys per hook.** A hook on Circleback, Quo, Verkada or Standard Webhooks verification takes up to 8 signing keys and accepts a delivery that any one of them verifies. Quo needs a separate webhook for messages, calls, summaries and transcripts, and each has its own key, so one key per hook dropped three of the four. Add or remove keys under Webhooks → a hook → Sender verification → Signing keys (humans only, like every other secret on that card; the agent gets 403). Keys are stored with the hook's other secrets in `hook-ingress/secrets.json` and are never returned, and the request log records which key verified each delivery (`authKey`), never the key. Adding or removing a key keeps the hook's shared-token window where it was.
+- **Verkada takes a pasted secret.** Besides generating a secret, Verkada verification now accepts the shared secret your Verkada webhooks already use. Verkada's API has no webhook endpoints, and its webhooks can only be deleted and re-created, so reusing the existing secret moves a hook without touching them.
+
+### Changed
+- **Signed deliveries keep the sender's signature and the query string.** After AlphaClaw verifies a delivery it now also forwards the sender's own signature header unchanged (`x-signature`, `webhook-signature`, `openphone-signature` or `verkada-signature`) and the query string with any `token` removed. The body is still forwarded byte for byte and never has the query merged into it, so a transform that checks the HMAC again over the body and headers still verifies. Before, a transform that checked Verkada's signature itself refused every alert once its hook moved to signed delivery.
+
+### Tests
+- `hook-ingress-senders.test.js`: for each signed scheme (Circleback, Quo, legacy Quo, Verkada, Standard Webhooks), the signature still verifies over the forwarded body and headers, and `token=` never reaches the gateway; a hook with several keys accepts each of them, records which one matched and refuses an unknown one; duplicate, extra and last-key removals are refused and the shared-token window survives key changes; a pasted Verkada secret verifies; agents get 403 on the new key routes.
+- `hook-ingress-signatures.test.js` and the live `hook-ingress.e2e.test.js` check the forwarded signature header against the pinned gateway; `webhook-sender-verification.test.js` covers the new card rules.
+
 ## [0.10.255] - 2026-11-10
 
 AlphaClaw no longer makes credential files readable by other users of the machine when it saves them. Saving a config change used to replace a 0600 `openclaw.json` with a 0644 copy, so any local account could read the gateway's credentials until someone fixed the mode by hand.

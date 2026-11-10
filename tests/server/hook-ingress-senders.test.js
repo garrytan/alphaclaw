@@ -13,6 +13,8 @@ const { createHookIngress } = require("../../lib/server/hook-ingress");
 const { hookIngressSecretsPath } = require("../../lib/server/hook-ingress/policy");
 const { backupHookIngress, kHookIngressBackupMarker } = require("../../lib/server/hook-ingress/backup");
 const { registerWebhookRoutes } = require("../../lib/server/routes/webhooks");
+const { verifySignedDelivery } = require("../../lib/server/hook-ingress/signatures");
+const { kMaxSigningKeys } = require("../../lib/server/hook-ingress/senders");
 const webhooksDb = require("../../lib/server/db/webhooks");
 
 // GST-2134 PR 2: per-sender verification, replay suppression, the 24 h
@@ -141,7 +143,7 @@ afterAll(() => {
 });
 
 describe("signed forwarding", () => {
-  it("forwards only the verified bytes, no query string and AlphaClaw's own header set", async () => {
+  it("forwards the verified bytes, the query without its token, the sender's signature and AlphaClaw's own header set", async () => {
     const h = await createHarness();
     const secret = randomSecret();
     h.hookIngress.setIngress("meetings", { preset: "circleback", secret });
@@ -155,12 +157,13 @@ describe("signed forwarding", () => {
     expect(res.status).toBe(200);
     expect(h.gateway.calls).toHaveLength(1);
     const call = h.gateway.calls[0];
-    expect(call.url).toBe("/hooks/meetings");
+    expect(call.url).toBe("/hooks/meetings?extra=1");
     expect(call.body.toString("utf8")).toBe(body);
+    expect(call.headers["x-signature"]).toBe(hmacHex(secret, body));
     expect(call.headers.authorization).toBe(bearer(kShared));
     expect(call.headers["idempotency-key"]).toBe("circleback:" + hmacHex(secret, body));
     expect(call.headers["content-type"]).toBe("application/json");
-    for (const name of ["x-signature", "x-event-type", "x-delivery-id", "x-custom", "x-openclaw-token"]) {
+    for (const name of ["x-event-type", "x-delivery-id", "x-custom", "x-openclaw-token"]) {
       expect(call.headers[name]).toBeUndefined();
     }
     await flush();
@@ -176,7 +179,7 @@ describe("signed forwarding", () => {
     await circlebackPost(h, { secret, body: first, headers: { "x-event-type": "a", "x-delivery-id": "1" } });
     webhooksDb.deleteReplayKeysByHook("meetings");
     await request(h.app)
-      .post("/hooks/meetings?x=2")
+      .post("/hooks/meetings")
       .set("content-type", "text/plain")
       .set("x-signature", hmacHex(secret, first))
       .set("x-event-type", "b")
@@ -207,7 +210,7 @@ describe("signed forwarding", () => {
     expect(res.status).toBe(200);
     expect(h.gateway.calls[0].headers["webhook-id"]).toBe("msg_1");
     expect(h.gateway.calls[0].headers["webhook-timestamp"]).toBe(ts);
-    expect(h.gateway.calls[0].headers["webhook-signature"]).toBeUndefined();
+    expect(h.gateway.calls[0].headers["webhook-signature"]).toBe("v1," + hmacB64(key, "msg_1." + ts + "." + body));
     expect(h.gateway.calls[0].headers["idempotency-key"]).toBe("quo:msg_1");
     const ms = String(h.clock.now);
     const legacy = JSON.stringify({ type: "message.received" });
@@ -265,6 +268,185 @@ describe("signed forwarding", () => {
     for (let i = 0; i < 21; i += 1) last = await circlebackPost(h, { secret: randomSecret(), body: "{}" });
     expect(last.status).toBe(429);
     expect(last.headers["retry-after"]).toBeTruthy();
+    await h.close();
+  });
+});
+
+describe("what a downstream check sees", () => {
+  const quoKey = () => {
+    const key = crypto.randomBytes(32);
+    return { key, secret: key.toString("base64") };
+  };
+  const cases = [
+    {
+      preset: "circleback",
+      hook: "meetings",
+      make: (h) => ({ secret: randomSecret() }),
+      sign: ({ secret }, body) => ({ "x-signature": hmacHex(secret, body) }),
+    },
+    {
+      preset: "quo",
+      hook: "phone",
+      make: () => quoKey(),
+      sign: ({ key }, body, h) => {
+        const ts = String(Math.floor(h.clock.now / 1000));
+        return { "webhook-id": "msg_9", "webhook-timestamp": ts, "webhook-signature": "v1," + hmacB64(key, "msg_9." + ts + "." + body) };
+      },
+    },
+    {
+      preset: "quo",
+      label: "quo (legacy openphone-signature)",
+      hook: "phone",
+      make: () => quoKey(),
+      sign: ({ key }, body, h) => {
+        const ms = String(h.clock.now);
+        return { "openphone-signature": "hmac;1;" + ms + ";" + hmacB64(key, ms + "." + body) };
+      },
+    },
+    {
+      preset: "verkada",
+      hook: "cams",
+      make: () => ({ secret: randomSecret() }),
+      sign: ({ secret }, body, h) => {
+        const ts = String(Math.floor(h.clock.now / 1000));
+        return { "verkada-signature": ts + "|" + hmacHex(secret, body + "|" + ts) };
+      },
+    },
+    {
+      preset: "standard_webhooks",
+      hook: "calendar",
+      make: () => {
+        const key = crypto.randomBytes(32);
+        return { key, secret: "whsec_" + key.toString("base64") };
+      },
+      sign: ({ key }, body, h) => {
+        const ts = String(Math.floor(h.clock.now / 1000));
+        return { "webhook-id": "evt_9", "webhook-timestamp": ts, "webhook-signature": "v1," + hmacB64(key, "evt_9." + ts + "." + body) };
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    it(`still verifies ${testCase.label || testCase.preset} over the forwarded body and headers, and never forwards token=`, async () => {
+      const h = await createHarness();
+      const material = testCase.make(h);
+      h.hookIngress.setIngress(testCase.hook, { preset: testCase.preset, secret: material.secret });
+      const body = JSON.stringify({ event: "x", n: 1 });
+      const req = request(h.app)
+        .post("/hooks/" + testCase.hook + "?token=" + kShared + "&source=wm")
+        .set("content-type", "application/json");
+      for (const [name, value] of Object.entries(testCase.sign(material, body, h))) req.set(name, value);
+      expect((await req.send(body)).status).toBe(200);
+      const call = h.gateway.calls[0];
+      expect(call.body.toString("utf8")).toBe(body);
+      expect(call.url).toBe("/hooks/" + testCase.hook + "?source=wm");
+      expect(call.url).not.toContain("token");
+      expect(call.body.toString("utf8")).not.toContain(kShared);
+      const downstream = verifySignedDelivery({
+        preset: testCase.preset,
+        secret: material.secret,
+        rawBody: call.body,
+        headers: call.headers,
+        nowMs: h.clock.now,
+      });
+      expect(downstream).toMatchObject({ ok: true });
+      await h.close();
+    });
+  }
+});
+
+describe("several signing keys", () => {
+  const quoPost = (h, key, id) => {
+    const body = JSON.stringify({ type: "call.completed", id });
+    const ts = String(Math.floor(h.clock.now / 1000));
+    return request(h.app)
+      .post("/hooks/phone")
+      .set("content-type", "application/json")
+      .set("webhook-id", id)
+      .set("webhook-timestamp", ts)
+      .set("webhook-signature", "v1," + hmacB64(key, id + "." + ts + "." + body))
+      .send(body);
+  };
+  const newKey = () => crypto.randomBytes(32);
+
+  it("accepts a delivery signed with any of the hook's keys and records which key verified it", async () => {
+    const h = await createHarness();
+    const keys = [newKey(), newKey(), newKey()];
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: keys[0].toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: keys[1].toString("base64") });
+    const status = h.hookIngress.addIngressSigningKey("phone", { secret: "whsec_" + keys[2].toString("base64") });
+    expect(status.signingKeys.map((key) => key.index)).toEqual([1, 2, 3]);
+    expect(status.maxSigningKeys).toBe(kMaxSigningKeys);
+    for (const key of keys) expect(JSON.stringify(status)).not.toContain(key.toString("base64"));
+
+    expect((await quoPost(h, keys[1], "m1")).status).toBe(200);
+    await flush();
+    expect(h.rows.at(-1)).toMatchObject({ authMethod: "signed", authKey: 2, gatewayStatus: 200 });
+    expect((await quoPost(h, keys[0], "m2")).status).toBe(200);
+    await flush();
+    expect(h.rows.at(-1)).toMatchObject({ authMethod: "signed", authKey: 1 });
+    expect((await quoPost(h, keys[2], "m3")).status).toBe(200);
+    await flush();
+    expect(h.rows.at(-1)).toMatchObject({ authKey: 3 });
+    expect((await quoPost(h, newKey(), "m4")).status).toBe(401);
+    expect(h.rows.at(-1)).toMatchObject({ authMethod: "rejected:bad_signature" });
+    expect(h.gateway.calls).toHaveLength(3);
+    await h.close();
+  });
+
+  it("keeps the shared-token window across key changes and refuses a duplicate, an extra or the only key", async () => {
+    const h = await createHarness();
+    const first = newKey();
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: first.toString("base64") });
+    expect((await quoPost(h, first, "w1")).status).toBe(200);
+    await flush();
+    const opened = policyOf(h, "phone");
+    expect(opened.firstAdmittedAt).toBeTruthy();
+
+    const second = newKey();
+    h.hookIngress.addIngressSigningKey("phone", { secret: second.toString("base64") });
+    expect(policyOf(h, "phone")).toMatchObject({ firstAdmittedAt: opened.firstAdmittedAt, closesAt: opened.closesAt });
+    expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: second.toString("base64") })).toThrow(/already has/);
+    expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: "short" })).toThrow(/not valid/);
+    for (let i = 2; i < kMaxSigningKeys; i += 1) h.hookIngress.addIngressSigningKey("phone", { secret: newKey().toString("base64") });
+    expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: newKey().toString("base64") })).toThrow(/at most/);
+
+    let status = h.hookIngress.removeIngressSigningKey("phone", 1);
+    expect(status.signingKeys).toHaveLength(kMaxSigningKeys - 1);
+    expect((await quoPost(h, first, "w2")).status).toBe(401);
+    expect((await quoPost(h, second, "w3")).status).toBe(200);
+    await flush();
+    expect(h.rows.at(-1)).toMatchObject({ authKey: 1 });
+    expect(() => h.hookIngress.removeIngressSigningKey("phone", 99)).toThrow(/No signing key/);
+    for (let i = status.signingKeys.length; i > 1; i -= 1) status = h.hookIngress.removeIngressSigningKey("phone", i);
+    expect(status.signingKeys).toHaveLength(1);
+    expect(() => h.hookIngress.removeIngressSigningKey("phone", 1)).toThrow(/only signing key/);
+    expect(policyOf(h, "phone")).toMatchObject({ firstAdmittedAt: opened.firstAdmittedAt, closesAt: opened.closesAt });
+    await h.close();
+  });
+
+  it("takes more keys only on a hook that verifies a sender signature", async () => {
+    const h = await createHarness();
+    expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: newKey().toString("base64") })).toThrow(/Only a hook/);
+    h.hookIngress.generateIngressSecret("meetings", { preset: "per_hook_token" });
+    expect(() => h.hookIngress.addIngressSigningKey("meetings", { secret: randomSecret() })).toThrow(/Only a hook/);
+    expect(() => h.hookIngress.addIngressSigningKey("nope", { secret: randomSecret() })).toThrow(/not found/);
+    await h.close();
+  });
+
+  it("takes a pasted Verkada secret as well as a generated one, but never a pasted own token", async () => {
+    const h = await createHarness();
+    const secret = randomSecret();
+    const status = h.hookIngress.setIngress("cams", { preset: "verkada", secret });
+    expect(status).toMatchObject({ preset: "verkada", hasSecret: true, state: "waiting" });
+    expect(JSON.stringify(status)).not.toContain(secret);
+    const body = JSON.stringify({ event: "tamper" });
+    const ts = String(Math.floor(h.clock.now / 1000));
+    const res = await request(h.app).post("/hooks/cams").set("content-type", "application/json")
+      .set("verkada-signature", ts + "|" + hmacHex(secret, body + "|" + ts)).send(body);
+    expect(res.status).toBe(200);
+    expect(h.gateway.calls[0].headers["verkada-signature"]).toBe(ts + "|" + hmacHex(secret, body + "|" + ts));
+    expect(() => h.hookIngress.setIngress("cams", { preset: "per_hook_token", secret })).toThrow(/Generate the token/);
     await h.close();
   });
 });
@@ -614,6 +796,8 @@ describe("ingress routes", () => {
       setIngress: (name, body) => { calls.push(["set", name, body]); return { preset: body.preset }; },
       generateIngressSecret: (name, body) => { calls.push(["gen", name, body]); return { secret: "s", ingress: { preset: body.preset } }; },
       reopenIngress: (name) => { calls.push(["reopen", name]); return { preset: "circleback" }; },
+      addIngressSigningKey: (name, body) => { calls.push(["add-key", name, body]); return { preset: "quo" }; },
+      removeIngressSigningKey: (name, index) => { calls.push(["remove-key", name, index]); return { preset: "quo" }; },
       builtinStatus: () => ({}),
     };
     const app = express();
@@ -642,7 +826,10 @@ describe("ingress routes", () => {
     expect((await request(app).put("/api/webhooks/meetings/ingress").send({ preset: "circleback", secret: "x" })).status).toBe(200);
     expect((await request(app).post("/api/webhooks/cams/ingress/generate-secret").send({ preset: "verkada" })).body.secret).toBe("s");
     expect((await request(app).post("/api/webhooks/meetings/ingress/reopen")).status).toBe(200);
-    expect(calls.map((c) => c[0])).toEqual(["set", "gen", "reopen"]);
+    expect((await request(app).post("/api/webhooks/phone/ingress/keys").send({ secret: "k" })).status).toBe(200);
+    expect((await request(app).delete("/api/webhooks/phone/ingress/keys/2")).status).toBe(200);
+    expect(calls.map((c) => c[0])).toEqual(["set", "gen", "reopen", "add-key", "remove-key"]);
+    expect(calls.at(-1)).toEqual(["remove-key", "phone", "2"]);
     expect((await request(app).get("/api/webhooks/Bad..Name/ingress")).status).toBe(500);
   });
 
@@ -652,6 +839,8 @@ describe("ingress routes", () => {
     expect((await request(app).put("/api/webhooks/meetings/ingress").send({ preset: "token" })).status).toBe(403);
     expect((await request(app).post("/api/webhooks/cams/ingress/generate-secret").send({ preset: "verkada" })).status).toBe(403);
     expect((await request(app).post("/api/webhooks/meetings/ingress/reopen")).status).toBe(403);
+    expect((await request(app).post("/api/webhooks/phone/ingress/keys").send({ secret: "k" })).status).toBe(403);
+    expect((await request(app).delete("/api/webhooks/phone/ingress/keys/1")).status).toBe(403);
     expect(calls).toHaveLength(0);
   });
 
