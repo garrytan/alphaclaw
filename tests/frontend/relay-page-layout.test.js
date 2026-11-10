@@ -263,6 +263,28 @@ describe("Relay page briefing layout", () => {
     expect(headings(closed)).toEqual([]);
   });
 
+  it("lists trusted Capy projects with a form to add one, and hides their own clients from the app list", () => {
+    const connections = { pending: null, setPending: vi.fn(), busy: false, confirm: vi.fn() };
+    const remote = {
+      ...kRemote,
+      capyAttestation: true,
+      clients: [...kRemote.clients, { clientId: "capy_0123456789abcdef", name: "Capy machines (proj_1)", redirectHosts: [], createdAt: 1, consentedAt: 2, revokedAt: null }],
+      grants: [
+        { id: "rg_0123456789abcdef", kind: "capy", project: "proj_1", tier: "delegate", createdAt: 1, revokedAt: null },
+        { id: "rg_fedcba9876543210", kind: "capy", project: "proj_old", tier: "delegate", createdAt: 1, revokedAt: 3 },
+      ],
+    };
+    const tree = expandTree(RelayConnections({ remote, error: null, connections }));
+    const text = collectText(tree);
+    expect(text).toContain("Trusted Capy projects");
+    expect(text).toContain("proj_1");
+    expect(text).not.toContain("proj_old");
+    expect(text).not.toContain("Capy machines (proj_1)");
+    expect(collectNodes(tree).filter((node) => node.type === "input").map((node) => node.props["aria-label"])).toEqual(["Capy project id", "Thread owner's Capy user id"]);
+    const off = collectText(expandTree(RelayConnections({ remote: { ...remote, capyAttestation: false }, error: null, connections })));
+    expect(off).not.toContain("Trusted Capy projects");
+  });
+
   it("reads at the content width like the other briefing pages", () => {
     expect(getRoute("relay")).toMatchObject({ layout: "briefing", wide: true, purpose: "Other agents can message this box's agent over the relay" });
   });
