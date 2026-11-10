@@ -100,6 +100,8 @@ describe("relay confirmations: the signing key and relay files by any path that 
     expect(at("scout2", "plain.md")).toBe("low");
     fs.writeFileSync(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify({ agents: { entries: { scout2: { workspace: custom } } } }));
     expect(at("scout2", "custombox/bridge.db")).toBe("high");
+    fs.writeFileSync(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "scout" }] } }));
+    expect(at("scout", "mainbox/bridge.db")).toBe("high");
   });
 
   it("never lets one approval cover a longer file list than the notice showed", () => {
