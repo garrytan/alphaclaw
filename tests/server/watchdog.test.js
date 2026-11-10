@@ -11994,6 +11994,31 @@ describe("server/watchdog", () => {
       expect(() => other.watchdog.setBootVerdict("nonsense")).not.toThrow();
     });
 
+    it("the runtime memo never latches a deliberate hold (installedHeld) and clears a runtime latch when the tree becomes the hold (GST-2293)", async () => {
+      vi.useFakeTimers();
+      try {
+        const info = pinnedInfo({ installedDiverged: true, heldVersion: "2026.7.1-2", installedHeld: true });
+        const { watchdog, insertWatchdogEvent, notifier } = createHarness({ autoRepair: false, getOpenclawInfo: () => info });
+        expect(watchdog.getStatus().versionMismatch).toBe(null);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(0);
+        expect(notifier.notify).not.toHaveBeenCalled();
+
+        info.installedHeld = false;
+        vi.advanceTimersByTime(6_000);
+        expect(watchdog.getStatus().versionMismatch).toMatchObject({ source: "runtime", running: "2026.7.1-2" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(rowsOf(insertWatchdogEvent, "version_mismatch")).toHaveLength(1);
+
+        info.installedHeld = true;
+        vi.advanceTimersByTime(6_000);
+        expect(watchdog.getStatus().versionMismatch).toBe(null);
+        watchdog.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("the runtime memo latches installedDiverged (source runtime, event deferred off the status tick) and clears itself when the tree converges on the pin — a boot latch is never cleared by it", async () => {
       vi.useFakeTimers();
       try {
