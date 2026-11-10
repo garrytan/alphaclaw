@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.260] - 2026-11-10
+
+Your own Capy threads no longer send you confirmation links. When a Capy thread you own connects to Agent Relay with the token Capy signs for its machine, AlphaClaw now treats it as you: its changes to config, env, secrets, plugins and guards run at once, with no 🔐 link, no confirmation row and no message to you. Before, every such change waited for your tap, even though you had already asked for it in Capy.
+
+### Changed
+- **Attested owner threads act as you.** A delegate whose binding was accepted through a verified Capy token, on the connection of a Capy project you trust, for your Capy organization (`ALPHACLAW_RELAY_CAPY_ORG`) and for a thread owner you list in the new `ALPHACLAW_RELAY_CAPY_OWNERS` (Capy user ids, deployment env only, empty by default) runs its high-risk calls with no confirmation. The owner is the token's `user` claim, which Capy sets to the thread owner's user id and which the box recorded when the thread bound. The bridge marks the run when it starts it, and the relay guard checks that mark against the box's own records on every call, so a handoff, a revoke or a changed binding ends it on the next call. Nothing the sending thread puts in its message, metadata or tool arguments can turn it on.
+- **The trust settings stay out of reach.** Even an attested owner thread cannot change what decides relay trust: the relay's own files (`<root>/relay/`), AlphaClaw's installed code, the relay guard's entry in `openclaw.json` (removing, disabling or reloading it) and the trust env names (`ALPHACLAW_ROOT_DIR`, `ALPHACLAW_RELAY_DELEGATE_AGENTS`, the `ALPHACLAW_RELAY_CAPY_*` keys, `WM_GUARDS_RELAY_TRUST_PATH`). Such a change is refused outright, again with no link and no message to you; the refusal says to make it in the repository and deploy, or on the box from outside the agent.
+- **Everyone else keeps the links.** Agents you have not made delegates, delegates on the plain connector, other people's threads in the same Capy organization, threads whose token went stale while their message waited, and every box without `ALPHACLAW_RELAY_CAPY_OWNERS` are held exactly as before.
+- **For other guards.** `resolveRelayTrust` keeps its tier and adds `attested`, `attestationReason` and `owner`; with `requireTrustedOwner: true` only an attested owner thread is a delegate (otherwise a peer with `owner_not_trusted`). `checkConfirmation` admits an attested owner thread's call from the box's records, so Wintermute's guard needs no change to stop asking.
+
+### Tests
+- `relay-attested-delegate.test.js` drives the real token exchange, binding, bridge, relay guard and confirmation notifier: an attested owner thread's writes to `openclaw.json`, `alphaclaw.json` and `.env`, a `wm-guards` edit, `openclaw config set` and an automations run go through with zero confirmation rows and zero notices; each trust-anchor class is refused with zero rows and zero notices; a peer, an unattested delegate, another owner's thread, a missing or unreadable owner claim, an empty or foreign owner list, another org, unset Capy keys, a stale token and a mismatched generation are each still held with a link; attestation-looking metadata, tool arguments and caller flags grant nothing.
+
 ## [0.10.259] - 2026-11-10
 
 You now hear what your Capy threads ask your agent to do over Agent Relay. Before, an ask ran silently unless it needed your 🔐 tap, and the daily digest only counted them.
