@@ -88,6 +88,7 @@ const createEnv = ({
   constants: constantOverrides = {},
   restartRequiredState,
   app = null,
+  resolveHookToken,
 } = {}) => {
   const root = fsReal.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-gwatch-"));
   tmpDirs.push(root);
@@ -166,6 +167,7 @@ const createEnv = ({
     reloadEnv,
     restartRequiredState:
       restartRequiredState === undefined ? { markRequired } : restartRequiredState,
+    ...(resolveHookToken ? { resolveHookToken } : {}),
   };
   const service = app
     ? require("../../lib/server/routes/gmail").registerGmailRoutes({ app, ...options })
@@ -730,6 +732,33 @@ describe("server/gmail-watch service", () => {
   });
 
   describe("hook wiring", () => {
+    // GST-2134 PR 3: gog serve presents the Gmail hook's own token.
+    it("gives gog serve the Gmail hook's own token when one can be read", async () => {
+      process.env.WEBHOOK_TOKEN = "env-token";
+      const ownToken = ["own", "gmail", "hook"].join("-");
+      const env = createEnv({ state: singleAccountState(), openclawJson: wiredOpenclawJson(), resolveHookToken: () => ownToken });
+      expect(env.service.ensureHookWiring().webhookToken).toBe(ownToken);
+      spawnState.calls.length = 0;
+      await env.service.startWatch({ accountId: "acct-1" });
+      const args = spawnState.calls.at(-1).args;
+      expect(args[args.indexOf("--hook-token") + 1]).toBe(ownToken);
+    });
+
+    it("falls back to the shared token when the Gmail hook's own token cannot be read", () => {
+      process.env.WEBHOOK_TOKEN = "env-token";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const env = createEnv({
+        state: singleAccountState(),
+        openclawJson: wiredOpenclawJson(),
+        resolveHookToken: () => {
+          throw new Error("secrets unreadable");
+        },
+      });
+      expect(env.service.ensureHookWiring().webhookToken).toBe("env-token");
+      expect(warn.mock.calls.some(([line]) => String(line).includes("could not read the Gmail hook's own token"))).toBe(true);
+      warn.mockRestore();
+    });
+
     it("reuses the WEBHOOK_TOKEN from the environment without changes", () => {
       process.env.WEBHOOK_TOKEN = "env-token";
       const env = createEnv({

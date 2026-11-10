@@ -227,6 +227,16 @@ describeLive("live: signed hook deliveries through the edge reach the pinned gat
         const refused = await shared();
         expect(refused.status).toBe(401);
         expect(captures()).toHaveLength(3);
+
+        // PR 3: the hook moved to its own token; the gateway admits a delivery
+        // with it (forwarded with the gateway credential) and the shared token
+        // stays closed.
+        const { secret: own } = hookIngress.generateIngressSecret("meetings", { preset: "per_hook_token" });
+        const viaOwn = await request(app).post("/hooks/meetings?token=" + own).send(JSON.stringify({ id: "m-4" }));
+        expect(viaOwn.status).toBe(204);
+        expect(captures()).toHaveLength(4);
+        expect(captures()[3].payload.id).toBe("m-4");
+        expect((await shared()).status).toBe(401);
       } finally {
         webhooksDb.closeWebhooksDb();
         try {

@@ -100,7 +100,12 @@ const createHarness = async ({ knownHooks = ["calendar", "meetings", "phone", "c
   app.use(["/hooks", "/webhook"], hookIngress.preParseGate, express.raw({ type: "*/*", limit: "5mb" }));
   app.use("/oauth", express.json());
   app.all("/oauth/:id", createOauthCallbackMiddleware({
-    getOauthCallbackById: (id) => (id === "cb1" ? { hookName: "meetings" } : null),
+    getOauthCallbackById: (id) => {
+      if (id === "cb1") return { hookName: "meetings", ownerConfirmedAt: null };
+      if (id === "cb2") return { hookName: "meetings", ownerConfirmedAt: "2026-11-09T12:00:00.000Z" };
+      if (id === "cb3") return { hookName: "calendar", ownerConfirmedAt: null };
+      return null;
+    },
     webhookMiddleware,
   }));
   app.all(/^\/hooks\/.+/, webhookMiddleware);
@@ -485,14 +490,21 @@ describe("fail closed", () => {
 });
 
 describe("oauth alias, hook lifecycle and migration", () => {
-  it("keeps an OAuth callback alias working on a signed hook", async () => {
+  it("delivers an OAuth callback to a signed hook only through an alias a person confirmed", async () => {
     const h = await createHarness();
     h.hookIngress.setIngress("meetings", { preset: "circleback", secret: randomSecret() });
-    const res = await request(h.app).get("/oauth/cb1?code=abc&state=s");
+    const refused = await request(h.app).get("/oauth/cb1?code=abc&state=s");
+    expect(refused.status).toBe(403);
+    expect(h.gateway.calls).toHaveLength(0);
+    await flush();
+    expect(h.rows.at(-1)).toMatchObject({ authMethod: "rejected:alias_unconfirmed" });
+    expect(h.notices.some((n) => n.message.includes("Rotate the callback URL once"))).toBe(true);
+    const res = await request(h.app).get("/oauth/cb2?code=abc&state=s");
     expect(res.status).toBe(200);
     expect(h.gateway.calls[0].headers.authorization).toBe(bearer(kShared));
     await flush();
     expect(h.rows.at(-1)).toMatchObject({ authMethod: "oauth_alias" });
+    expect((await request(h.app).get("/oauth/cb3?code=abc&state=s")).status).toBe(200);
     await h.close();
   });
 
@@ -505,9 +517,10 @@ describe("oauth alias, hook lifecycle and migration", () => {
     expect(policyOf(h, "meetings")).toBeUndefined();
     expect(JSON.parse(fs.readFileSync(hookIngressSecretsPath(h.rootDir), "utf8")).hooks.meetings).toBeUndefined();
     expect(webhooksDb.hasReplayKey("meetings", hmacHex(secret, "{}"))).toBe(false);
-    h.hookIngress.resetHookIngress("meetings", { created: true });
-    expect(policyOf(h, "meetings")).toMatchObject({ mode: "token" });
-    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(200);
+    const own = h.hookIngress.resetHookIngress("meetings", { created: true });
+    expect(policyOf(h, "meetings")).toMatchObject({ mode: "per_hook_token", closesAt: "2026-11-09T12:00:00.000Z" });
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(401);
+    expect((await request(h.app).post("/hooks/meetings?token=" + own).send("{}")).status).toBe(200);
     await h.close();
   });
 

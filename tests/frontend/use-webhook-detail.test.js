@@ -161,6 +161,11 @@ import { __destinationState } from "../../lib/public/js/hooks/use-destination-se
 import { deleteWebhook, sendWebhookRequest } from "../../lib/public/js/lib/api.js";
 import { getCached, setCached } from "../../lib/public/js/lib/api-cache.js";
 import { useWebhookDetail } from "../../lib/public/js/components/webhooks/webhook-detail/use-webhook-detail.js";
+import {
+  kHookTokenPlaceholder,
+  kSendTestNeedsOwnTokenReason,
+  kSendTestSignedReason,
+} from "../../lib/public/js/components/webhooks/own-token.js";
 
 const harness = preactHooks.__harness;
 
@@ -309,5 +314,67 @@ describe("frontend/use-webhook-detail test send", () => {
     await hook.actions.handleSendTestWebhook();
     expect(sendWebhookRequest).toHaveBeenCalled();
     expect(onTestWebhookSent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("frontend/use-webhook-detail own token", () => {
+  const kOwnToken = ["own", "token", "x9+y8"].join("-");
+  const kAuthScheme = ["Authorization:", "Bearer"].join(" ");
+  const kHookUrl = "https://box.example.com/hooks/hook-1";
+  const makeOwnTokenHook = (overrides = {}) =>
+    makeWebhook({
+      fullUrl: kHookUrl,
+      queryStringUrl: `${kHookUrl}?token=${kHookTokenPlaceholder}`,
+      authHeaderValue: [kAuthScheme, kHookTokenPlaceholder].join(" "),
+      hasHookToken: true,
+      ingress: { preset: "per_hook_token" },
+      ...overrides,
+    });
+
+  it("uses the in-memory token in the URLs, the curl example and Send test", async () => {
+    detailSlot().data = makeOwnTokenHook();
+    sendWebhookRequest.mockResolvedValue("");
+    const hook = renderHook({ ownToken: kOwnToken });
+    expect(hook.state.authHeaderValue).toBe([kAuthScheme, kOwnToken].join(" "));
+    expect(hook.state.webhookUrlWithQueryToken).toBe(`${kHookUrl}?token=${encodeURIComponent(kOwnToken)}`);
+    expect(hook.state.activeCurlCommand).toContain(kOwnToken);
+    expect(hook.state.activeCurlCommand).not.toContain(kHookTokenPlaceholder);
+    expect(hook.state.sendTestDisabledReason).toBe("");
+    await hook.actions.handleSendTestWebhook();
+    const [url, options] = sendWebhookRequest.mock.calls[0];
+    expect(url).toBe(kHookUrl);
+    expect(options.headers.Authorization).toBe(["Bearer", kOwnToken].join(" "));
+    expect(JSON.stringify(getCached("/api/webhooks/hook-1") ?? null)).not.toContain(kOwnToken);
+  });
+
+  it("keeps the placeholder and disables Send test without the token", async () => {
+    detailSlot().data = makeOwnTokenHook();
+    const onTestWebhookSent = vi.fn();
+    const hook = renderHook({ onTestWebhookSent });
+    expect(hook.state.authHeaderValue).toContain(kHookTokenPlaceholder);
+    expect(hook.state.activeCurlCommand).toContain(kHookTokenPlaceholder);
+    expect(hook.state.sendTestDisabledReason).toBe(kSendTestNeedsOwnTokenReason);
+    await hook.actions.handleSendTestWebhook();
+    expect(sendWebhookRequest).not.toHaveBeenCalled();
+    expect(onTestWebhookSent).not.toHaveBeenCalled();
+  });
+
+  it("disables Send test on a signed hook and keeps the OAuth GET test", () => {
+    detailSlot().data = makeOwnTokenHook({ ingress: { preset: "circleback" } });
+    expect(renderHook({ ownToken: kOwnToken }).state.sendTestDisabledReason).toBe(kSendTestSignedReason);
+    detailSlot().data = makeOwnTokenHook({ oauthCallbackUrl: "https://box.example.com/oauth/cb-1" });
+    expect(renderHook().state.sendTestDisabledReason).toBe("");
+  });
+
+  it("forgets the kept token once a new secret is issued, and refetches the detail", () => {
+    detailSlot().data = makeOwnTokenHook();
+    const onForgetOwnToken = vi.fn();
+    const hook = renderHook({ ownToken: kOwnToken, onForgetOwnToken });
+    hook.actions.handleIngressChanged({ ok: true, ingress: { preset: "per_hook_token" } });
+    expect(onForgetOwnToken).not.toHaveBeenCalled();
+    expect(detailSlot().refresh).toHaveBeenCalledTimes(1);
+    hook.actions.handleIngressChanged({ ok: true, secret: ["new", "secret"].join("-"), ingress: { preset: "per_hook_token" } });
+    expect(onForgetOwnToken).toHaveBeenCalledTimes(1);
+    expect(detailSlot().refresh).toHaveBeenCalledTimes(2);
   });
 });
