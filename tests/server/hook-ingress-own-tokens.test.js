@@ -187,18 +187,36 @@ describe("a hook off the shared token is the owner's", () => {
     expect(aliasVerdict().ok).toBe(true);
   });
 
+  it("forgets a confirmation left on a hook already on the shared token when the hook leaves it", async () => {
+    const h = createHarness();
+    await request(h.app).post("/api/webhooks").send({ name: "crm", oauthCallback: true });
+    const olderBuild = createHookIngress({
+      openclawDir: h.openclawDir,
+      rootDir: h.rootDir,
+      listHookNames: () => ["crm"],
+      logger: { warn: () => {}, log: () => {}, error: () => {} },
+    });
+    olderBuild.setIngress("crm", { preset: "token" });
+    expect(webhooksDb.getOauthCallbackByHook("crm").ownerConfirmedAt).toBeTruthy();
+    h.hookIngress.generateIngressSecret("crm", { preset: "per_hook_token" });
+    expect(webhooksDb.getOauthCallbackByHook("crm").ownerConfirmedAt).toBeNull();
+  });
+
   it("keeps the hook where it was when the confirmation cannot be cleared", () => {
     const h = createHarness();
+    let locked = false;
     const failing = createHookIngress({
       openclawDir: h.openclawDir,
       rootDir: h.rootDir,
       listHookNames: () => ["crm"],
       clearAliasConfirmation: () => {
-        throw new Error("database is locked");
+        if (locked) throw new Error("database is locked");
+        return 0;
       },
       logger: { warn: () => {}, log: () => {}, error: () => {} },
     });
     failing.generateIngressSecret("crm", { preset: "per_hook_token" });
+    locked = true;
     expect(() => failing.setIngress("crm", { preset: "token" })).toThrow("database is locked");
     expect(failing.ingressStatus("crm").preset).toBe("per_hook_token");
   });
