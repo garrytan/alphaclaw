@@ -204,7 +204,7 @@ describe("relay over the tailnet route (GST-2368)", () => {
     expect(tailnetSend.code, tailnetSend.stderr).toBe(0);
   });
 
-  it("drops a connection with no PROXY header, an unknown tailnet peer or a tag that is not allowed", async () => {
+  it("drops a connection with no PROXY header, an unknown tailnet peer, a tag that is not allowed, or any peer when no tag is allowed", async () => {
     const { ingressPort } = await start();
     const raw = (port, payload) =>
       new Promise((resolve) => {
@@ -226,6 +226,10 @@ describe("relay over the tailnet route (GST-2368)", () => {
     });
     const port = await ingress.listen();
     expect(await raw(port, Buffer.concat([proxyHeaderV4(kPeer), get]))).toBe("");
+    await ingress.close();
+    ingress = createTailnetIngress({ handler: ctx.app, whois: whoisStub(), allowedTags: [], logger: quiet });
+    const open = await ingress.listen();
+    expect(await raw(open, Buffer.concat([proxyHeaderV4(kPeer), get]))).toBe("");
     expect(ctx.remoteSends).toHaveLength(0);
   });
 
@@ -273,7 +277,7 @@ describe("relay client --via and --proxy", () => {
 
 describe("tailnet service", () => {
   const kKey = "tskey-auth-kTEST1234-0123456789abcdef";
-  const make = ({ backend = "NeedsLogin", authKey = kKey, upFails = false, binaries = true, startingReads = 0 } = {}) => {
+  const make = ({ backend = "NeedsLogin", authKey = kKey, upFails = false, binaries = true, startingReads = 0, tags = "tag:relay-liaison" } = {}) => {
     const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "tailnet-svc-"));
     const calls = [];
     let state = backend;
@@ -297,8 +301,9 @@ describe("tailnet service", () => {
     };
     const supervisor = { start: vi.fn(), getStatus: () => ({ status: "running", starts: 1, pid: 42 }) };
     const ingressPort = 45678;
-    const config = readRelayConfig({ env: { ALPHACLAW_RELAY_TAILNET: "required", ALPHACLAW_RELAY_TAILNET_TAGS: "tag:relay-liaison" } });
+    const config = readRelayConfig({ env: { ALPHACLAW_RELAY_TAILNET: "required", ALPHACLAW_RELAY_TAILNET_TAGS: tags } });
     const timers = [];
+    const callbacks = [];
     const service = createTailnetService({
       config,
       relayDir: relayPaths(rootDir).dir,
@@ -308,12 +313,12 @@ describe("tailnet service", () => {
       tailscale: binaries ? "/usr/bin/tailscale" : null,
       tailscaled: binaries ? "/usr/sbin/tailscaled" : null,
       runTailscale,
-      setTimer: (fn, ms) => (timers.push(ms), 1),
+      setTimer: (fn, ms) => (timers.push(ms), callbacks.push(fn), 1),
       clearTimer: () => {},
       sleep: async () => {},
       logger: quiet,
     });
-    return { service, calls, supervisor, timers, rootDir, cleanup: () => fs.rmSync(rootDir, { recursive: true, force: true }) };
+    return { service, calls, supervisor, timers, callbacks, setBackend: (next) => (state = next), rootDir, cleanup: () => fs.rmSync(rootDir, { recursive: true, force: true }) };
   };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -333,6 +338,35 @@ describe("tailnet service", () => {
     expect(status).toMatchObject({ mode: "required", phase: "ready", node: { name: "alphaclaw-relay.tail1234.ts.net", addresses: ["100.64.0.1", "fd7a:115c:a1e0::1"], port: 80 }, allowedTags: ["tag:relay-liaison"], authKeySet: true });
     expect(JSON.stringify(status)).not.toContain(kKey);
     expect(fs.statSync(path.join(relayPaths(t.rootDir).dir, "tailscale")).mode & 0o777).toBe(0o700);
+    t.cleanup();
+  });
+
+  it("refuses to open the route when no valid tag is configured, without retrying", async () => {
+    const t = make({ tags: "relay-liaison" });
+    t.service.start();
+    for (let i = 0; i < 10 && t.service.getStatus().phase !== "failed"; i += 1) await settle();
+    expect(t.service.getStatus().error.code).toBe("tailnet_no_tags");
+    expect(t.calls.some((call) => call.args[0] === "serve")).toBe(false);
+    expect(t.timers).toEqual([]);
+    t.cleanup();
+  });
+
+  it("notices a node that stops after it was ready and starts it again, and resets serve on stop", async () => {
+    const t = make({ backend: "Running" });
+    t.service.start();
+    for (let i = 0; i < 10 && t.service.getStatus().phase !== "ready"; i += 1) await settle();
+    expect(t.timers).toEqual([60000]);
+    await t.callbacks[0]();
+    expect(t.timers).toEqual([60000, 60000]);
+    t.setBackend("Stopped");
+    const before = t.calls.length;
+    await t.callbacks[1]();
+    for (let i = 0; i < 10 && !t.calls.slice(before).some((call) => call.args[0] === "up"); i += 1) await settle();
+    expect(t.calls.slice(before).map((call) => call.args[0])).toContain("up");
+    for (let i = 0; i < 10 && t.service.getStatus().phase !== "ready"; i += 1) await settle();
+    expect(t.service.getStatus().phase).toBe("ready");
+    await t.service.stop();
+    expect(t.calls.at(-1).args).toEqual(["serve", "reset"]);
     t.cleanup();
   });
 
@@ -417,6 +451,10 @@ describe("tailnet settings, sidecar, Doctor and guard", () => {
     const [down] = buildRelayCards(status({ mode: "on", phase: "failed", error: { code: "tailnet_not_running", message: "tailscaled is Stopped." } }));
     expect(down.priority).toBe("P2");
     expect(down.summary).toContain("can still use the public URL");
+    const [typo] = buildRelayCards(status({ mode: "off", phase: "off", settingsRejected: { mode: true, tags: 0, loginServer: false } }));
+    expect(typo).toMatchObject({ sourceKey: "det:relay-tailnet-settings" });
+    expect(typo.summary).toContain("still served on the public URL");
+    expect(buildRelayCards(status({ mode: "on", phase: "ready", settingsRejected: { mode: false, tags: 1, loginServer: false } })).map((card) => card.sourceKey)).toEqual(["det:relay-tailnet-settings"]);
   });
 
   it("refuses a relay session's change to the tailnet settings and any read of the node key", () => {
