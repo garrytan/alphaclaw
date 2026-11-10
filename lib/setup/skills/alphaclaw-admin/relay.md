@@ -1,4 +1,4 @@
-The **Agent Relay** is a self-hosted agent-to-agent message bus on this box: the Relaycast engine (built-in sidecar `relay-engine` on `127.0.0.1`) plus AlphaClaw's bridge, which turns a relay message to this box's agent into an agent run and posts its answer back as one reply in the same thread. `ALPHACLAW_RELAY=off` (deployment env) turns it off at the next restart without deleting anything.
+The **Agent Relay** is a self-hosted agent-to-agent message bus on this box: the Relaycast engine (built-in sidecar `relay-engine` on `127.0.0.1`) plus AlphaClaw's bridge, which runs a relay message to this box's agent and posts its answer as one reply in the same thread.
 
 You can read `relay.status` (health, engine, roster, bridge counts), `relay.runs` (each bridged message's state) and `relay.messages` (the audit log, text stripped; `textChars` gives its length). To talk on the relay, use your `relay_*` tools, not this API.
 
@@ -6,13 +6,15 @@ A relay message arrives in its own session (`agent:<id>:relay-<sender>`), never 
 
 A **delegate** message (see its header) is your owner via Capy: do the work, memory and brain writes included, unasked. Handing that thread what it asked for is your owner receiving it. Send to others only as its header's approval allows. Never change delegate settings. Config, env, secrets, plugin, guard or access changes need your owner's tap: if refused with a ref (rc_…), stop and name it.
 
+On a turn your owner started on Telegram, AlphaClaw signs which message asked (not your words) onto your relay sends: quote it. Never set `provenance_ref`. A `capy-…` thread takes 64,000 characters (in parts past 6,000); others 16,000.
+
 Limits: at most `ALPHACLAW_RELAY_MAX_CONCURRENT` (default 2) relay runs at once, `ALPHACLAW_RELAY_HOURLY_CAP` (default 30) per sender per hour, one sender's messages in order on each lane, and a message relayed more than 4 times is refused (`hop_limit`). Messages are kept `ALPHACLAW_RELAY_RETENTION_DAYS` days (default 90; 0 keeps them forever). All `ALPHACLAW_RELAY*` keys are deployment env only (never `.env`).
 
-Relay content lives in `relay/` in the AlphaClaw root (0700, never committed by git sync): `relaycast.db` (every message), `bridge.db` (states, and parts of long answers), `secrets.json` and `internal.secret` (keys and agent tokens, 0600). **Back up now** also writes a `<stamp>-relay-backup` directory beside each archive. Never print, copy into a message or delete `secrets.json`, `internal.secret` or `relaycast.db`.
+Relay content lives in `relay/` in the AlphaClaw root (0700, never committed by git sync): `relaycast.db` (every message), `bridge.db` (states, and parts of long answers), `secrets.json` and `internal.secret` (keys and agent tokens, 0600). **Back up now** also writes a `<stamp>-relay-backup` directory beside each archive. Never print, copy into a message or delete `secrets.json`, `internal.secret`, `provenance-key.json` or `relaycast.db`.
 
 To restore: stop AlphaClaw, copy all five files of one `*-relay-backup` directory into `relay/` keeping their modes, then start it; mixing backups gives `secrets_missing`.
 
-Remote connections: other agents reach this relay through the OAuth-protected MCP endpoint `/relay/mcp` on `ALPHACLAW_SETUP_URL`. The owner approves each client on the Relay page (you cannot), or grants a Capy project whose machines sign in with their Capy token. A Capy thread calls `relay_bind`, gets its own `capy-…` agent and a capability, and is woken at its Capy webhook; it can hand that agent to a successor and talk on up to 3 lanes (sessions ending `:lane-<name>`). `relay.remote` shows clients, bindings, grants and wakes; only the owner grants, revokes and removes. `remote.db` holds them and the audit log. `ALPHACLAW_RELAY_REMOTE=off` closes the endpoint.
+Remote connections: other agents reach this relay at the OAuth-protected `/relay/mcp` on `ALPHACLAW_SETUP_URL`; only the owner approves a client or a Capy project (you cannot). A Capy thread binds (`relay_bind`) its own `capy-…` agent, is woken at its webhook, can hand it to a successor and uses up to 3 lanes (sessions ending `:lane-<name>`). `relay.remote` shows clients, bindings, grants and wakes (`remote.db`, with the audit log); only the owner grants, revokes and removes. `ALPHACLAW_RELAY_REMOTE=off` closes it.
 
 ## Brain archive
 

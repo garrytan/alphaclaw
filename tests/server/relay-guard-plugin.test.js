@@ -50,7 +50,7 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
   const blocked = (result) => result?.block === true;
 
   it("registers one before_tool_call hook and publishes only the tool-name allowlist", () => {
-    expect(Object.keys(guard.handlers)).toEqual(["before_tool_call"]);
+    expect(Object.keys(guard.handlers).sort()).toEqual(["before_tool_call", "message_received"]);
     expect(policy.kRelayAllowedTools).toEqual(["session_status", "agents_list"]);
   });
 
