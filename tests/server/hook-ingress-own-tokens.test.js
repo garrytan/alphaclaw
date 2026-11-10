@@ -221,6 +221,21 @@ describe("a hook off the shared token is the owner's", () => {
     expect(failing.ingressStatus("crm").preset).toBe("per_hook_token");
   });
 
+  it("leaves a shared-token hook working when the confirmation cannot be cleared on the way off it", () => {
+    const h = createHarness();
+    const failing = createHookIngress({
+      openclawDir: h.openclawDir,
+      rootDir: h.rootDir,
+      listHookNames: () => ["crm"],
+      clearAliasConfirmation: () => {
+        throw new Error("database is locked");
+      },
+      logger: { warn: () => {}, log: () => {}, error: () => {} },
+    });
+    expect(() => failing.generateIngressSecret("crm", { preset: "per_hook_token" })).toThrow("database is locked");
+    expect(failing.ingressStatus("crm")).toMatchObject({ preset: "token", state: "token", sharedTokenAccepted: true });
+  });
+
   it("leaves a hook on the shared token to the agent as before, with an unconfirmed alias", async () => {
     const h = createHarness();
     await request(h.app).post("/api/webhooks").send({ name: "legacy", oauthCallback: true });
