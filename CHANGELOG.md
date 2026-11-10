@@ -5,6 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.247] - 2026-11-10
+
+New webhooks no longer take the one shared webhook token: each gets its own, and a hook that has moved off the shared token can only be deleted, or given a working OAuth callback URL, by a person.
+
+### Changed
+- **New hooks take their own token.** Creating a webhook mints a token for that hook alone and shows it once (masked for the agent; a person can replace it under Sender verification). The shared `WEBHOOK_TOKEN` is closed on a new hook from the start, and the detail page shows a placeholder instead of a token that would not work. The Setup UI shows the new token once at the top of the hook's page, fills it into the URL, curl example and Send test until you press Done, and keeps it only in the page's memory; afterwards Send test explains it needs the token. The Sender verification card now says "this hook's own token" instead of "signed" for these hooks and no longer offers a token-less URL for them.
+- **Gmail push uses the Gmail hook's own token.** gog serve gets it at its next start (an AlphaClaw restart restarts it); the shared token keeps working on the Gmail hook until 24 hours after its first delivery with the new token. If the token cannot be read, serve falls back to the shared token and logs why.
+- **Hooks off the shared token belong to their owner.** The agent gets 403 deleting such a hook or adding or rotating its OAuth callback alias, and its callback URL is masked for the agent. An OAuth callback delivers to such a hook only through an alias a person made or rotated while the hook was off the shared token; any other alias gets 403 and the owner is told to rotate it once.
+- `WEBHOOK_TOKEN` and `hooks.token` keep their value as AlphaClaw's own key to the gateway.
+
+### Tests
+- `hook-ingress-own-tokens.test.js`: a new hook's token and URLs, the shared token refused on it, masking for the agent, alias confirmation by a person and not the agent, agent refusals on owner-only hooks, and the Gmail hook's own token with its 24 h move-over.
+- `hook-ingress-senders.test.js`: an unconfirmed alias is refused on a signed hook and a confirmed one delivers; a recreated hook takes its own token.
+- `gmail-watch-service.test.js`: gog serve gets the Gmail hook's own token, and the shared token when it cannot be read.
+- `webhook-own-token.test.js`, `use-webhook-detail.test.js`, `webhook-sender-verification.test.js`: the token is kept in memory only and filled into the URLs and Send test, Send test is disabled with a reason without it or on a signed hook, and the status line names the own token.
+- `tests/live/hook-ingress.e2e.test.js`: the pinned gateway admits a delivery with a hook's own token while the shared token stays refused.
+
 ## [0.10.246] - 2026-11-10
 
 A delegate Capy thread can no longer change the box's own controls without you. Changes to config, env, secrets, plugins, the relay guards or AlphaClaw's access now wait for a one-time Approve link, and you get a daily digest of what your delegates did.

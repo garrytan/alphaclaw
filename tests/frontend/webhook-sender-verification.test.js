@@ -35,6 +35,14 @@ describe("frontend/webhook sender verification status line", () => {
     expect(getSenderVerificationStatus(makeIngress({ state }))).toEqual({ tone, text });
   });
 
+  it.each([
+    ["waiting", "Waiting for the first delivery with this hook's own token. The shared token still works until then."],
+    ["closed", "Closed: only deliveries with this hook's own token are accepted."],
+  ])("%s on a hook with its own token says the token, not a signature", (state, text) => {
+    const status = getSenderVerificationStatus(makeIngress({ state, preset: "per_hook_token" }));
+    expect(status.text).toBe(text);
+  });
+
   it("overlap names the local time the shared token stops working", () => {
     const closesAt = "2026-11-10T18:00:00.000Z";
     const status = getSenderVerificationStatus(

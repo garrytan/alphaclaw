@@ -380,7 +380,7 @@ describe("server/routes/webhooks coverage", () => {
       });
       const res = await request(app).post("/api/webhooks/aliased/oauth-callback");
       expect(res.status).toBe(201);
-      expect(createOauthCallback).toHaveBeenCalledWith({ hookName: "aliased" });
+      expect(createOauthCallback).toHaveBeenCalledWith({ hookName: "aliased", ownerConfirmed: false });
       expect(res.body).toEqual({
         ok: true,
         oauthCallbackId: kOauthRecord.callbackId,
@@ -415,7 +415,7 @@ describe("server/routes/webhooks coverage", () => {
         "/api/webhooks/aliased/oauth-callback/rotate",
       );
       expect(res.status).toBe(200);
-      expect(rotateOauthCallback).toHaveBeenCalledWith("aliased");
+      expect(rotateOauthCallback).toHaveBeenCalledWith("aliased", { ownerConfirmed: false });
       expect(res.body.oauthCallbackId).toBe("cb-rotated");
       expect(res.body.oauthCallbackUrl).toBe(
         "https://alphaclaw.example.com/oauth/cb-rotated",
