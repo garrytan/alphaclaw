@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.267] - 2026-11-11
+
+The relay's tailnet route now keeps tailscaled's log files inside its own directory. Before, on a box that already runs Tailscale, the relay's tailscaled wrote its logs into the existing daemon's directory and shared its log identity.
+
+### Fixed
+- The `relay-tailscaled` sidecar sets `TS_LOGS_DIR` to `<root>/relay/tailscale`. Without it, tailscaled falls back to `/var/lib/tailscale`, which is often the box's own Tailscale state directory.
+
 ## [0.10.266] - 2026-11-11
 
 You can now take the Agent Relay's client door off the public internet and serve it only on your Tailscale network, as a second lock beside the liaison key. Before, anyone on the internet could reach `/relay/key/call` and `/relay/mcp`, and only the signature or the OAuth token kept them out.
