@@ -312,6 +312,12 @@ const realWriteFileSync = fs.writeFileSync;
 const realUnlinkSync = fs.unlinkSync;
 const realRenameSync = fs.renameSync;
 const realChmodSync = fs.chmodSync;
+const realOpenSync = fs.openSync;
+const realCloseSync = fs.closeSync;
+const realFstatSync = fs.fstatSync;
+const realFchmodSync = fs.fchmodSync;
+const realFchownSync = fs.fchownSync;
+const kCronTempFd = 2147483000;
 
 const capturePath = process.env.ALPHACLAW_CAPTURE_CRON_PATH;
 const testHome = process.env.ALPHACLAW_TEST_HOME;
@@ -355,6 +361,12 @@ fs.chmodSync = (targetPath, ...rest) => {
   if (target.startsWith("/usr/local/bin/") || target.startsWith("/etc/cron.d/")) return;
   return realChmodSync(targetPath, ...rest);
 };
+fs.openSync = (targetPath, ...rest) =>
+  String(targetPath || "") in cronWrites ? kCronTempFd : realOpenSync(targetPath, ...rest);
+fs.closeSync = (fd, ...rest) => (fd === kCronTempFd ? undefined : realCloseSync(fd, ...rest));
+fs.fstatSync = (fd, ...rest) => (fd === kCronTempFd ? { nlink: 1 } : realFstatSync(fd, ...rest));
+fs.fchmodSync = (fd, ...rest) => (fd === kCronTempFd ? undefined : realFchmodSync(fd, ...rest));
+fs.fchownSync = (fd, ...rest) => (fd === kCronTempFd ? undefined : realFchownSync(fd, ...rest));
 
 Module._load = function patchedLoad(request, parent, isMain) {
   const parentFile = String(parent && parent.filename ? parent.filename : "");

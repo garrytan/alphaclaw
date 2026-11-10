@@ -271,12 +271,12 @@ describe("server/utils/safe-file", () => {
             const stats = fs.statSync(p);
             return p === target ? Object.assign(stats, { uid: 1000, gid: 1001 }) : stats;
           },
-          chownSync: (p, uid, gid) => chowns.push({ p, uid, gid, exists: fs.existsSync(target) }),
+          fchownSync: (fd, uid, gid) => chowns.push({ fd, uid, gid, exists: fs.existsSync(target) }),
         };
         writeFileAtomic(target, "new", { fsModule });
         expect(chowns).toHaveLength(1);
         expect(chowns[0]).toMatchObject({ uid: 1000, gid: 1001 });
-        expect(chowns[0].p).not.toBe(target);
+        expect(typeof chowns[0].fd).toBe("number");
         expect(fs.readFileSync(target, "utf8")).toBe("new");
       });
 
@@ -286,7 +286,7 @@ describe("server/utils/safe-file", () => {
         vi.spyOn(process, "geteuid").mockReturnValue(0);
         const fsModule = {
           ...fs,
-          chownSync: () => {
+          fchownSync: () => {
             throw Object.assign(new Error("EPERM"), { code: "EPERM" });
           },
         };
@@ -299,7 +299,8 @@ describe("server/utils/safe-file", () => {
 
       it("never chowns when not running as root, or when the target is new", () => {
         const chownSync = vi.fn();
-        const fsModule = { ...fs, chownSync };
+        const fchownSync = vi.fn();
+        const fsModule = { ...fs, chownSync, fchownSync };
         vi.spyOn(process, "geteuid").mockReturnValue(1000);
         const existing = path.join(tempDir, "mine.json");
         fs.writeFileSync(existing, "old");
@@ -307,6 +308,58 @@ describe("server/utils/safe-file", () => {
         process.geteuid.mockReturnValue(0);
         writeFileAtomic(path.join(tempDir, "fresh.json"), "new", { fsModule });
         expect(chownSync).not.toHaveBeenCalled();
+        expect(fchownSync).not.toHaveBeenCalled();
+      });
+
+      it.skipIf(process.platform === "win32")("never changes the file a swapped temp path points to", () => {
+        const target = path.join(tempDir, "secrets.json");
+        fs.writeFileSync(target, "old", { mode: 0o600 });
+        fs.chmodSync(target, 0o600);
+        const victim = path.join(tempDir, "victim");
+        fs.writeFileSync(victim, "victim");
+        fs.chmodSync(victim, 0o644);
+        const fsModule = {
+          ...fs,
+          writeFileSync: (p, content, options) => {
+            fs.writeFileSync(p, content, options);
+            if (String(p).endsWith(".tmp")) {
+              fs.unlinkSync(p);
+              fs.symlinkSync(victim, p);
+            }
+          },
+        };
+        expect(() => writeFileAtomic(target, "new", { fsModule })).toThrow(
+          expect.objectContaining({ code: "ELOOP" }),
+        );
+        expect(fs.statSync(victim).mode & 0o777).toBe(0o644);
+        expect(fs.readFileSync(target, "utf8")).toBe("old");
+        expect(fs.readdirSync(tempDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+      });
+
+      it.skipIf(process.platform === "win32")("as root, refuses a temp file that gained a second link before the chown", () => {
+        const target = path.join(tempDir, "owned.json");
+        fs.writeFileSync(target, "old", { mode: 0o600 });
+        const victim = path.join(tempDir, "victim");
+        fs.writeFileSync(victim, "victim");
+        vi.spyOn(process, "geteuid").mockReturnValue(0);
+        const fchownSync = vi.fn();
+        const fsModule = {
+          ...fs,
+          fchownSync,
+          writeFileSync: (p, content, options) => {
+            fs.writeFileSync(p, content, options);
+            if (String(p).endsWith(".tmp")) {
+              fs.unlinkSync(p);
+              fs.linkSync(victim, p);
+            }
+          },
+        };
+        expect(() => writeFileAtomic(target, "new", { fsModule })).toThrow(
+          expect.objectContaining({ code: "ETEMPREPLACED" }),
+        );
+        expect(fchownSync).not.toHaveBeenCalled();
+        expect(fs.readFileSync(target, "utf8")).toBe("old");
+        expect(fs.readFileSync(victim, "utf8")).toBe("victim");
       });
 
       it("removes the temp file and keeps the target when the chmod fails", () => {
@@ -314,7 +367,7 @@ describe("server/utils/safe-file", () => {
         fs.writeFileSync(target, "original", { mode: 0o600 });
         const fsModule = {
           ...fs,
-          chmodSync: () => {
+          fchmodSync: () => {
             throw Object.assign(new Error("EIO"), { code: "EIO" });
           },
         };
