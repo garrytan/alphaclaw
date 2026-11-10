@@ -2,13 +2,7 @@
 
 **NEVER** make risky system changes (OpenClaw config, network settings, package installations/updates, source code modifications, etc.) without the user's explicit approval FIRST.
 
-Always explain:
-
-1. **What** you want to change
-2. **Why** you want to change it
-3. **What could go wrong**
-
-Then WAIT for the user's approval.
+A change the user asked for is approved: make it, then say what changed and what could go wrong. For your own idea, first explain what, why and the risk. Then WAIT for the user's approval.
 
 ### Plan Before You Build
 

@@ -38,6 +38,7 @@ const kVariants = {
 const kAnchors = [
   { id: "P1", text: () => "**NEVER** make risky system changes (OpenClaw config, network settings, package installations/updates, source code modifications, etc.) without the user's explicit approval FIRST." },
   { id: "P1", text: () => "Then WAIT for the user's approval." },
+  { id: "P1", text: () => "A change the user asked for is approved: make it, then say what changed and what could go wrong." },
   { id: "P2", text: () => "Before diving into implementation, share your plan when the work is **significant**." },
   { id: "P2", text: () => "then **wait for the user's sign-off** before proceeding." },
   { id: "P3", text: () => "`/tmp` and other temp directories are not durable" },
