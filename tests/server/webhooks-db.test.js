@@ -38,6 +38,30 @@ describe("server/webhooks-db", () => {
     currentDbPath = "";
   });
 
+  it("syncs an OAuth alias confirmation clear to disk, then goes back to the normal sync level", () => {
+    const webhooksDb = createWebhooksDbContext("alphaclaw-webhooks-sync-");
+    webhooksDb.createOauthCallback({ hookName: "crm", ownerConfirmed: true });
+    const calls = [];
+    const realExec = DatabaseSync.prototype.exec;
+    const realPrepare = DatabaseSync.prototype.prepare;
+    DatabaseSync.prototype.exec = function (sql) {
+      calls.push(String(sql).trim());
+      return realExec.call(this, sql);
+    };
+    DatabaseSync.prototype.prepare = function (sql) {
+      if (/UPDATE oauth_callbacks/.test(sql)) calls.push("update");
+      return realPrepare.call(this, sql);
+    };
+    try {
+      expect(webhooksDb.clearOauthCallbackConfirmation("crm")).toBe(1);
+    } finally {
+      DatabaseSync.prototype.exec = realExec;
+      DatabaseSync.prototype.prepare = realPrepare;
+    }
+    expect(calls).toEqual(["PRAGMA synchronous=FULL;", "update", "PRAGMA synchronous=NORMAL;"]);
+    expect(webhooksDb.getOauthCallbackByHook("crm").ownerConfirmedAt).toBeNull();
+  });
+
   it("creates, rotates, marks usage, and deletes oauth callbacks", () => {
     const {
       createOauthCallback,
