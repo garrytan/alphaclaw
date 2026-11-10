@@ -385,14 +385,14 @@ describe("relay owner threads (GST-2323 PR2): over-refusals fixed", () => {
     expect(ctx.confirmationCount()).toBe(0);
   });
 
-  it("reads openclaw as the program only in command position, so an argument next to a shell variable changes nothing", async () => {
+  it("reads openclaw as an argument only in a command made of read-only commands, and fails closed otherwise", async () => {
     ctx = setup();
     const argumentCommands = [
       "grep -rn openclaw $DIR",
-      'docker logs openclaw --since "$T"',
-      'git commit -m "bump openclaw (gateway) pin"',
       'journalctl -u openclaw --since "$(date)"',
       "echo openclaw $HOME",
+      "ls /usr/lib/node_modules/openclaw $X",
+      'grep openclaw "$LOG" | wc -l',
     ];
     for (const command of argumentCommands) {
       expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).toBeNull();
@@ -400,11 +400,21 @@ describe("relay owner threads (GST-2323 PR2): over-refusals fixed", () => {
     }
     const run = await ctx.deliver((await ctx.attestedAgent()).agent);
     for (const command of argumentCommands) expect(await ctx.call(run, "exec", { command }), command).toEqual({});
+    const off = "openclaw config set plugins.entries.relay-guard.enabled false";
     for (const command of [
       "sudo -u root openclaw config set $K false",
-      'sh -c "openclaw config set $K false"',
+      "/usr/bin/env " + off,
+      '/bin/sh -c "' + off + '"',
+      "watch -n1 " + off,
+      "flock /tmp/l " + off,
+      "systemd-run --wait " + off,
+      "echo " + off + " | sh",
+      'bash <<< "' + off + '"',
+      "f() { " + off + "; }",
+      ">/dev/null " + off,
+      "echo $(/usr/bin/env " + off + ")",
+      "/usr/bin/env openclaw config patch x",
       "timeout 30 openclaw config patch x",
-      "echo plugins.entries.relay-guard.enabled | xargs openclaw config set",
       "( openclaw config set $K false )",
       "npx openclaw config $V plugins.entries.relay-guard.enabled false",
     ]) {
