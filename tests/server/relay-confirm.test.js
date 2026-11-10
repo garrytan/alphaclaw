@@ -82,6 +82,32 @@ describe("relay confirmations: the signing key and relay files by any path that 
     }
   });
 
+  it("folds .. before following links for a relative path, as OpenClaw's write tool does", () => {
+    fs.mkdirSync(path.join(root, "elsewhere", "deep"), { recursive: true });
+    fs.symlinkSync(path.join(root, "elsewhere", "deep"), path.join(workspace, "child"));
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const risk = write("child/../notes.txt", tool);
+      expect(risk.kind, tool).toBe("high");
+      expect(risk.target, tool).toBe(path.join(root, "relay", "provenance-key.json"));
+    }
+  });
+
+  it("names the file OpenClaw writes when a relative path climbs out through a link", () => {
+    const far = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-far-")));
+    try {
+      fs.mkdirSync(path.join(far, "a", "b"), { recursive: true });
+      fs.symlinkSync(path.join(far, "a", "b"), path.join(workspace, "L"));
+      for (const tool of ["write", "edit", "apply_patch"]) {
+        const config = write("L/../../openclaw.json", tool);
+        expect(config.kind, tool).toBe("high");
+        expect(config.target.split(","), tool).toContain(path.join(root, ".openclaw", "openclaw.json"));
+        expect(write("L/../../../relay/bridge.db", tool).target.split(","), tool).toContain(path.join(root, "relay", "bridge.db"));
+      }
+    } finally {
+      fs.rmSync(far, { recursive: true, force: true });
+    }
+  });
+
   it("keeps trailing spaces in a path, as the write tool does", () => {
     fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "notes.md "));
     for (const tool of ["write", "edit"]) expect(write("notes.md ", tool).kind, tool).toBe("high");
