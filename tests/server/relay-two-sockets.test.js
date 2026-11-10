@@ -117,6 +117,7 @@ const setupBridge = ({ verdict = peerVerdict, withPeer = true } = {}) => {
     guard,
     trust,
     nowRef,
+    bridge,
     tick,
     cleanup: () => {
       store.close();
@@ -191,6 +192,33 @@ describe("relay bridge: two gateway sockets (GST-2090)", () => {
     const messageId = ctx.engine.dm("capy-peer", "hello");
     await ctx.tick();
     expect(ctx.store.get(messageId).state).toBe("queued");
+    expect(ctx.admin.calls).not.toContain("chat.send");
+  });
+
+  // The admin socket is the only one whose run events reach the bridge. If it
+  // drops during a pump, after the guard check, a turn sent on the peer
+  // socket would run with no socket to hear its end (the reply then waits for
+  // the 30-minute stall reconcile). It waits for the next pump's guard check,
+  // which reconnects the admin socket, instead.
+  it("after the admin socket drops mid-pump a peer turn waits for the next guard check", async () => {
+    ctx = setupBridge();
+    await ctx.tick();
+    const messageId = ctx.engine.dm("capy-peer", "sent while the admin socket drops");
+    await ctx.bridge._internal.pollOnce();
+    expect(ctx.store.get(messageId).state).toBe("queued");
+    const getMessage = ctx.engine.getMessage;
+    ctx.engine.getMessage = async (...args) => {
+      ctx.engine.getMessage = getMessage;
+      ctx.bridge.onGatewayDisconnect();
+      return getMessage(...args);
+    };
+    await ctx.bridge._internal.pump();
+    await flush();
+    expect(ctx.store.get(messageId).state).toBe("queued");
+    expect(ctx.peer.sends).toEqual([]);
+    await ctx.tick();
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "dispatched", trust: "peer" });
+    expect(ctx.peer.sends.map((send) => send.idempotencyKey)).toEqual(["relay-" + messageId]);
     expect(ctx.admin.calls).not.toContain("chat.send");
   });
 
