@@ -593,7 +593,11 @@ describe("ingress routes", () => {
   const createRoutesApp = (actorType) => {
     const calls = [];
     const fake = {
-      ingressStatus: (name) => ({ preset: name === "meetings" ? "circleback" : "token", name }),
+      ingressStatus: (name) => ({
+        preset: name === "meetings" ? "circleback" : "token",
+        state: { meetings: "closed", phone: "misconfigured" }[name] || "token",
+        name,
+      }),
       setIngress: (name, body) => { calls.push(["set", name, body]); return { preset: body.preset }; },
       generateIngressSecret: (name, body) => { calls.push(["gen", name, body]); return { secret: "s", ingress: { preset: body.preset } }; },
       reopenIngress: (name) => { calls.push(["reopen", name]); return { preset: "circleback" }; },
@@ -641,7 +645,9 @@ describe("ingress routes", () => {
   it("lets only a person add an OAuth callback alias to a hook that has moved off the shared token", async () => {
     const agent = createRoutesApp("agent").app;
     expect((await request(agent).post("/api/webhooks/meetings/oauth-callback")).body).toMatchObject({ error: "humans_only" });
-    expect((await request(agent).post("/api/webhooks/calendar/oauth-callback")).status).not.toBe(403);
-    expect((await request(createRoutesApp("person").app).post("/api/webhooks/meetings/oauth-callback")).status).not.toBe(403);
+    expect((await request(agent).post("/api/webhooks/phone/oauth-callback")).body).toMatchObject({ error: "humans_only" });
+    const pastGate = { ok: false, error: "Could not read openclaw.json" };
+    expect((await request(agent).post("/api/webhooks/calendar/oauth-callback")).body).toEqual(pastGate);
+    expect((await request(createRoutesApp("person").app).post("/api/webhooks/meetings/oauth-callback")).body).toEqual(pastGate);
   });
 });
