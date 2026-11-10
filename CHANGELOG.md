@@ -5,6 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.266] - 2026-11-11
+
+You can now take the Agent Relay's client door off the public internet and serve it only on your Tailscale network, as a second lock beside the liaison key. Before, anyone on the internet could reach `/relay/key/call` and `/relay/mcp`, and only the signature or the OAuth token kept them out.
+
+### Added
+- **Tailnet route.** `ALPHACLAW_RELAY_TAILNET=on` (deployment env only) runs `tailscaled` beside the relay in userspace mode, with no TUN device or extra privileges, and joins your tailnet once with `ALPHACLAW_RELAY_TAILNET_AUTHKEY`. The node is saved in `<root>/relay/tailscale`, so redeploys do not need the key again. The box serves only the relay's client paths on its tailnet address (`ALPHACLAW_RELAY_TAILNET_PORT`, default 80) and turns away any tailnet node without one of the tags in `ALPHACLAW_RELAY_TAILNET_TAGS`. With no valid tag the route stays closed rather than open to every node, and the box rechecks its node every minute and rejoins if it stopped.
+- **`required` mode.** `ALPHACLAW_RELAY_TAILNET=required` also refuses `/relay/key/call` and `/relay/mcp` on the public URL (`tailnet_required`). Confirmation links and OAuth consent pages stay public, so they still open from your phone. Grants that require the tailnet route now work.
+- **Client.** `relay-client.mjs --via <tailnet address>` sends to the box's tailnet address, and `--proxy http://127.0.0.1:<port>` goes through a userspace `tailscaled`'s loopback proxy. Plain http is accepted only for a tailnet address.
+- A Doctor card shows when the route is on and down (P1 in `required` mode). The new settings are trust settings that no relay session can change, and the saved node key is a relay key file that no relay session can read.
+
+### Tests
+- `relay-tailnet.test.js` runs the real client through a local stand-in for `tailscale serve`:
+  - a send through the tailnet ingress is stamped `relay_route: tailnet`, and a header on the public port never is;
+  - `required` mode refuses the client paths on the public port in every spelling and keeps the consent pages;
+  - the ingress serves nothing else and drops a connection with no PROXY header, an unknown peer or a tag that is not allowed;
+  - a grant that requires the tailnet passes only there, and `--proxy` works;
+  - the login writes the key only to a 0600 file it removes, never logs in again for a saved node, and redacts a failed login.
+- It was also run by hand against a real tailnet (headscale with tailscale 1.104.4 and 1.102.3): the tagged liaison was let in, an untagged node was refused by the policy, and a restart kept the node without the key.
+
 ## [0.10.265] - 2026-11-11
 
 The one relay connection you pin can now prove itself with a private key file instead of a capability that sits in its thread's transcript. Before, anything that had read that transcript could act as the pinned connection.

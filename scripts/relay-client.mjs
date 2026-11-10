@@ -23,9 +23,18 @@
 //   and renew are signed requests to POST <box>/relay/key/call, with no OIDC
 //   token, capability or access token, and a key file anyone else can read
 //   is refused.
+//   Tailnet route (GST-2368): --via <url> (or RELAY_CLIENT_VIA) sends every
+//   request to the box's tailnet address instead of --box, which still names
+//   the box (the key and capability files are bound to it). Plain http is
+//   accepted there only for a tailnet address (100.64.0.0/10,
+//   fd7a:115c:a1e0::/48 or a *.ts.net name): WireGuard already encrypts and
+//   authenticates that hop. --proxy <url> (or RELAY_CLIENT_PROXY) sends those
+//   requests through a userspace tailscaled's loopback HTTP proxy
+//   (tailscaled --outbound-http-proxy-listen).
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -46,7 +55,7 @@ const keySigningInput = ({ method, path: urlPath, agent, timestamp, nonce, bodyH
 const kUsage =
   "usage: node relay-client.mjs <" +
   kCommands.join("|") +
-  "> --box <https url> [--capability-file <path>] [--token-file <path>] [--key-file <path>] [command flags]";
+  "> --box <https url> [--via <tailnet url>] [--proxy <loopback http url>] [--capability-file <path>] [--token-file <path>] [--key-file <path>] [command flags]";
 
 const secrets = new Set();
 
@@ -86,6 +95,52 @@ const redactValue = (value) => {
   return typeof value === "string" ? redactText(value) : value;
 };
 
+const isTailnetHost = (hostname) => {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) return Number(v4[1]) === 100 && Number(v4[2]) >= 64 && Number(v4[2]) <= 127 && v4.slice(3).every((part) => Number(part) <= 255);
+  if (host.includes(":")) return /^fd7a:115c:a1e0:(?::|[0-9a-f]{0,4}(?::|$))/.test(host);
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host);
+};
+
+// A plain http request through a loopback HTTP proxy (absolute-form request
+// line), answered as a fetch Response. Only for http targets on the tailnet.
+const fetchThroughProxy = (proxy, target, { method = "GET", headers = {}, body, signal } = {}) =>
+  new Promise((resolve, reject) => {
+    const payload = body === undefined || body === null ? null : Buffer.from(String(body));
+    const req = http.request(
+      {
+        host: proxy.hostname.replace(/^\[|\]$/g, ""),
+        port: Number(proxy.port) || 80,
+        method,
+        path: target,
+        headers: {
+          ...headers,
+          Host: new URL(target).host,
+          ...(payload ? { "Content-Length": String(payload.length) } : {}),
+          ...(body instanceof URLSearchParams ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+        },
+        signal,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("error", reject);
+        res.on("end", () => {
+          const pairs = [];
+          for (const [name, value] of Object.entries(res.headers)) {
+            for (const entry of Array.isArray(value) ? value : [value]) pairs.push([name, String(entry)]);
+          }
+          const status = res.statusCode || 502;
+          const noBody = status === 204 || status === 304;
+          resolve(new Response(noBody ? null : Buffer.concat(chunks), { status, headers: pairs }));
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end(payload ?? undefined);
+  });
+
 const writePrivateFile = (file, content) => {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -123,6 +178,8 @@ const main = async () => {
         "code-file": { type: "string" },
         agent: { type: "string" },
         "key-file": { type: "string" },
+        via: { type: "string" },
+        proxy: { type: "string" },
       },
     });
   } catch (err) {
@@ -157,6 +214,47 @@ const main = async () => {
   }
   if (boxUrl.username || boxUrl.password) usage("--box must not carry credentials.");
   const box = boxUrl.origin + boxUrl.pathname.replace(/\/+$/, "");
+
+  const viaFlag = values.via ?? process.env.RELAY_CLIENT_VIA;
+  let via = null;
+  if (viaFlag) {
+    let viaUrl;
+    try {
+      viaUrl = new URL(viaFlag);
+    } catch {
+      usage(`--via is not a URL: ${viaFlag}`);
+    }
+    if (viaUrl.username || viaUrl.password || viaUrl.search || viaUrl.hash || viaUrl.pathname !== "/") usage("--via is an origin only, like http://100.101.102.103.");
+    const plainOk = viaUrl.protocol === "http:" && (isTailnetHost(viaUrl.hostname) || kLoopbackHosts.has(viaUrl.hostname));
+    if (viaUrl.protocol !== "https:" && !plainOk) {
+      fail(
+        "insecure_box",
+        `Refusing ${viaUrl.protocol}//${viaUrl.host}: --via must be https, or plain http to a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48, *.ts.net).`,
+        { exitCode: 2 },
+      );
+    }
+    via = viaUrl.origin;
+  }
+  const proxyFlag = values.proxy ?? process.env.RELAY_CLIENT_PROXY;
+  let proxy = null;
+  if (proxyFlag) {
+    let proxyUrl;
+    try {
+      proxyUrl = new URL(proxyFlag);
+    } catch {
+      usage(`--proxy is not a URL: ${proxyFlag}`);
+    }
+    if (proxyUrl.protocol !== "http:" || !kLoopbackHosts.has(proxyUrl.hostname) || proxyUrl.username || proxyUrl.password) {
+      usage("--proxy is a loopback http proxy, like http://127.0.0.1:1055 (tailscaled --outbound-http-proxy-listen).");
+    }
+    if (!via || !via.startsWith("http:")) usage("--proxy needs --via with a plain http tailnet address.");
+    proxy = proxyUrl;
+  }
+  // Every request to the box: to --via when set, through --proxy when set.
+  const boxFetch = (pathname, init) => {
+    const target = (via ?? box) + pathname;
+    return proxy ? fetchThroughProxy(proxy, target, init) : fetch(target, init);
+  };
 
   const capabilityFile = path.resolve(
     values["capability-file"] ??
@@ -273,7 +371,7 @@ const main = async () => {
     const signature = crypto
       .sign(null, Buffer.from(keySigningInput({ method: "POST", path: kKeyPath, agent: key.agent, timestamp, nonce, bodyHash }), "utf8"), privateKey)
       .toString("base64url");
-    const response = await fetch(`${box}${kKeyPath}`, {
+    const response = await boxFetch(kKeyPath, {
       method: "POST",
       headers: {
         "Content-Type": kKeyContentType,
@@ -422,7 +520,7 @@ const main = async () => {
         return cached.access_token;
       }
     }
-    const response = await fetch(`${box}/relay/oauth/token`, {
+    const response = await boxFetch("/relay/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
       body: new URLSearchParams({ grant_type: kJwtBearerGrant, assertion: jwt, resource: `${box}/relay/mcp` }),
@@ -446,7 +544,7 @@ const main = async () => {
 
   const requestId = 1;
   const postToolCall = (accessToken) =>
-    fetch(`${box}/relay/mcp`, {
+    boxFetch("/relay/mcp", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
