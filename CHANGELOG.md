@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.251] - 2026-11-10
+
+A deployment that holds OpenClaw below AlphaClaw's pin on purpose no longer opens a critical version-mismatch incident on every boot. Boxes that hold OpenClaw 2026.10.9 under a release that pins 2026.11.2 now boot clean and notify nobody, while a version nobody chose still raises the alarm.
+
+### Fixed
+- **A deliberate OpenClaw hold is reported, not alarmed.** Before, any installed OpenClaw other than the pin made the boot report `INCONSISTENT`, sent a 🔴 notice to your channels and the notify webhook (once a day), and opened a critical `version_mismatch` incident on every boot that closed itself a minute or two later. A hold is now an exact `overrides.openclaw` version in the app's own `package.json` (the Render template already sets one). When the installed OpenClaw is exactly that version, older than the pin and at or above 2026.10.9, the boot is consistent: its log line and incident-timeline row say OpenClaw is held and at which version, Home's This box card shows `held (pin 2026.11.2)` beside the version, `alphaclaw diagnose` says the same, and there is no incident, Doctor card or notification.
+- **A real mismatch stays critical.** A version no override names, an override naming a version other than the one installed, a hold older than 2026.10.9 or newer than the pin still opens a critical incident and notifies as before. When a declared hold doesn't cover the install, the Doctor card and Home's warning say why.
+
+### Tests
+- `guards/openclaw-hold.guard.test.js`: boots a template-shaped install tree through the real runtime, boot report, watchdog and incident tracker. A hold at the floor opens no incident and notifies nobody; an undeclared version, a hold naming another version and a hold below the floor each open a critical incident and notify. The hold floor must stay at or below the pin.
+- `openclaw-pin-state`, `boot-report`, `boot-report-steps`, `watchdog`, `doctor-deterministic-checks` and the pin-warning frontend test cover held, unexpected and too-old installs.
+
 ## [0.10.250] - 2026-11-10
 
 Your agent now treats your own request for a system change as your approval, instead of explaining the change and waiting for you to approve what you just asked for.

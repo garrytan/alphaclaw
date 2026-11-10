@@ -20,7 +20,7 @@ const {
   resolveStateDir,
   kWatchdogStatusFields,
 } = require("../../lib/server/diagnose/collect");
-const { renderDiagnoseMarkdown, kDiagnoseSectionTitles, iso } = require("../../lib/server/diagnose/render");
+const { renderDiagnoseMarkdown, renderSection, kDiagnoseSectionTitles, iso } = require("../../lib/server/diagnose/render");
 const { createServerPidfile } = require("../../lib/server/server-pidfile");
 const { kBootMigrationFileName } = require("../../lib/server/openclaw-boot-migration");
 const { kRetirementFileName } = require("../../lib/server/openclaw-channel-retirement");
@@ -958,5 +958,15 @@ describe("diagnose: render helpers", () => {
     expect(md).toContain("openclaw pin 2026.9.2 / installed 2026.8.2; guard n/a");
     expect(md).toContain("openclaw pin n/a / installed n/a; guard n/a");
     expect(md).toContain("- none (no start has been refused for a corroborated live owner)");
+  });
+});
+
+describe("diagnose: a deliberate OpenClaw hold (GST-2293)", () => {
+  const installedLine = (data) =>
+    renderSection("openclaw", { source: "live", warnings: [], data: { pinnedVersion: "2026.11.2", installedVersion: "2026.10.9", installedDiverged: true, ...data } })
+      .find((line) => line.startsWith("- installed"));
+  it("says the install is held on purpose, and still flags a version nobody held", () => {
+    expect(installedLine({ heldVersion: "2026.10.9", installedHeld: true })).toBe("- installed: 2026.10.9 — held by this deployment on purpose (not the pin)");
+    expect(installedLine({})).toBe("- installed: 2026.10.9 — **not the pin** (broken or stale install)");
   });
 });

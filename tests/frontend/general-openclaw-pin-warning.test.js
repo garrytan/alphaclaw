@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   OpenclawPinWarning,
+  describeOpenclawHold,
   getOpenclawPinWarning,
 } from "../../lib/public/js/components/general/openclaw-pin-warning.js";
 
@@ -31,6 +32,17 @@ describe("frontend/general OpenClaw pin warning", () => {
     expect(warning.title).toBe("OpenClaw is not the pinned version");
     expect(warning.body).toContain("OpenClaw 2026.10.2 is installed");
     expect(warning.body).toContain("pins 2026.10.4");
+  });
+
+  it("a deliberate hold warns nobody and the version line says it is held (GST-2293)", () => {
+    const held = { state: "held", installed: "2026.10.9", pinned: "2026.11.2", held: "2026.10.9" };
+    expect(getOpenclawPinWarning(held)).toBe(null);
+    expect(describeOpenclawHold(held)).toBe("held (pin 2026.11.2)");
+    expect(describeOpenclawHold({ state: "match", installed: "2026.11.2", pinned: "2026.11.2" })).toBe(null);
+    const tooOld = getOpenclawPinWarning({
+      state: "diverged", installed: "2026.10.4", pinned: "2026.11.2", held: "2026.10.4", floor: "2026.10.9", reason: "below_floor",
+    });
+    expect(tooOld.body).toContain("holds OpenClaw at 2026.10.4, older than 2026.10.9");
   });
 
   it("renders the unreadable warning as a status region", () => {
