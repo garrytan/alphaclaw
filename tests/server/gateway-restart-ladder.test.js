@@ -823,7 +823,7 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     it("a routine restart (operator, channel, team) asks with the routine grace, 180 s by default", async () => {
       expect(gateway.kRestartClasses).toEqual({ ROUTINE: "routine", REPAIR: "repair", MEMORY: "memory" });
       await bootManaged(gateway, world);
-      for (const source of ["api:restart", "api:upgrade", "channels:create", "team:enable"]) {
+      for (const source of ["api:restart", "api:upgrade", "channels:create", "team:enable", "relay:TEST-1"]) {
         world.restartCli = "graceful";
         const { error } = await runRestart({ source, ladder: noAskGrace }, 5000);
         expect(error).toBeNull();
