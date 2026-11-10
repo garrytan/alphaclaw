@@ -559,6 +559,21 @@ Other agents reach the relay through one public endpoint, `https://<your box>/re
 
 The Relay page's **Connections** section lists the approved apps and bound threads, with **Revoke** (the app's tokens stop at once and its bindings go) and **Remove** for a binding. Access tokens last an hour and refresh tokens 30 days, rotated on every use; a refresh token used twice revokes its whole family. Tokens and capabilities are stored hashed in `relay/remote.db` (0600) with the grant, refresh, revoke and binding audit log. Wakes go only over `https` on port 443 to an allowed host (`api.capy.ai`; `ALPHACLAW_RELAY_WAKE_HOSTS` adds more), to an address checked to be public, with redirects never followed. `ALPHACLAW_RELAY_REMOTE=off` closes the endpoint and keeps the box side running.
 
+**Capy machines without a consent page (Capy OIDC).** A thread on a Capy cloud machine can prove which thread it is with the short-lived token Capy signs for each machine, instead of the browser sign-in above:
+
+1. In Capy, open **Settings → Cloud credentials → Generic OIDC**, choose **Add project**, pick the project whose threads should reach the box, and enter an **Audience** of your choosing (for example your box's `https://<your box>/relay` URL). Note the organization id the page shows.
+2. In the box's deployment environment set `ALPHACLAW_RELAY_CAPY_ORG` to that organization id and `ALPHACLAW_RELAY_CAPY_AUDIENCE` to the same audience, and restart AlphaClaw.
+3. On the Relay page, under **Trusted Capy projects**, enter the Capy project id and the Capy user id of the threads' owner and press **Trust project**. Those threads now work as you, as a delegate does; **Revoke** there stops them at once.
+4. On the Capy machine, the thread runs `node scripts/relay-client.mjs bind --box https://<your box> --webhook-url <its Capy webhook>` (from this repo at a pinned commit) and then `send`, `reply`, `inbox` and the rest. The client reads the token from `CAPY_OIDC_TOKEN_FILE`, keeps the capability in a 0600 file and never prints a secret. Handing the binding to a successor thread needs no code: the successor runs `claim` on its own machine.
+
+**Approving or denying a delegate's risky change.** When a delegate thread tries to change the box's own controls (config, env, secrets, plugins, its guards or AlphaClaw's access), nothing changes yet: you get one message (Telegram or your other admin channel) titled **Relay confirmation needed**, naming the thread, its lane, the change and its target, with a link that works once for 15 minutes.
+
+1. Open the link. Sign in to AlphaClaw if asked, with the shared password (or, in team mode, as the admin who made that thread a delegate); the page sends you back to the request.
+2. Read what the page says the agent wants to do. It shows the exact action and target, never the value, and never the message text.
+3. Press **Approve** to let that one change run once, within 15 minutes, when the thread asks again, or **Deny** to refuse it. The thread is told either way. Anything else still needs its own confirmation.
+
+If the link expired or was already answered, the page says so and nothing was decided; the thread asks again if it still needs it. Once a day you also get a short digest of what your delegates did.
+
 Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from `.env`: the agent must not be able to switch off its own audit trail or lift its caps. Errors and their fixes: [`lib/setup/skills/alphaclaw-admin/relay.md`](lib/setup/skills/alphaclaw-admin/relay.md).
 
 ## Environment Variables
@@ -644,6 +659,8 @@ Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from 
 | `ALPHACLAW_RELAY_MAX_BINDINGS_PER_CLIENT` | Optional | Active relay bindings (threads) one OAuth connection may hold; a new bind past it is refused with `binding_limit`, renewing one is always allowed (default `20`). Deployment env only. |
 | `ALPHACLAW_RELAY_DELEGATE_AGENTS` | Optional | Deprecated: use **Make delegate** on the Relay page. Comma-separated `capy-…` relay agents that act as you on this box. Imported once as delegate grants when the relay starts; afterwards it only covers an agent with no grant, a revoked grant always wins over it, and removing an agent from it does not revoke it (use Revoke delegate). Empty by default. Deployment env only. |
 | `ALPHACLAW_RELAY_DELEGATE_TOOLS` | Optional | Comma-separated extra tool names, or `server__*` prefixes for MCP servers, a delegate's turn may use beyond the built-in list. Deployment env only. |
+| `ALPHACLAW_RELAY_CAPY_ORG` | Optional | Your Capy organization id. With `ALPHACLAW_RELAY_CAPY_AUDIENCE`, lets threads of a project you trust on the Relay page connect with the token Capy signs for their machine (Generic OIDC), with no consent page. Unset by default (off). Deployment env only. |
+| `ALPHACLAW_RELAY_CAPY_AUDIENCE` | Optional | The **Audience** you entered in Capy's Generic OIDC setup for that project; tokens for any other audience are refused. Deployment env only. |
 | `ALPHACLAW_RELAY_WAKE_HOSTS` | Optional | Comma-separated extra hosts the relay may POST thread wakes to; `api.capy.ai` is always allowed. Deployment env only. |
 | `ALPHACLAW_RELAY_BRAIN` | Optional | `off` stops saving relay conversations to the brain ([brain archive](#agent-relay)). On by default wherever gbrain and a non-federated `relay` source exist; elsewhere it does nothing. Deployment env only. |
 | `ALPHACLAW_RELAY_BRAIN_BIN` | Optional | Absolute path of the gbrain wrapper the brain archive runs (default `/usr/local/bin/gbrain`; with neither, the archive shows Not set up and runs nothing). A relative value is ignored. Deployment env only. |

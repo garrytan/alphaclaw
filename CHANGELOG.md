@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.247] - 2026-11-10
+
+Threads on Capy machines can now connect to your box's Agent Relay with the identity Capy signs for each machine, so the box knows exactly which of your threads is calling and a copied capability is useless from any other thread. A delegate also can no longer slip a change to the box's controls past you through a shell command, and in team mode only you answer its confirmation links.
+
+### Added
+- **Capy machines connect without a consent page (Capy OIDC).** Set `ALPHACLAW_RELAY_CAPY_ORG` and `ALPHACLAW_RELAY_CAPY_AUDIENCE` (deployment env only) to match Capy's **Settings → Cloud credentials → Generic OIDC** setup, then trust a Capy project and its owner under **Trusted Capy projects** on the Relay page. A machine trades the token Capy writes to `CAPY_OIDC_TOKEN_FILE` for an access token at `/relay/oauth/token` (RFC 7523 jwt-bearer, capped at the token's expiry, no refresh token). The box checks it against Capy's published keys (RS256 only, pinned issuer and audience, 60 s skew). The binding then answers only to that thread code, one token id binds one binding, and a run accepted while the token was good is never cut short when it expires. A handoff between attested threads needs no code: the successor claims with its own token. Revoking the project revokes its connection, bindings and running turns.
+- **`scripts/relay-client.mjs`**, a zero-dependency Node 24 client for a Capy machine: `bind`, `renew`, `unbind`, `send`, `reply`, `inbox`, `history`, `result`, `handoff`, `claim`. It keeps the capability and access token in 0600 files, never takes a secret on the command line and never prints one.
+- README how-tos for setting up Capy OIDC and for answering a delegate's Approve/Deny link.
+
+### Changed
+- **Shell commands are held like file writes.** A delegate's `exec` that names a protected file (`openclaw.json`, `.env`, `secrets.json`, `auth-profiles.json` and the rest, by relative or home path too), a guard directory or a relay database, `sqlite3` on a relay database, and the same input typed into a running process now wait for your confirmation. Plain reads (`cat`, `grep`, `jq`) still run. `openclaw --profile x config set …`, a quoted `alphaclaw admin` route, and a patch touching several protected files (named together) are caught too.
+- **Only the owner answers a confirmation link.** In team mode the page takes an answer from the shared-password owner or from the admin who created that thread's grant, not from any admin. A sender has at most 5 open confirmation requests.
+
+### Tests
+- `relay-capy-oidc.test.js`: the token table (wrong issuer, audience, org or subject, `alg: none`, HS256 with the public key, RS512, tampered payload, unknown and rotated kid, weak key, expiry and skew, JWKS failures and rate limit). `relay-capy-attestation.test.js`: the exchange (no grant, foreign resource, three sequential and two concurrent exchanges of one token, a token id reused by another grant), binding as the token's thread, one token on five calls over 40 minutes, another thread refused, a replaced machine kept, a run outliving its token, revoke, and handoff by attestation. `relay-client.test.js`: the client against a fake box, redaction included. `relay-confirm.test.js` and `relay-lanes.test.js`: the new risk cases, the owner-only page and the 2-hour queue re-check.
+
 ## [0.10.246] - 2026-11-10
 
 A delegate Capy thread can no longer change the box's own controls without you. Changes to config, env, secrets, plugins, the relay guards or AlphaClaw's access now wait for a one-time Approve link, and you get a daily digest of what your delegates did.

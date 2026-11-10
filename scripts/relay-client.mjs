@@ -1,0 +1,445 @@
+#!/usr/bin/env node
+// Relay client for a Capy liaison machine: talks to an AlphaClaw box's Agent
+// Relay over its OAuth-protected MCP endpoint, authenticated with the machine's
+// Capy OIDC token instead of a browser consent. Standalone on purpose: Node 24
+// built-ins only, never AlphaClaw or OpenClaw code, fetched by commit sha and
+// run as `node relay-client.mjs <command> [flags]`.
+//
+// Contract (relay trust v2, GST-2090):
+//   POST <box>/relay/oauth/token (RFC 7523 jwt-bearer, resource <box>/relay/mcp)
+//     -> { access_token, token_type, expires_in }, capped at the JWT's exp.
+//   POST <box>/relay/mcp, stateless JSON-RPC tools/call with the bearer token;
+//     JSON or SSE body; a 401 re-exchanges once and retries once.
+//   The OIDC token is read only from CAPY_OIDC_TOKEN_FILE (or --token-file).
+//   The capability lives only in the 0600 capability file, the access token
+//   only in the 0600 cache beside it, a handoff code only in --code-file.
+//   None of them is ever printed: result fields named capability,
+//   handoff_code or access_token print as "[stored]", and any known secret
+//   inside other output prints as "[redacted]".
+//   Exit 0 on success, 1 on an error ({error, message} on stderr, the server's
+//   code unchanged), 2 on a usage error.
+
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { parseArgs } from "node:util";
+
+const kJwtBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+const kFreshnessMarginMs = 30_000;
+const kRequestTimeoutMs = 120_000;
+const kLoopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const kSecretKeys = new Set(["capability", "handoff_code", "access_token"]);
+const kCommands = ["bind", "renew", "unbind", "send", "reply", "inbox", "history", "result", "handoff", "claim"];
+const kUsage =
+  "usage: node relay-client.mjs <" +
+  kCommands.join("|") +
+  "> --box <https url> [--capability-file <path>] [--token-file <path>] [command flags]";
+
+const secrets = new Set();
+
+class ClientError extends Error {
+  constructor(code, message, { exitCode = 1, fix } = {}) {
+    super(message);
+    this.code = code;
+    this.exitCode = exitCode;
+    this.fix = fix;
+  }
+}
+
+const fail = (code, message, options) => {
+  throw new ClientError(code, message, options);
+};
+
+const usage = (message) => fail("usage", `${message}\n${kUsage}`, { exitCode: 2 });
+
+const redactText = (text) => {
+  let out = String(text);
+  for (const secret of secrets) {
+    if (secret.length >= 8) out = out.split(secret).join("[redacted]");
+  }
+  return out;
+};
+
+const redactValue = (value) => {
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, kSecretKeys.has(key) ? "[stored]" : redactValue(entry)]),
+    );
+  }
+  return typeof value === "string" ? redactText(value) : value;
+};
+
+const writePrivateFile = (file, content) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, content, { mode: 0o600, flag: "wx" });
+  fs.renameSync(temp, file);
+};
+
+const main = async () => {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: process.argv.slice(2),
+      allowPositionals: true,
+      strict: true,
+      options: {
+        box: { type: "string" },
+        "capability-file": { type: "string" },
+        "token-file": { type: "string" },
+        "thread-id": { type: "string" },
+        "webhook-url": { type: "string" },
+        until: { type: "string" },
+        to: { type: "string" },
+        text: { type: "string" },
+        "text-file": { type: "string" },
+        "approval-file": { type: "string" },
+        "confirmation-ref": { type: "string" },
+        "message-id": { type: "string" },
+        lane: { type: "string" },
+        with: { type: "string" },
+        limit: { type: "string" },
+        "result-ref": { type: "string" },
+        part: { type: "string" },
+        "successor-thread": { type: "string" },
+        "code-file": { type: "string" },
+        agent: { type: "string" },
+      },
+    });
+  } catch (err) {
+    usage(err.message);
+  }
+  const { values, positionals } = parsed;
+  const [command, ...extra] = positionals;
+  if (!kCommands.includes(command)) usage(command ? `Unknown command ${command}.` : "A command is required.");
+  if (extra.length) usage(`Unexpected arguments: ${extra.join(" ")}.`);
+
+  const required = (name) => values[name] ?? usage(`--${name} is required for ${command}.`);
+  const integer = (name) => {
+    const number = Number(values[name]);
+    return Number.isInteger(number) && number >= 0 ? number : usage(`--${name} must be a whole number.`);
+  };
+
+  const boxFlag = values.box ?? process.env.RELAY_CLIENT_BOX;
+  if (!boxFlag) usage("--box (or RELAY_CLIENT_BOX) is required.");
+  let boxUrl;
+  try {
+    boxUrl = new URL(boxFlag);
+  } catch {
+    usage(`--box is not a URL: ${boxFlag}`);
+  }
+  const loopbackHttp = boxUrl.protocol === "http:" && kLoopbackHosts.has(boxUrl.hostname);
+  if (boxUrl.protocol !== "https:" && !loopbackHttp) {
+    fail(
+      "insecure_box",
+      `Refusing ${boxUrl.protocol}//${boxUrl.host}: the box must be https (plain http only on 127.0.0.1, localhost or ::1).`,
+      { exitCode: 2 },
+    );
+  }
+  if (boxUrl.username || boxUrl.password) usage("--box must not carry credentials.");
+  const box = boxUrl.origin + boxUrl.pathname.replace(/\/+$/, "");
+
+  const capabilityFile = path.resolve(
+    values["capability-file"] ??
+      process.env.RELAY_CLIENT_CAPABILITY_FILE ??
+      path.join(os.homedir(), ".relay-client", "capability.json"),
+  );
+  const tokenCacheFile = `${capabilityFile}.token.json`;
+
+  const readBinding = () => {
+    let binding;
+    try {
+      binding = JSON.parse(fs.readFileSync(capabilityFile, "utf8"));
+    } catch (err) {
+      if (err.code === "ENOENT") fail("not_bound", `No capability file at ${capabilityFile}: run bind or claim first.`);
+      fail("capability_file_invalid", `Cannot read the capability file ${capabilityFile}.`);
+    }
+    if (typeof binding?.capability !== "string" || typeof binding.agent !== "string") {
+      fail("capability_file_invalid", `The capability file ${capabilityFile} has no agent or capability.`);
+    }
+    secrets.add(binding.capability);
+    if (binding.box !== box) {
+      fail("box_mismatch", `The capability file ${capabilityFile} belongs to ${binding.box}, not ${box}.`);
+    }
+    return binding;
+  };
+
+  const readText = () => {
+    if (values.text !== undefined && values["text-file"] !== undefined) usage("Pass --text or --text-file, not both.");
+    if (values.text !== undefined) return values.text;
+    const file = values["text-file"] ?? usage(`--text or --text-file is required for ${command}.`);
+    return fs.readFileSync(file === "-" ? 0 : file, "utf8");
+  };
+
+  const messageOptions = () => {
+    let approval;
+    if (values["approval-file"] !== undefined) {
+      try {
+        approval = JSON.parse(fs.readFileSync(values["approval-file"], "utf8"));
+      } catch {
+        usage(`--approval-file ${values["approval-file"]} is not a readable JSON file.`);
+      }
+    }
+    return {
+      ...(values.lane !== undefined ? { lane: values.lane } : {}),
+      ...(approval !== undefined ? { approval } : {}),
+      ...(values["confirmation-ref"] !== undefined ? { confirmation_ref: values["confirmation-ref"] } : {}),
+    };
+  };
+
+  let tool;
+  let args;
+  let binding;
+  let codeFile;
+  if (command === "bind") {
+    if (fs.existsSync(capabilityFile)) {
+      fail("already_bound", `${capabilityFile} already holds a binding: use renew, or unbind first.`);
+    }
+    tool = "relay_bind";
+    args = {
+      ...(values["thread-id"] !== undefined ? { thread_id: values["thread-id"] } : {}),
+      webhook_url: required("webhook-url"),
+      ...(values.until !== undefined ? { until: values.until } : {}),
+    };
+  } else if (command === "renew") {
+    binding = readBinding();
+    tool = "relay_bind";
+    args = {
+      thread_id: binding.thread_id,
+      webhook_url: values["webhook-url"] ?? binding.webhook_url,
+      capability: binding.capability,
+      ...(values.until !== undefined ? { until: values.until } : {}),
+    };
+  } else if (command === "claim") {
+    // A handoff from an attested holder needs no code: the box checks this
+    // machine's own Capy token against the thread the handoff named.
+    let code;
+    if (values["code-file"] !== undefined) {
+      codeFile = path.resolve(values["code-file"]);
+      try {
+        code = fs.readFileSync(codeFile, "utf8").trim();
+      } catch {
+        fail("handoff_code_unreadable", `Cannot read the handoff code file ${codeFile}.`);
+      }
+      if (!code) fail("handoff_code_unreadable", `The handoff code file ${codeFile} is empty.`);
+      secrets.add(code);
+    }
+    tool = "relay_claim";
+    args = {
+      as: required("agent"),
+      ...(code ? { handoff_code: code } : {}),
+      ...(values["thread-id"] !== undefined ? { thread_id: values["thread-id"] } : {}),
+      ...(values["webhook-url"] !== undefined ? { webhook_url: values["webhook-url"] } : {}),
+    };
+  } else {
+    const toolArgs = {
+      unbind: () => ["relay_unbind", {}],
+      send: () => ["relay_send", { to: required("to"), text: readText(), ...messageOptions() }],
+      reply: () => ["relay_reply", { message_id: required("message-id"), text: readText(), ...messageOptions() }],
+      inbox: () => ["relay_inbox", {}],
+      history: () => [
+        "relay_history",
+        {
+          with: required("with"),
+          ...(values.limit !== undefined ? { limit: integer("limit") } : {}),
+          ...(values.lane !== undefined ? { lane: values.lane } : {}),
+        },
+      ],
+      result: () => [
+        "relay_result",
+        { result_ref: required("result-ref"), ...(values.part !== undefined ? { part: integer("part") } : {}) },
+      ],
+      handoff: () => {
+        if (values["code-file"] !== undefined) codeFile = path.resolve(values["code-file"]);
+        return [
+          "relay_handoff",
+          {
+            successor_thread: required("successor-thread"),
+            ...(values["webhook-url"] !== undefined ? { webhook_url: values["webhook-url"] } : {}),
+          },
+        ];
+      },
+    }[command]();
+    binding = readBinding();
+    tool = toolArgs[0];
+    args = { as: binding.agent, capability: binding.capability, ...toolArgs[1] };
+  }
+
+  const tokenFile = values["token-file"] ?? process.env.CAPY_OIDC_TOKEN_FILE;
+  if (!tokenFile) {
+    fail("attestation_stale", "CAPY_OIDC_TOKEN_FILE is not set: this machine has no Capy OIDC token to present.");
+  }
+  let jwt;
+  try {
+    jwt = fs.readFileSync(tokenFile, "utf8").trim();
+  } catch {
+    fail(
+      "attestation_stale",
+      `Cannot read the Capy OIDC token file ${tokenFile}. Capy refreshes it while the machine is awake; try again shortly.`,
+    );
+  }
+  secrets.add(jwt);
+  let claims;
+  try {
+    claims = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString("utf8"));
+  } catch {
+    fail("attestation_stale", `The Capy OIDC token file ${tokenFile} does not hold a JWT.`);
+  }
+  if (typeof claims?.exp !== "number" || claims.exp * 1000 - Date.now() < kFreshnessMarginMs) {
+    fail(
+      "attestation_stale",
+      `The Capy OIDC token in ${tokenFile} has expired or expires within 30 s. Capy refreshes it while the machine is awake; try again shortly.`,
+    );
+  }
+  const jti =
+    typeof claims.jti === "string" && claims.jti ? claims.jti : crypto.createHash("sha256").update(jwt).digest("hex");
+
+  const getAccessToken = async ({ force }) => {
+    if (!force) {
+      let cached = null;
+      try {
+        cached = JSON.parse(fs.readFileSync(tokenCacheFile, "utf8"));
+      } catch {}
+      if (
+        typeof cached?.access_token === "string" &&
+        cached.box === box &&
+        cached.jti === jti &&
+        cached.expires_at - Date.now() > kFreshnessMarginMs
+      ) {
+        secrets.add(cached.access_token);
+        return cached.access_token;
+      }
+    }
+    const response = await fetch(`${box}/relay/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: new URLSearchParams({ grant_type: kJwtBearerGrant, assertion: jwt, resource: `${box}/relay/mcp` }),
+      redirect: "error",
+      signal: AbortSignal.timeout(kRequestTimeoutMs),
+    });
+    const body = await response.json().catch(() => null);
+    if (typeof body?.access_token === "string") secrets.add(body.access_token);
+    if (!response.ok || typeof body?.access_token !== "string") {
+      fail(
+        typeof body?.error === "string" ? body.error : "token_exchange_failed",
+        typeof body?.error_description === "string"
+          ? body.error_description
+          : `The box answered the token exchange with HTTP ${response.status}.`,
+      );
+    }
+    const expiresAt = Math.min(Date.now() + (Number(body.expires_in) || 0) * 1000, claims.exp * 1000);
+    writePrivateFile(tokenCacheFile, JSON.stringify({ access_token: body.access_token, expires_at: expiresAt, jti, box }));
+    return body.access_token;
+  };
+
+  const requestId = 1;
+  const postToolCall = (accessToken) =>
+    fetch(`${box}/relay/mcp`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "tools/call", params: { name: tool, arguments: args } }),
+      redirect: "error",
+      signal: AbortSignal.timeout(kRequestTimeoutMs),
+    });
+
+  let response = await postToolCall(await getAccessToken({ force: false }));
+  if (response.status === 401) {
+    response = await postToolCall(await getAccessToken({ force: true }));
+    if (response.status === 401) {
+      fail(
+        "unauthorized",
+        "The box refused a freshly exchanged access token twice: this machine's identity is not accepted for the relay.",
+      );
+    }
+  }
+  const raw = await response.text();
+  let message;
+  if ((response.headers.get("content-type") || "").includes("text/event-stream")) {
+    for (const event of raw.split(/\r?\n\r?\n/)) {
+      const data = event
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""))
+        .join("\n");
+      try {
+        const candidate = JSON.parse(data);
+        if (candidate?.id === requestId) message = candidate;
+      } catch {}
+    }
+  } else {
+    try {
+      message = JSON.parse(raw);
+    } catch {}
+  }
+  if (!message || typeof message !== "object") {
+    fail("bad_response", `The box answered ${tool} with HTTP ${response.status} and no JSON-RPC response.`);
+  }
+  if (message.error) {
+    fail("rpc_error", `The box rejected ${tool}: ${message.error.message || `JSON-RPC error ${message.error.code}`}`);
+  }
+  const text = (message.result?.content || []).find((part) => part?.type === "text")?.text ?? "";
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch {
+    result = { text };
+  }
+  for (const key of kSecretKeys) {
+    if (typeof result?.[key] === "string") secrets.add(result[key]);
+  }
+  if (message.result?.isError) {
+    fail(
+      typeof result?.error === "string" ? result.error : "tool_error",
+      typeof result?.message === "string" ? result.message : text,
+      { fix: typeof result?.fix === "string" ? result.fix : undefined },
+    );
+  }
+
+  if (command === "bind" || command === "renew" || command === "claim") {
+    const capability = result.capability ?? binding?.capability;
+    const agent = result.agent ?? binding?.agent ?? args.as;
+    if (typeof capability !== "string" || typeof agent !== "string") {
+      fail("bad_response", `The box answered ${tool} without an agent and capability.`);
+    }
+    writePrivateFile(
+      capabilityFile,
+      JSON.stringify(
+        {
+          box,
+          agent,
+          capability,
+          thread_id: args.thread_id ?? result.thread_id ?? null,
+          webhook_url: args.webhook_url ?? result.webhook_url ?? null,
+        },
+        null,
+        2,
+      ),
+    );
+    if (command === "claim" && codeFile) fs.rmSync(codeFile, { force: true });
+  } else if (command === "unbind") {
+    fs.rmSync(capabilityFile, { force: true });
+  } else if (command === "handoff" && typeof result.handoff_code === "string") {
+    // An attested holder gets no code; any other holder's code goes only to
+    // --code-file, and a handoff made without one is redone with it.
+    if (!codeFile) fail("usage", "This box answered with a handoff code: run handoff again with --code-file.", { exitCode: 2 });
+    writePrivateFile(codeFile, `${result.handoff_code}\n`);
+  }
+  process.stdout.write(redactText(JSON.stringify(redactValue(result), null, 2)) + "\n");
+};
+
+try {
+  await main();
+} catch (err) {
+  const error =
+    err instanceof ClientError
+      ? { error: err.code, message: err.message, ...(err.fix ? { fix: err.fix } : {}) }
+      : { error: "client_error", message: `${err?.message || err}${err?.cause?.message ? `: ${err.cause.message}` : ""}` };
+  process.stderr.write(redactText(JSON.stringify(error)) + "\n");
+  process.exitCode = err instanceof ClientError ? err.exitCode : 1;
+}

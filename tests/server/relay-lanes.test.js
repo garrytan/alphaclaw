@@ -163,6 +163,38 @@ describe("relay lanes: the bridge", () => {
     }
   });
 
+  // Capy attestation (PR3): checked when a message is accepted; one that then
+  // waited over 2 hours runs as the delegate only if its thread attested since.
+  it.each([
+    ["has not attested since: peer", -60 * 1000, { trust: "peer", grantId: null }],
+    ["attested again since: delegate", 30 * 60 * 1000, { trust: "delegate", grantId: "rg_0123456789abcdef" }],
+  ])("a Capy-attested message that waited over 2 hours and whose thread %s", async (_label, attestedFor, expected) => {
+    const ctx = setup({
+      maxConcurrent: 1,
+      verdict: (sender) =>
+        sender === kAgent
+          ? { trust: "delegate", reason: "grant", grantId: "rg_0123456789abcdef", lanesMax: 3, generation: 1, attestationRequired: true, attestedUntil: Date.now() + attestedFor }
+          : { trust: "peer", reason: "no_grant", grantId: null, lanesMax: 1, generation: null },
+    });
+    try {
+      await ctx.tick();
+      ctx.engine.dm(kOther, "holds the only slot");
+      await ctx.tick();
+      const waited = ctx.engine.dm(kAgent, "queued long ago", { relay_generation: 1, relay_attested_until: Date.now() + 60 * 1000 });
+      await ctx.tick();
+      expect(ctx.store.get(waited)).toMatchObject({ state: "queued", attestedUntil: expect.any(Number) });
+      const { DatabaseSync } = require("node:sqlite");
+      const raw = new DatabaseSync(path.join(dir, "bridge.db"));
+      raw.prepare("UPDATE relay_messages SET received_at = ? WHERE message_id = ?").run(Date.now() - 3 * 60 * 60 * 1000, waited);
+      raw.close();
+      await ctx.end(ctx.sends[0], "done");
+      await ctx.tick();
+      expect(ctx.store.get(waited)).toMatchObject({ state: "dispatched", ...expected });
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("a grant's hourly cap is the bridge's per-sender cap too", async () => {
     const ctx = setup({ verdict: () => ({ trust: "delegate", reason: "grant", grantId: "rg_0123456789abcdef", lanesMax: 3, hourlyCap: 1, generation: 1 }) });
     try {
