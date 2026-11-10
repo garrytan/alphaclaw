@@ -411,17 +411,84 @@ describe("several signing keys", () => {
     for (let i = 2; i < kMaxSigningKeys; i += 1) h.hookIngress.addIngressSigningKey("phone", { secret: newKey().toString("base64") });
     expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: newKey().toString("base64") })).toThrow(/at most/);
 
-    let status = h.hookIngress.removeIngressSigningKey("phone", 1);
+    let status = h.hookIngress.ingressStatus("phone");
+    const [firstId, secondId] = status.signingKeys.map((key) => key.id);
+    status = h.hookIngress.removeIngressSigningKey("phone", firstId);
     expect(status.signingKeys).toHaveLength(kMaxSigningKeys - 1);
+    expect(status.signingKeys[0]).toMatchObject({ id: secondId, index: 1 });
     expect((await quoPost(h, first, "w2")).status).toBe(401);
     expect((await quoPost(h, second, "w3")).status).toBe(200);
     await flush();
     expect(h.rows.at(-1)).toMatchObject({ authKey: 1 });
-    expect(() => h.hookIngress.removeIngressSigningKey("phone", 99)).toThrow(/No signing key/);
-    for (let i = status.signingKeys.length; i > 1; i -= 1) status = h.hookIngress.removeIngressSigningKey("phone", i);
+    expect(() => h.hookIngress.removeIngressSigningKey("phone", firstId)).toThrow(/no longer on this hook/);
+    while (status.signingKeys.length > 1) status = h.hookIngress.removeIngressSigningKey("phone", status.signingKeys.at(-1).id);
     expect(status.signingKeys).toHaveLength(1);
-    expect(() => h.hookIngress.removeIngressSigningKey("phone", 1)).toThrow(/only signing key/);
+    expect(() => h.hookIngress.removeIngressSigningKey("phone", status.signingKeys[0].id)).toThrow(/only signing key/);
     expect(policyOf(h, "phone")).toMatchObject({ firstAdmittedAt: opened.firstAdmittedAt, closesAt: opened.closesAt });
+    await h.close();
+  });
+
+  it("removes the key a stale page named, never the one now at its position", async () => {
+    const h = await createHarness();
+    const [a, b, c] = [newKey(), newKey(), newKey()];
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: a.toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: b.toString("base64") });
+    const stale = h.hookIngress.addIngressSigningKey("phone", { secret: c.toString("base64") });
+    h.hookIngress.removeIngressSigningKey("phone", stale.signingKeys[0].id);
+    const status = h.hookIngress.removeIngressSigningKey("phone", stale.signingKeys[1].id);
+    expect(status.signingKeys.map((key) => key.id)).toEqual([stale.signingKeys[2].id]);
+    expect((await quoPost(h, b, "s1")).status).toBe(401);
+    expect((await quoPost(h, c, "s2")).status).toBe(200);
+    await h.close();
+  });
+
+  it("keeps keys 2..n when key 1 is replaced, and drops them when the method changes", async () => {
+    const h = await createHarness();
+    const [a, b, c, d] = [newKey(), newKey(), newKey(), newKey()];
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: a.toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: b.toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: c.toString("base64") });
+    const before = h.hookIngress.ingressStatus("phone").signingKeys;
+    let status = h.hookIngress.setIngress("phone", { preset: "quo", secret: "whsec_" + d.toString("base64") });
+    expect(status.signingKeys).toHaveLength(3);
+    expect(status.signingKeys.slice(1).map((key) => key.id)).toEqual(before.slice(1).map((key) => key.id));
+    expect((await quoPost(h, a, "r1")).status).toBe(401);
+    for (const [key, id] of [[b, "r2"], [c, "r3"], [d, "r4"]]) expect((await quoPost(h, key, id)).status).toBe(200);
+    status = h.hookIngress.setIngress("phone", { preset: "quo", secret: b.toString("base64") });
+    expect(status.signingKeys).toHaveLength(2);
+    status = h.hookIngress.setIngress("phone", { preset: "standard_webhooks", secret: "whsec_" + c.toString("base64") });
+    expect(status.signingKeys).toHaveLength(1);
+
+    const cams = randomSecret();
+    h.hookIngress.setIngress("cams", { preset: "verkada", secret: cams });
+    h.hookIngress.addIngressSigningKey("cams", { secret: randomSecret() });
+    const generated = h.hookIngress.generateIngressSecret("cams", { preset: "verkada" });
+    expect(generated.ingress.signingKeys).toHaveLength(2);
+    await h.close();
+  });
+
+  it("treats a Quo key with and without whsec_ as one key", async () => {
+    const h = await createHarness();
+    const [a, b] = [newKey(), newKey()];
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: a.toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: b.toString("base64") });
+    expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: "whsec_" + b.toString("base64") })).toThrow(/already has/);
+    expect(() => h.hookIngress.addIngressSigningKey("phone", { secret: "whsec_" + a.toString("base64") })).toThrow(/already has/);
+    await h.close();
+  });
+
+  it("reports a stale timestamp when a matching key is too old, even if other keys fail first", async () => {
+    const h = await createHarness();
+    const [a, b] = [newKey(), newKey()];
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: a.toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: b.toString("base64") });
+    const body = JSON.stringify({ type: "call.completed" });
+    const ts = String(Math.floor(h.clock.now / 1000) - 600);
+    const res = await request(h.app).post("/hooks/phone").set("content-type", "application/json")
+      .set("webhook-id", "old_1").set("webhook-timestamp", ts)
+      .set("webhook-signature", "v1," + hmacB64(b, "old_1." + ts + "." + body)).send(body);
+    expect(res.status).toBe(401);
+    expect(h.rows.at(-1)).toMatchObject({ authMethod: "rejected:stale_timestamp" });
     await h.close();
   });
 
@@ -827,9 +894,9 @@ describe("ingress routes", () => {
     expect((await request(app).post("/api/webhooks/cams/ingress/generate-secret").send({ preset: "verkada" })).body.secret).toBe("s");
     expect((await request(app).post("/api/webhooks/meetings/ingress/reopen")).status).toBe(200);
     expect((await request(app).post("/api/webhooks/phone/ingress/keys").send({ secret: "k" })).status).toBe(200);
-    expect((await request(app).delete("/api/webhooks/phone/ingress/keys/2")).status).toBe(200);
+    expect((await request(app).delete("/api/webhooks/phone/ingress/keys/a1b2c3")).status).toBe(200);
     expect(calls.map((c) => c[0])).toEqual(["set", "gen", "reopen", "add-key", "remove-key"]);
-    expect(calls.at(-1)).toEqual(["remove-key", "phone", "2"]);
+    expect(calls.at(-1)).toEqual(["remove-key", "phone", "a1b2c3"]);
     expect((await request(app).get("/api/webhooks/Bad..Name/ingress")).status).toBe(500);
   });
 
@@ -840,7 +907,7 @@ describe("ingress routes", () => {
     expect((await request(app).post("/api/webhooks/cams/ingress/generate-secret").send({ preset: "verkada" })).status).toBe(403);
     expect((await request(app).post("/api/webhooks/meetings/ingress/reopen")).status).toBe(403);
     expect((await request(app).post("/api/webhooks/phone/ingress/keys").send({ secret: "k" })).status).toBe(403);
-    expect((await request(app).delete("/api/webhooks/phone/ingress/keys/1")).status).toBe(403);
+    expect((await request(app).delete("/api/webhooks/phone/ingress/keys/primary")).status).toBe(403);
     expect(calls).toHaveLength(0);
   });
 

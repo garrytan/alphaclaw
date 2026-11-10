@@ -413,4 +413,25 @@ describe("server/webhooks-db", () => {
     database.close();
     expect(count).toBe(kMaxRequestsTotal);
   });
+
+  it("adds the auth_key column to an older webhooks.db and records which signing key matched", () => {
+    currentRootDir = fs.mkdtempSync(path.join(os.tmpdir(), "webhooks-db-auth-key-"));
+    fs.mkdirSync(path.join(currentRootDir, "db"), { recursive: true });
+    currentDbPath = path.join(currentRootDir, "db", "webhooks.db");
+    const seed = new DatabaseSync(currentDbPath);
+    seed.exec(
+      "CREATE TABLE webhook_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, hook_name TEXT NOT NULL, method TEXT, headers TEXT, payload TEXT, " +
+        "payload_truncated INTEGER DEFAULT 0, payload_size INTEGER, source_ip TEXT, gateway_status INTEGER, gateway_body TEXT, " +
+        "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), auth_method TEXT, gateway_ms INTEGER)",
+    );
+    seed.prepare("INSERT INTO webhook_requests (hook_name, method, payload, gateway_status, auth_method) VALUES ('phone', 'POST', '{}', 200, 'signed')").run();
+    seed.close();
+
+    currentWebhooksDb = loadWebhooksDb();
+    currentWebhooksDb.initWebhooksDb({ rootDir: currentRootDir });
+    currentWebhooksDb.insertRequest({ hookName: "phone", method: "POST", payload: "{}", gatewayStatus: 200, authMethod: "signed", authKey: 3 });
+    currentWebhooksDb.insertRequest({ hookName: "phone", method: "POST", payload: "{}", gatewayStatus: 200, authMethod: "signed", authKey: "x" });
+    const rows = currentWebhooksDb.getRequests("phone", { limit: 10 });
+    expect(rows.map((row) => row.authKey).sort()).toEqual([3, null, null].sort());
+  });
 });
