@@ -7,10 +7,13 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.254] - 2026-11-10
 
-AlphaClaw no longer loosens the file permissions of `openclaw.json` when it saves a config change. A config kept at 0600 because it holds secret references used to come back 0644 after every save.
+AlphaClaw no longer makes credential files readable by other users of the machine when it saves them. Saving a config change used to replace a 0600 `openclaw.json` with a 0644 copy, so any local account could read the gateway's credentials until someone fixed the mode by hand.
 
 ### Fixed
-- **Config saves keep the file's permissions.** A save over an existing file keeps that file's mode exactly, whatever the process umask, for `openclaw.json`, `alphaclaw.json` and every other file AlphaClaw writes atomically without an explicit mode. A new `openclaw.json` is created 0600.
+- **Saves keep a file's permissions.** A save over an existing file keeps that file's mode exactly, whatever the process umask, for every file AlphaClaw writes atomically without naming a mode. A save that names a mode now gets exactly that mode, too, instead of one the umask could strip.
+- **Credential files are always 0600.** Every AlphaClaw writer of `openclaw.json`, `alphaclaw.json`, the pre-Doctor config backup, the restored config from git, the Google account state and the gog config writes them 0600, new or replaced, so a box that already has a world-readable copy is tightened on its next save. `.env`, the relay secrets and provenance key, the webhook ingress secrets, the auth, team and operator stores and the agent admin token already did.
+- **Running as root no longer takes over files.** When AlphaClaw runs as root and saves a file another account owns, the file keeps its owner and group instead of becoming root's.
+- A new structural guard fails CI when a writer of a credential file can leave it looser than 0600.
 
 ## [0.10.253] - 2026-11-10
 

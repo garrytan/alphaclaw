@@ -351,7 +351,8 @@ fs.unlinkSync = (targetPath, ...rest) => {
   return realUnlinkSync(targetPath, ...rest);
 };
 fs.chmodSync = (targetPath, ...rest) => {
-  if (String(targetPath || "").startsWith("/usr/local/bin/")) return;
+  const target = String(targetPath || "");
+  if (target.startsWith("/usr/local/bin/") || target.startsWith("/etc/cron.d/")) return;
   return realChmodSync(targetPath, ...rest);
 };
 

@@ -1310,6 +1310,7 @@ describe("server/routes/system", () => {
     expect(deps.fs.writeFileSync).toHaveBeenCalledWith(
       "/tmp/openclaw/alphaclaw.json",
       expect.stringContaining('"enabled": true'),
+      { mode: 0o600 },
     );
     expect(deps.ensureGatewayProxyConfig).toHaveBeenCalledWith(
       "https://setup.example.com",

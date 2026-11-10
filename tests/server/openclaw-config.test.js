@@ -154,6 +154,22 @@ describe("server/openclaw-config", () => {
       });
     });
 
+    describe("file permissions (GST-2299)", () => {
+      let previousUmask;
+      beforeEach(() => {
+        previousUmask = process.umask(0o022);
+      });
+      afterEach(() => {
+        process.umask(previousUmask);
+      });
+
+      it.skipIf(process.platform === "win32")("tightens a world-readable openclaw.json back to 0600 on the next write", () => {
+        fs.writeFileSync(configPath(), JSON.stringify({ keep: true }), { mode: 0o644 });
+        writeOpenclawConfig({ openclawDir, config: { keep: true } });
+        expect(fs.statSync(configPath()).mode & 0o777).toBe(0o600);
+      });
+    });
+
     it("fails closed on an unparseable config: throws and never writes", () => {
       fs.writeFileSync(configPath(), kJson5Fixture);
       const mutate = vi.fn();
