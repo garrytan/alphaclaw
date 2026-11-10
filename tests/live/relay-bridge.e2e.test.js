@@ -4,6 +4,9 @@
 // hermetic bridge tests only fake: chat.send's run id, the agent lifecycle
 // end event, chat.history's content shape, sessions.list's hasActiveRun, and
 // that a gateway SIGKILL mid-run still ends in exactly one relay reply.
+// GST-2090: and that a peer's turn reaches OpenClaw over the bridge's peer
+// socket (no operator.admin), so OpenClaw records it as not the owner's,
+// while a delegate's turn rides the admin socket and is the owner's.
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -22,7 +25,7 @@ const kCandidateBinDir = process.env.OPENCLAW_CONTRACT_INSTALL_DIR
   : null;
 process.env.PATH = [kCandidateBinDir, liveHelpers.repoBinDir(), process.env.PATH].filter(Boolean).join(path.delimiter);
 
-const { kLiveEnabled, waitFor, readDeclaredPin } = liveHelpers;
+const { kLiveEnabled, waitFor, readDeclaredPin, runCliJson, repoOpenclawBin } = liveHelpers;
 const describeLive = kLiveEnabled && process.platform === "linux" ? describe : describe.skip;
 const kTestTimeoutMs = 10 * 60 * 1000;
 const kSlowTurnSeconds = 40;
@@ -37,6 +40,8 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   let slowNext = false;
   let modelRequests = 0;
   let gatewaySends = 0;
+  // Each turn the bridge sent, by socket: { admin: [runId], peer: [runId] }.
+  const sendsBySocket = { admin: [], peer: [] };
   let secrets;
   let remote;
   // The bound remote caller of the OAuth MCP case, reused by the grant case.
@@ -72,6 +77,13 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   };
   const repliesOf = async (token, messageId) =>
     (await relayCall("GET", "/v1/messages/" + messageId + "/replies", token)).replies.filter((reply) => reply.agent_name === relay.getStatus().agentName);
+  // OpenClaw's own record of a relay turn: the user row chat.history returns
+  // for it, whose __openclaw.senderIsOwner OpenClaw stamps only when the
+  // sending client held operator.admin.
+  const userRowOf = (sessionKey, messageId) => {
+    const history = runCliJson(repoOpenclawBin(), ["gateway", "call", "chat.history", "--params", JSON.stringify({ sessionKey, limit: 200 }), "--json"], { env: gateway.gatewayEnv(), label: "chat.history" });
+    return (history.messages || []).find((row) => row.role === "user" && JSON.stringify(row.content).includes("relay:" + messageId)) || null;
+  };
   const readyzOk = async () => {
     try {
       return (await fetch(`http://127.0.0.1:${port}/readyz`)).status === 200;
@@ -179,7 +191,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       notifyOwner: (text, opts) => ownerNotices.push({ text, opts }),
       // As lib/server.js wires it: the remote side's grants decide the tier.
       resolveSenderTrust: (sender) => (remote ? remote.resolveDelegate(sender) : { trust: "peer", reason: "not_bound" }),
-      createGatewayClient: ({ onEvent, onDisconnect }) => {
+      createGatewayClient: ({ onEvent, onDisconnect, scopes }) => {
         const client = require("../../lib/server/chat/gateway-client").createGatewayClient({
           fs,
           openclawDir: OPENCLAW_DIR,
@@ -187,12 +199,17 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
           WebSocketImpl: require("ws").WebSocket,
           onEvent,
           onDisconnect,
+          scopes,
         });
+        const socket = client.scopes.includes("operator.admin") ? "admin" : "peer";
         return {
           ...client,
-          requestGateway: (method, ...rest) => {
-            if (method === "chat.send") gatewaySends += 1;
-            return client.requestGateway(method, ...rest);
+          requestGateway: (method, params, ...rest) => {
+            if (method === "chat.send") {
+              gatewaySends += 1;
+              sendsBySocket[socket].push(params.idempotencyKey);
+            }
+            return client.requestGateway(method, params, ...rest);
           },
         };
       },
@@ -253,6 +270,15 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       const keys = JSON.parse(sessions.stdout).sessions.map((s) => s.key);
       expect(keys).toContain("agent:main:relay-capy-live");
       expect(keys).not.toContain("agent:main:main");
+      // GST-2090: an unbound sender is a peer. The bridge stamped the turn
+      // peer and sent it on the peer socket, and OpenClaw did not run it as
+      // the owner.
+      const peerRow = userRowOf("agent:main:relay-capy-live", firstId);
+      console.log("[live] peer turn: " + JSON.stringify({ trust: relay.getStore().get(firstId).trust, senderIsOwner: peerRow?.__openclaw?.senderIsOwner ?? null, sockets: sendsBySocket }));
+      expect(relay.getStore().get(firstId).trust).toBe("peer");
+      expect(peerRow).toBeTruthy();
+      expect(peerRow.__openclaw?.senderIsOwner === true).toBe(false);
+      expect(sendsBySocket).toEqual({ admin: [], peer: ["relay-" + firstId] });
 
       // 2. SIGKILL the gateway while the relay run is in flight.
       slowNext = true;
@@ -453,6 +479,15 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       const row = relay.getStore().get(first.data.message_id);
       expect(row).toMatchObject({ trust: "delegate", lane: "gbrain", grantId: granted.body.grant.id });
       expect(row.sessionKey).toMatch(/:lane-gbrain$/);
+      // GST-2090: a delegate's turn rides the admin socket and OpenClaw runs
+      // it as the owner.
+      expect(sendsBySocket.admin).toContain("relay-" + first.data.message_id);
+      expect(sendsBySocket.peer).not.toContain("relay-" + first.data.message_id);
+      const delegateRow = userRowOf(row.sessionKey, first.data.message_id);
+      console.log("[live] delegate turn: " + JSON.stringify({ trust: row.trust, senderIsOwner: delegateRow?.__openclaw?.senderIsOwner ?? null }));
+      expect(delegateRow?.__openclaw?.senderIsOwner).toBe(true);
+      // Every turn the bridge sent so far went over the socket its tier names.
+      for (const runId of sendsBySocket.peer) expect(relay.getStore().get(runId.replace(/^relay-/, ""))?.trust).toBe("peer");
 
       await waitFor(async () => ownerNotices.some((notice) => notice.opts?.id === "relay-confirm-" + ref), 30_000, "the owner's confirmation link");
       const notice = ownerNotices.find((entry) => entry.opts?.id === "relay-confirm-" + ref);
