@@ -10,6 +10,7 @@ const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
 const { openRemoteStore, sha256 } = require("../../lib/server/relay/remote-store");
 const { createRelayConfirmations } = require("../../lib/server/relay/confirmations");
 const { registerRelayConfirmRoutes } = require("../../lib/server/routes/relay-confirm");
+const { createRelayService } = require("../../lib/server/relay");
 const { relayPaths } = require("../../lib/server/relay/constants");
 
 // Relay trust v2 PR2 (GST-2090): a delegate's high-risk call waits for the
@@ -46,6 +47,12 @@ describe("relay confirmations: the risk kinds", () => {
     ["a copy into the guard's directory", { toolName: "exec", params: { command: "cp x ~/.openclaw/extensions/wm-guards/index.js" } }, "high", "run a command on wm-guards"],
     ["a read hidden behind a substitution", { toolName: "exec", params: { command: "cat $(echo /data/.env) | sh" } }, "high", "run a command on .env"],
     ["a plain read of openclaw.json", { toolName: "exec", params: { command: "cat ~/.openclaw/openclaw.json | jq .gateway" } }, "low", null],
+    ["a delete backgrounded behind a read", { toolName: "exec", params: { command: "cat openclaw.json & rm -f openclaw.json" } }, "high", "run a command on openclaw.json"],
+    ["rg running a program through --pre", { toolName: "exec", params: { command: "rg --pre=/bin/rm x openclaw.json" } }, "high", "run a command on openclaw.json"],
+    ["rg with --pre-glob only", { toolName: "exec", params: { command: "rg --pre-glob '*.gz' token ~/.openclaw/openclaw.json" } }, "low", null],
+    ["a redirect with no space", { toolName: "exec", params: { command: "cd ~/.openclaw && echo {} >openclaw.json" } }, "high", "run a command on openclaw.json"],
+    ["a move by brace expansion", { toolName: "exec", params: { command: "cd ~/.openclaw && mv openclaw.json{,.bak}" } }, "high", "run a command on openclaw.json"],
+    ["a read of a backup copy", { toolName: "exec", params: { command: "cat ~/.openclaw/openclaw.json.bak" } }, "low", null],
     ["openclaw with a global flag first", { toolName: "exec", params: { command: "openclaw --profile x config set gateway.bind lan" } }, "high", "openclaw config set gateway.bind"],
     ["a quoted admin route", { toolName: "exec", params: { command: "alphaclaw admin POST '/api/relay/remote/grants'" } }, "high", "alphaclaw admin POST /api/relay/remote/grants"],
     ["input typed into a running editor", { toolName: "process", params: { action: "write", sessionId: "s1", data: "vi /data/.openclaw/openclaw.json\n" } }, "high", "run a command on openclaw.json"],
@@ -400,6 +407,23 @@ describe("relay confirmations: the owner's page", () => {
     const approved = await request(app).post("/relay/confirm/" + token).set("Origin", "https://box.example.test").type("form").send({ csrf, decision: "approve" });
     expect(approved.status).toBe(200);
     expect(box.bridge.confirmations.get(box.told[0].row.id).decidedBy).toBe("owner");
+  });
+
+  it("answers through the relay service the server mounts the page with", async () => {
+    box = makeBox();
+    const run = box.running({ lane: "gbrain" });
+    box.call(run, "write", { path: path.join(box.rootDir, ".openclaw", "openclaw.json"), content: "{}" });
+    box.confirmations.tick();
+    const service = createRelayService({ env: {}, rootDir: box.rootDir, logger: quiet });
+    service._internal.state.confirmations = box.confirmations;
+    const app = express();
+    registerRelayConfirmRoutes({ app, resolveRequestIdentity: () => ({ kind: "legacy", role: "admin" }), confirmations: service.confirmations, resolveSetupUrl: () => "https://box.example.test", logger: quiet });
+    const token = linkToken(box.notices[0]);
+    const page = await request(app).get("/relay/confirm/" + token);
+    expect(page.status).toBe(200);
+    const approved = await request(app).post("/relay/confirm/" + token).set("Origin", "https://box.example.test").type("form").send({ csrf: csrfOf(page.text), decision: "approve" });
+    expect(approved.status).toBe(200);
+    expect(box.told).toHaveLength(1);
   });
 
   it("refuses every member for a grant imported from the env list, which only the owner answers", async () => {
