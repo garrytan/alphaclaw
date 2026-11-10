@@ -122,6 +122,7 @@ const setup = ({ maxConcurrent = 2, hourlyCap = 30, nowRef = { value: Date.now()
     getAuth: () => ({ workspaceKey: "rk", agentToken: "at", agentName: "wintermute" }),
     store,
     requestGateway: (...args) => gateway.requestGateway(...args),
+    requestPeerGateway: (...args) => gateway.requestGateway(...args),
     resolveAgentId: () => "main",
     config: { maxConcurrent, hourlyCap },
     ...(onRelayMessage ? { onRelayMessage } : {}),

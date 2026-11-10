@@ -522,6 +522,7 @@ describe("relay delegates: the bridge", () => {
       getAuth: () => ({ workspaceKey: "rk", agentToken: "at", agentName: "wintermute" }),
       store,
       requestGateway,
+      requestPeerGateway: requestGateway,
       resolveAgentId: () => "main",
       config: { maxConcurrent: 2, hourlyCap: 30 },
       resolveSenderTrust: verdictFn,
