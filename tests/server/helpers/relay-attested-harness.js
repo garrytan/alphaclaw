@@ -41,6 +41,7 @@ const flush = async (times = 20) => {
 // The engine the remote side registers bound agents on.
 const createRemoteEngine = () => {
   const agents = new Map([["wintermute", "at_live_box"]]);
+  const sends = [];
   const byToken = (token) => [...agents.entries()].find(([, value]) => value === token)?.[0];
   return {
     registerAgent: async (key, name) => {
@@ -53,7 +54,11 @@ const createRemoteEngine = () => {
       if (!byToken(token)) throw Object.assign(new Error("401"), { engineStatus: 401 });
       return { unread: [] };
     },
-    sendDm: async () => ({ id: "1", conversation_id: "conv-1" }),
+    sends,
+    sendDm: async (token, to, text, data) => {
+      sends.push({ to, text, data });
+      return { id: String(sends.length), conversation_id: "conv-1" };
+    },
     dmConversations: async () => [],
     dmMessages: async () => [],
     listAgents: async () => [...agents.keys()].map((name) => ({ name, status: "active" })),
@@ -293,6 +298,8 @@ const setup = ({ env = capyEnv() } = {}) => {
   ];
   const confirmationCount = () => Object.values(bridgeStore.confirmations.countsSince(0)).reduce((sum, n) => sum + n, 0);
   return {
+    app,
+    remoteSends: relayService.engine.sends,
     clock,
     rootDir,
     relayRemote,

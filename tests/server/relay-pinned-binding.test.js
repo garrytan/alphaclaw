@@ -269,6 +269,6 @@ describe("relay pinned binding (GST-2323 PR3): ALPHACLAW_RELAY_TRUSTED_BINDINGS"
   it("says on the Doctor card when a pin entry did not fit, so a typo never looks like a pin", () => {
     const { buildRelayCards } = require("../../lib/server/relay/doctor-card");
     const [card] = buildRelayCards({ enabled: true, phase: "ready", settings: { delegateAgents: [], trustedBindingsRejected: 1 } });
-    expect(card.summary).toContain("1 entry in ALPHACLAW_RELAY_TRUSTED_BINDINGS did not fit, so nothing is pinned for it.");
+    expect(card.summary).toContain("1 entry in ALPHACLAW_RELAY_TRUSTED_BINDINGS or ALPHACLAW_RELAY_TRUSTED_BINDING_KEYS did not fit, so nothing is pinned for it.");
   });
 });

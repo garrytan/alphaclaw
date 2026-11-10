@@ -5,6 +5,24 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.265] - 2026-11-11
+
+The one relay connection you pin can now prove itself with a private key file instead of a capability that sits in its thread's transcript. Before, anything that had read that transcript could act as the pinned connection.
+
+### Added
+- **Liaison keys.** `node relay-client.mjs keygen` makes an Ed25519 key in a 0600 file on the liaison's machine and prints only the public key. Put the printed entry in `ALPHACLAW_RELAY_TRUSTED_BINDING_KEYS` (deployment env only). From then on the binding gets owner trust only for messages signed with that key, sent with `relay-client.mjs send|history|result|renew --key-file`. Each request is signed over its body, accepted within 5 minutes of its timestamp and only once. The box stores only the public key.
+- **The old capability is retired.** Once a key is registered, the binding's capability is refused for every call (`key_required`), and a message it sent before the key went in stays a plain delegate that asks for confirmations. Wakes keep going to the binding's webhook; `renew --webhook-url` moves them, which is how a liaison rotation hands over after the operator swaps in the new thread's key.
+- The new setting is a trust setting no relay session can change. The relay skill tells the agent that a pinned connection's header also means no confirmation.
+
+### Tests
+- `relay-liaison-key.test.js` runs the real client against the box, in both directions:
+  - a signed message is trusted with zero rows and zero notices, while the same binding's connector message taps;
+  - a forged fingerprint, a removed key and a replaced key end the pin;
+  - a bad signature, a replay, a stale timestamp, an unregistered agent and an unsigned request are refused with nothing sent;
+  - the capability is refused for send, history, handoff, unbind and bind once the key is in, and renew moves the wake URL;
+  - the key file is made 0600, and a 0644 key file is refused;
+  - changing the key list is refused to the pinned binding.
+
 ## [0.10.264] - 2026-11-10
 
 You can now trust one relay connection like your own Capy threads, without a Capy token: name it in `ALPHACLAW_RELAY_TRUSTED_BINDINGS` and its changes run with no confirmation links, while every other connection keeps them. Before, only attested threads of an owner on `ALPHACLAW_RELAY_CAPY_OWNERS` could skip the links, which trusts every thread that owner has.

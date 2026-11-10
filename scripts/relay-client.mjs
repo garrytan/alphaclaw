@@ -18,6 +18,11 @@
 //   inside other output prints as "[redacted]".
 //   Exit 0 on success, 1 on an error ({error, message} on stderr, the server's
 //   code unchanged), 2 on a usage error.
+//   Liaison key (GST-2323 PR4): keygen writes an Ed25519 key to a 0600 file
+//   and prints only its public key; with --key-file, send, history, result
+//   and renew are signed requests to POST <box>/relay/key/call, with no OIDC
+//   token, capability or access token, and a key file anyone else can read
+//   is refused.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -30,11 +35,18 @@ const kFreshnessMarginMs = 30_000;
 const kRequestTimeoutMs = 120_000;
 const kLoopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const kSecretKeys = new Set(["capability", "handoff_code", "access_token"]);
-const kCommands = ["bind", "renew", "unbind", "send", "reply", "inbox", "history", "result", "handoff", "claim"];
+const kCommands = ["bind", "renew", "unbind", "send", "reply", "inbox", "history", "result", "handoff", "claim", "keygen"];
+// The commands the liaison-key path serves (--key-file), and its wire
+// contract with the box (lib/server/relay/key-auth.js): change both together.
+const kKeyCommands = new Set(["send", "history", "result", "renew"]);
+const kKeyPath = "/relay/key/call";
+const kKeyContentType = "application/vnd.alphaclaw.relay-key+json";
+const keySigningInput = ({ method, path: urlPath, agent, timestamp, nonce, bodyHash }) =>
+  ["alphaclaw-relay-key-v1", method, urlPath, agent, timestamp, nonce, bodyHash].join("\n");
 const kUsage =
   "usage: node relay-client.mjs <" +
   kCommands.join("|") +
-  "> --box <https url> [--capability-file <path>] [--token-file <path>] [command flags]";
+  "> --box <https url> [--capability-file <path>] [--token-file <path>] [--key-file <path>] [command flags]";
 
 const secrets = new Set();
 
@@ -110,6 +122,7 @@ const main = async () => {
         "successor-thread": { type: "string" },
         "code-file": { type: "string" },
         agent: { type: "string" },
+        "key-file": { type: "string" },
       },
     });
   } catch (err) {
@@ -194,6 +207,97 @@ const main = async () => {
       ...(values["confirmation-ref"] !== undefined ? { confirmation_ref: values["confirmation-ref"] } : {}),
     };
   };
+
+  // The liaison key (GST-2323 PR4): an Ed25519 private key that lives only
+  // in a 0600 file on this machine. keygen makes it and prints only the
+  // public key; with --key-file, send, history and result are signed with
+  // it, and no capability or token is read or sent.
+  const keyFileFlag = values["key-file"] ?? process.env.RELAY_CLIENT_KEY_FILE;
+  if (command === "keygen") {
+    const keyFile = path.resolve(keyFileFlag ?? path.join(os.homedir(), ".capy", "work", "relay", "liaison-key.json"));
+    const agent = required("agent");
+    if (!/^capy-[a-z0-9-]{1,43}$/.test(agent)) usage("--agent must be the binding's capy-... agent name.");
+    if (fs.existsSync(keyFile)) fail("key_exists", `${keyFile} already holds a key: remove it first to make a new one.`);
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+    const privateDer = privateKey.export({ format: "der", type: "pkcs8" }).toString("base64url");
+    secrets.add(privateDer);
+    const publicRaw = publicKey.export({ format: "jwk" }).x;
+    writePrivateFile(keyFile, JSON.stringify({ box, agent, private_key: privateDer, public_key: publicRaw }, null, 2));
+    process.stdout.write(
+      JSON.stringify({ agent, box, key_file: keyFile, public_key: publicRaw, env_entry: `${agent}:${publicRaw}` }, null, 2) + "\n",
+    );
+    return;
+  }
+  if (keyFileFlag !== undefined) {
+    if (!kKeyCommands.has(command)) usage(`--key-file serves ${[...kKeyCommands].join(", ")} only.`);
+    const keyFile = path.resolve(keyFileFlag);
+    let stat;
+    try {
+      stat = fs.statSync(keyFile);
+    } catch {
+      fail("key_file_missing", `No liaison key file at ${keyFile}: run keygen first.`);
+    }
+    if ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+      fail("key_file_mode", `Refusing ${keyFile}: it must be owned by you and readable by you only (chmod 600).`, { exitCode: 2 });
+    }
+    let key;
+    try {
+      key = JSON.parse(fs.readFileSync(keyFile, "utf8"));
+    } catch {
+      fail("key_file_invalid", `Cannot read the liaison key file ${keyFile}.`);
+    }
+    if (typeof key?.private_key !== "string" || typeof key.agent !== "string") fail("key_file_invalid", `The liaison key file ${keyFile} has no agent or key.`);
+    secrets.add(key.private_key);
+    if (key.box !== box) fail("box_mismatch", `The liaison key file ${keyFile} belongs to ${key.box}, not ${box}.`);
+    const [keyTool, keyArgs] = {
+      send: () => ["relay_send", { to: required("to"), text: readText(), ...messageOptions() }],
+      history: () => [
+        "relay_history",
+        {
+          with: required("with"),
+          ...(values.limit !== undefined ? { limit: integer("limit") } : {}),
+          ...(values.lane !== undefined ? { lane: values.lane } : {}),
+        },
+      ],
+      result: () => ["relay_result", { result_ref: required("result-ref"), ...(values.part !== undefined ? { part: integer("part") } : {}) }],
+      renew: () => [
+        "relay_renew",
+        { ...(values["webhook-url"] !== undefined ? { webhook_url: values["webhook-url"] } : {}), ...(values.until !== undefined ? { until: values.until } : {}) },
+      ],
+    }[command]();
+    const body = JSON.stringify({ tool: keyTool, args: keyArgs });
+    const timestamp = String(Date.now());
+    const nonce = crypto.randomBytes(18).toString("base64url");
+    const bodyHash = crypto.createHash("sha256").update(body).digest("hex");
+    const privateKey = crypto.createPrivateKey({ key: Buffer.from(key.private_key, "base64url"), format: "der", type: "pkcs8" });
+    const signature = crypto
+      .sign(null, Buffer.from(keySigningInput({ method: "POST", path: kKeyPath, agent: key.agent, timestamp, nonce, bodyHash }), "utf8"), privateKey)
+      .toString("base64url");
+    const response = await fetch(`${box}${kKeyPath}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": kKeyContentType,
+        Accept: "application/json",
+        "x-relay-agent": key.agent,
+        "x-relay-timestamp": timestamp,
+        "x-relay-nonce": nonce,
+        "x-relay-signature": signature,
+      },
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(kRequestTimeoutMs),
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result || typeof result !== "object") {
+      fail(
+        typeof result?.error === "string" ? result.error : "key_call_failed",
+        typeof result?.message === "string" ? result.message : `The box answered ${keyTool} with HTTP ${response.status}.`,
+        { fix: typeof result?.fix === "string" ? result.fix : undefined },
+      );
+    }
+    process.stdout.write(redactText(JSON.stringify(redactValue(result), null, 2)) + "\n");
+    return;
+  }
 
   let tool;
   let args;
