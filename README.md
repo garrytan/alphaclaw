@@ -582,6 +582,14 @@ The Relay page's **Connections** section lists the approved apps and bound threa
 
 If the link expired or was already answered, the page says so and nothing was decided; the thread asks again if it still needs it. Once a day you also get a short digest of what your delegates did.
 
+**Hearing what Capy threads ask your agent.** When a Capy thread sends your agent an ask over the relay, you get a short line about it on your admin notification channels (Telegram, and Slack or a webhook if you set them up), within about a minute:
+
+```
+🛰 @capy-25cf4e98b5b6 (thread `ALPH-92`, lane gbrain, delegate, tailnet, 812 characters) asks: "`re-import yesterday's meeting notes into gbrain`" · queued
+```
+
+The line names the asking agent, its Capy thread (only when Capy vouched for it), its lane and tier, how the call came in, how long the message is, and whether the box queued it, is running it, answered it or refused it. The words in quotes are the thread's own one-line summary (`summary` on `relay_send` and `relay_reply`, `--summary` in `relay-client.mjs`), cleaned of secrets and formatting and cut to 120 characters; the message itself never leaves the Relay page. Asks are batched: at most one notice a minute with 10 lines (the rest are counted), and at most 20 notices an hour (past that, the next notice says how many asks went unmentioned). A plain "thanks" or "got it" gets no line. A notice is information only: it has no link or button, and replying to it talks to your agent, not to the thread, so it ends with a reminder that only 🔐 confirmation links approve relay actions. The **Important only** and **Disabled** notification settings silence these notices, and `ALPHACLAW_RELAY_NARRATION=off` in the deployment environment turns them off (asks that arrive while it is off are never sent later).
+
 Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from `.env`: the agent must not be able to switch off its own audit trail or lift its caps. Errors and their fixes: [`lib/setup/skills/alphaclaw-admin/relay.md`](lib/setup/skills/alphaclaw-admin/relay.md).
 
 ## Environment Variables
@@ -666,6 +674,7 @@ Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from 
 | `ALPHACLAW_RELAY_OAUTH_REDIRECT_URIS` | Optional | Comma-separated extra OAuth redirect URIs (exact `https://` URLs) an MCP client may register for `/relay/mcp`; Capy's `https://capy.ai/web/callbacks/mcp` is always allowed. Deployment env only. |
 | `ALPHACLAW_RELAY_MAX_BINDINGS_PER_CLIENT` | Optional | Active relay bindings (threads) one OAuth connection may hold; a new bind past it is refused with `binding_limit`, renewing one is always allowed (default `20`). Deployment env only. |
 | `ALPHACLAW_RELAY_DELEGATE_AGENTS` | Optional | Deprecated: use **Make delegate** on the Relay page. Comma-separated `capy-…` relay agents that act as you on this box. Imported once as delegate grants when the relay starts; afterwards it only covers an agent with no grant, a revoked grant always wins over it, and removing an agent from it does not revoke it (use Revoke delegate). Empty by default. Deployment env only. |
+| `ALPHACLAW_RELAY_NARRATION` | Optional | `off` (or `0`, `false`) stops the [notices about what Capy threads ask your agent](#agent-relay); asks that arrive while it is off are never sent later. On by default. Deployment env only. |
 | `ALPHACLAW_RELAY_DELEGATE_TOOLS` | Optional | Comma-separated extra tool names, or `server__*` prefixes for MCP servers, a delegate's turn may use beyond the built-in list. Deployment env only. |
 | `ALPHACLAW_RELAY_CAPY_ORG` | Optional | Your Capy organization id. With `ALPHACLAW_RELAY_CAPY_AUDIENCE`, lets threads of a project you trust on the Relay page connect with the token Capy signs for their machine (Generic OIDC), with no consent page. Unset by default (off). Deployment env only. |
 | `ALPHACLAW_RELAY_CAPY_AUDIENCE` | Optional | The **Audience** you entered in Capy's Generic OIDC setup for that project; tokens for any other audience are refused. Deployment env only. |

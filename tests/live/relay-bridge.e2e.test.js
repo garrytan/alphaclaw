@@ -58,6 +58,9 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   const fakeGbrainDir = liveHelpers.mkTemp("alphaclaw-live-relay-gbrain-");
   const scratchBrain = kRealGbrain ? require("./gbrain-scratch").createScratchBrain(kRealGbrain) : null;
   let archiveClockOffsetMs = 0;
+  // Narration (GST-2304) runs on a clock the test moves ahead, so the case
+  // need not sit out the 30-second and 60-second windows.
+  let narrationClockOffsetMs = 0;
   const fakeGbrainCalls = () =>
     fs.existsSync(path.join(fakeGbrainDir, "calls.jsonl"))
       ? fs.readFileSync(path.join(fakeGbrainDir, "calls.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
@@ -184,6 +187,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
         now: () => Date.now() + archiveClockOffsetMs,
         sleep: async () => {},
       },
+      narrationOptions: { now: () => Date.now() + narrationClockOffsetMs },
       rootDir: kRootDir,
       getSupervisor: () => sidecars.find("relay-engine"),
       resolveAgentId: () => "main",
@@ -398,6 +402,51 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       const status = remote.getStatus();
       expect(status.bindings[0]).toMatchObject({ agent: bound.data.agent, lastWakeStatus: "delivered" });
       expect(JSON.stringify(status)).not.toContain(bound.data.capability);
+    },
+    kTestTimeoutMs,
+  );
+
+  it(
+    "the owner gets one narration notice for an ask with a summary, naming the sender, and none for an acknowledgment (GST-2304)",
+    async () => {
+      expect(remoteTool).toBeTruthy();
+      const narration = relay._internal.state.narration;
+      const narrationNotices = () => ownerNotices.filter((notice) => notice.opts?.eventType === "relay_narration");
+      // Everything sent before this case is narrated first, so the next
+      // notice holds only this case's asks.
+      narrationClockOffsetMs += 2 * 60 * 1000;
+      narration.tick();
+      const before = narrationNotices().length;
+      const as = { as: remoteBound.agent, capability: remoteBound.capability };
+      const asked = await remoteTool("relay_send", { ...as, to: "wintermute", text: "ping-88 please look at the box", summary: "look at the box for ping-88" });
+      expect(asked.isError).toBe(false);
+      expect(asked.data.summary).toBe("look at the box for ping-88");
+      const ack = await remoteTool("relay_send", { ...as, to: "wintermute", text: "thanks", summary: "ack only" });
+      expect(ack.isError).toBe(false);
+      await waitFor(async () => Boolean(relay.getStore().get(asked.data.message_id) && relay.getStore().get(ack.data.message_id)), 60_000, "both messages taken in by the bridge");
+      expect(relay.getStore().get(asked.data.message_id)).toMatchObject({ summary: "look at the box for ping-88", isAck: false, bodyChars: 30, route: "public" });
+      expect(relay.getStore().get(ack.data.message_id).isAck).toBe(true);
+      narrationClockOffsetMs += 2 * 60 * 1000;
+      narration.tick();
+      narrationClockOffsetMs += 2 * 60 * 1000;
+      narration.tick();
+      const fresh = narrationNotices().slice(before);
+      console.log("[live] narration: " + JSON.stringify(fresh.map((notice) => ({ id: notice.opts.id, text: notice.text }))));
+      expect(fresh).toHaveLength(1);
+      const lines = fresh[0].text.split("\n").filter((line) => line.startsWith("🛰"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("@" + remoteBound.agent + " (peer, public URL, 30 characters) asks: \"`look at the box for ping-88`\"");
+      expect(fresh[0].text).not.toContain("ack only");
+      expect(fresh[0].text).not.toContain("ping-88 please");
+      expect(fresh[0].text).toContain("only 🔐 links approve relay actions.");
+      expect(fresh[0].opts).toEqual({ eventType: "relay_narration", id: "relay-narration-" + asked.data.message_id, verbose: true });
+      expect(relay.getStore().get(ack.data.message_id).narration).toBe("ack");
+      // Both runs settle before the next case.
+      await waitFor(
+        async () => [asked, ack].every(({ data }) => !["queued", "dispatched", "completing", "reconciling", "replying"].includes(relay.getStore().get(data.message_id)?.state)),
+        180_000,
+        "both relay runs settled",
+      );
     },
     kTestTimeoutMs,
   );

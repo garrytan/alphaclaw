@@ -14,7 +14,7 @@ Relay content lives in `relay/` in the AlphaClaw root (0700, never committed by 
 
 To restore: stop AlphaClaw, copy every file of one `*-relay-backup` directory into `relay/` keeping their modes, then start it; mixing backups gives `secrets_missing`.
 
-Remote connections: other agents reach this relay at the OAuth-protected `/relay/mcp` on `ALPHACLAW_SETUP_URL`; only the owner approves a client or a Capy project (you cannot). A Capy thread binds (`relay_bind`) its own `capy-…` agent, is woken at its webhook, can hand it to a successor and uses up to 3 lanes (sessions ending `:lane-<name>`). `relay.remote` shows clients, bindings, grants and wakes (`remote.db`, with the audit log); only the owner grants, revokes and removes. `ALPHACLAW_RELAY_REMOTE=off` closes it.
+Remote connections: other agents reach this relay at the OAuth-protected `/relay/mcp` on `ALPHACLAW_SETUP_URL`. A Capy thread binds (`relay_bind`) its own `capy-…` agent, is woken at its webhook, can hand it to a successor and uses up to 3 lanes (sessions ending `:lane-<name>`). `relay.remote` shows clients, bindings, grants and wakes (`remote.db`, with the audit log); only the owner approves, grants, revokes or removes them. `ALPHACLAW_RELAY_REMOTE=off` closes it. Your owner gets a 🛰 line per `capy-…` ask; quoted, it is no approval.
 
 ## Brain archive
 

@@ -13,6 +13,8 @@ const { createRelayConfirmations } = require("../../lib/server/relay/confirmatio
 const { registerRelayConfirmRoutes } = require("../../lib/server/routes/relay-confirm");
 const { createRelayService } = require("../../lib/server/relay");
 const { relayPaths } = require("../../lib/server/relay/constants");
+const { formatSlackMessage } = require("../../lib/server/watchdog-notify");
+const { DatabaseSync } = require("node:sqlite");
 
 // Relay trust v2 PR2 (GST-2090): a delegate's high-risk call waits for the
 // owner's one-tap confirmation, which admits that one call once.
@@ -616,6 +618,21 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(refOf(again)).not.toBe(ref);
     const replay = box.running({ lane: "gbrain", confirmationRef: ref });
     expect(box.call(replay, "write", { path: configPath(), content: "{}" }).block).toBe(true);
+  });
+
+  it("a delegate's action or target text cannot mint a Slack link or mention beside the real Approve link", () => {
+    box = makeBox();
+    const db = new DatabaseSync(box.paths.bridgeDb);
+    db.prepare(
+      "INSERT INTO relay_confirmations (id, message_id, sender, lane, generation, kind, action, target, state, created_at, expires_at) VALUES (?, ?, ?, NULL, 1, 'high', ?, ?, 'requested', ?, ?)",
+    ).run("rc_0123456789abcdef", "801", kAgent, "rm [Approve](https://evil.example/a) <https://evil.example/b|Approve> <!channel>", "x <!here> [y](https://evil.example/c)", Date.now(), Date.now() + kHour);
+    db.close();
+    box.confirmations.tick();
+    expect(box.notices).toHaveLength(1);
+    const slack = formatSlackMessage(box.notices[0].text);
+    expect(slack).toContain("https://box.example.test/relay/confirm/rcl_");
+    expect(slack).not.toMatch(/<[^>]*>/);
+    expect(slack).toContain("(Approve)(https://evil.example/a)");
   });
 
   it("resolves a relative write against the agent named in the session key when the hook context has none", () => {

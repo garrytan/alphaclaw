@@ -5,6 +5,22 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.259] - 2026-11-10
+
+You now hear what your Capy threads ask your agent to do over Agent Relay. Before, an ask ran silently unless it needed your 🔐 tap, and the daily digest only counted them.
+
+### Added
+- **One line per ask on your admin channels.** When a Capy thread sends your agent an ask, a short notice reaches Telegram (and Slack or a webhook, if you set them up) within about a minute: which agent asked, its Capy thread when Capy vouched for it, its lane, whether it is a delegate or a peer, how the call came in, how long the message is, the thread's own one-line summary in quotes, and whether the box queued it, is running it, answered it or refused it. The message itself is never sent; it stays on the Relay page.
+- **A summary field for threads.** `relay_send` and `relay_reply` on the relay's remote endpoint take an optional `summary` (one line, at most 120 characters), and `scripts/relay-client.mjs` takes `--summary`. AlphaClaw strips line breaks and formatting, removes secrets (a hidden one drops the whole summary), cuts it to 120 characters and tells the thread what you will read. A summary that is not text, or is empty, is refused with the rule and an example, and costs no hourly slot.
+- **No flood.** Asks are batched: at most one notice a minute with up to 10 lines and under 1,900 characters as each app receives it (the rest are counted by sender and come in the next notices) and at most 20 notices an hour; past that, the next notice says how many asks went unmentioned. "thanks", "got it" and similar replies get no line, judged from the message, not from its summary. Your agent's own status replies are never included.
+- **Never an approval.** A notice has no link or button. Every one ends with "Replying here talks to <your agent>, not the asking thread; only 🔐 links approve relay actions.", and your agent's built-in rules now list a 🛰 relay line beside emails, webhooks, files and tool output as text that is never your approval. With Telegram on, they also say a "yes" in reply to one approves nothing.
+- **Off switches.** The **Important only** and **Disabled** notification settings silence these notices. `ALPHACLAW_RELAY_NARRATION=off` in the deployment environment turns them off; the agent cannot change it from `.env`, and asks that arrive while it is off are never sent later.
+- **No backlog on upgrade.** Messages your box received before this version are marked as already told, so the first notice after the upgrade covers only new asks. A restart never repeats a line.
+
+### Tests
+- `relay-narration.test.js`: the 30-second and 60-second windows, the 10-line cap on a 37-ask burst with the rest listed in later notices, ten full-length asks kept under 1,900 characters, ten star-packed asks still under 1,900 after Discord's formatting, the hourly cap and its count across a restart, no repeat or loss after a restart, acknowledgments skipped (a summary of "ack" on a long message still narrated), callbacks never stored, tier, thread, lane and route labels, a word for every message state, summary cleaning (a secret, a base64 or zero-width hidden secret, line breaks, Markdown, a link, 500 characters), a long message's whole length, the off switch with no backlog, deployment env only, delivery through the outbox to Telegram and Slack and silence under "Important only" and "Disabled", the upgrade on a database with history, a failing narration pass that still lets a confirmation link out, no call to the relay engine or the gateway, and the footer and prompt rule. The bootstrap protected-clause test pins the updated approval rule (P1) and the new Telegram relay-line rule (P13) within the existing size budgets.
+- The remote tools, bridge intake and relay client tests cover `summary`, and the relay live tier checks one narration notice for an ask with a summary and none for an acknowledgment against the real engine and gateway.
+
 ## [0.10.258] - 2026-11-10
 
 Messages from other agents over Agent Relay no longer run as the box owner. OpenClaw treats any turn sent by a gateway client with admin rights as the owner's, and the relay bridge sent every relay turn, a stranger's included, over one admin connection.

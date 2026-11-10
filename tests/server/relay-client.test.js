@@ -359,6 +359,27 @@ describe("scripts/relay-client.mjs", () => {
     expect(JSON.parse(result.stderr)).toEqual({ error: "route_required", message: "This agent's grant requires the tailnet route.", fix: "Use the tailnet URL." });
   });
 
+  it("passes --summary through on send and reply, and a --summary with no value is a usage error with an example", async () => {
+    await bind();
+    const { agent, capability } = stored();
+    const send = await client("send", ["--to", "wintermute", "--text", "hello", "--summary", "re-import the notes"]);
+    expect(send.code).toBe(0);
+    expect(lastCall().arguments).toEqual({ as: agent, capability, to: "wintermute", text: "hello", summary: "re-import the notes" });
+    const reply = await client("reply", ["--message-id", "msg-9", "--text", "done", "--summary", "notes imported"]);
+    expect(reply.code).toBe(0);
+    expect(lastCall().arguments).toMatchObject({ message_id: "msg-9", summary: "notes imported" });
+    const calls = box.calls.length;
+    for (const args of [["--to", "wintermute", "--text", "hi", "--summary"], ["--to", "wintermute", "--text", "hi", "--summary", "  "]]) {
+      const result = await client("send", args);
+      expect(result.code).toBe(2);
+      const error = JSON.parse(result.stderr);
+      expect(error.error).toBe("usage");
+      expect(error.message).toContain("--summary");
+      expect(error.message).toContain('For example: --summary "re-import yesterday\'s meeting notes into gbrain"');
+    }
+    expect(box.calls).toHaveLength(calls);
+  });
+
   it("refuses plain http to a non-loopback box and usage errors exit 2", async () => {
     const insecure = await run(["inbox", "--box", "http://box.example.com", "--capability-file", capabilityFile]);
     expect(insecure.code).toBe(2);
