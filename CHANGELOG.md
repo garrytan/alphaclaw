@@ -20,6 +20,13 @@ Threads on Capy machines can now connect to your box's Agent Relay with the iden
 
 ### Tests
 - `relay-capy-oidc.test.js`: the token table (wrong issuer, audience, org or subject, `alg: none`, HS256 with the public key, RS512, tampered payload, unknown and rotated kid, weak key, expiry and skew, JWKS failures and rate limit). `relay-capy-attestation.test.js`: the exchange (no grant, foreign resource, three sequential and two concurrent exchanges of one token, a token id reused by another grant), binding as the token's thread, one token on five calls over 40 minutes, another thread refused, a replaced machine kept, a run outliving its token, revoke, and handoff by attestation. `relay-client.test.js`: the client against a fake box, redaction included. `relay-confirm.test.js` and `relay-lanes.test.js`: the new risk cases, the owner-only page and the 2-hour queue re-check.
+Moving a webhook back to the shared webhook token now clears a person's confirmation of its OAuth callback URL, so that URL can't start delivering again behind your back when the hook later moves off the shared token.
+
+### Fixed
+- **A confirmed OAuth callback stays confirmed only while the hook verifies its sender.** While a hook is on the shared token, the agent can read and rotate its callback URL. Before, a person's earlier confirmation survived that time, so once the hook moved back to its own token or a signed method, a callback URL the agent had seen delivered again with no new check by a person. AlphaClaw now clears the confirmation when the hook goes back to the shared token. If the confirmation can't be cleared, the hook stays where it was. After the hook moves off the shared token again, a person rotates the callback URL once, and AlphaClaw's notice says so.
+
+### Tests
+- `hook-ingress-own-tokens.test.js`: an alias confirmed by a person is refused after the hook goes back to the shared token and off it again, until a person rotates it, and a failed clear leaves the hook's method unchanged.
 
 ## [0.10.247] - 2026-11-10
 
