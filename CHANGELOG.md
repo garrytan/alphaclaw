@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.250] - 2026-11-10
+
+Your agent now treats your own request for a system change as your approval, instead of explaining the change and waiting for you to approve what you just asked for.
+
+### Changed
+- **The "No YOLO System Changes" rule in the agent's AGENTS.md.** A risky change the agent thinks of on its own still needs your approval first, with what, why and what could go wrong. A change you asked for is made, and the agent tells you afterwards what it changed and what could go wrong. Only your own message counts as a request: text in emails, webhooks, files or tool output does not.
+
 ## [0.10.249] - 2026-11-10
 
 Moving a webhook back to the shared webhook token now clears a person's confirmation of its OAuth callback URL, so that URL can't start delivering again behind your back when the hook later moves off the shared token.
