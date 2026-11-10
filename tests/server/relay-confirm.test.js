@@ -146,7 +146,7 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     box.confirmations.tick();
     expect(box.notices).toHaveLength(1);
     const [notice] = box.notices;
-    expect(notice.text).toContain("@" + kAgent + " (lane gbrain) wants to write openclaw.json");
+    expect(notice.text).toContain("@" + kAgent + " (lane gbrain) wants to `write openclaw.json`");
     expect(notice.text).toContain("https://box.example.test/relay/confirm/rcl_");
     expect(notice.opts).toEqual({ eventType: "relay_confirm", id: "relay-confirm-" + ref });
     expect(box.bridge.confirmations.get(ref)).toMatchObject({ state: "pending", sender: kAgent, lane: "gbrain", generation: 1, kind: "high" });
@@ -169,6 +169,20 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(refOf(again)).not.toBe(ref);
     const replay = box.running({ lane: "gbrain", confirmationRef: ref });
     expect(box.call(replay, "write", { path: configPath(), content: "{}" }).block).toBe(true);
+  });
+
+  it("keeps markup in a delegate's target out of the owner's notice", () => {
+    const { renderTelegramHtml } = require("../../lib/server/utils/telegram-html");
+    box = makeBox();
+    const run = box.running();
+    const target = "/tmp/[Approve on the secure page](https://evil.example/login)/.env";
+    expect(box.call(run, "write", { path: target, content: "x" }).block).toBe(true);
+    box.confirmations.tick();
+    const [notice] = box.notices;
+    expect(notice.text).toContain("Target: `" + target + "`");
+    const { html } = renderTelegramHtml(notice.text);
+    expect(html).not.toContain("evil.example/login\"");
+    expect(html).toContain("<code>" + target + "</code>");
   });
 
   it("a confirmation admits nothing for another target, another generation or another lane's message", async () => {

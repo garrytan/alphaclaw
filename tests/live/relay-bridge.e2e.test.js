@@ -456,7 +456,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
 
       await waitFor(async () => ownerNotices.some((notice) => notice.opts?.id === "relay-confirm-" + ref), 30_000, "the owner's confirmation link");
       const notice = ownerNotices.find((entry) => entry.opts?.id === "relay-confirm-" + ref);
-      expect(notice.text).toContain("wants to write .env.relay-probe");
+      expect(notice.text).toContain("wants to `write .env.relay-probe`");
       expect(notice.text).not.toContain("confirm-probe-1");
       const token = notice.text.match(/\/relay\/confirm\/(rcl_[a-f0-9]{48})/)[1];
       expect(await relay.confirmations.decide({ token, approve: true, by: "owner" })).toMatchObject({ ok: true, state: "confirmed" });
