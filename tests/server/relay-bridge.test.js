@@ -235,6 +235,21 @@ describe("relay bridge", () => {
     expect(ctx.engine.replies[0].text).toContain("(code hop_limit)");
   });
 
+  it("stores the sender's cleaned summary, the body's length, the ack flag and the intake tier on every row, refused ones included (GST-2304)", async () => {
+    ctx = setup();
+    await ctx.tick();
+    const asked = ctx.engine.dm("capy-sum1", "please re-import the notes", { relay_summary: "re-import\nthe notes, summary-only words" });
+    const thanks = ctx.engine.dm("capy-sum1", "got it.", { relay_summary: "ack" });
+    const looped = ctx.engine.dm("capy-sum2", "again", { relay_hop: kHopLimit, relay_summary: "loop" });
+    await ctx.tick();
+    expect(ctx.store.get(asked)).toMatchObject({ summary: "re-import the notes, summary-only words", bodyChars: 26, isAck: false, intakeTrust: "peer", narratedAt: null });
+    expect(ctx.store.get(thanks)).toMatchObject({ summary: "ack", bodyChars: 7, isAck: true });
+    expect(ctx.store.get(looped)).toMatchObject({ state: "hop_limit", summary: "loop", bodyChars: 5, isAck: false, intakeTrust: "peer" });
+    // The summary never reaches the agent's turn; only the body does.
+    expect(ctx.gateway.sends).toHaveLength(1);
+    expect(ctx.gateway.sends.map((send) => send.message).join("\n")).not.toContain("summary-only words");
+  });
+
   it("caps one sender per hour and lets the next hour through", async () => {
     const nowRef = { value: Date.parse("2026-11-06T10:00:00Z") };
     ctx = setup({ hourlyCap: 2, nowRef, maxConcurrent: 4 });

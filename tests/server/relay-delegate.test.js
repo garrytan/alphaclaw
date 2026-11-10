@@ -392,6 +392,56 @@ describe("relay delegates: remote tools and the remote side", () => {
     return { engine, set, send };
   };
 
+  it("relay_send and relay_reply take a one-line summary for the owner's narration, cleaned before it reaches the engine (GST-2304)", async () => {
+    box = makeBox();
+    const delegate = tools();
+    const plain = await delegate.send({ summary: "re-import\nyesterday's `notes` sk-ant-api03-" + "a".repeat(40) });
+    expect(plain.result.isError).toBeFalsy();
+    expect(delegate.engine.sent[0].metadata.relay_summary).toBe(plain.body.summary);
+    expect(plain.body.summary).toMatch(/^re-import yesterday's 'notes' /);
+    expect(plain.body.summary).not.toContain("a".repeat(40));
+    expect(plain.body.summary_truncated).toBeUndefined();
+
+    const long = await delegate.send({ summary: "z".repeat(300) });
+    expect(long.body).toMatchObject({ summary: "z".repeat(120), summary_truncated: true });
+    expect(delegate.engine.sent[1].metadata.relay_summary).toBe("z".repeat(120));
+
+    const none = await delegate.send({});
+    expect(none.body.summary).toBeUndefined();
+    expect(delegate.engine.sent[2].metadata).not.toHaveProperty("relay_summary");
+
+    const { sha256 } = require("../../lib/server/relay/remote-store");
+    const before = box.remote.countAgentAudit("remote_send", kAgent, 0);
+    for (const bad of [42, { text: "x" }, "  \n\t ", "\u200b\u0007"]) {
+      const refused = await delegate.send({ summary: bad });
+      expect(refused.result.isError).toBe(true);
+      expect(refused.body).toMatchObject({ error: "invalid_input" });
+      expect(JSON.stringify(refused.body)).toContain("at most 120 characters");
+      expect(JSON.stringify(refused.body)).toContain("leave summary out");
+    }
+    expect(box.remote.countAgentAudit("remote_send", kAgent, 0)).toBe(before);
+    expect(delegate.engine.sent).toHaveLength(3);
+
+    const { kRelayWithheldText } = require("../../lib/server/relay/constants");
+    const masked = createRemoteRelayTools({
+      engine: delegate.engine,
+      store: box.remote,
+      getWorkspaceKey: () => "rk",
+      getConfig: () => ({ hourlyCap: 30, maxBindingsPerClient: 20, wakeHosts: ["api.capy.ai"], delegateAgents: [kAgent] }),
+      maskText: (text) => (text.includes("c2VjcmV0") ? kRelayWithheldText : text),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    box.remote.db.prepare("UPDATE relay_bindings SET capability_hash = ? WHERE agent = ?").run(sha256("arcap_test"), kAgent);
+    const withheld = await masked.call({ clientId: kClient, name: "relay_send", args: { as: kAgent, capability: "arcap_test", to: "wintermute", text: "hi", summary: "use c2VjcmV0" } });
+    expect(JSON.parse(withheld.content[0].text)).toMatchObject({ summary: null, summary_withheld: true });
+    expect(delegate.engine.sent[3].metadata).not.toHaveProperty("relay_summary");
+
+    const definitions = Object.fromEntries(require("../../lib/server/relay/remote-tools").kRemoteToolDefinitions.map((definition) => [definition.name, definition.inputSchema.properties]));
+    expect(definitions.relay_send.summary.description).toContain("what you are asking the box to do");
+    expect(definitions.relay_reply.summary.description).toContain("what this reply asks or tells the box");
+    expect(definitions.relay_history.summary).toBeUndefined();
+  });
+
   it("relay_send says which tier the message got, and records an approval only for a delegate", async () => {
     box = makeBox();
     const delegate = tools();

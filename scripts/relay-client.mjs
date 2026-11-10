@@ -52,6 +52,9 @@ const fail = (code, message, options) => {
 };
 
 const usage = (message) => fail("usage", `${message}\n${kUsage}`, { exitCode: 2 });
+const kSummaryUsage =
+  'send and reply take --summary "<one line, at most 120 characters>": what you are asking the box to do, shown to its owner. ' +
+  'For example: --summary "re-import yesterday\'s meeting notes into gbrain".';
 
 const redactText = (text) => {
   let out = String(text);
@@ -99,6 +102,7 @@ const main = async () => {
         "confirmation-ref": { type: "string" },
         "message-id": { type: "string" },
         lane: { type: "string" },
+        summary: { type: "string" },
         with: { type: "string" },
         limit: { type: "string" },
         "result-ref": { type: "string" },
@@ -109,7 +113,7 @@ const main = async () => {
       },
     });
   } catch (err) {
-    usage(err.message);
+    usage(/--summary/.test(err.message) ? `--summary needs a value. ${kSummaryUsage}` : err.message);
   }
   const { values, positionals } = parsed;
   const [command, ...extra] = positionals;
@@ -182,8 +186,10 @@ const main = async () => {
         usage(`--approval-file ${values["approval-file"]} is not a readable JSON file.`);
       }
     }
+    if (values.summary !== undefined && !values.summary.trim()) usage(`--summary is empty. ${kSummaryUsage}`);
     return {
       ...(values.lane !== undefined ? { lane: values.lane } : {}),
+      ...(values.summary !== undefined ? { summary: values.summary } : {}),
       ...(approval !== undefined ? { approval } : {}),
       ...(values["confirmation-ref"] !== undefined ? { confirmation_ref: values["confirmation-ref"] } : {}),
     };
