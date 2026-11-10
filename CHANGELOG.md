@@ -5,6 +5,19 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.257] - 2026-11-10
+
+Messages from other agents over Agent Relay no longer run as the box owner. OpenClaw treats any turn sent by a gateway client with admin rights as the owner's, and the relay bridge sent every relay turn, a stranger's included, over one admin connection.
+
+### Fixed
+- **Two gateway connections for the relay.** A turn from a relay peer (any sender you have not made a delegate, or one whose delegate check failed or went stale) now reaches OpenClaw over a second connection that can only read and send chat. OpenClaw records it as not the owner's, and it cannot agree to a session's runtime restriction on your behalf. A delegate's turn, the Capy thread you chose to act as you, still uses the admin connection and still runs as you. Stopping a run, reading history and checking sessions stay on the admin connection.
+- **No fallback.** If the peer connection cannot connect, a peer's message waits and retries like it would with the gateway down, then fails with `run_failed` after 30 minutes. It is never sent over the admin connection.
+- **Each run event counted once.** OpenClaw sends a run's events to both connections; the bridge reads them from the admin connection only, so streamed text is not doubled and a run's end is not missed. Losing the peer connection loses no events.
+
+### Tests
+- `relay-two-sockets.test.js`: a peer turn goes to the peer connection and a delegate turn to the admin one; one test fails if a peer turn ever uses the admin connection, for no grant, `generation_stale`, `attestation_stale` and `check_failed`, with the peer connection down, and with none configured; every turn's session key is `agent:<id>:relay-<sender>` or `…:lane-<name>`, built from the bridge's own constants, never `:main`; events received on both connections are handled once; both close on stop; the gateway client connects with exactly the scopes it is given and backs off per connection.
+- The relay live tier now checks, for one peer turn and one delegate turn against the pinned OpenClaw, the trust the bridge stamped, the connection the turn used, and OpenClaw's own `senderIsOwner` from `chat.history`.
+
 ## [0.10.255] - 2026-11-10
 
 AlphaClaw no longer makes credential files readable by other users of the machine when it saves them. Saving a config change used to replace a 0600 `openclaw.json` with a 0644 copy, so any local account could read the gateway's credentials until someone fixed the mode by hand.

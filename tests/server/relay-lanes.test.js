@@ -60,6 +60,7 @@ describe("relay lanes: the bridge", () => {
       getAuth: () => ({ workspaceKey: "rk", agentToken: "at", agentName: "wintermute" }),
       store,
       requestGateway,
+      requestPeerGateway: requestGateway,
       resolveAgentId: () => "main",
       config: { maxConcurrent, hourlyCap: 30 },
       resolveSenderTrust: vi.fn(verdict),
