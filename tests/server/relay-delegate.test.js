@@ -144,7 +144,7 @@ describe("relay delegates: the guard's tiers", () => {
     for (const toolName of ["exec", "process", "read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "sessions_list", "tool_search", "dispatch_action", "tool_call", "EXEC"]) {
       expect(call(toolName, { command: "gbrain put x" }), toolName).toEqual({});
     }
-    for (const toolName of ["message", "sessions_history", "sessions_search", "sessions_send", "sessions_spawn", "subagents", "automations", "cron", "gateway", "plugins", "secrets", "ask_user", "nodes", "computer", "screen", "terminal", "browser", "openclaw", "skill_workshop", "personal_instructions", "github_publish", "relay__relay_send", "aside__click", "brand_new_tool"]) {
+    for (const toolName of ["message", "sessions_send", "sessions_spawn", "subagents", "cron", "gateway", "plugins", "secrets", "ask_user", "nodes", "computer", "screen", "terminal", "browser", "openclaw", "skill_workshop", "personal_instructions", "github_publish", "relay__relay_send", "aside__click", "brand_new_tool"]) {
       const result = call(toolName, { action: "send", target: "@lupe" });
       expect(blocked(result), toolName).toBe(true);
       expect(result.blockReason).toContain("[relay-guard] " + toolName + " is not available to a delegate relay session");
@@ -154,6 +154,35 @@ describe("relay delegates: the guard's tiers", () => {
     expect(blocked(call("session_status", { model: "x" }))).toBe(true);
     expect(blocked(call("session_status", { sessionKey: "agent:main:main" }))).toBe(true);
     expect(call("session_status", {})).toEqual({});
+  });
+
+  it("a delegate reads automations and its own relay sessions; an automation change waits for the owner and other sessions stay closed", () => {
+    box = makeBox();
+    box.message();
+    register();
+    for (const action of ["status", "list", "get", "runs", "next_check", "LIST"]) expect(call("automations", { action, jobId: "job-1" }), action).toEqual({});
+    for (const [params, label] of [
+      [{ action: "add", job: { name: "nightly" } }, "automations add nightly"],
+      [{ action: "update", jobId: "job-1", patch: { enabled: false } }, "automations update job-1"],
+      [{ action: "remove", jobId: "job-1" }, "automations remove job-1"],
+      [{ action: "run", jobId: "job-1" }, "automations run job-1"],
+      [{ action: "wake" }, "automations wake"],
+    ]) {
+      const held = call("automations", params);
+      expect(blocked(held), label).toBe(true);
+      expect(held.blockReason).toContain(label + " needs your owner's confirmation");
+    }
+    expect(call("automations", { action: "explode" }).blockReason).toContain("automations action explode is not available to a delegate relay session");
+    expect(call("sessions_history", { sessionKey: kSession })).toEqual({});
+    expect(call("sessions_history", { sessionKey: kSession.toUpperCase() + ":LANE-BUILD" })).toEqual({});
+    expect(call("sessions_search", { query: "deploy", sessionKey: kSession + ":lane-build" })).toEqual({});
+    for (const params of [{}, { sessionKey: "agent:main:main" }, { sessionKey: "agent:main:telegram:direct:42" }, { sessionKey: kSession + "0" }, { sessionKey: kSession + ":lane-" }, { sessionKey: kSession, sessionId: "s-1", messageId: "m" }, { sessionKey: "current" }]) {
+      for (const toolName of ["sessions_history", "sessions_search"]) {
+        const result = call(toolName, { query: "deploy", ...params });
+        expect(blocked(result), toolName + " " + JSON.stringify(params)).toBe(true);
+        expect(result.blockReason).toContain("[relay-guard] " + toolName);
+      }
+    }
   });
 
   it("the operator's ALPHACLAW_RELAY_DELEGATE_TOOLS adds exact names and server prefixes", () => {

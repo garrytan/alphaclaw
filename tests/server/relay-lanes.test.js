@@ -231,6 +231,26 @@ describe("relay lanes: the bridge", () => {
     }
   });
 
+  it("a Capy thread's long message reaches the box whole, and only from the sender that stored it (PR4)", async () => {
+    const ctx = setup();
+    try {
+      await ctx.tick();
+      const whole = Array.from({ length: 900 }, (_, index) => "row " + index + " " + "z".repeat(20)).join("\n");
+      ctx.store.saveLongMessage({ ref: "rl_" + "a".repeat(24), sender: kAgent, text: whole });
+      ctx.engine.dm(kAgent, whole.slice(0, 12000) + "\n\n[Relay: long]", { relay_long_ref: "rl_" + "a".repeat(24) });
+      ctx.store.saveLongMessage({ ref: "rl_" + "b".repeat(24), sender: kOther, text: "someone else's text" });
+      ctx.engine.dm(kAgent, "short engine text", { relay_long_ref: "rl_" + "b".repeat(24), relay_lane: "evals" });
+      await ctx.tick();
+      expect(ctx.sends).toHaveLength(2);
+      expect(ctx.sends[0].message).toContain(whole);
+      expect(ctx.sends[0].message).not.toContain("[Relay: long]");
+      expect(ctx.sends[1].message).toContain("short engine text");
+      expect(ctx.sends[1].message).not.toContain("someone else's text");
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("a long answer to a sender with no relay_result (not a capy- agent) goes out whole", async () => {
     const ctx = setup({ verdict: () => ({ trust: "peer", reason: "not_bound" }) });
     try {
