@@ -319,4 +319,47 @@ describe("server/oauth-callback-middleware mapping selection and rate budget", (
       expect(calls).toHaveLength(10);
     });
   });
+
+  describe("an alias that changes while its body is still arriving", () => {
+    const createDirectApp = (rows) => {
+      const seen = [];
+      const app = express();
+      app.use(express.json());
+      const middleware = createOauthCallbackMiddleware({
+        getOauthCallbackById: () => rows.shift() ?? null,
+        webhookMiddleware: (req, res) => {
+          seen.push(req.alphaclawHookAliasConfirmed);
+          res.status(200).json({ ok: true });
+        },
+      });
+      app.all("/oauth/:id", middleware);
+      return { app, seen };
+    };
+
+    it("takes the confirmation from a read after the body parse, not before", async () => {
+      const { app, seen } = createDirectApp([
+        { callbackId: "abc123", hookName: "crm", ownerConfirmedAt: "2026-11-10T00:00:00.000Z" },
+        { callbackId: "abc123", hookName: "crm", ownerConfirmedAt: null },
+      ]);
+      const response = await request(app)
+        .post("/oauth/abc123")
+        .type("form")
+        .send("code=AUTH&state=STATE");
+      expect(response.status).toBe(200);
+      expect(seen).toEqual([false]);
+    });
+
+    it("refuses a request whose alias was rotated or deleted while it was in flight", async () => {
+      const { app, seen } = createDirectApp([
+        { callbackId: "abc123", hookName: "crm", ownerConfirmedAt: "2026-11-10T00:00:00.000Z" },
+        null,
+      ]);
+      const response = await request(app)
+        .post("/oauth/abc123")
+        .type("form")
+        .send("code=AUTH&state=STATE");
+      expect(response.status).toBe(404);
+      expect(seen).toEqual([]);
+    });
+  });
 });

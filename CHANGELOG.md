@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.251] - 2026-11-10
+## [0.10.252] - 2026-11-10
 
 A deployment that holds OpenClaw below AlphaClaw's pin on purpose no longer opens a critical version-mismatch incident on every boot. Boxes that hold OpenClaw 2026.10.9 under a release that pins 2026.11.2 now boot clean and notify nobody, while a version nobody chose still raises the alarm.
 
@@ -16,6 +16,20 @@ A deployment that holds OpenClaw below AlphaClaw's pin on purpose no longer open
 ### Tests
 - `guards/openclaw-hold.guard.test.js`: boots a template-shaped install tree through the real runtime, boot report, watchdog and incident tracker. A hold at the floor opens no incident and notifies nobody; an undeclared version, a hold naming another version and a hold below the floor each open a critical incident and notify. The hold floor must stay at or below the pin.
 - `openclaw-pin-state`, `boot-report`, `boot-report-steps`, `watchdog`, `doctor-deterministic-checks` and the pin-warning frontend test cover held, unexpected and too-old installs.
+
+## [0.10.251] - 2026-11-10
+
+Three narrow ways an OAuth callback URL could deliver to a webhook without a person's fresh confirmation are closed.
+
+### Fixed
+- **The agent sees a callback URL only when the hook is plainly on the shared token.** If a hook's sender verification settings can't be read, the hook reports the shared token in a misconfigured state. The agent used to see that hook's real callback URL. It now sees it masked.
+- **A callback request in flight is checked against the alias as it is now.** AlphaClaw read the alias before parsing a form_post body and used that copy afterwards. A request started before the hook left the shared token, or before a rotation, could still deliver with the old confirmation. AlphaClaw now reads the alias again after the body arrives. A rotated or deleted alias gets 404, and a cleared confirmation is refused.
+- **Clearing a confirmation is written to disk at once.** The clear now commits with a full sync, like the secret and policy it precedes, so a power loss can't keep a hook's new method while losing the clear.
+
+### Tests
+- `hook-ingress-own-tokens.test.js`: a confirmed hook's callback URL is masked for the agent when the hook's policy can't be read.
+- `oauth-callback-middleware.test.js`: a form_post request takes its confirmation from a read after the body parse, and a request whose alias is gone by then gets 404.
+- `webhooks-db.test.js`: the confirmation clear runs with full sync and then returns to normal sync.
 
 ## [0.10.250] - 2026-11-10
 

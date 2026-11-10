@@ -120,10 +120,25 @@ describe("new hooks take their own token", () => {
     expect(masked.webhook.queryStringUrl).toBe("https://box.example/hooks/orders?token=<this hook's token>");
     const tokenHook = webhooksDomain.ops.find((op) => op.id === "webhooks.detail").redactResponse({
       ok: true,
-      webhook: { hasRuntimeToken: true, ingress: { preset: "token" }, oauthCallbackId: "cb-2", oauthCallbackUrl: "https://box.example/oauth/cb-2", queryStringUrl: "u?token=" + kShared, authHeaderValue: "a" },
+      webhook: { hasRuntimeToken: true, ingress: { preset: "token", state: "token" }, oauthCallbackId: "cb-2", oauthCallbackUrl: "https://box.example/oauth/cb-2", queryStringUrl: "u?token=" + kShared, authHeaderValue: "a" },
     });
     expect(tokenHook.webhook.oauthCallbackUrl).toBe("https://box.example/oauth/cb-2");
     expect(JSON.stringify(tokenHook)).not.toContain(kShared);
+  });
+
+  it("masks a confirmed hook's callback URL for the agent when its policy cannot be read", async () => {
+    const h = createHarness();
+    await request(h.app).post("/api/webhooks").send({ name: "crm", oauthCallback: true });
+    const configPath = path.join(h.openclawDir, "alphaclaw.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    config.hooksIngress.hooks = [];
+    fs.writeFileSync(configPath, JSON.stringify(config));
+    const detail = await request(h.app).get("/api/webhooks/crm");
+    expect(detail.body.webhook.ingress).toMatchObject({ preset: "token" });
+    expect(detail.body.webhook.ingress.state).not.toBe("token");
+    const callbackId = webhooksDb.getOauthCallbackByHook("crm").callbackId;
+    const masked = webhooksDomain.ops.find((op) => op.id === "webhooks.detail").redactResponse(detail.body);
+    expect(JSON.stringify(masked)).not.toContain(callbackId);
   });
 
   it("masks a moved hook's callback URL for the agent when it changes the hook's destination", async () => {
