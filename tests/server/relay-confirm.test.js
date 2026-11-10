@@ -38,6 +38,21 @@ describe("relay confirmations: the risk kinds", () => {
     ["openclaw secrets set", { toolName: "exec", params: { command: "openclaw secrets set OPENAI_API_KEY sk-live-abc123" } }, "high", "openclaw secrets set OPENAI_API_KEY"],
     ["openclaw plugins install", { toolName: "exec", params: { command: "cd /tmp && openclaw plugins install ./evil" } }, "high", "openclaw plugins install ./evil"],
     ["a plain shell command", { toolName: "exec", params: { command: "ls -la" } }, "low", null],
+    ["a shell write to openclaw.json", { toolName: "exec", params: { command: "node -e \"fs.writeFileSync('/data/.openclaw/openclaw.json', x)\"" } }, "high", "run a command on openclaw.json"],
+    ["sed on .env", { toolName: "exec", params: { command: "sed -i s/a/b/ /data/.env" } }, "high", "run a command on .env"],
+    ["a redirect into a relative .env", { toolName: "exec", params: { command: "echo KEY=x >> .env" } }, "high", "run a command on .env"],
+    ["sqlite3 on the bridge database from inside relay/", { toolName: "exec", params: { command: "cd ~/.alphaclaw/relay && sqlite3 bridge.db \"delete from relay_confirmations\"" } }, "high", "run a command on bridge.db"],
+    ["a script opening a relay database", { toolName: "exec", params: { command: "python3 -c \"open('/data/.alphaclaw/relay/remote.db','w')\"" } }, "high", "run a command on remote.db"],
+    ["a copy into the guard's directory", { toolName: "exec", params: { command: "cp x ~/.openclaw/extensions/wm-guards/index.js" } }, "high", "run a command on wm-guards"],
+    ["a read hidden behind a substitution", { toolName: "exec", params: { command: "cat $(echo /data/.env) | sh" } }, "high", "run a command on .env"],
+    ["a plain read of openclaw.json", { toolName: "exec", params: { command: "cat ~/.openclaw/openclaw.json | jq .gateway" } }, "low", null],
+    ["openclaw with a global flag first", { toolName: "exec", params: { command: "openclaw --profile x config set gateway.bind lan" } }, "high", "openclaw config set gateway.bind"],
+    ["a quoted admin route", { toolName: "exec", params: { command: "alphaclaw admin POST '/api/relay/remote/grants'" } }, "high", "alphaclaw admin POST /api/relay/remote/grants"],
+    ["input typed into a running editor", { toolName: "process", params: { action: "write", sessionId: "s1", data: "vi /data/.openclaw/openclaw.json\n" } }, "high", "run a command on openclaw.json"],
+    ["keys sent to a running shell", { toolName: "process", params: { action: "send-keys", sessionId: "s1", keys: ["sqlite3 relay/bridge.db", "Enter"] } }, "high", "run a command on bridge.db"],
+    ["a process poll", { toolName: "process", params: { action: "poll", sessionId: "s1" } }, "low", null],
+    ["a relative relay database write", { toolName: "write", params: { path: "relay/bridge.db" } }, "high", "write bridge.db"],
+    ["a patch touching two protected files", { toolName: "apply_patch", params: { input: "*** Begin Patch\n*** Update File: a/.env\n*** Update File: b/openclaw.json\n*** End Patch" } }, "high", "apply_patch .env,openclaw.json"],
     ["a message", { toolName: "message", params: { to: "@lupe" } }, "medium", null],
     ["a read of openclaw.json", { toolName: "read", params: { path: "/data/.openclaw/openclaw.json" } }, "low", null],
   ])("%s", (_name, call, kind, action) => {
@@ -73,7 +88,7 @@ describe("relay confirmations: the risk kinds", () => {
   });
 });
 
-const makeBox = ({ clock = { now: Date.now() } } = {}) => {
+const makeBox = ({ clock = { now: Date.now() }, grantedBy = "legacy" } = {}) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-confirm-"));
   const paths = relayPaths(rootDir);
   fs.mkdirSync(paths.dir, { recursive: true });
@@ -82,7 +97,7 @@ const makeBox = ({ clock = { now: Date.now() } } = {}) => {
   remote.clients.insert({ client_id: kClient, client_name: "Capy", redirect_uris: ["https://capy.ai/web/callbacks/mcp"] });
   remote.clients.markConsented(kClient);
   remote.bindings.upsert({ agent: kAgent, threadId: "jam_A", clientId: kClient, webhookUrl: "https://api.capy.ai/w/x", until: Date.now() + kHour, capabilityHash: sha256("arcap_test"), agentToken: "at_capy" });
-  const grant = remote.grants.create({ agent: kAgent, createdBy: "admin" });
+  const grant = remote.grants.create({ agent: kAgent, createdBy: grantedBy });
   let next = 800;
   // A delegate turn in flight, as the bridge stamps it right before chat.send.
   const running = ({ lane = null, generation = 1, confirmationRef = null } = {}) => {
@@ -109,6 +124,7 @@ const makeBox = ({ clock = { now: Date.now() } } = {}) => {
     resolveSetupUrl: () => "https://box.example.test/",
     sendToAgent: async (row, text, data) => told.push({ row, text, data }),
     readRevokes: () => 0,
+    resolveGrantCreator: (id) => remote.grants.get(id)?.createdBy || null,
     now: () => clock.now,
     setTimer: () => null,
     clearTimer: () => {},
@@ -275,6 +291,13 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(box.bridge.confirmations.get(ref).state).toBe("cancelled");
   });
 
+  it("holds at most 5 open requests per sender and refuses a sixth without asking the owner", () => {
+    box = makeBox();
+    const ask = (n) => checkConfirmation({ rootDir: box.rootDir, sender: kAgent, messageId: "m" + n, kind: "high", action: "write .env", target: "/x" + n + "/.env" });
+    for (let n = 0; n < 5; n += 1) expect(ask(n).state).toBe("requested");
+    expect(ask(5)).toEqual({ admitted: false, state: "too_many", ref: null });
+  });
+
   it("the owner's message names the action and key, never the value or the message text", () => {
     box = makeBox();
     const run = box.running();
@@ -313,8 +336,8 @@ describe("relay confirmations: the owner's page", () => {
     box = null;
   });
 
-  const setup = (identity = { kind: "legacy", role: "admin" }) => {
-    box = makeBox();
+  const setup = (identity = { kind: "legacy", role: "admin" }, options = {}) => {
+    box = makeBox(options);
     const run = box.running({ lane: "gbrain" });
     box.call(run, "write", { path: path.join(box.rootDir, ".openclaw", "openclaw.json"), content: "{}" });
     box.confirmations.tick();
@@ -356,5 +379,31 @@ describe("relay confirmations: the owner's page", () => {
     expect((await request(app).get("/relay/confirm/" + token)).status).toBe(403);
     expect((await request(app).get("/relay/confirm/not-a-token")).status).toBe(410);
     expect(box.bridge.confirmations.listOpen()[0].state).toBe("pending");
+  });
+
+  it("in team mode takes an answer only from the owner or the admin who added the sender's grant", async () => {
+    const { app, token, setIdentity } = setup({ kind: "member", memberId: "m_other", role: "admin" }, { grantedBy: "member:m_owner" });
+    const refused = await request(app).get("/relay/confirm/" + token);
+    expect(refused.status).toBe(403);
+    expect(refused.text).toContain("Only the owner who connected @" + kAgent);
+    setIdentity({ kind: "member", memberId: "m_owner", role: "admin" });
+    const page = await request(app).get("/relay/confirm/" + token);
+    expect(page.status).toBe(200);
+    const csrf = csrfOf(page.text);
+    setIdentity({ kind: "member", memberId: "m_other", role: "admin" });
+    const otherPost = await request(app).post("/relay/confirm/" + token).set("Origin", "https://box.example.test").type("form").send({ csrf, decision: "approve" });
+    expect(otherPost.status).toBe(403);
+    expect(box.bridge.confirmations.listOpen()[0].state).toBe("pending");
+    setIdentity({ kind: "member", memberId: "m_owner", role: "member" });
+    expect((await request(app).get("/relay/confirm/" + token)).status).toBe(403);
+    setIdentity({ kind: "legacy", role: "admin" });
+    const approved = await request(app).post("/relay/confirm/" + token).set("Origin", "https://box.example.test").type("form").send({ csrf, decision: "approve" });
+    expect(approved.status).toBe(200);
+    expect(box.bridge.confirmations.get(box.told[0].row.id).decidedBy).toBe("owner");
+  });
+
+  it("refuses every member for a grant imported from the env list, which only the owner answers", async () => {
+    const { app, token } = setup({ kind: "member", memberId: "m1", role: "admin" }, { grantedBy: "env:ALPHACLAW_RELAY_DELEGATE_AGENTS" });
+    expect((await request(app).get("/relay/confirm/" + token)).status).toBe(403);
   });
 });
