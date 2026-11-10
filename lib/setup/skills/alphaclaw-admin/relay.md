@@ -126,6 +126,14 @@ Too many active bindings for this connection. Unbind unused threads (relay_unbin
 
 This grant requires the tailnet route. Call over the box's tailnet address, not its public URL. Retry: none.
 
+### tailnet_required
+
+The box serves the relay's client paths (`/relay/key/call`, `/relay/mcp`) only over its tailnet (`ALPHACLAW_RELAY_TAILNET=required`). Call through the box's tailnet address (`relay-client.mjs --via`). Retry: none.
+
+### Tailnet route down (Doctor: "Agent Relay's tailnet route …")
+
+`GET /api/relay/status` → `tailnet` shows the phase. `tailnet_needs_login`: the box has no saved node and no `ALPHACLAW_RELAY_TAILNET_AUTHKEY`. `tailnet_binary_missing`: `tailscale`/`tailscaled` are not on PATH. Anything else retries with backoff; the sidecar log is `logs/sidecars/relay-tailscaled.log`. Never change `ALPHACLAW_RELAY_TAILNET*`, print the auth key, or run `tailscale` against `<root>/relay/tailscale`: ask the owner. Retry: automatic, except the two above.
+
 ### attestation_stale
 
 This call needs a current Capy token. Read CAPY_OIDC_TOKEN_FILE again and exchange it at /relay/oauth/token. Retry: after a new token.

@@ -126,7 +126,7 @@ const guardedConfig = (rootDir, extra = {}) => ({
   ...extra,
 });
 
-const setup = ({ env = capyEnv() } = {}) => {
+const setup = ({ env = capyEnv(), routeOf, gate } = {}) => {
   // The fake clock starts at the real time: the MCP SDK's bearer check
   // (requireBearerAuth) compares a token's expiry with the real clock, so a
   // fixed start date expires every access token an hour after that date.
@@ -159,6 +159,7 @@ const setup = ({ env = capyEnv() } = {}) => {
     wakeOptions: { lookup: async () => [{ address: "34.120.1.1", family: 4 }], requestImpl: () => ({ on() {}, end() {}, destroy() {} }) },
   });
   const app = express();
+  if (gate) app.use(gate);
   app.use(express.json());
   registerRelayRemoteRoutes({
     app,
@@ -166,6 +167,7 @@ const setup = ({ env = capyEnv() } = {}) => {
     requireAdmin: (req, res, next) => next(),
     resolveRequestIdentity: () => ({ kind: "legacy", role: "admin" }),
     relayRemote,
+    routeOf,
     logger: quiet,
   });
   const access = async (claims) =>
