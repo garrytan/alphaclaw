@@ -185,6 +185,19 @@ describe("relay grants: remote tools", () => {
     expect((await call("relay_send", { to: "wintermute", text: "x", lane: "Not a lane!" })).body).toMatchObject({ error: "invalid_input" });
   });
 
+  it("a delegate's confirmation_ref rides its send's metadata; a peer's is dropped and a malformed one refused", async () => {
+    box = makeBox();
+    box.remote.grants.create({ agent: kAgent, createdBy: "admin" });
+    const { sent, call } = toolsFor();
+    expect((await call("relay_send", { to: "wintermute", text: "again", confirmation_ref: "rc_0123456789abcdef" })).body).toMatchObject({ trust: "delegate" });
+    expect(sent[0].metadata).toMatchObject({ relay_confirmation_ref: "rc_0123456789abcdef" });
+    expect((await call("relay_send", { to: "wintermute", text: "x", confirmation_ref: "rc_nope" })).body).toMatchObject({ error: "invalid_input" });
+    const peer = "capy-bbbbbbbbbbbb";
+    box.remote.bindings.upsert({ agent: peer, threadId: "jam_P", clientId: kClient, webhookUrl: "https://api.capy.ai/w/p", until: Date.now() + kHour, capabilityHash: sha256("arcap_peer"), agentToken: "at_peer" });
+    expect((await call("relay_send", { as: peer, capability: "arcap_peer", to: "wintermute", text: "p", confirmation_ref: "rc_0123456789abcdef" })).body).toMatchObject({ trust: "peer" });
+    expect(sent[1].metadata.relay_confirmation_ref).toBeUndefined();
+  });
+
   it("a delegate's sends do not use up its connection's cap for the peers on it", async () => {
     box = makeBox();
     box.remote.grants.create({ agent: kAgent, hourlyCap: 5, createdBy: "admin" });
@@ -318,6 +331,19 @@ describe("relay grants: the remote side and the owner's routes", () => {
       logger: quiet,
     });
     expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "peer", reason: "grant_revoked" });
+  });
+
+  it("a delegate grant is refused while a live peer grant holds the agent, and allowed once that is revoked", async () => {
+    const ctx = setup({ ALPHACLAW_RELAY_DELEGATE_AGENTS: "" });
+    const peer = await request(ctx.app).post("/api/relay/remote/grants").send({ agent: kAgent, tier: "peer" });
+    expect(peer.status).toBe(200);
+    const delegate = await request(ctx.app).post("/api/relay/remote/grants").send({ agent: kAgent });
+    expect(delegate.status).toBe(400);
+    expect(delegate.body.code).toBe("invalid_input");
+    expect(ctx.store.grants.forAgent(kAgent)).toHaveLength(1);
+    await request(ctx.app).post("/api/relay/remote/grants/" + peer.body.grant.id + "/revoke");
+    expect((await request(ctx.app).post("/api/relay/remote/grants").send({ agent: kAgent })).status).toBe(200);
+    expect(remote.resolveDelegate(kAgent)).toMatchObject({ trust: "delegate" });
   });
 
   it("a second delegate grant for a delegate is refused, so one revoke on the page makes it a peer", async () => {
