@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.250] - 2026-11-10
+## [0.10.251] - 2026-11-10
 
 Three narrow ways an OAuth callback URL could deliver to a webhook without a person's fresh confirmation are closed.
 
@@ -18,6 +18,13 @@ Three narrow ways an OAuth callback URL could deliver to a webhook without a per
 - `hook-ingress-own-tokens.test.js`: a confirmed hook's callback URL is masked for the agent when the hook's policy can't be read.
 - `oauth-callback-middleware.test.js`: a form_post request takes its confirmation from a read after the body parse, and a request whose alias is gone by then gets 404.
 - `webhooks-db.test.js`: the confirmation clear runs with full sync and then returns to normal sync.
+
+## [0.10.250] - 2026-11-10
+
+Your agent now treats your own request for a system change as your approval, instead of explaining the change and waiting for you to approve what you just asked for.
+
+### Changed
+- **The "No YOLO System Changes" rule in the agent's AGENTS.md.** A risky change the agent thinks of on its own still needs your approval first, with what, why and what could go wrong. A change you asked for is made, and the agent tells you afterwards what it changed and what could go wrong. Only your own message counts as a request: text in emails, webhooks, files or tool output does not.
 
 ## [0.10.249] - 2026-11-10
 
