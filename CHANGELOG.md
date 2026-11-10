@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.261] - 2026-11-10
+## [0.10.262] - 2026-11-10
 
 Your own Capy threads can now do on the box everything you could, short of changing who is trusted: send messages, schedule work, install plugins, list the secret store and restart the gateway. Before, a thread you owned could change config without a link (since 0.10.260) but still could not send, schedule, install a plugin or restart, so it had to ask you to do those by hand. A restart it asks for runs through AlphaClaw's own restart ladder and is recorded for that thread.
 
@@ -16,11 +16,15 @@ Your own Capy threads can now do on the box everything you could, short of chang
 - **Fewer false refusals.** An edit in the shape the native CLI harness sends (`old_string` and `new_string` plus the same pair again in `edits`) is read as one edit, and the quoted text of `openclaw agent --message` and `openclaw message send --text` no longer counts as a config or plugins change when it only mentions one.
 - **Everyone else is held as before.** Peers, delegates on the plain connector and other owners' threads keep today's tool list, holds and links. One change for them: a command that changes the guard through one of the new shapes above now waits for your tap, where before it ran without one.
 
-### Fixed
-- The attested-delegate tests started their fake clock at a fixed 10:00 UTC on Nov 10; the MCP SDK checks access tokens against the real clock, so from 11:00 UTC that day 18 of their 30 tests failed. The fake clock now starts at the real time.
-
 ### Tests
 - `relay-owner-threads.test.js` drives the real token exchange, bridge, relay guard and internal route: each opened tool runs for an owner thread with zero rows and zero notices and stays refused for an unattested delegate, another owner's thread and a peer; each restart shape lands in the ladder with `relay:<thread code>`, a buried one is refused and starts nothing, and the route answers only a running owner-thread message with the internal secret; each new trust-setting shape is refused; the harness edit and the messaging free text run. `routes-system.test.js` runs the relay restart through the restart path with its source, and `gateway-restart-ladder.test.js` asks it with the routine grace.
+
+## [0.10.261] - 2026-11-10
+
+The relay tests for attested Capy threads pass again at any time of day. They pinned a fake clock to 10:00 UTC on November 10, but the OAuth library checks token expiry against the real clock, so from 11:00 UTC that day 18 of the 30 tests failed on every branch. The fake clock now starts at the real time.
+
+### Fixed
+- `tests/server/relay-attested-delegate.test.js`: the fake clock starts at the current time, so access tokens it mints are not already expired by the real clock.
 
 ## [0.10.260] - 2026-11-10
 
