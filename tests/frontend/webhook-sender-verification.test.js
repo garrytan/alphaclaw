@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canAddSigningKey,
   canSaveSenderPreset,
   findPreset,
   formatIngressCounts,
@@ -90,7 +91,7 @@ describe("frontend/webhook sender verification presets", () => {
     expect(resolvePresetOptions(makeIngress({ presets: serverPresets }))).toBe(serverPresets);
     expect(resolvePresetOptions(makeIngress())).toBe(kSenderVerificationPresets);
     expect(resolvePresetOptions(null)).toBe(kSenderVerificationPresets);
-    expect(findPreset(serverPresets, "verkada")).toMatchObject({ id: "verkada", secretSource: "alphaclaw" });
+    expect(findPreset(serverPresets, "verkada")).toMatchObject({ id: "verkada", secretSource: "either" });
     expect(findPreset(serverPresets, "nope")).toBe(null);
   });
 });
@@ -113,6 +114,28 @@ describe("frontend/webhook sender verification save rules", () => {
   it("an AlphaClaw-made secret never saves through PUT (it uses Generate)", () => {
     expect(canSaveSenderPreset({ ingress: makeIngress(), draftPreset: "verkada", secretSource: "alphaclaw", secretDraft: "x" })).toBe(false);
     expect(canSaveSenderPreset({ ingress: null, draftPreset: "quo", secretSource: "sender", secretDraft: "x" })).toBe(false);
+  });
+});
+
+describe("frontend/webhook sender verification signing keys", () => {
+  const keys = (count) => Array.from({ length: count }, (_, i) => ({ index: i + 1, addedAt: null }));
+
+  it("a secret that can be pasted or generated saves once one is pasted", () => {
+    const ingress = makeIngress();
+    expect(canSaveSenderPreset({ ingress, draftPreset: "verkada", secretSource: "either", secretDraft: "" })).toBe(false);
+    expect(canSaveSenderPreset({ ingress, draftPreset: "verkada", secretSource: "either", secretDraft: "pasted" })).toBe(true);
+  });
+
+  it("adds a key only to a signed hook that has one, below the limit, with a key pasted", () => {
+    const quo = makeIngress({ preset: "quo", state: "waiting", hasSecret: true, signingKeys: keys(1), maxSigningKeys: 8 });
+    expect(canAddSigningKey(quo, "pasted")).toBe(true);
+    expect(canAddSigningKey(quo, "  ")).toBe(false);
+    expect(canAddSigningKey({ ...quo, signingKeys: keys(8) }, "pasted")).toBe(false);
+    expect(canAddSigningKey({ ...quo, state: "misconfigured" }, "pasted")).toBe(false);
+    expect(canAddSigningKey({ ...quo, signingKeys: [] }, "pasted")).toBe(false);
+    expect(canAddSigningKey(makeIngress({ preset: "per_hook_token", state: "waiting" }), "pasted")).toBe(false);
+    expect(canAddSigningKey(makeIngress(), "pasted")).toBe(false);
+    expect(canAddSigningKey(null, "pasted")).toBe(false);
   });
 });
 

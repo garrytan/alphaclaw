@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 // (two domain modules exporting the same name make export * drop it) fails here.
 const kExpectedApiExports = [
   "acknowledgeAutotuneResize",
+  "addWebhookIngressSigningKey",
   "applyImport",
   "approveDevice",
   "approvePairing",
@@ -152,6 +153,7 @@ const kExpectedApiExports = [
   "removeNode",
   "removeRelayBinding",
   "removeTeamMember",
+  "removeWebhookIngressSigningKey",
   "renewGmailWatch",
   "reopenBuiltinHookSharedToken",
   "reopenWebhookIngressSharedToken",
@@ -232,7 +234,7 @@ describe("api.js barrel", () => {
   it("re-exports exactly the pre-split export set", async () => {
     const api = await import("../../lib/public/js/lib/api.js");
     expect(Object.keys(api).sort()).toEqual(kExpectedApiExports);
-    expect(kExpectedApiExports).toHaveLength(221);
+    expect(kExpectedApiExports).toHaveLength(223);
   });
 
   it("keeps the envelope parsers internal to the api modules", async () => {

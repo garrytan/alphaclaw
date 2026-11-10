@@ -148,7 +148,8 @@ describeLive("live: AlphaClaw's /hooks edge verdict matches the pinned gateway",
 });
 
 // PR 2: a signed delivery through the edge reaches the pinned gateway's
-// mapping transform with only the signed body and AlphaClaw's header set, its
+// mapping transform with the signed body, no query string, the sender's
+// signature header and AlphaClaw's header set, its
 // replay is answered without a second dispatch, the shared token is refused
 // once the overlap closes, and a Circleback-size body near the gateway's
 // 256 KiB limit is admitted.
@@ -209,7 +210,7 @@ describeLive("live: signed hook deliveries through the edge reach the pinned gat
         expect(captured.url).not.toContain("leak");
         expect(captured.url).not.toContain("token");
         expect(captured.headers["x-event-type"]).toBeUndefined();
-        expect(captured.headers["x-signature"]).toBeUndefined();
+        expect(captured.headers["x-signature"]).toBe(sign(body));
         expect(captured.headers["idempotency-key"]).toBe("circleback:" + sign(body));
 
         const replay = await post(body);
