@@ -133,6 +133,41 @@ describe("relay pinned binding (GST-2323 PR3): trusted like the owner's own thre
     expect(resolveRelayTrust({ rootDir: ctx.rootDir, ...run.ctx, requireTrustedOwner: true }).tier, label).toBe("peer");
   });
 
+  it("follows a handoff: the running turn loses the pin at the new generation, and the successor's next message is pinned", async () => {
+    ctx = setup({ env: pinnedEnv() });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    expect(await ctx.call(run, "secrets", { action: "list" })).toEqual({});
+    const binding = ctx.store().bindings.get(kPinned);
+    ctx.store().bindings.claim({ agent: kPinned, generation: binding.generation, threadId: "jam_successor", clientId: binding.clientId, webhookUrl: binding.webhookUrl, capabilityHash: "c".repeat(64), priorUntil: binding.until });
+    expect((await ctx.call(run, "secrets", { action: "list" })).block).toBe(true);
+    expect(ownerThreadBasisOf({ rootDir: ctx.rootDir, sender: kPinned, messageId: run.messageId })).toBe(null);
+    const successor = await ctx.deliver(kPinned);
+    expect(ownerThreadBasisOf({ rootDir: ctx.rootDir, sender: kPinned, messageId: successor.messageId })).toBe("pinned_binding");
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("ends the owner-thread stamp of a running turn once the pin is taken off the list, and keeps it a delegate", async () => {
+    ctx = setup({ env: pinnedEnv() });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    expect(await ctx.call(run, "secrets", { action: "list" })).toEqual({});
+    ctx.setConfig({});
+    await ctx.tick();
+    expect(ctx.bridgeStore.get(run.messageId)).toMatchObject({ trust: "delegate", pinnedBinding: null });
+    expect(ctx.bridgeLogs.some((line) => line.includes("owner thread ended reason=unpinned"))).toBe(true);
+    expect((await ctx.call(run, "secrets", { action: "list" })).block).toBe(true);
+    expectHeldWithTap(ctx, run, "write", { path: ctx.openclawJson, content: "{}" });
+  });
+
+  it("ends an attested thread's owner stamp the same way once its owner is taken off ALPHACLAW_RELAY_CAPY_OWNERS", async () => {
+    ctx = setup();
+    const run = await ctx.deliver((await ctx.attestedAgent()).agent);
+    expect(await ctx.call(run, "secrets", { action: "list" })).toEqual({});
+    ctx.setConfig(capyEnv({ owners: "user_9" }));
+    await ctx.tick();
+    expect(ctx.bridgeStore.get(run.messageId)).toMatchObject({ trust: "delegate", attestedOrg: null, attestedOwner: null });
+    expect((await ctx.call(run, "secrets", { action: "list" })).block).toBe(true);
+  });
+
   it("refuses the pinned binding's changes to the trust anchor and its reads of the relay's keys, with no row", async () => {
     ctx = setup({ env: pinnedEnv() });
     const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
@@ -229,5 +264,11 @@ describe("relay pinned binding (GST-2323 PR3): ALPHACLAW_RELAY_TRUSTED_BINDINGS"
       trustedBindingsRejected: 2,
     });
     expect(require("../../lib/server/deployment-only-env").kDeploymentOnlyEnvKeys).toContain("ALPHACLAW_RELAY_TRUSTED_BINDINGS");
+  });
+
+  it("says on the Doctor card when a pin entry did not fit, so a typo never looks like a pin", () => {
+    const { buildRelayCards } = require("../../lib/server/relay/doctor-card");
+    const [card] = buildRelayCards({ enabled: true, phase: "ready", settings: { delegateAgents: [], trustedBindingsRejected: 1 } });
+    expect(card.summary).toContain("1 entry in ALPHACLAW_RELAY_TRUSTED_BINDINGS did not fit, so nothing is pinned for it.");
   });
 });
