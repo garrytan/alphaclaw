@@ -66,6 +66,19 @@ describe("relay pinned binding with attestation required (GST-2323 PR4)", () => 
     expect(ownerThreadBasisOf({ rootDir: ctx.rootDir, sender: agent, messageId: run.messageId })).toBe(null);
   });
 
+  it("refuses the pin once the same call's attestation fails, even with the pin stamp and the delegate grant still live", async () => {
+    ctx = setup();
+    const { agent } = await ctx.attestedAgent();
+    ctx.setConfig(combined(agent));
+    const run = await ctx.deliver(agent);
+    expect(await ctx.call(run, "secrets", { action: "list" })).toEqual({});
+    ctx.bridgeStore.update(run.messageId, { attestedOrg: null, attestedOwner: null });
+    expect(ctx.bridgeStore.get(run.messageId)).toMatchObject({ pinnedBinding: agent, pinRequiresAttestation: true, trust: "delegate" });
+    expect(resolveRelayTrust({ rootDir: ctx.rootDir, ...run.ctx })).toMatchObject({ tier: "delegate", ownerThread: false, pinnedBinding: null });
+    expect(ownerThreadBasisOf({ rootDir: ctx.rootDir, sender: agent, messageId: run.messageId })).toBe(null);
+    expect((await ctx.call(run, "secrets", { action: "list" })).block).toBe(true);
+  });
+
   it("ends both stamps of a running turn at the next sweep once the pin is taken off the list", async () => {
     ctx = setup();
     const { agent } = await ctx.attestedAgent();
