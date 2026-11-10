@@ -654,8 +654,51 @@ describe("relay delegates: the bridge", () => {
     try {
       await ctx.tick();
       const messageId = ctx.engine.dm(kAgent, "hello");
-      await ctx.tick();
+      // A lookup that could not run fails the poll, so the message is read
+      // again (GST-2090) instead of being admitted with the ungranted limits.
+      await expect(ctx.tick()).rejects.toThrow("remote.db locked");
+      expect(ctx.store.get(messageId)).toBeFalsy();
+      for (let i = 0; i < 5; i += 1) await ctx.tick().catch(() => {});
       expect(ctx.store.get(messageId).trust).toBe("peer");
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("a trust lookup that fails once is retried, and the message is admitted under its grant", async () => {
+    let failures = 1;
+    const ctx = setup({
+      verdict: () => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("remote.db locked");
+        }
+        return { trust: "delegate", reason: "grant", grantId: "rg_0123456789abcdef", lanesMax: 3 };
+      },
+    });
+    try {
+      await ctx.tick();
+      const messageId = ctx.engine.dm(kAgent, "hello", { relay_lane: "gbrain" });
+      await expect(ctx.tick()).rejects.toThrow("remote.db locked");
+      expect(ctx.store.get(messageId)).toBeFalsy();
+      await ctx.tick();
+      expect(ctx.store.get(messageId)).toMatchObject({ trust: "delegate", grantId: "rg_0123456789abcdef", lane: "gbrain" });
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("a confirmation ref in the message's metadata is kept on its row and named to the agent", async () => {
+    const ctx = setup();
+    try {
+      await ctx.tick();
+      const messageId = ctx.engine.dm(kAgent, "try again", { relay_confirmation_ref: "rc_0123456789abcdef" });
+      const forged = ctx.engine.dm(kAgent, "x", { relay_confirmation_ref: "rc_not-a-ref" });
+      await ctx.tick();
+      expect(ctx.store.get(messageId).confirmationRef).toBe("rc_0123456789abcdef");
+      expect(ctx.store.get(forged).confirmationRef).toBeNull();
+      expect(ctx.sends[0].message).toContain("carries confirmation ref rc_0123456789abcdef");
+      expect(ctx.sends[0].message).toContain("one-tap confirmation");
     } finally {
       ctx.close();
     }
