@@ -1,6 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const express = require("express");
 const request = require("supertest");
 
@@ -19,6 +20,177 @@ const kClient = "d1df4e9e-8f1b-4520-98f6-2db9ab5d035f";
 const kAgent = "capy-25cf4e98b5b6";
 const kHour = 60 * 60 * 1000;
 const quiet = { log: () => {}, warn: () => {}, info: () => {}, error: () => {} };
+
+describe("relay confirmations: the signing key and relay files by any path that lands on them", () => {
+  let root;
+  let workspace;
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-keypath-")));
+    workspace = path.join(root, ".openclaw", "workspace-scout");
+    fs.mkdirSync(path.join(root, "relay"), { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(root, "relay", "provenance-key.json"), "{}");
+    fs.writeFileSync(path.join(root, "relay", "bridge.db"), "");
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "notes.txt"));
+    fs.symlinkSync(path.join(root, "relay"), path.join(workspace, "box"));
+    fs.symlinkSync(root, path.join(root, "..", path.basename(root) + "-link"));
+  });
+  afterEach(() => {
+    fs.rmSync(path.join(root, "..", path.basename(root) + "-link"), { force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const write = (filePath, toolName = "write") => classifyRisk({ toolName, params: toolName === "apply_patch" ? { input: "*** Begin Patch\n*** Update File: " + filePath + "\n*** End Patch" } : { path: filePath }, rootDir: root, agentId: "scout" });
+
+  it.each([
+    ["a relative path with . and ..", "../../relay/./provenance-key.json"],
+    ["a relative path through a sibling directory", "../workspace/../../relay/provenance-key.json"],
+    ["a symlink in the workspace to the key", "notes.txt"],
+    ["a linked directory over relay/", "box/provenance-key.json"],
+    ["a linked directory over a relay database", "box/bridge.db"],
+    ["an absolute path through a linked root", "ROOTLINK/relay/provenance-key.json"],
+    ["an absolute path to the key with a .. in it", "ROOT/relay/../relay/provenance-key.json"],
+    ["the key by name anywhere", "some/dir/provenance-key.json"],
+    ["a file reference with a leading @", "@notes.txt"],
+    ["an @ path through a linked directory", "@box/bridge.db"],
+    ["an @ path under relay/", "@ROOT/relay/sub/x"],
+    ["a percent-encoded file: URL to the key", "file://ROOT/relay/provenance%2Dkey.json"],
+    ["a percent-encoded file: URL to a relay database", "file://ROOT/relay/bridge%2Edb"],
+  ])("holds %s", (_name, given) => {
+    const filePath = given.replace("ROOTLINK", path.join(root, "..", path.basename(root) + "-link")).replace("ROOT", root);
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const risk = write(filePath, tool);
+      expect(risk.kind, tool + " " + filePath).toBe("high");
+    }
+  });
+
+  it("names the file the write lands on, and leaves ordinary workspace files alone", () => {
+    expect(write("notes.txt").action).toBe("write provenance-key.json");
+    expect(write("box/bridge.db").target).toContain("/relay/bridge.db");
+    fs.writeFileSync(path.join(workspace, "plain.md"), "x");
+    for (const given of ["plain.md", "drafts/new.md", "../workspace-scout/plain.md", "relay-notes/key.txt"]) {
+      expect(write(given).kind, given).toBe("low");
+    }
+  });
+
+  it("walks .. from the real directory a link reaches, not from the link's own parent", () => {
+    fs.mkdirSync(path.join(root, "relay", "child"));
+    fs.symlinkSync(path.join(root, "relay", "child"), path.join(workspace, "child"));
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const risk = write(workspace + "/child/../bridge.db", tool);
+      expect(risk.kind, tool).toBe("high");
+      expect(risk.target, tool).toBe(path.join(root, "relay", "bridge.db"));
+    }
+  });
+
+  it("folds .. before following links for a relative path, as OpenClaw's write tool does", () => {
+    fs.mkdirSync(path.join(root, "elsewhere", "deep"), { recursive: true });
+    fs.symlinkSync(path.join(root, "elsewhere", "deep"), path.join(workspace, "child"));
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const risk = write("child/../notes.txt", tool);
+      expect(risk.kind, tool).toBe("high");
+      expect(risk.target, tool).toBe(path.join(root, "relay", "provenance-key.json"));
+    }
+  });
+
+  it("names the file OpenClaw writes when a relative path climbs out through a link", () => {
+    const far = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-far-")));
+    try {
+      fs.mkdirSync(path.join(far, "a", "b"), { recursive: true });
+      fs.symlinkSync(path.join(far, "a", "b"), path.join(workspace, "L"));
+      for (const tool of ["write", "edit", "apply_patch"]) {
+        const config = write("L/../../openclaw.json", tool);
+        expect(config.kind, tool).toBe("high");
+        expect(config.target.split(","), tool).toContain(path.join(root, ".openclaw", "openclaw.json"));
+        expect(write("L/../../../relay/bridge.db", tool).target.split(","), tool).toContain(path.join(root, "relay", "bridge.db"));
+      }
+    } finally {
+      fs.rmSync(far, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps trailing spaces in a path, as the write tool does", () => {
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "notes.md "));
+    for (const tool of ["write", "edit"]) expect(write("notes.md ", tool).kind, tool).toBe("high");
+  });
+
+  it("binds a link with a protected name to the file it lands on", () => {
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, ".env"));
+    const risk = write(".env");
+    expect(risk.action).toBe("write provenance-key.json");
+    expect(risk.target).toBe(path.join(root, "relay", "provenance-key.json"));
+    fs.writeFileSync(path.join(root, "elsewhere.txt"), "");
+    fs.symlinkSync(path.join(root, "elsewhere.txt"), path.join(workspace, "secrets.json"));
+    expect(write("secrets.json")).toMatchObject({ kind: "high", action: "write elsewhere.txt", target: path.join(root, "elsewhere.txt") });
+  });
+
+  it("decodes a file: URL before the name rules, for every protected name", () => {
+    for (const given of ["file:///data/.openclaw/openclaw%2Ejson", "file:///data/secrets%2Ejson", "file:///data/%2Eenv", "file:///data/exec-approvals%2Ejson"]) {
+      expect(write(given).kind, given).toBe("high");
+    }
+  });
+
+  it("reads a leading @ the way the pinned OpenClaw does", async () => {
+    const dist = path.resolve(__dirname, "../../node_modules/openclaw/dist");
+    const file = fs.readdirSync(dist).find((name) => name.endsWith(".mjs") && fs.readFileSync(path.join(dist, name), "utf8").includes("function normalizeFileReferencePrefix("));
+    expect(file, "OpenClaw's normalizeFileReferencePrefix moved; recheck openclawPathOf in confirm.js").toBeTruthy();
+    const mod = await import(pathToFileURL(path.join(dist, file)).href);
+    const normalize = Object.values(mod).find((value) => typeof value === "function" && value.name === "normalizeFileReferencePrefix");
+    expect(normalize).toBeTypeOf("function");
+    fs.symlinkSync(path.join(root, "relay", "provenance-key.json"), path.join(workspace, "@lit"));
+    for (const [given, lands] of [["@notes.txt", "notes.txt"], ["@@lit", "./@lit"], ["notes.txt", "notes.txt"], ["@box/bridge.db", "box/bridge.db"]]) {
+      expect(normalize(given), given).toBe(lands);
+      expect(write(given).kind, given).toBe("high");
+    }
+  });
+
+  it("holds a link to a protected file that does not exist yet, since the write creates it", () => {
+    fs.rmSync(path.join(root, "relay", "provenance-key.json"));
+    fs.symlinkSync(path.join(root, "relay", "bridge.db-journal"), path.join(workspace, "journal.txt"));
+    fs.symlinkSync(path.join(root, "missing", "exec-approvals.json"), path.join(workspace, "approvals.txt"));
+    for (const given of ["notes.txt", "journal.txt", "approvals.txt"]) {
+      for (const tool of ["write", "edit", "apply_patch"]) expect(write(given, tool).kind, tool + " " + given).toBe("high");
+    }
+    expect(write("notes.txt").target).toBe(path.join(root, "relay", "provenance-key.json"));
+  });
+
+  it("holds a patch header OpenClaw applies after trimming its indent", () => {
+    for (const header of ["  *** Update File: .env", "\t*** Add File: box/bridge.db", " *** Delete File: notes.txt", "*** Update File: plain.md\n  *** Move to: x/openclaw.json"]) {
+      const risk = classifyRisk({ toolName: "apply_patch", params: { input: "*** Begin Patch\n" + header + "\n*** End Patch" }, rootDir: root, agentId: "scout" });
+      expect(risk.kind, header).toBe("high");
+    }
+  });
+
+  it("resolves a relative write against the main workspace and the workspace openclaw.json sets for the agent", () => {
+    const main = path.join(root, ".openclaw", "workspace");
+    const custom = path.join(root, ".openclaw", "scout-files");
+    fs.mkdirSync(main, { recursive: true });
+    fs.mkdirSync(custom, { recursive: true });
+    fs.symlinkSync(path.join(root, "relay"), path.join(main, "mainbox"));
+    fs.symlinkSync(path.join(root, "relay"), path.join(custom, "custombox"));
+    const at = (agentId, given) => classifyRisk({ toolName: "write", params: { path: given }, rootDir: root, agentId }).kind;
+    expect(at("main", "mainbox/bridge.db")).toBe("high");
+    expect(at("", "mainbox/bridge.db")).toBe("high");
+    expect(at("scout2", "custombox/bridge.db")).toBe("low");
+    fs.writeFileSync(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "scout2", workspace: custom }] } }));
+    expect(at("scout2", "custombox/bridge.db")).toBe("high");
+    expect(at("scout2", "custombox/notes.md")).toBe("high");
+    expect(at("scout2", "plain.md")).toBe("low");
+    fs.writeFileSync(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify({ agents: { entries: { scout2: { workspace: custom } } } }));
+    expect(at("scout2", "custombox/bridge.db")).toBe("high");
+    fs.writeFileSync(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "scout" }] } }));
+    expect(at("scout", "mainbox/bridge.db")).toBe("high");
+  });
+
+  it("never lets one approval cover a longer file list than the notice showed", () => {
+    const pad = [1, 2, 3, 4].map((i) => "*** Add File: .env." + String(i).repeat(75) + "\n+x").join("\n");
+    const patch = (extra) => classifyRisk({ toolName: "apply_patch", params: { input: "*** Begin Patch\n" + pad + extra + "\n*** End Patch" }, rootDir: root, agentId: "scout" });
+    const four = patch("");
+    const five = patch("\n*** Update File: " + path.join(root, "relay", "provenance-key.json") + "\n@@\n+x");
+    expect(four.kind).toBe("high");
+    expect(five.target).not.toBe(four.target);
+    expect(five.action).toMatch(/ \+5 files$/);
+  });
+});
 
 describe("relay confirmations: the risk kinds", () => {
   const root = "/data/.alphaclaw";
@@ -222,6 +394,19 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(refOf(again)).not.toBe(ref);
     const replay = box.running({ lane: "gbrain", confirmationRef: ref });
     expect(box.call(replay, "write", { path: configPath(), content: "{}" }).block).toBe(true);
+  });
+
+  it("resolves a relative write against the agent named in the session key when the hook context has none", () => {
+    box = makeBox();
+    const workspace = path.join(box.rootDir, ".openclaw", "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.symlinkSync(box.paths.dir, path.join(workspace, "box"));
+    const run = box.running();
+    expect(run.ctx.agentId).toBeUndefined();
+    const held = box.call(run, "write", { path: "box/bridge.db", content: "x" });
+    expect(held.block).toBe(true);
+    expect(held.blockReason).toContain("write bridge.db needs your owner's confirmation");
+    expect(box.call(run, "write", { path: "notes.md", content: "x" })).toEqual({});
   });
 
   it("an approved automations change is admitted once for the same call, and the next one asks again (PR4)", async () => {
