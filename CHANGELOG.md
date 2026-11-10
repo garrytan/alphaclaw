@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.255] - 2026-11-10
+
+A delegate thread that only reads one of the box's protected files, or writes a note that mentions one, no longer sends you an Approve tap. Real changes to those files are still held.
+
+### Fixed
+- **Only a real change asks for your tap.** The relay guard used to hold any shell command that named a protected file (`openclaw.json`, `alphaclaw.json`, `.env`, the relay's key and databases, the guards' folders) unless every part of it was on a short list of reads. So a `grep` piped into `cut` or `sort`, a regex that spelled `process.env`, a note appended to `memory/` and an `echo` into a scratch file each asked the owner; all three requests that reached the owner on the box were of this kind, and all expired unanswered. The guard now reads the command the way bash splits it and holds it only when a protected name sits where it can be acted on: a redirect's target, an argument of a command that writes or runs things, input piped or fed to `sh`, `python3`, `xargs` and the like, a command inside `$( )`, backticks or an unquoted here-document, or a file the same command writes and then runs.
+- **Anything unclear stays held.** A variable in a write position (other than `HOME`, `PWD`, `TMPDIR` and `USER` when the command leaves them alone) counts as the protected name the command spells, and a command the guard cannot split, such as one with an unclosed quote, keeps the old rule. Input typed into a running process keeps the old rule too, since the guard can't know what reads it.
+
+### Tests
+- `relay-confirm.test.js`: the three commands behind the holds on the box, plus reads, quoted here-document notes, dated notes and `tee` copies, are not held; nine kinds of real write (two redirects, `rm`, `cp`, `mv`, `tee`, `sed -i`, a Python here-document, a pipe into `sh`) against each of the 15 protected files and relay databases are held; and 29 ways of hiding a change (variables, functions, loops, substitutions, here-strings, fd redirects, a script written then run, split or escaped names) are held.
+
 ## [0.10.254] - 2026-11-10
 
 A delegate thread can no longer change the relay's signing key, or the relay's own files, without your Approve tap by writing to them through a relative path, a `..` or a symlink.
