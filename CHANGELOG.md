@@ -5,9 +5,8 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.256] - 2026-11-10
+## [0.10.257] - 2026-11-10
 
-<<<<<<< HEAD
 A webhook that verifies its sender can now hold several signing keys, so a sender like Quo, which signs each of its webhooks with its own key, can move every webhook onto one hook. A signed delivery also reaches the hook's transform with the sender's signature header and the query string, so a transform that checks the signature itself keeps working.
 
 ### Added
@@ -20,7 +19,9 @@ A webhook that verifies its sender can now hold several signing keys, so a sende
 ### Tests
 - `hook-ingress-senders.test.js`: for each signed scheme (Circleback, Quo, legacy Quo, Verkada, Standard Webhooks), the signature still verifies over the forwarded body and headers, and `token=` never reaches the gateway; a hook with several keys accepts each of them, records which one matched and refuses an unknown one; duplicate, extra and last-key removals are refused and the shared-token window survives key changes; a pasted Verkada secret verifies; agents get 403 on the new key routes.
 - `hook-ingress-signatures.test.js` and the live `hook-ingress.e2e.test.js` check the forwarded signature header against the pinned gateway; `webhook-sender-verification.test.js` covers the new card rules.
-=======
+
+## [0.10.256] - 2026-11-10
+
 A delegate thread that only reads one of the box's protected files, or writes a note that mentions one, no longer sends you an Approve tap. Real changes to those files are still held, and so is any command the guard can't read word for word.
 
 ### Fixed
@@ -29,7 +30,6 @@ A delegate thread that only reads one of the box's protected files, or writes a 
 
 ### Tests
 - `relay-confirm.test.js`: the three commands behind the holds on the box and seven other reads and notes are not held; the nine kinds of real write against each of the 15 protected files and relay databases are held; 37 ways of hiding a change and 46 more found in review (variables, functions, `eval`, `PATH` and `LD_PRELOAD`, `printf -v` and `printf %n`, `sort -o`, programs outside `/bin`, comments, escaped quotes, globbed targets) are held; and a note through a symlink onto the signing key, a note over an executable, exec `env` overrides, the exec `workdir` and `cd`, and a `/tmp/cat` typed into a process are each covered.
->>>>>>> origin/main
 
 ## [0.10.255] - 2026-11-10
 
