@@ -3301,6 +3301,40 @@ describe("server/routes/system", () => {
     });
   });
 
+  describe("a restart the owner's attested relay thread asked for (GST-2323 PR2)", () => {
+    it("runs the restart path with the relay source, joins a restart already running and refuses during an upgrade", async () => {
+      const deps = createSystemDeps();
+      withRealRestartStore(deps);
+      deps.watchdog = { getStatus: vi.fn(() => ({})), recordOperationEvent: vi.fn() };
+      let options = null;
+      let release = null;
+      deps.restartGateway = vi.fn((opts) => {
+        options = opts;
+        return new Promise((resolve) => {
+          release = () => resolve({ durationMs: 5 });
+        });
+      });
+      const app = express();
+      app.use(express.json());
+      const { requestGatewayRestart } = registerSystemRoutes({ app, agentSessionsCacheTtlMs: 0, ...deps });
+      const started = requestGatewayRestart({ actor: "relay", source: "relay:TEST-1", reason: "relay_message=501" });
+      expect(started).toEqual({ operationId: expect.any(String) });
+      await vi.waitFor(() => expect(deps.restartGateway).toHaveBeenCalledTimes(1));
+      expect(options).toEqual(expect.objectContaining({ source: "relay:TEST-1", reason: "actor=relay relay_message=501", opId: started.operationId }));
+      expect(requestGatewayRestart({ actor: "relay", source: "relay:TEST-2", reason: "relay_message=502" })).toEqual({ operationId: started.operationId, attached: true });
+      release();
+      await vi.waitFor(() =>
+        expect(deps.watchdog.recordOperationEvent).toHaveBeenCalledWith(
+          expect.objectContaining({ kind: "gateway_restart", status: "ok", details: expect.objectContaining({ operationId: started.operationId, restartSource: "relay:TEST-1" }) }),
+        ),
+      );
+      expect(deps.restartGateway).toHaveBeenCalledTimes(1);
+      deps.isOnboarded = () => false;
+      const notOnboarded = registerSystemRoutes({ app: express(), agentSessionsCacheTtlMs: 0, ...deps }).requestGatewayRestart({ actor: "relay", source: "relay:TEST-1", reason: "x" });
+      expect(notOnboarded.refusal).toEqual(expect.objectContaining({ statusCode: 400, body: expect.objectContaining({ code: "not_onboarded" }) }));
+    });
+  });
+
   const createQueuedRestartHarness = () => {
     const { createGatewayLifecycleLock } = require("../../lib/server/gateway-lifecycle-lock");
     const deps = createSystemDeps();
