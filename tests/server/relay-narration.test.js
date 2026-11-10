@@ -167,7 +167,7 @@ describe("relay narration: batching, folding and the hourly cap", () => {
     expect(ctx.notices).toHaveLength(2);
   });
 
-  it("lists 10 asks and folds the rest by sender; a burst of 37 is stamped whole and none of it is narrated again", () => {
+  it("lists 10 asks and counts the rest by sender; the rest stay pending and the next notices list each once", () => {
     ctx = setup();
     for (let n = 0; n < 25; n += 1) ctx.ask();
     for (let n = 0; n < 12; n += 1) ctx.ask({ sender: kOther });
@@ -176,18 +176,56 @@ describe("relay narration: batching, folding and the hourly cap", () => {
     expect(ctx.notices).toHaveLength(1);
     const lines = linesOf(ctx.notices[0]);
     expect(lines).toHaveLength(11);
-    expect(lines[10]).toBe("🛰 …and 27 more asks from @" + kAgent + " (15), @" + kOther + " (12)");
-    const outcomes = ctx.store.recent({ limit: 100 }).map((row) => row.narration);
-    expect(outcomes.filter((outcome) => outcome === "sent")).toHaveLength(10);
-    expect(outcomes.filter((outcome) => outcome === "folded")).toHaveLength(27);
+    expect(lines[10]).toBe("🛰 +27 more asks from @" + kAgent + " (15), @" + kOther + " (12), in later notices");
+    const outcomes = () => ctx.store.recent({ limit: 100 }).map((row) => row.narration);
+    expect(outcomes().filter((outcome) => outcome === "sent")).toHaveLength(10);
+    expect(outcomes().filter((outcome) => outcome === null)).toHaveLength(27);
+
+    ctx.advance(61 * kSecond);
+    ctx.narration.tick();
+    ctx.advance(61 * kSecond);
+    ctx.narration.tick();
+    ctx.advance(61 * kSecond);
+    ctx.narration.tick();
+    expect(ctx.notices).toHaveLength(4);
+    expect(ctx.notices.map((notice) => linesOf(notice).filter((line) => line.includes(" asks: ")).length)).toEqual([10, 10, 10, 7]);
+    expect(linesOf(ctx.notices[3]).some((line) => line.includes("more ask"))).toBe(false);
+    expect(outcomes().filter((outcome) => outcome === "sent")).toHaveLength(37);
 
     ctx.advance(2 * kMinute);
     const late = ctx.ask({ sender: kOther, summary: "one more" });
     ctx.advance(31 * kSecond);
     ctx.narration.tick();
+    expect(ctx.notices).toHaveLength(5);
+    expect(linesOf(ctx.notices[4])).toEqual([expect.stringContaining("one more")]);
+    expect(ctx.notices[4].opts.id).toBe("relay-narration-" + late);
+  });
+
+  it("keeps a notice of ten full-length asks under 1,900 characters; the asks that do not fit stay pending for the next notice", () => {
+    ctx = setup({ resolveThread: () => "ALPH-92" });
+    const full = { intakeTrust: "delegate", lane: "gbrain-import", route: "public", bodyChars: 12345 };
+    const ids = [];
+    for (let n = 0; n < 10; n += 1) ids.push(ctx.ask({ ...full, summary: String(n) + "w".repeat(119) }));
+    ctx.advance(31 * kSecond);
+    ctx.narration.tick();
+    expect(ctx.notices).toHaveLength(1);
+    const first = ctx.notices[0].text;
+    expect(first.length).toBeLessThanOrEqual(1900);
+    const listed = linesOf(ctx.notices[0]).filter((line) => line.includes(" asks: "));
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.length).toBeLessThan(10);
+    const pending = 10 - listed.length;
+    expect(linesOf(ctx.notices[0]).at(-1)).toBe("🛰 +" + pending + " more ask" + (pending === 1 ? "" : "s") + " from @" + kAgent + ", in later notices");
+    expect(ids.slice(0, listed.length).map((id) => ctx.store.get(id).narration)).toEqual(Array(listed.length).fill("sent"));
+    expect(ids.slice(listed.length).map((id) => ctx.store.get(id).narratedAt)).toEqual(Array(pending).fill(null));
+
+    ctx.advance(61 * kSecond);
+    ctx.narration.tick();
     expect(ctx.notices).toHaveLength(2);
-    expect(linesOf(ctx.notices[1])).toEqual([expect.stringContaining("one more")]);
-    expect(ctx.notices[1].opts.id).toBe("relay-narration-" + late);
+    expect(ctx.notices[1].text.length).toBeLessThanOrEqual(1900);
+    expect(ctx.notices[1].opts.id).toBe("relay-narration-" + ids[listed.length]);
+    expect(linesOf(ctx.notices[1])[0]).toContain("`" + String(listed.length) + "w");
+    expect(ids.map((id) => ctx.store.get(id).narration).filter((outcome) => outcome === "sent").length).toBe(Math.min(10, 2 * listed.length));
   });
 
   it("sends at most 20 notices an hour, counts the asks past that once, and a restart in the middle keeps the count", () => {
