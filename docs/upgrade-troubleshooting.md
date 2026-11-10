@@ -690,13 +690,22 @@ facts:
   `package.json`, the only version AlphaClaw runs.
 - `installedVersion` / `installedAtBoot` — the build actually in
   `node_modules/openclaw`.
-- `installedDiverged` — `true` when the two differ. That means the image did
-  not install the pin (a broken or stale install), never a version choice. It
+- `installedDiverged` — `true` when the two differ. Unless the deployment holds
+  that version on purpose (`heldVersion` below), it means the image did not
+  install the pin (a broken or stale install), never a version choice. It
   also latches `versionMismatch` on `GET /api/watchdog/status`, opens a
   `version_mismatch` incident, prefixes notifications with
   `⚠️ Version mismatch: running <r>, expected <e>` and puts
   `installed_not_expected` in the boot verdict. Redeploy the AlphaClaw image
   (or rerun its `npm install`) so the pinned build is installed.
+- `heldVersion` — the exact `overrides.openclaw` in the app's own
+  `package.json` (see the README's "Holding an older OpenClaw on purpose"), or
+  `null`. When `installedVersion` is that hold, older than the pin and no older
+  than 2026.10.9, the install is held: `installedDiverged` stays `true`, but the
+  boot verdict is `consistent`, no incident opens and nobody is notified, and
+  the **OpenClaw** section says `held by this deployment on purpose`. A hold that
+  does not cover the install is still a mismatch, and the Doctor card says why
+  (a different version installed, older than 2026.10.9, or newer than the pin).
 - `bootMigration` — the boot migration record (`completedForVersion`, `at`):
   the version the once-per-pin `doctor --fix` last completed for. A record
   older than `installedVersion` means the boot migration failed or has not run
@@ -722,8 +731,9 @@ collected, not that the gateway recovered.
    legacy claim converged, or the new process wrote its own record).
 3. `<root>/.openclaw/.alphaclaw/alphaclaw-version.json` names the AlphaClaw
    version you just deployed.
-4. The **OpenClaw** section shows `installedDiverged: false` and a
-   `bootMigration.completedForVersion` equal to the pin.
+4. The **OpenClaw** section shows `installedDiverged: false` (or a deliberate
+   hold: `held by this deployment on purpose`) and a
+   `bootMigration.completedForVersion` equal to the installed version.
 5. The watchdog phase is healthy and the incidents timeline shows this
    boot's `boot` event with its verdict.
 
