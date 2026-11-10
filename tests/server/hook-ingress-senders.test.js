@@ -143,7 +143,7 @@ afterAll(() => {
 });
 
 describe("signed forwarding", () => {
-  it("forwards the verified bytes, the query without its token, the sender's signature and AlphaClaw's own header set", async () => {
+  it("forwards the verified bytes with no query string, the sender's signature and AlphaClaw's own header set", async () => {
     const h = await createHarness();
     const secret = randomSecret();
     h.hookIngress.setIngress("meetings", { preset: "circleback", secret });
@@ -157,7 +157,7 @@ describe("signed forwarding", () => {
     expect(res.status).toBe(200);
     expect(h.gateway.calls).toHaveLength(1);
     const call = h.gateway.calls[0];
-    expect(call.url).toBe("/hooks/meetings?extra=1");
+    expect(call.url).toBe("/hooks/meetings");
     expect(call.body.toString("utf8")).toBe(body);
     expect(call.headers["x-signature"]).toBe(hmacHex(secret, body));
     expect(call.headers.authorization).toBe(bearer(kShared));
@@ -179,7 +179,7 @@ describe("signed forwarding", () => {
     await circlebackPost(h, { secret, body: first, headers: { "x-event-type": "a", "x-delivery-id": "1" } });
     webhooksDb.deleteReplayKeysByHook("meetings");
     await request(h.app)
-      .post("/hooks/meetings")
+      .post("/hooks/meetings?x=2")
       .set("content-type", "text/plain")
       .set("x-signature", hmacHex(secret, first))
       .set("x-event-type", "b")
@@ -327,7 +327,7 @@ describe("what a downstream check sees", () => {
   ];
 
   for (const testCase of cases) {
-    it(`still verifies ${testCase.label || testCase.preset} over the forwarded body and headers, and never forwards token=`, async () => {
+    it(`still verifies ${testCase.label || testCase.preset} over the forwarded body and headers, and forwards no query string`, async () => {
       const h = await createHarness();
       const material = testCase.make(h);
       h.hookIngress.setIngress(testCase.hook, { preset: testCase.preset, secret: material.secret });
@@ -339,8 +339,7 @@ describe("what a downstream check sees", () => {
       expect((await req.send(body)).status).toBe(200);
       const call = h.gateway.calls[0];
       expect(call.body.toString("utf8")).toBe(body);
-      expect(call.url).toBe("/hooks/" + testCase.hook + "?source=wm");
-      expect(call.url).not.toContain("token");
+      expect(call.url).toBe("/hooks/" + testCase.hook);
       expect(call.body.toString("utf8")).not.toContain(kShared);
       const downstream = verifySignedDelivery({
         preset: testCase.preset,
@@ -425,6 +424,30 @@ describe("several signing keys", () => {
     expect(status.signingKeys).toHaveLength(1);
     expect(() => h.hookIngress.removeIngressSigningKey("phone", status.signingKeys[0].id)).toThrow(/only signing key/);
     expect(policyOf(h, "phone")).toMatchObject({ firstAdmittedAt: opened.firstAdmittedAt, closesAt: opened.closesAt });
+    await h.close();
+  });
+
+  it("keeps each key's deliveries apart when two senders reuse a delivery id", async () => {
+    const h = await createHarness();
+    const [a, b] = [newKey(), newKey()];
+    h.hookIngress.setIngress("phone", { preset: "quo", secret: a.toString("base64") });
+    h.hookIngress.addIngressSigningKey("phone", { secret: b.toString("base64") });
+    const ts = String(Math.floor(h.clock.now / 1000));
+    const post = (key, body) => request(h.app).post("/hooks/phone").set("content-type", "application/json")
+      .set("webhook-id", "msg_same").set("webhook-timestamp", ts)
+      .set("webhook-signature", "v1," + hmacB64(key, "msg_same." + ts + "." + body)).send(body);
+    const first = await post(a, JSON.stringify({ from: "messages" }));
+    await flush();
+    const second = await post(b, JSON.stringify({ from: "calls" }));
+    await flush();
+    expect([first.status, second.status]).toEqual([200, 200]);
+    expect(second.body).not.toMatchObject({ deduped: true });
+    expect(h.gateway.calls).toHaveLength(2);
+    const [keyA, keyB] = h.hookIngress.ingressStatus("phone").signingKeys.map((key) => key.id);
+    expect(h.gateway.calls.map((call) => call.headers["idempotency-key"])).toEqual(["quo:" + keyA + ":msg_same", "quo:" + keyB + ":msg_same"]);
+    const replay = await post(b, JSON.stringify({ from: "calls" }));
+    expect(replay.body).toEqual({ ok: true, deduped: true });
+    expect(h.gateway.calls).toHaveLength(2);
     await h.close();
   });
 
