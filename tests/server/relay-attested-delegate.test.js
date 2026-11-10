@@ -483,7 +483,11 @@ describe("relay attested delegates (GST-2323): no owner taps for the owner's att
     const { agent } = await ctx.attestedAgent();
     // A Make delegate grant on the agent keeps it a delegate past the Capy
     // grant's queue rule, so only the attestation's freshness decides here.
-    ctx.relayRemote.createGrant({ agent, actor: "legacy" });
+    // It must be the newer grant: with the clock frozen both grants share a
+    // createdAt and the resolver would pick between them by random id.
+    ctx.clock.now += 1000;
+    const legacy = ctx.relayRemote.createGrant({ agent, actor: "legacy" });
+    expect(ctx.relayRemote.resolveDelegate(agent)).toMatchObject({ trust: "delegate", grantId: legacy.id, attestationRequired: false });
     // The binding itself outlives the wait; only the token is old.
     const { DatabaseSync } = require("node:sqlite");
     const raw = new DatabaseSync(path.join(ctx.rootDir, "relay", "remote.db"));
