@@ -202,6 +202,25 @@ describe("a hook off the shared token is the owner's", () => {
     expect(webhooksDb.getOauthCallbackByHook("crm").ownerConfirmedAt).toBeNull();
   });
 
+  it("forgets that confirmation even when the hook policy is malformed", async () => {
+    const h = createHarness();
+    await request(h.app).post("/api/webhooks").send({ name: "crm", oauthCallback: true });
+    const olderBuild = createHookIngress({
+      openclawDir: h.openclawDir,
+      rootDir: h.rootDir,
+      listHookNames: () => ["crm"],
+      logger: { warn: () => {}, log: () => {}, error: () => {} },
+    });
+    olderBuild.setIngress("crm", { preset: "token" });
+    const configPath = path.join(h.openclawDir, "alphaclaw.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    config.hooksIngress.hooks = [];
+    fs.writeFileSync(configPath, JSON.stringify(config));
+    expect(webhooksDb.getOauthCallbackByHook("crm").ownerConfirmedAt).toBeTruthy();
+    h.hookIngress.generateIngressSecret("crm", { preset: "per_hook_token" });
+    expect(webhooksDb.getOauthCallbackByHook("crm").ownerConfirmedAt).toBeNull();
+  });
+
   it("keeps the hook where it was when the confirmation cannot be cleared", () => {
     const h = createHarness();
     let locked = false;
