@@ -40,6 +40,12 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ["the internal secret typed into a running shell", "process", { action: "write", sessionId: "s1", data: "cat " + relay + "/internal.secret\n" }],
     ["a read tool on a Back up now copy", "read", { path: path.dirname(relay) + "/20261110-relay-backup/secrets.json" }],
     ["a cat of a Back up now copy", "exec", { command: "cat " + path.dirname(relay) + "/20261110-relay-backup/secrets.json" }],
+    ["a redirect glued to the command and a glob", "exec", { command: "cat<../../relay/./secret?.json" }],
+    ["a redirect glued to the command", "exec", { command: "cat<../../relay/./secrets.json" }],
+    ["hex bytes sent to a running shell", "process", { action: "send-keys", sessionId: "s1", hex: Buffer.from("cat " + relay + "/secrets.json\n").toString("hex") }],
+    ["a cd typed into a running shell", "process", { action: "write", sessionId: "s1", data: "cd " + relay + "\n" }],
+    ["a workdir in a Back up now copy", "exec", { command: "cat secrets.json", workdir: path.dirname(relay) + "/2026-11-10T00-00-00Z-relay-backup" }],
+    ["a read of an unfinished Back up now copy", "read", { path: path.dirname(relay) + "/2026-11-10T00-00-00Z-relay-backup.partial/secrets.json" }],
   ];
   const symlinked = (ctx) => {
     const workspace = path.join(ctx.rootDir, ".openclaw", "workspace");
