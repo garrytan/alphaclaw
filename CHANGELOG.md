@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.249] - 2026-11-10
+
+Moving a webhook back to the shared webhook token now clears a person's confirmation of its OAuth callback URL, so that URL can't start delivering again behind your back when the hook later moves off the shared token.
+
+### Fixed
+- **A confirmed OAuth callback stays confirmed only while the hook verifies its sender.** While a hook is on the shared token, the agent can read and rotate its callback URL. Before, a person's earlier confirmation survived that time, so once the hook moved back to its own token or a signed method, a callback URL the agent had seen delivered again with no new check by a person. AlphaClaw now clears the confirmation when the hook goes back to the shared token, and again when it leaves the shared token, which also catches a confirmation that 0.10.247 kept on a hook already on the shared token. If the confirmation can't be cleared, the hook's method is not changed. After the hook moves off the shared token again, a person rotates the callback URL once, and AlphaClaw's notice says so.
+
+### Tests
+- `hook-ingress-own-tokens.test.js`: an alias confirmed by a person is refused after the hook goes back to the shared token and off it again, until a person rotates it, a confirmation already on a hook that sits on the shared token is cleared when the hook leaves it, and a failed clear leaves the hook's method unchanged.
+
 ## [0.10.248] - 2026-11-10
 
 Threads on Capy machines can now connect to your box's Agent Relay with the identity Capy signs for each machine, so the box knows exactly which of your threads is calling and a copied capability is useless from any other thread. A delegate also can no longer slip a change to the box's controls past you through a shell command, and in team mode only you answer its confirmation links.
