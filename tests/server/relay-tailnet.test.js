@@ -438,7 +438,7 @@ describe("tailnet settings, sidecar, Doctor and guard", () => {
       "--socket=/data/.alphaclaw/relay/tailscale/tailscaled.sock",
       "--port=0",
     ]);
-    expect(Object.keys(entry.env)).toEqual(["HOME"]);
+    expect(entry.env).toEqual({ HOME: "/data/.alphaclaw/relay/tailscale", TS_LOGS_DIR: "/data/.alphaclaw/relay/tailscale" });
   });
 
   it("shows one Doctor card while the route is on and down, P1 when required", () => {
