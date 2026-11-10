@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.264] - 2026-11-10
+
+You can now trust one relay connection like your own Capy threads, without a Capy token: name it in `ALPHACLAW_RELAY_TRUSTED_BINDINGS` and its changes run with no confirmation links, while every other connection keeps them. Before, only attested threads of an owner on `ALPHACLAW_RELAY_CAPY_OWNERS` could skip the links, which trusts every thread that owner has.
+
+### Added
+- **Pinned bindings.** `ALPHACLAW_RELAY_TRUSTED_BINDINGS` (deployment env only, comma-separated `capy-…` agent names, empty by default) pins relay bindings. A pinned binding that is still bound, on an unrevoked connector, with a live delegate grant gets what an attested owner thread gets: no confirmation row, link or notice, the message, cron, plugins, secret-list and config-read tools, and gateway restarts through AlphaClaw's restart ladder, recorded as `relay:<agent name>`. A revoked grant, a revoked connector or a removed binding ends it on the next tool call; taking the name off the list ends it for a running turn once the relay next checks its queue, and the same now holds for an attested thread whose owner is taken off `ALPHACLAW_RELAY_CAPY_OWNERS`. A handoff passes the pin to the successor thread the holder names. A Doctor card says when an entry did not fit. The relay records it as not attested (`pinned_binding`), since no identity is checked; the binding's capability is the only proof.
+- Changes to what decides relay trust and reads of the relay's own files stay refused for a pinned binding, and the new name joins the trust env names no relay session can change.
+
+### Tests
+- `relay-pinned-binding.test.js` covers both directions: the pinned binding gets zero rows and zero notices, an unpinned delegate still taps, a peer stays a peer, a revoked grant, revoked connector or removed binding loses trust on the next call, a pinned name with no binding or no grant does nothing, and the anchor and key reads stay refused. Two relay tests no longer fail after 15:00 UTC, when the daily relay digest joined the notices they count.
+
 ## [0.10.263] - 2026-11-10
 
 A Capy thread connected to your box can no longer read or change the relay's own keys, databases and their backups, through the read tool or a shell command. Before, `cat relay/secrets.json` or `cd relay && rm bridge.db` from a delegate on the plain connector ran with no tap.

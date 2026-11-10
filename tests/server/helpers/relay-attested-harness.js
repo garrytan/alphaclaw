@@ -220,7 +220,12 @@ const setup = ({ env = capyEnv() } = {}) => {
   const notices = [];
   const confirmations = createRelayConfirmations({
     getStore: () => bridgeStore,
-    notify: (text, opts) => notices.push({ text, opts }),
+    // The daily digest is left out: the clock starts at the real time, so
+    // after 15:00 UTC (kDigestHourUtc) the first tick would send it, and
+    // these tests count confirmation notices only.
+    notify: (text, opts) => {
+      if (opts?.eventType !== "relay_digest") notices.push({ text, opts });
+    },
     resolveSetupUrl: () => kPublic,
     sendToAgent: async () => {},
     readRevokes: () => 0,
@@ -245,13 +250,13 @@ const setup = ({ env = capyEnv() } = {}) => {
   };
   // A Capy thread bound through the plain OAuth connector, made a delegate
   // with Make delegate: no attestation.
-  const oauthDelegate = (agent = "capy-25cf4e98b5b6", { grant = true } = {}) => {
+  const oauthDelegate = (agent = "capy-25cf4e98b5b6", { grant = true, threadId = "jam_A" } = {}) => {
     const remote = store();
     if (!remote.clients.get(kOauthClient)) {
       remote.clients.insert({ client_id: kOauthClient, client_name: "Capy", redirect_uris: ["https://capy.ai/web/callbacks/mcp"] });
       remote.clients.markConsented(kOauthClient);
     }
-    remote.bindings.upsert({ agent, threadId: "jam_A", clientId: kOauthClient, webhookUrl: kWebhook, until: clock.now + 24 * kHour, capabilityHash: sha256("arcap_" + agent), agentToken: "at_" + agent });
+    remote.bindings.upsert({ agent, threadId, clientId: kOauthClient, webhookUrl: kWebhook, until: clock.now + 24 * kHour, capabilityHash: sha256("arcap_" + agent), agentToken: "at_" + agent });
     if (grant) relayRemote.createGrant({ agent, actor: "legacy" });
     return { agent };
   };
