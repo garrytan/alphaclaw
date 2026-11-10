@@ -22,6 +22,7 @@ const {
   updateWatchdogOverseerEnabled,
   writeAlphaclawConfig,
   readToolsAllowShadow,
+  resolveAlphaclawConfigPath,
 } = require("../../lib/server/alphaclaw-config");
 
 const createTempOpenclawDir = () =>
@@ -833,5 +834,27 @@ describe("server/alphaclaw-config combined doctor settings write (adversarial C-
         fs.rmSync(dir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe("server/alphaclaw-config file permissions (GST-2299)", () => {
+  let previousUmask;
+  let openclawDir = "";
+  beforeEach(() => {
+    previousUmask = process.umask(0o022);
+    openclawDir = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-config-mode-"));
+  });
+  afterEach(() => {
+    process.umask(previousUmask);
+    fs.rmSync(openclawDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === "win32")("writes alphaclaw.json at 0600, new or replaced", () => {
+    writeAlphaclawConfig({ openclawDir, config: {} });
+    const configPath = resolveAlphaclawConfigPath({ openclawDir });
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    fs.chmodSync(configPath, 0o644);
+    writeAlphaclawConfig({ openclawDir, config: {} });
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
   });
 });

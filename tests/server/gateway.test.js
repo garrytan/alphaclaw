@@ -52,6 +52,9 @@ const originalFsyncSync = fs.fsyncSync;
 const originalCloseSync = fs.closeSync;
 const originalUnlinkSync = fs.unlinkSync;
 const originalRenameSync = fs.renameSync;
+const originalChmodSync = fs.chmodSync;
+const originalFchmodSync = fs.fchmodSync;
+const originalFchownSync = fs.fchownSync;
 
 // Fix wave F013: openclaw.json writers go through writeFileAtomic (temp file →
 // fsync → rename). Tests that used to capture `fs.writeFileSync(configPath)`
@@ -79,6 +82,16 @@ const mockAtomicConfigWrites = (onWrite = () => {}) => {
     if (pending.delete(String(targetPath))) return undefined;
     return originalUnlinkSync(targetPath);
   });
+  fs.chmodSync = vi.fn((targetPath, mode) =>
+    pending.has(String(targetPath)) ? undefined : originalChmodSync(targetPath, mode),
+  );
+  fs.fchmodSync = vi.fn((fd, mode) => (fd === kAtomicMockFd ? undefined : originalFchmodSync(fd, mode)));
+  fs.fchownSync = vi.fn((fd, uid, gid) =>
+    fd === kAtomicMockFd ? undefined : originalFchownSync(fd, uid, gid),
+  );
+  fs.fstatSync = vi.fn((fd, ...rest) =>
+    fd === kAtomicMockFd ? { nlink: 1 } : originalFstatSync(fd, ...rest),
+  );
   fs.renameSync = vi.fn((from, to) => {
     if (!pending.has(String(from))) return originalRenameSync(from, to);
     const contents = pending.get(String(from));
@@ -191,6 +204,9 @@ describe("server/gateway restart behavior", () => {
     fs.closeSync = originalCloseSync;
     fs.unlinkSync = originalUnlinkSync;
     fs.renameSync = originalRenameSync;
+    fs.chmodSync = originalChmodSync;
+    fs.fchmodSync = originalFchmodSync;
+    fs.fchownSync = originalFchownSync;
     net.createConnection = originalCreateConnection;
     if (originalPrelaunchHookEnv === undefined) {
       delete process.env.ALPHACLAW_GATEWAY_PRELAUNCH_HOOK;
