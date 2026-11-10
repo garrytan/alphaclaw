@@ -11,9 +11,10 @@ A delegate thread can no longer change the relay's signing key, or the relay's o
 
 ### Fixed
 - **Writes are judged by where they land.** Before it decides whether a `write`, `edit` or `apply_patch` touches a protected file, the relay guard now folds `.` and `..`, resolves a relative path against the agent's workspace, and follows symlinks. A write to `relay/provenance-key.json` or a relay database through `../../relay/./provenance-key.json`, a symlink in the workspace, or a linked directory over `relay/` now waits for the owner's confirmation, and the notice names the real file. `provenance-key.json` is also protected by name anywhere, like `secrets.json`.
+- **No gaps around the edges.** A symlink to a protected file that does not exist yet is held too (the write would create it, so a delegate could not plant its own signing key before the box first signs). A relative path is also resolved against the workspace and working directory `openclaw.json` sets for the agent, not only the default workspace. A patch header with leading spaces, which OpenClaw trims and applies, is read like any other. And when a write names more files than the owner's notice can show, the notice says how many and the approval is bound to the whole list, so it cannot cover a file the notice left out.
 
 ### Tests
-- `relay-confirm.test.js`: the key and a relay database reached through `..`, a workspace symlink, a linked directory and a linked root, for `write`, `edit` and `apply_patch`, plus ordinary workspace files left unheld.
+- `relay-confirm.test.js`: the key and a relay database reached through `..`, a workspace symlink, a linked directory and a linked root, for `write`, `edit` and `apply_patch`, plus ordinary workspace files left unheld; a link to a protected file that does not exist yet; indented patch headers; the main workspace, a workspace set in `openclaw.json` and the agent named in the session key; and a long file list.
 
 ## [0.10.252] - 2026-11-10
 

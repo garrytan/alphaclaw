@@ -65,6 +65,50 @@ describe("relay confirmations: the signing key and relay files by any path that 
       expect(write(given).kind, given).toBe("low");
     }
   });
+
+  it("holds a link to a protected file that does not exist yet, since the write creates it", () => {
+    fs.rmSync(path.join(root, "relay", "provenance-key.json"));
+    fs.symlinkSync(path.join(root, "relay", "bridge.db-journal"), path.join(workspace, "journal.txt"));
+    fs.symlinkSync(path.join(root, "missing", "exec-approvals.json"), path.join(workspace, "approvals.txt"));
+    for (const given of ["notes.txt", "journal.txt", "approvals.txt"]) {
+      for (const tool of ["write", "edit", "apply_patch"]) expect(write(given, tool).kind, tool + " " + given).toBe("high");
+    }
+    expect(write("notes.txt").target).toBe(path.join(root, "relay", "provenance-key.json"));
+  });
+
+  it("holds a patch header OpenClaw applies after trimming its indent", () => {
+    for (const header of ["  *** Update File: .env", "\t*** Add File: box/bridge.db", " *** Delete File: notes.txt", "*** Update File: plain.md\n  *** Move to: x/openclaw.json"]) {
+      const risk = classifyRisk({ toolName: "apply_patch", params: { input: "*** Begin Patch\n" + header + "\n*** End Patch" }, rootDir: root, agentId: "scout" });
+      expect(risk.kind, header).toBe("high");
+    }
+  });
+
+  it("resolves a relative write against the main workspace and the workspace openclaw.json sets for the agent", () => {
+    const main = path.join(root, ".openclaw", "workspace");
+    const custom = path.join(root, ".openclaw", "scout-files");
+    fs.mkdirSync(main, { recursive: true });
+    fs.mkdirSync(custom, { recursive: true });
+    fs.symlinkSync(path.join(root, "relay"), path.join(main, "mainbox"));
+    fs.symlinkSync(path.join(root, "relay"), path.join(custom, "custombox"));
+    const at = (agentId, given) => classifyRisk({ toolName: "write", params: { path: given }, rootDir: root, agentId }).kind;
+    expect(at("main", "mainbox/bridge.db")).toBe("high");
+    expect(at("", "mainbox/bridge.db")).toBe("high");
+    expect(at("scout2", "custombox/bridge.db")).toBe("low");
+    fs.writeFileSync(path.join(root, ".openclaw", "openclaw.json"), JSON.stringify({ agents: { list: [{ id: "scout2", workspace: custom }] } }));
+    expect(at("scout2", "custombox/bridge.db")).toBe("high");
+    expect(at("scout2", "custombox/notes.md")).toBe("high");
+    expect(at("scout2", "plain.md")).toBe("low");
+  });
+
+  it("never lets one approval cover a longer file list than the notice showed", () => {
+    const pad = [1, 2, 3, 4].map((i) => "*** Add File: .env." + String(i).repeat(75) + "\n+x").join("\n");
+    const patch = (extra) => classifyRisk({ toolName: "apply_patch", params: { input: "*** Begin Patch\n" + pad + extra + "\n*** End Patch" }, rootDir: root, agentId: "scout" });
+    const four = patch("");
+    const five = patch("\n*** Update File: " + path.join(root, "relay", "provenance-key.json") + "\n@@\n+x");
+    expect(four.kind).toBe("high");
+    expect(five.target).not.toBe(four.target);
+    expect(five.action).toMatch(/ \+5 files$/);
+  });
 });
 
 describe("relay confirmations: the risk kinds", () => {
@@ -269,6 +313,19 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(refOf(again)).not.toBe(ref);
     const replay = box.running({ lane: "gbrain", confirmationRef: ref });
     expect(box.call(replay, "write", { path: configPath(), content: "{}" }).block).toBe(true);
+  });
+
+  it("resolves a relative write against the agent named in the session key when the hook context has none", () => {
+    box = makeBox();
+    const workspace = path.join(box.rootDir, ".openclaw", "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.symlinkSync(box.paths.dir, path.join(workspace, "box"));
+    const run = box.running();
+    expect(run.ctx.agentId).toBeUndefined();
+    const held = box.call(run, "write", { path: "box/bridge.db", content: "x" });
+    expect(held.block).toBe(true);
+    expect(held.blockReason).toContain("write bridge.db needs your owner's confirmation");
+    expect(box.call(run, "write", { path: "notes.md", content: "x" })).toEqual({});
   });
 
   it("an approved automations change is admitted once for the same call, and the next one asks again (PR4)", async () => {
