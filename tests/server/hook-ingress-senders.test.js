@@ -353,6 +353,46 @@ describe("shared-token overlap (D2)", () => {
     await h.close();
   });
 
+  it("keeps a closed hook closed when its signing secret is replaced or its method changes", async () => {
+    const h = await createHarness();
+    const secret = randomSecret();
+    h.hookIngress.setIngress("meetings", { preset: "circleback", secret });
+    expect((await circlebackPost(h, { secret, body: JSON.stringify({ first: true }) })).status).toBe(200);
+    await flush();
+    h.clock.now += 25 * kHour;
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(401);
+    const replaced = randomSecret();
+    expect(h.hookIngress.setIngress("meetings", { preset: "circleback", secret: replaced })).toMatchObject({ state: "closed", sharedTokenAccepted: false });
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(401);
+    expect((await circlebackPost(h, { secret, body: JSON.stringify({ old: true }) })).status).toBe(401);
+    expect((await circlebackPost(h, { secret: replaced, body: JSON.stringify({ next: true }) })).status).toBe(200);
+    h.hookIngress.generateIngressSecret("meetings", { preset: "per_hook_token" });
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(401);
+    expect(policyOf(h, "meetings")).toMatchObject({ firstAdmittedAt: "2026-11-09T12:00:00.000Z", closesAt: "2026-11-10T12:00:00.000Z" });
+    h.hookIngress.reopenIngress("meetings");
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(200);
+    await h.close();
+  });
+
+  it("starts the window from a duplicate when the first admission could not be stored", async () => {
+    const h = await createHarness();
+    const secret = randomSecret();
+    h.hookIngress.setIngress("meetings", { preset: "circleback", secret });
+    const body = JSON.stringify({ only: true });
+    expect((await circlebackPost(h, { secret, body })).status).toBe(200);
+    await flush();
+    const configPath = path.join(h.openclawDir, "alphaclaw.json");
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    cfg.hooksIngress.hooks.meetings = { ...cfg.hooksIngress.hooks.meetings, firstAdmittedAt: null, closesAt: null };
+    fs.writeFileSync(configPath, JSON.stringify(cfg));
+    h.clock.now += kHour;
+    const again = await circlebackPost(h, { secret, body });
+    expect(again.body).toMatchObject({ deduped: true });
+    expect(h.gateway.calls).toHaveLength(1);
+    expect(policyOf(h, "meetings")).toMatchObject({ firstAdmittedAt: "2026-11-09T13:00:00.000Z", closesAt: "2026-11-10T13:00:00.000Z" });
+    await h.close();
+  });
+
   it("does not start the window when the gateway refuses the signed delivery", async () => {
     const h = await createHarness();
     const secret = randomSecret();
@@ -406,6 +446,34 @@ describe("fail closed", () => {
     fs.writeFileSync(configPath, "{ not json");
     expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(503);
     expect((await request(h.app).post("/hooks/calendar?token=" + kShared).send("{}")).status).toBe(200);
+    await h.close();
+  });
+
+  it("refuses a shared-token entry that still has a signing secret behind it (a restored or reverted policy)", async () => {
+    const h = await createHarness();
+    h.hookIngress.setIngress("meetings", { preset: "circleback", secret: randomSecret() });
+    const configPath = path.join(h.openclawDir, "alphaclaw.json");
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    cfg.hooksIngress.hooks.meetings = { mode: "token", changedAt: "2026-11-01T00:00:00.000Z" };
+    fs.writeFileSync(configPath, JSON.stringify(cfg));
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(503);
+    expect(h.gateway.calls).toHaveLength(0);
+    expect(h.hookIngress.ingressStatus("meetings")).toMatchObject({ state: "misconfigured", sharedTokenAccepted: false });
+    h.hookIngress.setIngress("meetings", { preset: "token" });
+    expect((await request(h.app).post("/hooks/meetings?token=" + kShared).send("{}")).status).toBe(200);
+    await h.close();
+  });
+
+  it("treats hook names that match Object members as ordinary hooks", async () => {
+    const h = await createHarness({ knownHooks: ["calendar", "constructor"] });
+    expect(policyOf(h, "constructor")).toMatchObject({ mode: "token" });
+    expect((await request(h.app).post("/hooks/constructor?token=" + kShared).send("{}")).status).toBe(200);
+    for (const name of ["toString", "valueOf", "hasOwnProperty"]) {
+      const res = await request(h.app).post("/hooks/" + name).set("x-signature", "x").send("{}");
+      expect(res.status).toBe(401);
+    }
+    await flush();
+    expect(h.notices).toHaveLength(0);
     await h.close();
   });
 
@@ -510,13 +578,22 @@ describe("backup", () => {
     expect(bare.notices.some((n) => n.message.includes("secret_missing"))).toBe(true);
     await bare.close();
   });
+
+  it("reports a backup directory it cannot create as a failure instead of throwing", async () => {
+    const h = await createHarness();
+    h.hookIngress.setIngress("meetings", { preset: "circleback", secret: randomSecret() });
+    const fsModule = { ...fs, mkdirSync: () => { throw new Error("EACCES: permission denied"); } };
+    const result = backupHookIngress({ rootDir: h.rootDir, openclawDir: h.openclawDir, backupsDir: mkdir(), fsModule });
+    expect(result).toMatchObject({ ok: false, error: "EACCES: permission denied" });
+    await h.close();
+  });
 });
 
 describe("ingress routes", () => {
   const createRoutesApp = (actorType) => {
     const calls = [];
     const fake = {
-      ingressStatus: (name) => ({ preset: "token", name }),
+      ingressStatus: (name) => ({ preset: name === "meetings" ? "circleback" : "token", name }),
       setIngress: (name, body) => { calls.push(["set", name, body]); return { preset: body.preset }; },
       generateIngressSecret: (name, body) => { calls.push(["gen", name, body]); return { secret: "s", ingress: { preset: body.preset } }; },
       reopenIngress: (name) => { calls.push(["reopen", name]); return { preset: "circleback" }; },
@@ -559,5 +636,12 @@ describe("ingress routes", () => {
     expect((await request(app).post("/api/webhooks/cams/ingress/generate-secret").send({ preset: "verkada" })).status).toBe(403);
     expect((await request(app).post("/api/webhooks/meetings/ingress/reopen")).status).toBe(403);
     expect(calls).toHaveLength(0);
+  });
+
+  it("lets only a person add an OAuth callback alias to a hook that has moved off the shared token", async () => {
+    const agent = createRoutesApp("agent").app;
+    expect((await request(agent).post("/api/webhooks/meetings/oauth-callback")).body).toMatchObject({ error: "humans_only" });
+    expect((await request(agent).post("/api/webhooks/calendar/oauth-callback")).status).not.toBe(403);
+    expect((await request(createRoutesApp("person").app).post("/api/webhooks/meetings/oauth-callback")).status).not.toBe(403);
   });
 });

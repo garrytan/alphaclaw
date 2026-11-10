@@ -105,6 +105,10 @@ describe("frontend/general backups card", () => {
       error: "disk full",
     });
     expect(buildBackupResultModel({ ok: false }).error).toBe("Backup failed.");
+    expect(success.warning).toBe(null);
+    expect(buildBackupResultModel({ ok: true, archivePath: "/a.tar.gz", hookIngress: { ok: false, error: "disk full" } }).warning).toBe(
+      "Webhook sender verification settings and secrets were not saved with it: disk full",
+    );
   });
 
   it("reads GET /api/openclaw/backup and polls only while a backup is running", () => {
