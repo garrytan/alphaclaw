@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.263] - 2026-11-10
+
+A Capy thread connected to your box can no longer read or change the relay's own keys, databases and their backups, through the read tool or a shell command. Before, `cat relay/secrets.json` or `cd relay && rm bridge.db` from a delegate on the plain connector ran with no tap.
+
+### Fixed
+- **The relay's files stay out of relay turns.** A read of `relay/secrets.json`, `provenance-key.json`, `internal.secret`, a relay database or a Back up now copy of one is refused in every relay session, your own attested threads included, and so is a shell command or typed input that reaches them. That covers a `cd` into the directory, a glob in it, a workspace symlink to it, and a delete or overwrite. Nothing is asked of you. `ls` of the directory and notes that only mention a file name still run.
+- **Changes to AlphaClaw's own code always ask.** The trust-anchor check now runs on every delegate call, so a delegate on the plain connector working inside AlphaClaw's installed code needs your one-tap confirmation, even for a command the guard otherwise rated harmless.
+
+### Tests
+- `relay-anchor-every-tier.test.js` covers both tiers in both directions: 20 read shapes and 5 change shapes are refused with no row and no notice, a held change admits exactly the approved call once, and ordinary reads and notes still run. Two existing tests change with the behavior: the owner thread's anchor test now expects the key reads refused, and the relative-note test pins the guard's working directory outside AlphaClaw's own code.
+
 ## [0.10.262] - 2026-11-10
 
 Your own Capy threads can now do on the box everything you could, short of changing who is trusted: send messages, schedule work, install plugins, list the secret store and restart the gateway. Before, a thread you owned could change config without a link (since 0.10.260) but still could not send, schedule, install a plugin or restart, so it had to ask you to do those by hand. A restart it asks for runs through AlphaClaw's own restart ladder and is recorded for that thread.
