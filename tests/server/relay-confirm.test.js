@@ -210,14 +210,13 @@ describe("relay confirmations: only a command that can change a protected file i
 
   it.each([
     ["a hash and a listing", "sha256sum /data/.openclaw/openclaw.json && ls -la /data/.env*"],
-    ["a quoted here-document note", "cat <<'EOF' >> memory/notes.md\nChecked alphaclaw.json and .env today.\n$(rm openclaw.json) stays text\nEOF"],
-    ["a dated note with substitutions", 'echo "$(date -u +%H:%M) checked alphaclaw.json" >> "memory/$(date +%F).md"'],
-    ["a note under $HOME after a read", 'grep -q x ~/.openclaw/openclaw.json && echo "openclaw.json ok" >> $HOME/memory/n.md'],
     ["a printf note", "printf '%s\\n' 'see openclaw.json' >> notes/today.md"],
-    ["tests and a cut of .env", "test -w openclaw.json && echo ok; [ -f .env ] && cat .env | cut -d= -f1"],
-    ["a copy out through tee", "cat openclaw.json | tee /tmp/copy.json"],
+    ["tests and a cut of .env", "test -f .env && cat .env | cut -d= -f1"],
+    ["a copy out through a redirect", "cat openclaw.json > /tmp/copy.json"],
     ["a note then a read of it", 'echo "checked alphaclaw.json" >> memory/n.md && tail -3 memory/n.md'],
-    ["a here-string into grep", 'grep -c x <<< "openclaw.json"'],
+    ["a mkdir then a note", "mkdir -p memory && echo 'checked .env today' >> memory/2026-11-10.md"],
+    ["a count through sort and uniq", "cat openclaw.json | sort | uniq -c | head"],
+    ["a grep by its /usr/bin path", "/usr/bin/grep x openclaw.json"],
   ])("does not hold %s", (_name, command) => {
     expect(exec(command).kind).toBe("low");
   });
@@ -286,8 +285,114 @@ describe("relay confirmations: only a command that can change a protected file i
     ["sudo tee", "sudo tee /data/.env < x"],
     ["sqlite3 opening the bridge database read-only", "sqlite3 ~/.alphaclaw/relay/bridge.db .tables"],
     ["a command the reader cannot split", 'echo "alphaclaw.json >> x'],
+    ["a quoted here-document note", "cat <<'EOF' >> memory/notes.md\nChecked alphaclaw.json and .env today.\n$(rm openclaw.json) stays text\nEOF"],
+    ["a dated note with substitutions", 'echo "$(date -u +%H:%M) checked alphaclaw.json" >> "memory/$(date +%F).md"'],
+    ["a note under $HOME after a read", 'grep -q x ~/.openclaw/openclaw.json && echo "openclaw.json ok" >> $HOME/memory/n.md'],
+    ["a [ ] test before a cut of .env", "test -w openclaw.json && echo ok; [ -f .env ] && cat .env | cut -d= -f1"],
+    ["a copy out through tee", "cat openclaw.json | tee /tmp/copy.json"],
+    ["a here-string into grep", 'grep -c x <<< "openclaw.json"'],
   ])("still holds %s", (_name, command) => {
     expect(exec(command).kind).toBe("high");
+  });
+
+  // Commands that got past the shell reader this rule replaced, or that a
+  // literal split must not take as a read or a note.
+  it.each([
+    'f=openclaw.json; echo "rm $f" | sh',
+    'f=openclaw.json; echo "rm $f" > /tmp/s; sh /tmp/s',
+    'cat() { sh; }; echo "rm openclaw.json" | cat',
+    "cat() { xargs rm; }; echo openclaw.json | cat",
+    "echo 'rm \"$1\"' > /tmp/cat; chmod +x /tmp/cat; /tmp/cat openclaw.json",
+    "shopt -s expand_aliases\nalias cat=rm\ncat openclaw.json",
+    "f=openclaw.json; echo $f | xargs rm",
+    'f=openclaw.json; sh <<< "rm $f"',
+    "f=openclaw.json; sh <<EOF\nrm $f\nEOF",
+    "export f=openclaw.json; sh <<'EOF'\nrm $f\nEOF",
+    "printf '#!/bin/sh\\nrm \"$1\"' > /usr/local/bin/cat; cat openclaw.json",
+    "cp /tmp/x /usr/local/bin/cat; cat openclaw.json",
+    'function cat { sh; }; echo "rm openclaw.json" | cat',
+    "PATH=/tmp cat openclaw.json",
+    "PATH=/tmp; cat openclaw.json",
+    "/tmp/cat openclaw.json",
+    "./cat openclaw.json",
+    "/tmp/cat; cat openclaw.json",
+    "echo $(cp /tmp/x /usr/local/bin/cat); cat openclaw.json",
+    'f=openclaw.json; echo "rm $f" | tee /tmp/s; sh /tmp/s',
+    "printf -v PATH /tmp; cat openclaw.json",
+    "echo x | sort -o/usr/bin/cat; cat openclaw.json",
+    "echo x | sort --output=/usr/bin/cat; cat openclaw.json",
+    "sort -o /usr/bin/cat x; cat openclaw.json",
+    "sort --compress-program=sh openclaw.json",
+    "echo() { cat openclaw.json; }; cp /tmp/x /usr/local/bin/cat; hash -r; echo",
+    "while cat openclaw.json; do cp /tmp/x /usr/local/bin/cat; hash -r; done",
+    "{ head -c 100000000 /dev/zero | wc -c; cat openclaw.json; } & cp /tmp/x /usr/local/bin/cat",
+    "LD_PRELOAD=/tmp/x.so cat openclaw.json",
+    "LD_LIBRARY_PATH=/tmp cat openclaw.json",
+    "echo $[PATH=0]; cat openclaw.json",
+    "echo ${HOME:+'}'}; rm openclaw.json # '",
+    "f=openclaw.json; rm ${HOME:+$f}",
+    "echo $[ cat , PATH=0 ]; cat openclaw.json",
+    "echo ${x:-$[PATH=0]}; cat openclaw.json",
+    'PATH="/tmp:/bin/cat"; cat openclaw.json',
+    "echo $(echo 'rm $1' | tee /usr/local/bin/cat); cat openclaw.json",
+    "[[ PATH=0 -eq 0 ]]; cat openclaw.json",
+    "f=openclaw.json; eval 'rm $f'",
+    'f=openclaw.json; sh -c "rm \\$f"',
+    "f=openclaw.json; export f; sh -c 'rm $f'",
+    "f=openclaw.json; export f; python3 -c 'import os; os.remove(os.environ[\"f\"])'",
+    "echo openclaw.json > /data/.openclaw/o*",
+    "echo note >> memory/n # '\nrm openclaw.json\n'",
+    'echo \\"; rm openclaw.json; echo \\"',
+    "echo x &>openclaw.json",
+  ])("still holds %s", (command) => {
+    expect(exec(command).kind).toBe("high");
+  });
+
+  it("holds a note written through a symlink onto the signing key", () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-note-link-")));
+    try {
+      fs.mkdirSync(path.join(dir, "relay"));
+      fs.writeFileSync(path.join(dir, "relay", "provenance-key.json"), "{}");
+      fs.symlinkSync(path.join(dir, "relay", "provenance-key.json"), path.join(dir, "note.md"));
+      const risk = classifyRisk({ toolName: "exec", params: { command: "echo openclaw.json > " + path.join(dir, "note.md") }, rootDir: dir });
+      expect(risk.kind).toBe("high");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("holds a note written over an executable", () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-note-exec-")));
+    try {
+      fs.writeFileSync(path.join(dir, "cat"), "#!/bin/sh\n");
+      fs.chmodSync(path.join(dir, "cat"), 0o755);
+      fs.writeFileSync(path.join(dir, "plain.txt"), "");
+      expect(exec("echo openclaw.json > " + path.join(dir, "cat")).kind).toBe("high");
+      expect(exec("echo openclaw.json > " + path.join(dir, "plain.txt")).kind).toBe("low");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("holds a read run with exec env overrides", () => {
+    const run = (params) => classifyRisk({ toolName: "exec", params: { command: "cat openclaw.json", ...params }, rootDir: root }).kind;
+    expect(run({ env: { PATH: "/tmp" } })).toBe("high");
+    expect(run({ env: {} })).toBe("low");
+    expect(run({})).toBe("low");
+  });
+
+  it("resolves a relative note from the exec workdir and an absolute cd only", () => {
+    const run = (command, params = {}) => classifyRisk({ toolName: "exec", params: { command, ...params }, rootDir: root }).kind;
+    expect(run("echo openclaw.json >> notes.md", { workdir: os.tmpdir() })).toBe("low");
+    expect(run("echo openclaw.json >> notes.md", { workdir: "sub" })).toBe("high");
+    expect(run("cd " + os.tmpdir() + " && echo openclaw.json >> notes.md")).toBe("low");
+    expect(run("cd .. && echo openclaw.json >> notes.md")).toBe("high");
+    expect(run("cd .. && echo openclaw.json >> " + path.join(os.tmpdir(), "notes.md"))).toBe("low");
+  });
+
+  it("holds a program outside /bin and /usr/bin typed into a process", () => {
+    expect(classifyRisk({ toolName: "process", params: { action: "write", sessionId: "s1", data: "/tmp/cat openclaw.json" } }).kind).toBe("high");
+    expect(classifyRisk({ toolName: "process", params: { action: "write", sessionId: "s1", data: "cat openclaw.json" } }).kind).toBe("low");
   });
 });
 
