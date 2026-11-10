@@ -5,7 +5,7 @@ const request = require("supertest");
 const { registerRelayRoutes } = require("../../lib/server/routes/relay");
 const { relayPaths } = require("../../lib/server/relay/constants");
 const { kRelayGuardPluginId } = require("../../lib/server/relay/guard-entry");
-const { classifyAnchor, gatewayRestartOf } = require("../../lib/plugin/relay-guard/confirm");
+const { classifyAnchor, classifyRisk, gatewayRestartOf } = require("../../lib/plugin/relay-guard/confirm");
 const { kOwnerThreadPluginActions } = require("../../lib/plugin/relay-guard/policy");
 const { kOtherOwner, guardedConfig, setup, expectHeld, expectHeldWithTap } = require("./helpers/relay-attested-harness");
 
@@ -380,6 +380,35 @@ describe("relay owner threads (GST-2323 PR2): over-refusals fixed", () => {
       "openclaw agent --message hi; openclaw config set plugins.entries.relay-guard.enabled false",
       "openclaw agent --message hi > " + ctx.openclawJson,
     ]) {
+      expect((await ctx.call(run, "exec", { command })).blockReason, command).toContain("would change what decides relay trust on this box");
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("reads openclaw as the program only in command position, so an argument next to a shell variable changes nothing", async () => {
+    ctx = setup();
+    const argumentCommands = [
+      "grep -rn openclaw $DIR",
+      'docker logs openclaw --since "$T"',
+      'git commit -m "bump openclaw (gateway) pin"',
+      'journalctl -u openclaw --since "$(date)"',
+      "echo openclaw $HOME",
+    ];
+    for (const command of argumentCommands) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).toBeNull();
+      expect(classifyRisk({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }).kind, command).toBe("low");
+    }
+    const run = await ctx.deliver((await ctx.attestedAgent()).agent);
+    for (const command of argumentCommands) expect(await ctx.call(run, "exec", { command }), command).toEqual({});
+    for (const command of [
+      "sudo -u root openclaw config set $K false",
+      'sh -c "openclaw config set $K false"',
+      "timeout 30 openclaw config patch x",
+      "echo plugins.entries.relay-guard.enabled | xargs openclaw config set",
+      "( openclaw config set $K false )",
+      "npx openclaw config $V plugins.entries.relay-guard.enabled false",
+    ]) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
       expect((await ctx.call(run, "exec", { command })).blockReason, command).toContain("would change what decides relay trust on this box");
     }
     expect(ctx.confirmationCount()).toBe(0);
