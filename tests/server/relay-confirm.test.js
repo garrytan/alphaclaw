@@ -46,6 +46,25 @@ describe("relay confirmations: the risk kinds", () => {
     expect(risk.action).toBe(action);
   });
 
+  it("cuts what the delegate chose to plain path characters, so nothing in it can render as a link or markup", () => {
+    const risk = classifyRisk({ toolName: "write", params: { path: "/tmp/[Approve](https://evil.example/login)/<x|y>\u202e cookie: z/.env" } });
+    expect(risk.kind).toBe("high");
+    expect(risk.target).toMatch(/^[A-Za-z0-9._/@+,?-]+$/);
+    const config = classifyRisk({ toolName: "exec", params: { command: "openclaw config set [a](https://evil.example) b" } });
+    expect(config.action).toMatch(/^openclaw config set [A-Za-z0-9._/@+,?-]*$/);
+  });
+
+  it("binds an approved command to that exact command, flags and value included", () => {
+    const a = classifyRisk({ toolName: "exec", params: { command: "openclaw config set gateway.bind lan" } });
+    const b = classifyRisk({ toolName: "exec", params: { command: "openclaw config set gateway.bind custom" } });
+    const flag = classifyRisk({ toolName: "exec", params: { command: "openclaw config set --json gateway.auth '{}'" } });
+    expect(a.action).toBe(b.action);
+    expect(a.target).not.toBe(b.target);
+    expect(a.target).toMatch(/^openclaw config set gateway\.bind #[a-f0-9]{16}$/);
+    expect(flag.action).toBe("openclaw config set");
+    expect(flag.target).not.toBe(classifyRisk({ toolName: "exec", params: { command: "openclaw config set --json gateway.bind '{}'" } }).target);
+  });
+
   it("names key names and paths only, never a value", () => {
     const risk = classifyRisk({ toolName: "exec", params: { command: "openclaw secrets set OPENAI_API_KEY sk-live-abc123" } });
     expect(JSON.stringify(risk)).not.toContain("sk-live-abc123");
@@ -171,19 +190,27 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(box.call(replay, "write", { path: configPath(), content: "{}" }).block).toBe(true);
   });
 
-  it("keeps markup in a delegate's target out of the owner's notice", () => {
+  it("keeps markup in a delegate's target out of the owner's notice on every transport, after redaction too", () => {
     const { renderTelegramHtml } = require("../../lib/server/utils/telegram-html");
+    const { formatSlackMessage } = require("../../lib/server/watchdog-notify");
+    const { redactSecretText } = require("../../lib/server/utils/redact");
     box = makeBox();
     const run = box.running();
-    const target = "/tmp/[Approve on the secure page](https://evil.example/login)/.env";
-    expect(box.call(run, "write", { path: target, content: "x" }).block).toBe(true);
+    for (const target of ["/tmp/[Approve on the secure page](https://evil.example/login)/.env", "/tmp/cookie: x [Approve](https://evil.example/a)/.env", "/tmp/<https://evil.example/b|Approve>/.env"]) {
+      expect(box.call(run, "write", { path: target, content: "x" }).block).toBe(true);
+    }
     box.confirmations.tick();
-    const [notice] = box.notices;
-    expect(notice.text).toContain("Target: `" + target + "`");
-    const { html } = renderTelegramHtml(notice.text);
-    expect(html).not.toContain("evil.example/login\"");
-    expect(html).toContain("<code>" + target + "</code>");
+    expect(box.notices).toHaveLength(3);
+    for (const notice of box.notices) {
+      const text = redactSecretText(notice.text);
+      expect(text).toMatch(/Target: \x60[A-Za-z0-9._/@+,?-]+\x60\n/);
+      expect(text).not.toMatch(/https?:\/\/evil/);
+      const { html } = renderTelegramHtml(text);
+      expect(html).not.toMatch(/href="[^"]*evil/);
+      expect(formatSlackMessage(text)).not.toMatch(/<https?:\/\/evil/);
+    }
   });
+
 
   it("a confirmation admits nothing for another target, another generation or another lane's message", async () => {
     box = makeBox();
