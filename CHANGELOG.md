@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.254] - 2026-11-10
+
+AlphaClaw no longer loosens the file permissions of `openclaw.json` when it saves a config change. A config kept at 0600 because it holds secret references used to come back 0644 after every save.
+
+### Fixed
+- **Config saves keep the file's permissions.** A save over an existing file keeps that file's mode exactly, whatever the process umask, for `openclaw.json`, `alphaclaw.json` and every other file AlphaClaw writes atomically without an explicit mode. A new `openclaw.json` is created 0600.
+
 ## [0.10.253] - 2026-11-10
 
 A deployment that holds OpenClaw below AlphaClaw's pin on purpose no longer opens a critical version-mismatch incident on every boot. Boxes that hold OpenClaw 2026.10.9 under a release that pins 2026.11.2 now boot clean and notify nobody, while a version nobody chose still raises the alarm.

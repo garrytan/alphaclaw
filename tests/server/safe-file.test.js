@@ -193,6 +193,35 @@ describe("server/utils/safe-file", () => {
       }
     });
 
+    it("keeps an existing file's permissions when no mode is given, whatever the umask", () => {
+      if (process.platform === "win32") return;
+      const target = path.join(tempDir, "openclaw.json");
+      fs.writeFileSync(target, "old");
+      fs.chmodSync(target, 0o600);
+      const previous = process.umask(0o022);
+      try {
+        writeFileAtomic(target, "new");
+        expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+        fs.chmodSync(target, 0o664);
+        writeFileAtomic(target, "newer");
+        expect(fs.statSync(target).mode & 0o777).toBe(0o664);
+      } finally {
+        process.umask(previous);
+      }
+      expect(fs.readFileSync(target, "utf8")).toBe("newer");
+      expect(fs.readdirSync(tempDir)).toEqual(["openclaw.json"]);
+    });
+
+    it("uses newFileMode only when the target does not exist yet", () => {
+      if (process.platform === "win32") return;
+      const target = path.join(tempDir, "fresh.json");
+      writeFileAtomic(target, "a", { newFileMode: 0o600 });
+      expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+      fs.chmodSync(target, 0o640);
+      writeFileAtomic(target, "b", { newFileMode: 0o600 });
+      expect(fs.statSync(target).mode & 0o777).toBe(0o640);
+    });
+
     it("degrades to a plain write for mock fs without renameSync", () => {
       const writes = [];
       const fsModule = {
