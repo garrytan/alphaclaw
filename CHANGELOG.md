@@ -5,6 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.252] - 2026-11-10
+
+A delegate thread can now read your automations and look back through its own relay conversations, and when your agent messages a Capy thread during a turn you started on Telegram, the message carries a statement signed by the box saying which of your Telegram messages asked. Messages between the box and a Capy thread can also be up to 64,000 characters in either direction.
+
+### Added
+- **Signed owner provenance.** A relay message the box agent sends a Capy thread during a turn the owner started on Telegram carries `relay_provenance`: an Ed25519 signature by the relay's own key (`relay/provenance-key.json`, 0600) over the Telegram chat, topic, message id and sender, the sha256 of the owner's message and a masked quote of it, and the sha256 of the relay text as sent. `relay_history` shows it as `owner_provenance` with `verified`, and `GET /relay/provenance-key` serves the public key. It proves which Telegram message the owner sent and that this relay text is the one signed. A message you send after the agent's turn made its first tool call is never named for that turn. It does not prove that the agent's own words say what the owner meant, so a thread should act on the quoted message. The relay guard writes a one-time claim only for a turn OpenClaw marks as the owner's, on the same channel and from the same sender, and removes any `provenance_ref` an agent or a remote caller passes in. A message to any other agent carries no statement, so the owner's words reach only Capy threads. The key is masked out of relay text, a delegate's change to it waits for your Approve tap, **Back up now** copies it, and AlphaClaw never replaces a key it cannot read.
+- **Long messages both ways.** The box agent can send a Capy thread up to 64,000 characters; past 6,000 the thread gets the first part and a `result_ref` for `relay_result`. A Capy thread can send the box up to 64,000 characters; past 12,000 the box stores the whole text and its run reads all of it. Other agents keep the 16,000 cap.
+
+### Changed
+- **Delegates read automations and their own sessions.** `automations` reads (`status`, `list`, `get`, `runs`, `next_check`) run for a delegate; `add`, `update`, `remove`, `run` and `wake` wait for your Approve tap, and unknown actions are refused. `sessions_history` and `sessions_search` run only for the delegate's own relay session and its lanes, by session key; any other key or a `sessionId` is refused.
+
+### Tests
+- `relay-owner-provenance.test.js`: signing, a forged or reused ref, another channel, sender or non-owner turn, a tampered statement or text, and the public key. `relay-delegate.test.js`: automations reads and held writes, own-session reads, and every other session refused. `relay-grants.test.js`, `relay-lanes.test.js` and `relay-mask.test.js`: long sends both ways, the 16,000 cap for other agents, a caller's `provenance_ref` dropped, and the outbound route's caller rule.
+
 ## [0.10.251] - 2026-11-10
 
 Three narrow ways an OAuth callback URL could deliver to a webhook without a person's fresh confirmation are closed.

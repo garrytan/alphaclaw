@@ -224,6 +224,24 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(box.call(replay, "write", { path: configPath(), content: "{}" }).block).toBe(true);
   });
 
+  it("an approved automations change is admitted once for the same call, and the next one asks again (PR4)", async () => {
+    box = makeBox();
+    const first = box.running({ lane: "gbrain" });
+    const params = { action: "run", jobId: "job-1" };
+    const held = box.call(first, "automations", params);
+    expect(held.block).toBe(true);
+    expect(held.blockReason).toContain("automations run job-1 needs your owner's confirmation");
+    const ref = refOf(held);
+    box.confirmations.tick();
+    expect(await approve(box.notices[0])).toMatchObject({ ok: true, state: "confirmed" });
+    const other = box.running({ lane: "gbrain", confirmationRef: ref });
+    expect(box.call(other, "automations", { action: "run", jobId: "job-2" }).block).toBe(true);
+    const retry = box.running({ lane: "gbrain", confirmationRef: ref });
+    expect(box.call(retry, "automations", { action: "run", jobId: "job-1" })).toEqual({});
+    expect(box.bridge.confirmations.get(ref)).toMatchObject({ state: "spent", spentMessageId: retry.id });
+    expect(box.call(retry, "automations", params).block).toBe(true);
+  });
+
   it("keeps markup in a delegate's target out of the owner's notice on every transport, after redaction too", () => {
     const { renderTelegramHtml } = require("../../lib/server/utils/telegram-html");
     const { formatSlackMessage } = require("../../lib/server/watchdog-notify");

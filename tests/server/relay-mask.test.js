@@ -169,6 +169,30 @@ describe("relay masker (ALPH-63)", () => {
       app.server.close();
     }
   });
+
+  it("the outbound route has the mask route's caller rule, masks, refuses a long text to an agent that cannot page, and the key route shows only the public key (PR4)", async () => {
+    const app = await startApp();
+    try {
+      const post = (body) => request(app.app).post("/relay/internal/outbound").send(body);
+      expect((await post({ to: "capy-1", text: "hi" })).status).toBe(404);
+      expect((await post({ to: "capy-1", text: "hi" }).set("Authorization", "Bearer " + kSecrets.internal).set("X-Forwarded-For", "203.0.113.9")).status).toBe(404);
+      const ok = await post({ to: "capy-1", text: "key " + kDeployOnly }).set("Authorization", "Bearer " + kSecrets.internal);
+      expect(ok.status).toBe(200);
+      expect(ok.headers["cache-control"]).toBe("no-store");
+      expect(ok.body).toEqual({ ok: true, text: "key ***", metadata: {}, provenance: false });
+      const refused = await post({ to: "scout", text: "s".repeat(16001) }).set("Authorization", "Bearer " + kSecrets.internal);
+      expect(refused.status).toBe(400);
+      expect(refused.body).toMatchObject({ ok: false, error: "invalid_input" });
+      expect((await post({ to: "capy-1", text: 5 }).set("Authorization", "Bearer " + kSecrets.internal)).status).toBe(400);
+      const key = await request(app.app).get("/relay/provenance-key");
+      expect(key.status).toBe(200);
+      expect(key.body).toMatchObject({ alg: "Ed25519", public_key_jwk: { kty: "OKP", crv: "Ed25519" } });
+      expect(key.body.public_key_pem).toContain("BEGIN PUBLIC KEY");
+      expect(JSON.stringify(key.body)).not.toMatch(/PRIVATE|"d":/);
+    } finally {
+      app.server.close();
+    }
+  });
 });
 
 describe("relay masker: disguised copies and the remote side's values (ALPH-71 H-1)", () => {
