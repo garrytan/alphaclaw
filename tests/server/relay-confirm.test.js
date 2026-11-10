@@ -211,7 +211,6 @@ describe("relay confirmations: only a command that can change a protected file i
   it.each([
     ["a hash and a listing", "sha256sum /data/.openclaw/openclaw.json && ls -la /data/.env*"],
     ["tests and a cut of .env", "test -f .env && cat .env | cut -d= -f1"],
-    ["a copy out into a text note", "cat openclaw.json > /tmp/copy.txt"],
     ["a note then a read of it", 'echo "checked alphaclaw.json" >> memory/n.md && tail -3 memory/n.md'],
     ["a mkdir then a note", "mkdir -p memory && echo 'checked .env today' >> memory/2026-11-10.md"],
     ["a count through sort and uniq", "cat openclaw.json | sort | uniq -c | head"],
@@ -274,6 +273,7 @@ describe("relay confirmations: only a command that can change a protected file i
     ["a literal script file", "printf '%s\n' 'sed -i s/a/b/ openclaw.json' > /tmp/x.sh"],
     ["a login file", "echo 'rm /data/.openclaw/openclaw.json' >> ~/.profile"],
     ["a copy out into a json file", "cat openclaw.json > /tmp/copy.json"],
+    ["a copy of a protected file into a text note", "cat openclaw.json > /tmp/copy.txt"],
     ["a dotfile note", "echo openclaw.json >> memory/.notes.md"],
     ["a script written and then run", 'echo "rm alphaclaw.json" > /tmp/s.sh; sh /tmp/s.sh'],
     ["a script written and then piped into sh", 'echo "rm alphaclaw.json" > /tmp/s; cat /tmp/s | sh'],
