@@ -634,6 +634,48 @@ describe("relay attested delegates (GST-2323): the trust anchor is refused outri
     expect(ctx.notices).toHaveLength(3);
   });
 
+  it("refuses guard changes written behind CLI options, variables, bracket keys, $include or an extra load path", async () => {
+    ctx = setup();
+    const { agent } = await ctx.attestedAgent();
+    const run = await ctx.deliver(agent);
+    const extraPath = guardedConfig(ctx.rootDir);
+    extraPath.plugins.load.paths.unshift("/tmp/evil");
+    fs.writeFileSync(path.join(path.dirname(ctx.openclawJson), "relay-off.json"), JSON.stringify({ deny: [kRelayGuardPluginId] }));
+    for (const [label, toolName, params] of [
+      ["config set behind a global option", "exec", { command: "openclaw --log-level info config set plugins.entries.relay-guard.enabled false" }],
+      ["config unset behind --profile", "exec", { command: "openclaw --profile main config unset plugins" }],
+      ["config apply behind a global option", "exec", { command: "openclaw --log-level error config apply /tmp/new.json" }],
+      ["config set on a key in a variable", "exec", { command: "K=plugins.entries.relay-guard.config.rootDir; openclaw config set $K /tmp/x" }],
+      ["plugins disable on a name in a variable", "exec", { command: "P=relay-guard; openclaw plugins disable $P" }],
+      ["config set with a bracket key", "exec", { command: "openclaw config set 'plugins[entries][relay-guard].config.rootDir' /tmp/x" }],
+      ["$include under plugins", "edit", { path: ctx.openclawJson, old_string: '"allow": [', new_string: '"$include": "./relay-off.json",\n    "allow": [' }],
+      ["$include at the top", "edit", { path: ctx.openclawJson, old_string: '"gateway": {', new_string: '"$include": "./relay-off.json",\n  "gateway": {' }],
+      ["an extra plugin load path", "write", { path: ctx.openclawJson, content: JSON.stringify(extraPath) }],
+      ["a trust env name through the edit tool's edits", "edit", { path: ctx.dotEnv, edits: [{ oldText: "A=1", newText: "A=1\nALPHACLAW_ROOT_DIR=/tmp/fake" }] }],
+      ["a trust env name through oldText and newText", "edit", { path: ctx.dotEnv, oldText: "A=1", newText: "A=1\nALPHACLAW_RELAY_CAPY_OWNERS=user_x" }],
+      ["edits disabling the guard", "edit", { path: ctx.openclawJson, edits: [{ oldText: '"enabled": true', newText: '"enabled": false' }] }],
+      ["edits whose first replacement plants the second's text", "edit", { path: ctx.openclawJson, edits: [{ oldText: '"bind": "loopback"', newText: '"bind": "loopback", "note": "\\"enabled\\": true"' }, { oldText: '"enabled": true', newText: '"enabled": false' }] }],
+    ]) {
+      const result = ctx.call(run, toolName, params);
+      expect(result.block, label).toBe(true);
+      expect(result.blockReason, label).toContain("would change what decides relay trust on this box");
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+    ctx.confirmations.tick();
+    expect(ctx.notices).toEqual([]);
+  });
+
+  it("classifyAnchor reads the edit tool's oldText, newText and edits shapes, so the owner's other config edits stay open", () => {
+    ctx = setup();
+    for (const params of [
+      { path: ctx.openclawJson, oldText: '"bind": "loopback"', newText: '"bind": "lan"' },
+      { path: ctx.openclawJson, edits: [{ oldText: '"bind": "loopback"', newText: '"bind": "lan"' }] },
+      { path: ctx.dotEnv, edits: [{ oldText: "A=1", newText: "OPENAI_API_KEY=x" }] },
+    ]) {
+      expect(classifyAnchor({ toolName: "edit", params, rootDir: ctx.rootDir }), JSON.stringify(params).slice(0, 80)).toBeNull();
+    }
+  });
+
   it("classifyAnchor leaves the owner's other changes open", () => {
     ctx = setup();
     const open = [
