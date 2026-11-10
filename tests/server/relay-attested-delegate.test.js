@@ -129,7 +129,10 @@ const guardedConfig = (rootDir, extra = {}) => ({
 });
 
 const setup = ({ env = capyEnv() } = {}) => {
-  const clock = { now: Date.parse("2026-11-10T10:00:00Z") };
+  // The fake clock starts at the real time: the MCP SDK's bearer check
+  // (requireBearerAuth) compares a token's expiry with the real clock, so a
+  // fixed start date expires every access token an hour after that date.
+  const clock = { now: Math.floor(Date.now() / 1000) * 1000 };
   const now = () => clock.now;
   const issuer = createCapyIssuer({ org: "org_garry", audience: kAudience, now });
   issuer.rotate("k1");
