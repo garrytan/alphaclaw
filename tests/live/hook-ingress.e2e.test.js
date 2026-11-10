@@ -21,14 +21,18 @@ const describeLive = kLiveEnabled ? describe : describe.skip;
 const kTestTimeoutMs = 6 * 60 * 1000;
 const kHookToken = "live-hook-token-1111111111111111";
 
-const bootGateway = async (kPort, hooksToken, extraEnv) => {
+const bootGateway = async (kPort, hooksToken, extraEnv, { mappings = null, transformSources = {} } = {}) => {
   const rootDir = mkTemp("alphaclaw-live-hooks-");
   const openclawDir = path.join(rootDir, ".openclaw");
   fs.mkdirSync(path.join(openclawDir, "state"), { recursive: true });
   const config = {
     gateway: { mode: "local", bind: "loopback", port: kPort, auth: { token: "live-e2e-token-000000000000000000000000" } },
-    hooks: { enabled: true, path: "/hooks", token: hooksToken },
+    hooks: { enabled: true, path: "/hooks", token: hooksToken, ...(mappings ? { mappings } : {}) },
   };
+  for (const [name, source] of Object.entries(transformSources)) {
+    fs.mkdirSync(path.join(openclawDir, "hooks", "transforms"), { recursive: true });
+    fs.writeFileSync(path.join(openclawDir, "hooks", "transforms", name), source);
+  }
   fs.writeFileSync(path.join(openclawDir, "openclaw.json"), JSON.stringify(config));
   const source = withOpenclawStartupEnv({
     ...scrubTestRunnerEnv(),
@@ -141,4 +145,96 @@ describeLive("live: AlphaClaw's /hooks edge verdict matches the pinned gateway",
       kTestTimeoutMs,
     );
   }
+});
+
+// PR 2: a signed delivery through the edge reaches the pinned gateway's
+// mapping transform with only the signed body and AlphaClaw's header set, its
+// replay is answered without a second dispatch, the shared token is refused
+// once the overlap closes, and a Circleback-size body near the gateway's
+// 256 KiB limit is admitted.
+describeLive("live: signed hook deliveries through the edge reach the pinned gateway", () => {
+  it(
+    "admits a signed delivery once, refuses its replay and the shared token after close",
+    async () => {
+      const crypto = require("crypto");
+      const webhooksDb = require("../../lib/server/db/webhooks");
+      const kPort = 18996;
+      const preRoot = mkTemp("alphaclaw-live-signed-");
+      const capturePath = path.join(preRoot, "captures.jsonl");
+      const transformSource =
+        'import fs from "node:fs";\n' +
+        "export default function transform(ctx) {\n" +
+        "  fs.appendFileSync(" + JSON.stringify(capturePath) + ", JSON.stringify({ headers: Object.fromEntries(Object.entries(ctx.headers || {})), url: String(ctx.url || \"\"), path: String(ctx.path || \"\"), payload: ctx.payload }) + \"\\n\");\n" +
+        "  return null;\n" +
+        "}\n";
+      const booted = await bootGateway(kPort, "$" + "{WEBHOOK_TOKEN}", { WEBHOOK_TOKEN: kHookToken }, {
+        mappings: [{ id: "meetings", match: { path: "meetings" }, action: "wake", transform: { module: "meetings.mjs" } }],
+        transformSources: { "meetings.mjs": transformSource },
+      });
+      const clock = { now: Date.now() };
+      webhooksDb.initWebhooksDb({ rootDir: booted.rootDir });
+      try {
+        const hookIngress = createHookIngress({
+          openclawDir: booted.openclawDir,
+          rootDir: booted.rootDir,
+          readOpenclawConfig: () => booted.config,
+          getLaunchEnv: () => booted.env,
+          hasReplayKey: webhooksDb.hasReplayKey,
+          recordReplayKey: webhooksDb.recordReplayKey,
+          deleteReplayKeysByHook: webhooksDb.deleteReplayKeysByHook,
+          listHookNames: () => ["meetings"],
+          nowMs: () => clock.now,
+          logger: { warn: () => {}, log: () => {}, error: () => {} },
+        });
+        hookIngress.runHooksPolicyMigration();
+        const secret = crypto.randomBytes(24).toString("base64url");
+        hookIngress.setIngress("meetings", { preset: "circleback", secret });
+        const app = express();
+        app.use("/hooks", express.raw({ type: "*/*", limit: "5mb" }));
+        app.all(/^\/hooks\/.+/, createWebhookMiddleware({ gatewayUrl: "http://127.0.0.1:" + kPort, insertRequest: () => {}, hookIngress }));
+        const sign = (body) => crypto.createHmac("sha256", secret).update(body).digest("hex");
+        const post = (body, extra = {}, query = "") => {
+          let req = request(app).post("/hooks/meetings" + query).set("content-type", "application/json").set("x-signature", sign(body));
+          for (const [key, value] of Object.entries(extra)) req = req.set(key, value);
+          return req.send(body);
+        };
+        const captures = () => (fs.existsSync(capturePath) ? fs.readFileSync(capturePath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : []);
+
+        const body = JSON.stringify({ id: "m-1", title: "Standup" });
+        const first = await post(body, { "x-event-type": "meeting.done" }, "?token=" + kHookToken + "&leak=1");
+        expect(first.status).toBe(204);
+        expect(captures()).toHaveLength(1);
+        const captured = captures()[0];
+        expect(captured.payload).toEqual(JSON.parse(body));
+        expect(captured.url).not.toContain("leak");
+        expect(captured.url).not.toContain("token");
+        expect(captured.headers["x-event-type"]).toBeUndefined();
+        expect(captured.headers["x-signature"]).toBeUndefined();
+        expect(captured.headers["idempotency-key"]).toBe("circleback:" + sign(body));
+
+        const replay = await post(body);
+        expect(replay.status).toBe(200);
+        expect(replay.body).toEqual({ ok: true, deduped: true });
+        expect(captures()).toHaveLength(1);
+
+        const big = JSON.stringify({ id: "m-2", transcript: "x".repeat(250 * 1024) });
+        expect((await post(big)).status).toBe(204);
+        expect(captures()).toHaveLength(2);
+
+        const shared = () => request(app).post("/hooks/meetings").set("authorization", "Bearer " + kHookToken).send(JSON.stringify({ id: "m-3" }));
+        expect((await shared()).status).toBe(204);
+        clock.now += 24 * 60 * 60 * 1000 + 1000;
+        const refused = await shared();
+        expect(refused.status).toBe(401);
+        expect(captures()).toHaveLength(3);
+      } finally {
+        webhooksDb.closeWebhooksDb();
+        try {
+          process.kill(-booted.child.pid, "SIGKILL");
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    },
+    kTestTimeoutMs,
+  );
 });
