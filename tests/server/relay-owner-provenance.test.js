@@ -40,13 +40,16 @@ const makeBox = () => {
     maskText: (text) => text.replace(/sk-live-[a-z0-9]+/g, "***"),
     logger: { log: () => {}, warn: () => {} },
   });
-  const ownerSays = (content, { messageId = "777", senderId = kOwnerId, channelId = "telegram", sessionKey = kOwnerSession } = {}) =>
+  let run = 0;
+  const ownerSays = (content, { messageId = "777", senderId = kOwnerId, channelId = "telegram", sessionKey = kOwnerSession } = {}) => (
+    (run += 1),
     handlers.message_received(
       { content, messageId, senderId, threadId: 42, sessionKey, timestamp: 1_800_000_000_000, from: "telegram:" + senderId },
       { channelId, accountId: "default", conversationId: "-1001" },
-    );
-  const send = (params, requester = { channel: "telegram", senderId: kOwnerId, senderIsOwner: true }, sessionKey = kOwnerSession) =>
-    handlers.before_tool_call({ toolName: "relay__relay_send", params }, { sessionKey, runId: "run-1", requester });
+    )
+  );
+  const send = (params, requester = { channel: "telegram", senderId: kOwnerId, senderIsOwner: true }, sessionKey = kOwnerSession, runId = "run-" + run) =>
+    handlers.before_tool_call({ toolName: "relay__relay_send", params }, { sessionKey, runId, requester });
   return { rootDir, relayDir, store, handlers, outbound, ownerSays, send, logs, cleanup: () => { store.close(); fs.rmSync(rootDir, { recursive: true, force: true }); } };
 };
 
@@ -212,3 +215,132 @@ describe("relay long messages both ways (PR4)", () => {
     expect(createRelayTools({ engine, getAuth: () => ({}) }).list().find((tool) => tool.name === "relay_send").inputSchema.properties.provenance_ref).toBeUndefined();
   });
 });
+
+describe("relay owner provenance: fix round (GST-2090 PR4 review)", () => {
+  let box;
+  afterEach(() => {
+    box?.cleanup();
+    box = null;
+  });
+
+  it("a requester OpenClaw names no sender for gets no ref, even on an owner turn", () => {
+    box = makeBox();
+    box.ownerSays("from someone in the group", { senderId: "5555" });
+    expect(box.send({ to: kThread, text: "x" }, { channel: "telegram", senderIsOwner: true }).params?.provenance_ref ?? "").toBe("");
+    expect(box.send({ to: kThread, text: "x" }, { channel: "telegram", senderId: null, senderIsOwner: true }).params?.provenance_ref ?? "").toBe("");
+  });
+
+  it("masks a credential that crosses the 2,000-character quote cut", () => {
+    box = makeBox();
+    const secret = "sk-live-" + "a1".repeat(20);
+    box.ownerSays("x".repeat(1990) + " " + secret + " and more");
+    const ref = box.send({ to: kThread, text: "x" }).params.provenance_ref;
+    const outbound = createRelayOutbound({
+      relayDir: box.relayDir,
+      getStore: () => box.store,
+      getBoxAgentName: () => kBox,
+      maskText: (text) => text.split(secret).join("***"),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    const statement = JSON.parse(outbound.prepareOutbound({ to: kThread, text: "ok", provenanceRef: ref }).metadata.relay_provenance.payload);
+    expect(statement.quote).toBe(("x".repeat(1990) + " *** and more").slice(0, 2000));
+  });
+
+  it("a send to an agent that is not a Capy thread spends the claim and carries no statement", () => {
+    box = makeBox();
+    box.ownerSays("Tell scout hello. Keep the acquisition private.");
+    const ref = box.send({ to: "scout", text: "hello" }).params.provenance_ref;
+    const out = box.outbound.prepareOutbound({ to: "scout", text: "hello", provenanceRef: ref });
+    expect(out).toEqual({ text: "hello", metadata: {}, provenance: false });
+    expect(box.store.claimProvenance(ref, 60_000)).toBeNull();
+  });
+
+  it("never replaces a signing key it cannot read: the send goes out unsigned and the file is kept", () => {
+    box = makeBox();
+    const file = path.join(box.relayDir, "provenance-key.json");
+    fs.writeFileSync(file, "{ not json", { mode: 0o600 });
+    box.ownerSays("hi");
+    const ref = box.send({ to: kThread, text: "x" }).params.provenance_ref;
+    expect(box.outbound.prepareOutbound({ to: kThread, text: "hi", provenanceRef: ref })).toEqual({ text: "hi", metadata: {}, provenance: false });
+    expect(box.outbound.readProvenance({ agent_name: kBox, text: "hi", metadata: { relay_provenance: { v: 1 } } })).toMatchObject({ verified: false, statement: null });
+    expect(() => box.outbound.publicKey()).toThrow();
+    expect(fs.readFileSync(file, "utf8")).toBe("{ not json");
+    fs.writeFileSync(file, JSON.stringify({ version: 1 }));
+    expect(() => box.outbound.publicKey()).toThrow(/no private key/);
+  });
+
+  it("keeps the signing key on the box: masked in relay text, its changes held for the owner, and backed up", () => {
+    box = makeBox();
+    box.outbound.publicKey();
+    const file = path.join(box.relayDir, "provenance-key.json");
+    const raw = fs.readFileSync(file, "utf8");
+    const body = JSON.parse(raw).privateKeyPem.replace(/-----[A-Z ]+-----/g, "").replace(/\s+/g, "");
+    const { createRelayMasker } = require("../../lib/server/relay/mask");
+    const masked = createRelayMasker({ rootDir: box.rootDir, env: {} })(raw);
+    expect(masked).not.toContain(body);
+    const { classifyRisk } = require("../../lib/plugin/relay-guard/confirm");
+    expect(classifyRisk({ toolName: "exec", params: { command: "rm " + file } }).kind).toBe("high");
+    expect(classifyRisk({ toolName: "exec", params: { command: "cp /tmp/k.json relay/provenance-key.json" } }).kind).toBe("high");
+    expect(classifyRisk({ toolName: "write", params: { path: file, content: "{}" }, rootDir: box.rootDir }).kind).toBe("high");
+    const { backupRelay } = require("../../lib/server/relay/backup");
+    const { relayPaths } = require("../../lib/server/relay/constants");
+    fs.writeFileSync(path.join(box.relayDir, "secrets.json"), "{}", { mode: 0o600 });
+    const backupsDir = path.join(box.rootDir, "backups");
+    const result = backupRelay({ paths: relayPaths(box.rootDir), backupsDir });
+    expect(result.ok).toBe(true);
+    expect(Object.keys(result.files)).toContain("provenance-key.json");
+    expect(fs.readFileSync(path.join(result.path, "provenance-key.json"), "utf8")).toBe(raw);
+    expect(fs.statSync(path.join(result.path, "provenance-key.json")).mode & 0o777).toBe(0o600);
+  });
+});
+
+
+describe("relay owner provenance: a run never names a newer owner message (PR4 review)", () => {
+  let box;
+  afterEach(() => {
+    box?.cleanup();
+    box = null;
+  });
+
+  it("a message that arrives after a run's first tool call is not signed for that run, and is for the next run", () => {
+    box = makeBox();
+    const owner = { channel: "telegram", senderId: kOwnerId, senderIsOwner: true };
+    box.ownerSays("do X", { messageId: "1" });
+    box.handlers.before_tool_call({ toolName: "exec", params: { command: "ls" } }, { sessionKey: kOwnerSession, runId: "run-a", requester: owner });
+    const now = Date.now();
+    const spy = vi.spyOn(Date, "now").mockReturnValue(now + 1000);
+    try {
+      box.ownerSays("stop, don't send that", { messageId: "2" });
+      expect(box.send({ to: kThread, text: "x" }, owner, kOwnerSession, "run-a")).toEqual({});
+      const ref = box.send({ to: kThread, text: "x" }, owner, kOwnerSession, "run-b").params.provenance_ref;
+      expect(box.store.claimProvenance(ref, 60_000)).toMatchObject({ messageId: "2" });
+      expect(box.send({ to: kThread, text: "x" }, owner, kOwnerSession, null)).toEqual({});
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("relay_reply names the other participant (PR4 review)", () => {
+  it("the box replying to its own earlier message in a Capy DM pages and signs for the Capy thread, not itself", async () => {
+    const shapes = [];
+    const engine = {
+      getMessage: async () => ({ id: "m1", agent_name: kBox, channel_id: "dm-1", metadata: {} }),
+      conversations: async () => [{ channel_id: "dm-1", participants: [kBox, kThread] }],
+      reply: async () => ({ id: "m2" }),
+    };
+    const tools = createRelayTools({
+      engine,
+      getAuth: () => ({ agentToken: "t", agentName: kBox, workspaceKey: "w" }),
+      maxTextChars: 64000,
+      boxTools: true,
+      shapeOutbound: async ({ to, text }) => (shapes.push(to), { text, metadata: {}, provenance: false }),
+    });
+    const result = JSON.parse((await tools.call("relay_reply", { message_id: "m1", text: "y".repeat(20000) })).content[0].text);
+    expect(result).toMatchObject({ message_id: "m2", in_reply_to: "m1" });
+    expect(shapes).toEqual([kThread]);
+    engine.conversations = async () => [{ channel_id: "dm-1", participants: ["scout", kThread] }];
+    expect((await tools.call("relay_reply", { message_id: "m1", text: "hi" })).isError).toBe(true);
+  });
+});
+
