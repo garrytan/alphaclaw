@@ -655,7 +655,8 @@ describe("relay narration: migration and isolation", () => {
     const due = timers.splice(0).filter((timer) => timer.ms === 5000);
     expect(due.length).toBeGreaterThanOrEqual(2);
     for (const timer of due) timer.fn();
-    expect(notices.map((notice) => notice.opts.eventType)).toEqual(["relay_confirm"]);
+    // The daily digest (after 15:00 UTC on the real clock) is not under test.
+    expect(notices.map((notice) => notice.opts.eventType).filter((type) => type !== "relay_digest")).toEqual(["relay_confirm"]);
     expect(warnings).toContain("[relay] narration tick failed: database is locked");
     expect(service.getStatus().narration).toMatchObject({ enabled: true, failures: 1, lastError: "database is locked" });
     // Both loops keep running.
