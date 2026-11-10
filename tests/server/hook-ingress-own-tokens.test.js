@@ -125,6 +125,19 @@ describe("new hooks take their own token", () => {
     expect(JSON.stringify(tokenHook)).not.toContain(kShared);
   });
 
+  it("masks a moved hook's callback URL for the agent when it changes the hook's destination", async () => {
+    const h = createHarness();
+    await request(h.app).post("/api/webhooks").send({ name: "orders", oauthCallback: true });
+    const callbackId = webhooksDb.getOauthCallbackByHook("orders").callbackId;
+    h.actor.type = "agent";
+    const res = await request(h.app).put("/api/webhooks/orders/destination").send({ destination: null });
+    expect(res.status).toBe(200);
+    expect(res.body.webhook.authNote).toContain("its own token");
+    const masked = webhooksDomain.ops.find((op) => op.id === "webhooks.destination-update").redactResponse(res.body);
+    expect(JSON.stringify(masked)).not.toContain(callbackId);
+    expect(masked.webhook.oauthCallbackUrl).toBe("••• (owner only)");
+  });
+
   it("confirms an OAuth alias made by a person with the hook, and not one made by the agent", async () => {
     const h = createHarness();
     await request(h.app).post("/api/webhooks").send({ name: "crm", oauthCallback: true });
