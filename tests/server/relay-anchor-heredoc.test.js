@@ -178,4 +178,31 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     expectRefusedOutright(await ctx.call(run, "exec", { command: unquoted }), "an unquoted delimiter");
     expect(ctx.confirmationCount()).toBe(0);
   });
+  it("still refuses a change hidden in an f-string or template field, behind a Node regular expression, before a sentence end, or in a body a shell runs as a script", async () => {
+    const run = await pinnedRun();
+    const exec = "require('child_process').execSync";
+    const commands = [
+      "python3 - <<'PY'\nimport os\nf\"{os.system('openclaw config set plugins.enabled false')}\"\nPY",
+      "python3 - <<'PY'\nimport os\nprint(f'''{os.system(\"openclaw gateway call config.apply\")}''')\nPY",
+      "node - <<'JS'\n`${" + exec + "('openclaw config set plugins.enabled false')}`\nJS",
+      "node - <<'JS'\nconst u = /https?:\\/\\//; " + exec + "('openclaw config set plugins.enabled false')\nJS",
+      "node - <<'JS'\nconst q = /'/; " + exec + "('openclaw config set plugins.enabled false')\nJS",
+      "python3 - <<'PY'\nimport os\nos.system('openclaw config set plugins.enabled false && echo done.')\nPY",
+      "python3 - <<'PY'\nimport os\nos.system('openclaw config set plugins.enabled false.')\nPY",
+    ];
+    const bin = path.join(ctx.rootDir, "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "jq"), "#!/bin/sh\n", { mode: 0o755 });
+    const script = "#!/bin/sh\n$A$B config set plugins.enabled false";
+    commands.push(
+      "cat > " + path.join(bin, "jq") + " <<'EOF'\n" + script + "\nEOF\njq",
+      "cat > " + kDir + "/jq <<'EOF'\n" + script + "\nEOF\nchmod +x " + kDir + "/jq",
+      "cat > " + kDir + "/jq <<'EOF'\n" + script + "\nEOF\nchmod 755 " + kDir + "/jq",
+    );
+    for (const command of commands) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expectRefusedOutright(await ctx.call(run, "exec", { command }), command);
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+  });
 });
