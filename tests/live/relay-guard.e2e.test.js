@@ -335,7 +335,6 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       for (const [toolName, args, refusal] of [
         ["message", { action: "send", channel: "telegram", target: "@someone-else", message: "hi" }, "[relay-guard] @someone-else is not a recipient the owner's approval names"],
         ["message", { action: "send", channel: "telegram", targets: ["@live-target"], to: "@stranger", message: "hi" }, "[relay-guard] an approved send takes one target and no targets, to field"],
-        ["automations", { action: "list" }, withheld("automations")],
         ["gateway", { action: "config.get" }, withheld("gateway")],
         ["sessions_send", { sessionKey: "agent:main:main", message: "hi" }, withheld("sessions_send")],
       ]) {
@@ -344,6 +343,10 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
         if (answer.startsWith("NOT-OFFERED")) continue;
         expect(answer, toolName).toContain(refusal);
       }
+
+      const automationsList = await delegateCall("automations", { action: "list" });
+      console.log("[live] delegate automations list: " + automationsList.slice(0, 200));
+      if (!automationsList.startsWith("NOT-OFFERED")) expect(automationsList).not.toContain("[relay-guard]");
 
       const approvedArgs = { action: "send", channel: "telegram", target: "@live-target", message: "approved" };
       const approved = await delegateCall("message", approvedArgs);
