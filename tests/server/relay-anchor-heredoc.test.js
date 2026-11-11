@@ -70,6 +70,31 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     expect(ctx.confirmationCount()).toBe(0);
   });
 
+  it("runs the exact shape refused on the box: a quoted here-document whose Python has dollar amounts and config, gateway and plugin words in its strings", async () => {
+    const run = await pinnedRun();
+    const body = [
+      "import json,re,os",
+      "B='/data/stronghold-brain/brain/'",
+      "Q=[",
+      '("acme-seed", "What did Acme raise?", "$1.9M ARR, then $450K at $40M"),',
+      '("acme-burn", "What was the burn?", "$8K/mo; the plan was $4M-$10M"),',
+      '("ngrok-err", "Why did the tunnel fail?", "ngrok: gateway config invalid (plugin missing): $2 retry"),',
+      '("lmstudio-err", "What did LM Studio say?", "lmstudio: failed to load plugin config from /data/.openclaw/workspace/skills/lm/SKILL.md"),',
+      "]",
+      "with open('questions-b4.jsonl','w') as f:",
+      "    for s,q,g in Q: f.write(json.dumps({'slug':s,'q':q,'gold':g})+'\\n')",
+    ].join("\n");
+    const first = "cd " + kDir + " && cat > build.py <<'EOF'\n" + body + "\nEOF\numask 077; python3 build.py";
+    const second = "cd " + kDir + " && cat > build.py <<'EOF'\n" + body + "\nEOF\numask 077; python3 build.py; chmod 600 questions-b4.jsonl build.py; sha256sum questions-b4.jsonl | cut -c1-16";
+    for (const command of [first, second]) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).toBeNull();
+      expect(await ctx.call(run, "exec", { command }), command).toEqual({});
+    }
+    // The same body run by a shell is still read as shell.
+    expectRefusedOutright(await ctx.call(run, "exec", { command: "bash <<'EOF'\n" + body + "\nEOF" }), "bash");
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
   it("still refuses the same body when a shell runs it", async () => {
     const run = await pinnedRun();
     for (const command of [
