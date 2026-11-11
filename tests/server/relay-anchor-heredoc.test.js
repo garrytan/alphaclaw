@@ -95,6 +95,22 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     expect(ctx.confirmationCount()).toBe(0);
   });
 
+  it("reads a text body as code too when the command runs a program that could run it", async () => {
+    const run = await pinnedRun();
+    const payload = 'import subprocess\nsubprocess.run(["openclaw", "config", "set", key, "false"])';
+    const runner = "import sys\nexec(sys.stdin.read())";
+    for (const command of [
+      "cat > " + kDir + "/r.py <<'PY'\n" + runner + "\nPY\npython3 " + kDir + "/r.py <<'EOF'\n" + payload + "\nEOF",
+      "cat > " + kDir + "/r.py <<'PY'\nexec(open('" + kDir + "/data.txt').read())\nPY\ncat > " + kDir + "/data.txt <<'EOF'\n" + payload + "\nEOF\npython3 " + kDir + "/r.py",
+    ]) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expectRefusedOutright(await ctx.call(run, "exec", { command }), command);
+    }
+    const prose = "cat > " + kDir + "/notes.txt <<'EOF'\nOpenClaw (the agent runtime) restarts the gateway; it's $1.9M ARR.\nEOF\npython3 " + kScript;
+    const withScript = "cat > " + kScript + " <<'PY'\nprint('ok')\nPY\n" + prose;
+    expect(classifyAnchor({ toolName: "exec", params: { command: withScript }, rootDir: ctx.rootDir })).toBeNull();
+  });
+
   it("still refuses the same body when a shell runs it", async () => {
     const run = await pinnedRun();
     for (const command of [
