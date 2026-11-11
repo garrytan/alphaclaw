@@ -205,4 +205,22 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     }
     expect(ctx.confirmationCount()).toBe(0);
   });
+  it("still refuses a change spelled with an escape, shell quotes or a glob, a forged marker, or a body any chmod makes executable", async () => {
+    const run = await pinnedRun();
+    const script = "#!/bin/sh\n$A$B config set plugins.enabled false";
+    const commands = [
+      "python3 - <<'PY'\nimport os\nos.system(\"openclaw \" + \"\\t\" + \"gateway call config.patch --params p.json\")\nPY",
+      "python3 - <<'PY'\nimport subprocess\nsubprocess.run(\"open''claw gateway call config.patch\", shell=True)\nPY",
+      "python3 - <<'PY'\nimport os\nos.system('o\\\\penclaw gateway call config.apply')\nPY",
+      "touch config.apply && python3 - <<'PY'\nimport os\nos.system('openclaw gateway call config.appl? --params p.json')\nPY",
+      "cat > \u00029 <<'PY'\n" + builder + "\nPY\npython3 \u00029",
+      "cat > " + kDir + "/jq <<'EOF'\n" + script + "\nEOF\nchmod --reference=/bin/sh " + kDir + "/jq",
+      "cat > " + kDir + "/jq <<'EOF'\n" + script + "\nEOF\nchmod 00755 " + kDir + "/jq",
+    ];
+    for (const command of commands) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expectRefusedOutright(await ctx.call(run, "exec", { command }), command);
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+  });
 });
