@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 The relay's tailnet route no longer floods the log when something on the box keeps poking its local port. A hosting platform's port scanner was hitting the route's loopback listener about once a second, and each refused connection wrote a log line, about 86,000 lines a day.
 
 ### Fixed
-- The tailnet ingress logs the first refusal of each kind, then counts repeats and writes one line with the count when the window ends: an hour for local clients that send no PROXY header or time out (port probes), a minute for tailnet peers that are refused. The connection is still closed every time; only the logging changed.
+- The tailnet ingress logs the first refusal of each kind, then counts repeats and writes one line with the count when the window ends: an hour for local clients that send no PROXY header or time out (port probes), a minute for each refused tailnet peer, which is still named on its first line. The connection is still closed every time; only the logging changed.
 
 ## [0.10.267] - 2026-11-11
 
