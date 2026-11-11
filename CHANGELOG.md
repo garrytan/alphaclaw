@@ -10,10 +10,11 @@ Versions follow this repository's `package.json` release counter.
 AlphaClaw now runs OpenClaw 2026.11.3, OpenClaw's current stable release. It is a patch release on the 2026.11.2 line with the same database schemas, and it brings credential-isolation and redaction fixes (plugin result caches scoped to their credentials, inline environment credentials hidden from config reads, Signal and language-server children no longer inheriting Gateway secrets), update-recovery fixes, and fixes for stuck child-task handoffs and tool failures that ended a turn silently.
 
 ### Changed
-- The pinned OpenClaw moves from 2026.11.2 to 2026.11.3. The first boot runs OpenClaw's Doctor once, as for every pin change, and keeps the pre-upgrade config at `.alphaclaw/openclaw.json.pre-2026.11.3`. No database migration: the state and agent schemas stay at 22 and 27.
+- The pinned OpenClaw moves from 2026.11.2 to 2026.11.3. The first boot runs OpenClaw's Doctor once, as for every pin change, and keeps the pre-upgrade config at `.alphaclaw/openclaw.json.pre-2026.11.3`. No database migration: the state and agent schemas stay at 22 and 27. The lockfile refresh also moves `@babel/runtime` from 7.29.13 to 7.29.14.
 - The OpenClaw hold floor stays at 2026.10.9. Its comment and the README now say so plainly, instead of describing it as "the pin before the current one".
 
 ### Fixed
+- Going back to an older pin no longer overwrites a saved config. Before, a boot on an older OpenClaw than the last upgrade (for example 2026.11.2 after 2026.11.3) copied the current `openclaw.json`, already written by the newer version, over `.alphaclaw/openclaw.json.pre-<older>`, the copy kept from before the earlier upgrade, and pointed the migration record at it. Now a downgrade keeps no copy and leaves the existing copies and the record alone.
 - The live relay guard test expected a delegate relay session's `automations list` to be refused, but delegates have been allowed to read automations since 0.10.252. It now checks that the guard lets the read through.
 
 ### Docs

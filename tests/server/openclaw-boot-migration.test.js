@@ -146,6 +146,28 @@ describe("server/openclaw-boot-migration", () => {
     expect(logger.warn).toHaveBeenCalledWith(`[alphaclaw] no verified copy of openclaw.json from before the upgrade to OpenClaw 2026.11.2: the current file was already written by 2026.11.2, and ${copyPath} is left as it is`);
   });
 
+  it("going back to an older pin keeps no copy and never overwrites the earlier upgrade's copy or its record", async () => {
+    const box = newBox();
+    const older = path.join(box.managedDir, "openclaw.json.pre-2026.11.2");
+    const newer = path.join(box.managedDir, "openclaw.json.pre-2026.11.3");
+    const olderContent = '{"meta":{"lastTouchedVersion":"2026.10.9"}}\n';
+    const newerContent = '{"meta":{"lastTouchedVersion":"2026.11.2"}}\n';
+    fs.writeFileSync(older, olderContent);
+    fs.writeFileSync(newer, newerContent);
+    const kept = { path: newer, fromVersion: "2026.11.2", toVersion: "2026.11.3", bytes: newerContent.length, sha256: require("crypto").createHash("sha256").update(newerContent).digest("hex"), at: kNow - 10 };
+    recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.11.3", nowFn: () => kNow - 1 });
+    const recordPath = path.join(box.managedDir, kBootMigrationFileName);
+    fs.writeFileSync(recordPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(recordPath, "utf8")), preUpgradeConfig: kept }));
+    fs.writeFileSync(path.join(box.openclawDir, "openclaw.json"), '{"meta":{"lastTouchedVersion":"2026.11.3"}}\n');
+    const onDoctorStart = vi.fn();
+    const runDoctorFix = vi.fn(async () => ({ ok: false, code: 1, stdout: "older than the config last written by OpenClaw 2026.11.3\n" }));
+    await runBootMigration({ ...box, installedVersion: "2026.11.2", runDoctorFix, onDoctorStart, nowFn: () => kNow, logger: silentLogger() });
+    expect(fs.readFileSync(older, "utf8")).toBe(olderContent);
+    expect(fs.readFileSync(newer, "utf8")).toBe(newerContent);
+    expect(readMigrationRecord({ managedDir: box.managedDir }).preUpgradeConfig).toEqual(kept);
+    expect(onDoctorStart).toHaveBeenLastCalledWith(expect.objectContaining({ preUpgradeConfigPath: null }));
+  });
+
   it("a copy that cannot be kept is logged and the upgrade goes ahead", async () => {
     const box = newBox();
     recordDoctorCompletedForPin({ managedDir: box.managedDir, version: "2026.10.9", nowFn: () => kNow - 1 });
