@@ -233,6 +233,46 @@ describe("relay over the tailnet route (GST-2368)", () => {
     expect(ctx.remoteSends).toHaveLength(0);
   });
 
+  it("logs the first refusal of each kind and peer and counts the repeats, so a local port prober cannot flood the log", async () => {
+    const lines = [];
+    const logger = { log() {}, warn: (line) => lines.push(line), error() {} };
+    const other = "100.64.0.3";
+    ingress = createTailnetIngress({
+      handler: (req, res) => res.end(),
+      whois: whoisStub({
+        [kPeer]: { node: "laptop", nodeId: "n2", tags: [], user: "someone@example.com" },
+        [other]: { node: "phone", nodeId: "n3", tags: ["tag:other"], user: "someone@example.com" },
+      }),
+      allowedTags: ["tag:relay-liaison"],
+      logger,
+      probeLogWindowMs: 1000,
+    });
+    const port = await ingress.listen();
+    const raw = (payload) =>
+      new Promise((resolve) => {
+        const socket = net.connect(port, "127.0.0.1", () => socket.write(payload));
+        socket.on("close", resolve);
+        socket.on("error", resolve);
+      });
+    const get = Buffer.from("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    for (let i = 0; i < 5; i += 1) await raw(get);
+    await raw(Buffer.concat([proxyHeaderV4(kPeer), get]));
+    await raw(Buffer.concat([proxyHeaderV4(other), get]));
+    await raw(Buffer.concat([proxyHeaderV4(kPeer), get]));
+    expect(lines).toEqual([
+      "[relay] tailnet ingress refused not_proxy_v2 (no PROXY v2 header from tailscaled's serve, usually a local port probe; repeats are counted for an hour)",
+      "[relay] tailnet ingress refused tag_not_allowed node=laptop tags=-",
+      "[relay] tailnet ingress refused tag_not_allowed node=phone tags=tag:other",
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    expect(lines.slice(3)).toEqual([expect.stringMatching(/^\[relay\] tailnet ingress refused not_proxy_v2 4 more times in [12]s$/)]);
+    await raw(get);
+    expect(lines.at(-1)).toMatch(/refused not_proxy_v2 \(no PROXY v2 header/);
+    await ingress.close();
+    expect(lines.at(-1)).toMatch(/^\[relay\] tailnet ingress refused tag_not_allowed node=laptop tags=- 1 more time in [12]s$/);
+    expect(lines).toHaveLength(6);
+  });
+
   it("goes through a userspace tailscaled's loopback HTTP proxy with --proxy", async () => {
     const { box, keyFile, tailnet } = await start();
     const seen = [];
