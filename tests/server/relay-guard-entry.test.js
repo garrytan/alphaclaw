@@ -11,7 +11,7 @@ describe("relay guard plugin entry (openclaw.json)", () => {
     expect(resolveDesiredRelayGuardEntry({ env: { ALPHACLAW_RELAY: "off" }, rootDir })).toBeNull();
     const cfg = { plugins: { allow: ["usage-tracker"], load: { paths: ["/old/node_modules/alphaclaw/lib/plugin/relay-guard"] }, entries: {} } };
     expect(applyRelayGuardEntry(cfg, desired, quiet)).toEqual({ changed: true, conflict: false });
-    expect(cfg.plugins.allow).toEqual(["usage-tracker", "relay-guard"]);
+    expect(cfg.plugins.allow).toEqual(["usage-tracker", "relay-guard", "memory-core"]);
     expect(cfg.plugins.load.paths).toEqual([kRelayGuardPluginPath]);
     expect(kRelayGuardPluginPath).toBe(path.resolve(__dirname, "../../lib/plugin/relay-guard"));
     expect(cfg.plugins.entries["relay-guard"]).toEqual({ enabled: true, config: { _alphaclawManaged: "relay", rootDir } });
@@ -30,7 +30,7 @@ describe("relay guard plugin entry (openclaw.json)", () => {
     const ours = { plugins: { allow: ["relay-guard", "usage-tracker"], load: { paths: [kRelayGuardPluginPath, "/x/plugin/usage-tracker"] }, entries: {} } };
     applyRelayGuardEntry(ours, desired, quiet);
     expect(applyRelayGuardEntry(ours, null, quiet)).toEqual({ changed: true, conflict: false });
-    expect(ours.plugins).toEqual({ allow: ["usage-tracker"], load: { paths: ["/x/plugin/usage-tracker"] }, entries: {} });
+    expect(ours.plugins).toEqual({ allow: ["usage-tracker", "memory-core"], load: { paths: ["/x/plugin/usage-tracker"] }, entries: {} });
     expect(applyRelayGuardEntry({}, null, quiet)).toEqual({ changed: false, conflict: false });
   });
 });

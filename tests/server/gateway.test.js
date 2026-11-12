@@ -1187,7 +1187,7 @@ describe("server/gateway restart behavior", () => {
         withSecretDropCommand("off", () => withEnv(noRemote, () => {
           expect(io.gateway.ensureGatewayProxyConfig(undefined)).toBe(true);
           expect(io.getConfig().plugins.entries["secret-drop"]).toBeUndefined();
-          expect(io.getConfig().plugins.allow).toEqual(["usage-tracker"]);
+          expect(io.getConfig().plugins.allow).toEqual(["usage-tracker", "memory-core"]);
           expect(io.getConfig().plugins.load.paths).toEqual([]);
         }));
       });

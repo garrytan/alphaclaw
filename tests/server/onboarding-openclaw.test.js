@@ -170,7 +170,7 @@ describe("server/onboarding/openclaw", () => {
     });
 
     const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    expect(next.plugins.allow).toEqual(["usage-tracker"]);
+    expect(next.plugins.allow).toEqual(["usage-tracker", "memory-core"]);
     expect(next.plugins.entries["usage-tracker"]).toEqual({
       enabled: true,
       hooks: { allowConversationAccess: true },
@@ -221,7 +221,7 @@ describe("server/onboarding/openclaw", () => {
     writeSanitizedOpenclawConfig({ fs, openclawDir, varMap: {} });
 
     const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    expect(next.plugins.allow).toEqual(["usage-tracker", "codex"]);
+    expect(next.plugins.allow).toEqual(["usage-tracker", "memory-core", "codex"]);
     expect(next.plugins.entries.codex).toEqual({ enabled: true });
   });
 

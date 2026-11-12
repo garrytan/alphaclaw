@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.272] - 2026-11-12
+
+Every `plugins.allow` list AlphaClaw writes now includes OpenClaw's own memory plugin, `memory-core`. OpenClaw 2026.11.5's `openclaw memory …` commands (status, index, search) refuse to run while an allow list leaves it out, even though the gateway loads it anyway, and AlphaClaw creates an allow list as soon as it registers its own plugins.
+
+### Fixed
+- Adding any plugin to `plugins.allow` (usage tracker, relay guard, `/secret`, Codex, channel plugins, onboarding) also adds `memory-core` when it is missing, and the boot reconcile adds it once to existing configs. A config with no allow list is left without one.
+- On OpenClaw 2026.10.9 and 2026.11.3 this changes nothing: `openclaw config validate` accepts it, `memory-core` loads exactly as before, and a memory slot set to `none` (or another memory plugin) still keeps it off.
+- Rolling back a failed channel create also takes `memory-core` back out when the create added it, so the config returns to what it was.
+
 ## [0.10.271] - 2026-11-12
 
 When Wintermute's owner talks to it from one of his own Capy threads over the agent relay, the relay now lets that thread read his brain through the owner's own read-only brain connector. Before this, only his Telegram DM and forum could use that connector, so once private pages are labelled, his own Capy threads would have lost them.

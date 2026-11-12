@@ -313,7 +313,7 @@ describe("/secret command plugin entry (openclaw.json)", () => {
     }
     const cfg = { plugins: { allow: ["usage-tracker"], load: { paths: ["/old/node_modules/alphaclaw/lib/plugin/secret-drop", "/x/plugin/usage-tracker"] }, entries: {} } };
     expect(applySecretDropCommandEntry(cfg, desired, quiet)).toEqual({ changed: true, conflict: false });
-    expect(cfg.plugins.allow).toEqual(["usage-tracker", "secret-drop"]);
+    expect(cfg.plugins.allow).toEqual(["usage-tracker", "secret-drop", "memory-core"]);
     expect(cfg.plugins.load.paths).toEqual(["/x/plugin/usage-tracker", kSecretDropPluginPath]);
     expect(kSecretDropPluginPath).toBe(path.resolve(__dirname, "../../lib/plugin/secret-drop"));
     expect(cfg.plugins.entries["secret-drop"]).toEqual({ enabled: true, config: { _alphaclawManaged: "secret-drop", openclawDir, port: 3000 } });
@@ -339,7 +339,7 @@ describe("/secret command plugin entry (openclaw.json)", () => {
     const ours = { plugins: { allow: ["secret-drop", "usage-tracker"], load: { paths: [kSecretDropPluginPath, "/x/plugin/usage-tracker"] }, entries: {} } };
     applySecretDropCommandEntry(ours, desired, quiet);
     expect(applySecretDropCommandEntry(ours, null, quiet)).toEqual({ changed: true, conflict: false });
-    expect(ours.plugins).toEqual({ allow: ["usage-tracker"], load: { paths: ["/x/plugin/usage-tracker"] }, entries: {} });
+    expect(ours.plugins).toEqual({ allow: ["usage-tracker", "memory-core"], load: { paths: ["/x/plugin/usage-tracker"] }, entries: {} });
     expect(applySecretDropCommandEntry({}, null, quiet)).toEqual({ changed: false, conflict: false });
   });
 });
