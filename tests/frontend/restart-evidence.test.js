@@ -8,6 +8,12 @@ describe("frontend/restart-evidence", () => {
     expect(lines.some(([, text]) => /refused/.test(text))).toBe(false);
   });
 
+  it("a gateway that restarted in place reads as stopped to start a fresh one, never as an OpenClaw refusal (GST-2578)", () => {
+    const lines = describeStopEvidenceLines({ stopEvidence: { how: "sigterm", askExit: "restarted_in_place", askRefusedLine: null } });
+    expect(lines.find(([label]) => label === "Graceful stop")[1]).toMatch(/restarted inside the same process/);
+    expect(lines.some(([, text]) => /refused/.test(text))).toBe(false);
+  });
+
   it("a non-zero ask exit without a graceful stop still reads as refused", () => {
     const lines = describeStopEvidenceLines({ stopEvidence: { how: "sigterm", askExit: 1, askRefusedLine: "nope" } });
     expect(lines.find(([label]) => label === "Graceful stop")[1]).toBe("OpenClaw refused: nope");
