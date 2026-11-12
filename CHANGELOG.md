@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.270] - 2026-11-12
+
+The pre-merge check that runs before a pull request is called ready now leaves the live and container test folders to their own CI jobs. Those tests need a real gateway or Docker and are excluded from the plain unit run, so asking the local run to execute them made every check that touched them fail, even when nothing was wrong.
+
+### Changed
+- `.gstack/pregate.json` declares `tests/live/**` and `tests/container/**` as test trees with no local dependencies, so the local unit run reports them as not run instead of failing. They still run in their own CI jobs.
+
 ## [0.10.269] - 2026-11-11
 
 AlphaClaw now runs OpenClaw 2026.11.3, OpenClaw's current stable release. It is a patch release on the 2026.11.2 line with the same database schemas, and it brings credential-isolation and redaction fixes (plugin result caches scoped to their credentials, inline environment credentials hidden from config reads, Signal and language-server children no longer inheriting Gateway secrets), update-recovery fixes, and fixes for stuck child-task handoffs and tool failures that ended a turn silently.
