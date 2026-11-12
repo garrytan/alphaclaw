@@ -12,7 +12,7 @@ Every `plugins.allow` list AlphaClaw writes now includes OpenClaw's own memory p
 ### Fixed
 - Adding any plugin to `plugins.allow` (usage tracker, relay guard, `/secret`, Codex, channel plugins, onboarding) also adds `memory-core` when it is missing, and the boot reconcile adds it once to existing configs. A config with no allow list is left without one.
 - On OpenClaw 2026.10.9 and 2026.11.3 this changes nothing: `openclaw config validate` accepts it, `memory-core` loads exactly as before, and a memory slot set to `none` (or another memory plugin) still keeps it off.
-- Rolling back a failed channel create also takes `memory-core` back out when the create added it, so the config returns to what it was.
+- Rolling back a failed channel create also takes `memory-core` back out when the create added it together with the channel's plugin. When the channel's plugin was already allowed, `memory-core` stays, because it changes nothing and the boot reconcile adds it anyway.
 
 ## [0.10.271] - 2026-11-12
 
