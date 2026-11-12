@@ -245,6 +245,13 @@ log says `restart op=<id> expedite requested=true actor=…` then
 of "refused". The agent cannot press it (`/api/gateway/restart/expedite` is
 human-only).
 
+OpenClaw 2026.11.5 sometimes restarts inside the same process instead of
+exiting (it logs `[gateway] … falling back to in-process restart` when it
+cannot write its restart handoff). Its drain is already done, so since
+v0.10.272 AlphaClaw ends the wait at once, logs `asking
+status=restarted_in_place`, stops it with SIGTERM and starts a fresh gateway;
+the stop evidence says OpenClaw restarted inside the same process.
+
 To change the grace, set `ALPHACLAW_GATEWAY_RESTART_GRACE_SECONDS` in the
 deployment environment and restart AlphaClaw (it is read at process start and
 never from `.env`). Values outside 30–300 are clamped with one warning line.
@@ -311,6 +318,7 @@ restart op=9e1e29ab asking status=probe attempt=1 gateway=draining|closed|admitt
 restart op=9e1e29ab asking status=reasking attempt=2 graceMs=…
 restart op=9e1e29ab asking status=honoured attempts=… ms=… drainMs=…
 restart op=9e1e29ab asking status=refused|expired exit=… class=… gateway=… attempts=… ms=… drainMs=… line=…
+restart op=9e1e29ab asking status=restarted_in_place ms=… drainMs=… line=…
 restart op=9e1e29ab stopping signal=SIGTERM target=group pgid=4200
 restart op=9e1e29ab forcing signal=SIGKILL target=group pgid=4200
 restart op=9e1e29ab stopped how=graceful|sigterm|sigkill ms=… gateway=[…] observedExits={…}
