@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.269] - 2026-11-12
+## [0.10.271] - 2026-11-12
 
 Your own trusted Capy threads can again run a Python or Node script they write with a here-document, even when the script's text talks about OpenClaw, its gateway or its plugins. The relay guard read the whole script as shell, so a question in it like "How does OpenClaw restart the gateway (and drain the turn)?" looked like an `openclaw` command with a part the shell fills in, and the turn was refused as a change to what decides relay trust.
 
@@ -13,6 +13,29 @@ Your own trusted Capy threads can again run a Python or Node script they write w
 - The relay guard reads each here-document body in the language that reads it: a body `cat` or `tee` writes to a file is read as text, and a body fed to `python`/`node`, or written to a file the same command then runs with one of them, is read as that program. Prose that mentions OpenClaw is no longer a command.
 - Nothing that reaches the trust anchor gets through: a body still counts when it names the relay's files, AlphaClaw's installed code, the guard, `openclaw.json` or a trust setting, or makes a real `openclaw config`, `plugins` or `gateway` change (a variable, an f-string field or a concatenation in it counts as unknown, as in a shell). A body a shell runs is read as shell, as before, and so is any command the guard cannot fully follow. Reads of the relay's keys and databases stay refused in every relay session.
 - A here-document write that lands inside the trust anchor, through a symlink too, is now refused as an anchor change.
+
+## [0.10.270] - 2026-11-12
+
+The pre-merge check that runs before a pull request is called ready now leaves the live and container test folders to their own CI jobs. Those tests need a real gateway or Docker and are excluded from the plain unit run, so asking the local run to execute them made every check that touched them fail, even when nothing was wrong.
+
+### Changed
+- `.gstack/pregate.json` declares `tests/live/**` and `tests/container/**` as test trees with no local dependencies, so the local unit run reports them as not run instead of failing. They still run in their own CI jobs.
+
+## [0.10.269] - 2026-11-11
+
+AlphaClaw now runs OpenClaw 2026.11.3, OpenClaw's current stable release. It is a patch release on the 2026.11.2 line with the same database schemas, and it brings credential-isolation and redaction fixes (plugin result caches scoped to their credentials, inline environment credentials hidden from config reads, Signal and language-server children no longer inheriting Gateway secrets), update-recovery fixes, and fixes for stuck child-task handoffs and tool failures that ended a turn silently.
+
+### Changed
+- The pinned OpenClaw moves from 2026.11.2 to 2026.11.3. The first boot runs OpenClaw's Doctor once, as for every pin change, and keeps the pre-upgrade config at `.alphaclaw/openclaw.json.pre-2026.11.3`. No database migration: the state and agent schemas stay at 22 and 27. The lockfile refresh also moves `@babel/runtime` from 7.29.13 to 7.29.14.
+- The OpenClaw hold floor stays at 2026.10.9. Its comment and the README now say so plainly, instead of describing it as "the pin before the current one".
+
+### Fixed
+- Going back to an older pin no longer overwrites a saved config. Before, a boot on an older OpenClaw than the last upgrade (for example 2026.11.2 after 2026.11.3) copied the current `openclaw.json`, already written by the newer version, over `.alphaclaw/openclaw.json.pre-<older>`, the copy kept from before the earlier upgrade, and pointed the migration record at it. Now a downgrade keeps no copy and leaves the existing copies and the record alone.
+- The live relay guard test expected a delegate relay session's `automations list` to be refused, but delegates have been allowed to read automations since 0.10.252. It now checks that the guard lets the read through.
+
+### Docs
+- The README explains how to go back from 2026.11.3 to 2026.11.2: no database restore, but once 2026.11.3 has written `openclaw.json`, 2026.11.2 refuses it until `.alphaclaw/openclaw.json.pre-2026.11.3` is put back.
+- The README warns that on boxes with a large session history, the memory index rebuild after upgrading from 2026.10.9 still runs out of worker memory on 2026.11.2 and 2026.11.3, and gives the workaround we measured.
 
 ## [0.10.268] - 2026-11-11
 

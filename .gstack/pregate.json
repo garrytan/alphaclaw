@@ -5,7 +5,9 @@
     "package-lock.json": [
       "tests/server/alphaclaw-version.test.js"
     ],
-    "tests/browser/**": []
+    "tests/browser/**": [],
+    "tests/live/**": [],
+    "tests/container/**": []
   },
   "run_profiles": {
     "ci/test-24": {
