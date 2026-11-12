@@ -7,12 +7,10 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.271] - 2026-11-12
 
-Your own trusted Capy threads can again run a Python or Node script they write with a here-document, even when the script's text talks about OpenClaw, its gateway or its plugins. The relay guard read the whole script as shell, so a question in it like "How does OpenClaw restart the gateway (and drain the turn)?" looked like an `openclaw` command with a part the shell fills in, and the turn was refused as a change to what decides relay trust.
+Your own trusted Capy threads can again commit a change whose message says "OpenClaw (the runtime)", or run a Python script whose text puts a word in parentheses next to OpenClaw, its gateway or its config. The relay guard counted every `(` as a part the shell fills in, so ordinary prose in a commit message or a here-document looked like an `openclaw` command it could not read, and the turn was refused as a change to what decides relay trust.
 
 ### Fixed
-- The relay guard reads each here-document body in the language that reads it: a body `cat` or `tee` writes to a file is read as text, and a body fed to `python`/`node`, or written to a file the same command then runs with one of them, is read as that program. Prose that mentions OpenClaw is no longer a command.
-- Nothing that reaches the trust anchor gets through: a body still counts when it names the relay's files, AlphaClaw's installed code, the guard, `openclaw.json` or a trust setting, or makes a real `openclaw config`, `plugins` or `gateway` change (a variable, an f-string field or a concatenation in it counts as unknown, as in a shell). A body a shell runs is read as shell, as before, and so is any command the guard cannot fully follow. When the command also runs a Python or Node program, a plain text body is read as shell as well, since the program could hand it to bash, so prose notes beside a running script still count. Reads of the relay's keys and databases stay refused in every relay session.
-- A here-document write that lands inside the trust anchor, through a symlink too, is now refused as an anchor change.
+- A `(` that starts a word, and whose group holds no pattern character, now only separates words. A shell runs that as a subshell, whose words the guard reads like any others, or rejects it, so nothing in it is filled in. A `(` inside a word, an extglob or zsh pattern group, `$(`, `<(`, `>(` and backticks still count, and every real `openclaw config`, `plugins` or `gateway` change, including one inside a subshell, stays refused.
 
 ## [0.10.270] - 2026-11-12
 
