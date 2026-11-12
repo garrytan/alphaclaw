@@ -463,6 +463,7 @@ describe("server/auth-profiles", () => {
       "telegram",
       "usage-tracker",
       "codex",
+      "memory-core",
     ]);
     expect(updated.plugins.entries.telegram).toEqual({ enabled: true });
     expect(updated.plugins.entries.codex).toEqual({

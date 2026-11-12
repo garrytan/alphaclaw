@@ -116,7 +116,7 @@ describe("admitted boot config normalization", () => {
       logging: { file: "/var/log/openclaw/gateway.log" },
       agents: { entries: { main: {} }, defaults: { subagents: { maxSpawnDepth: 3 } } },
       plugins: {
-        allow: ["usage-tracker"],
+        allow: ["usage-tracker", "memory-core"],
         load: { paths: [kUsageTrackerPluginPath] },
         entries: { "usage-tracker": { enabled: true, hooks: { allowConversationAccess: true } } },
       },
@@ -169,7 +169,7 @@ describe("admitted boot config normalization", () => {
         gateway: { cliAgents: { enabled: false } },
         agents: { defaults: { subagents: { maxSpawnDepth: 1 } } },
         plugins: {
-          allow: ["usage-tracker"],
+          allow: ["usage-tracker", "memory-core"],
           load: { paths: [kUsageTrackerPluginPath] },
           entries: { "usage-tracker": { enabled: true, hooks: { allowConversationAccess: true } } },
         },

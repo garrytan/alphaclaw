@@ -19,7 +19,7 @@ describe("codex-runtime-config", () => {
     };
 
     expect(ensureCodexRuntimePlugin(cfg)).toBe(true);
-    expect(cfg.plugins.allow).toEqual(["telegram", "codex"]);
+    expect(cfg.plugins.allow).toEqual(["telegram", "codex", "memory-core"]);
     expect(cfg.plugins.entries.codex).toEqual({ enabled: true });
     expect(ensureCodexRuntimePlugin(cfg)).toBe(false);
   });

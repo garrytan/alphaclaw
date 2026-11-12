@@ -304,6 +304,7 @@ describe("server/agents/service", () => {
       "telegram",
       "usage-tracker",
       "codex",
+      "memory-core",
     ]);
     expect(config.plugins.entries.codex).toEqual({ enabled: true });
   });
@@ -1364,7 +1365,7 @@ describe("server/agents/service", () => {
       if (String(command).startsWith("channels add")) {
         const currentConfig = fsMock.readConfig();
         expect(currentConfig.plugins).toEqual({
-          allow: ["discord", "usage-tracker", "telegram"],
+          allow: ["discord", "usage-tracker", "telegram", "memory-core"],
           entries: {
             discord: { enabled: true },
             "usage-tracker": { enabled: true },
@@ -1481,7 +1482,7 @@ describe("server/agents/service", () => {
           },
         },
         plugins: {
-          allow: ["discord"],
+          allow: ["discord", "memory-core"],
           entries: {
             discord: { enabled: true },
           },

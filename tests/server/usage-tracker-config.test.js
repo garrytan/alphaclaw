@@ -212,7 +212,7 @@ describe("server/usage-tracker-config", () => {
     expect(ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir })).toBe(true);
 
     const next = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    expect(next.plugins.allow).toEqual(["telegram", "usage-tracker", "codex"]);
+    expect(next.plugins.allow).toEqual(["telegram", "usage-tracker", "memory-core", "codex"]);
     expect(next.plugins.entries.codex).toEqual({ enabled: true });
   });
 
@@ -292,7 +292,7 @@ describe("server/usage-tracker-config", () => {
       };
 
       expect(reconcileEnabledChannelPlugins(cfg)).toBe(true);
-      expect(cfg.plugins.allow).toEqual(["telegram", "whatsapp"]);
+      expect(cfg.plugins.allow).toEqual(["telegram", "memory-core", "whatsapp"]);
       expect(cfg.plugins.entries.telegram).toEqual({ enabled: true });
       expect(cfg.plugins.entries.whatsapp).toEqual({ enabled: true });
       expect(cfg.plugins.entries.discord).toBeUndefined();
@@ -324,7 +324,7 @@ describe("server/usage-tracker-config", () => {
     const configPath = path.join(openclawDir, "openclaw.json");
     const reconciled = {
       plugins: {
-        allow: ["usage-tracker"],
+        allow: ["usage-tracker", "memory-core"],
         load: { paths: [kUsageTrackerPluginPath] },
         entries: {
           "usage-tracker": {
@@ -372,6 +372,45 @@ describe("server/usage-tracker-config", () => {
       ).toThrow();
       // The original file is left exactly as-is — never overwritten with {}.
       expect(fs.readFileSync(configPath, "utf8")).toBe(original);
+    });
+  });
+
+  describe("memory-core in plugins.allow (GST-2578)", () => {
+    it("adds memory-core once to an existing allow list at boot, so OpenClaw 2026.11.5's memory commands run", () => {
+      const openclawDir = createTempOpenclawDir();
+      const configPath = path.join(openclawDir, "openclaw.json");
+      const existing = {
+        plugins: {
+          allow: ["usage-tracker"],
+          load: { paths: [kUsageTrackerPluginPath] },
+          entries: { "usage-tracker": { enabled: true, hooks: { allowConversationAccess: true } } },
+        },
+      };
+      fs.writeFileSync(configPath, JSON.stringify(existing, null, 2), "utf8");
+
+      expect(ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir })).toBe(true);
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).plugins.allow).toEqual(["usage-tracker", "memory-core"]);
+      const after = fs.readFileSync(configPath, "utf8");
+      expect(ensureUsageTrackerPluginConfig({ fsModule: fs, openclawDir })).toBe(false);
+      expect(fs.readFileSync(configPath, "utf8")).toBe(after);
+    });
+
+    it("a fresh config's first allow list carries memory-core, and an operator's own entry is never duplicated", () => {
+      const fresh = {};
+      reconcileManagedPluginConfig(fresh);
+      expect(fresh.plugins.allow).toContain("memory-core");
+      expect(fresh.plugins.allow.filter((id) => id === "memory-core")).toHaveLength(1);
+
+      const operator = { plugins: { allow: ["memory-core", "usage-tracker"], load: { paths: [kUsageTrackerPluginPath] }, entries: {} } };
+      ensureUsageTrackerPluginEntry(operator);
+      expect(operator.plugins.allow).toEqual(["memory-core", "usage-tracker"]);
+    });
+
+    it("never creates an allow list just to hold memory-core", () => {
+      const { ensureMemoryCoreAllowed } = require("../../lib/server/plugin-config");
+      const cfg = { plugins: { entries: {} } };
+      expect(ensureMemoryCoreAllowed(cfg)).toBe(false);
+      expect(cfg.plugins).toEqual({ entries: {} });
     });
   });
 });
