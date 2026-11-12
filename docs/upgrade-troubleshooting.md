@@ -205,6 +205,10 @@ openclaw backup create --output <root>/backups/openclaw --verify --json
 `409 backup_in_progress` while one runs) and `GET /api/openclaw/backup`
 reports `running` plus the last result: the archive path and size, or the
 error (the CLI's last stderr lines, or "did not report a verified archive").
+A run gets 30 minutes plus 2 minutes per GiB of state, at most 12 hours (the
+full 12 hours when the state cannot be measured quickly). A run that times out
+or fails removes the unfinished `.openclaw-backup-publish-*` staging folder it
+created, and a timed-out result records `timeoutMs` and `stateBytes`.
 The result lives in memory only, so it resets when AlphaClaw restarts; the
 archive itself stays in `<root>/backups/openclaw`. AlphaClaw adds no quiesce,
 retention, inventory or restore of its own. Delete old archives yourself when
