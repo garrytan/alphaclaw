@@ -147,6 +147,17 @@ describe("server/openclaw-runtime", () => {
       expect(calls[0].options.timeout).toBe(40 * 60 * 1000 + 1);
     });
 
+    it("runs the CLI without its self-respawn so the timeout's SIGKILL stops the archive writer (GST-2578)", () => {
+      const { runtime, calls } = createBackupHarness();
+      runtime.startBackup();
+      expect(calls[0].options.env).toEqual({
+        OPENCLAW_STATE_DIR: path.join(root, ".openclaw"),
+        MARKER: "spawn-env",
+        OPENCLAW_NO_RESPAWN: "1",
+        NODE_DISABLE_COMPILE_CACHE: "1",
+      });
+    });
+
     it("a timed-out backup is a failure that leaves no unfinished archive behind (GST-2578)", () => {
       const { runtime, calls } = createBackupHarness();
       const earlier = path.join(backupsDir, ".openclaw-backup-publish-earlier-abc");
