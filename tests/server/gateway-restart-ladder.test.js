@@ -186,6 +186,10 @@ const createWorld = () => {
     //   killed_draining   same, but the CLI dies by SIGKILL (OOM killer)
     //   unknown_dropped   the ack is lost AND the request was rolled back:
     //                     exit 1 "outcome is unknown", the gateway admits
+    //   in_place          the gateway drains, cannot write its restart
+    //                     handoff and restarts inside the same pid (2026.11.5),
+    //                     logging the fallback line (split across two chunks
+    //                     when world.inPlaceSplit); the CLI exits 0
     spawnRestartCli(args = []) {
       const pid = nextPid++;
       const child = world.makeChild(pid);
@@ -219,6 +223,16 @@ const createWorld = () => {
           world.exit(pid, 1);
         }, world.cliExitDelayMs);
         if (world.drainExitMs != null) setTimeout(exitGatewayRoot, world.drainExitMs);
+      } else if (mode === "in_place") {
+        setTimeout(() => { world.readyState = "draining"; }, 50);
+        setTimeout(() => {
+          world.readyState = "ready";
+          const root = [...procs.values()].find((p) => p.alive && p.pid === gateway.ppid) || gateway;
+          const line = "[gateway] external supervisor restart handoff could not be persisted; falling back to in-process restart\n";
+          const chunks = world.inPlaceSplit ? [line.slice(0, 70), line.slice(70)] : [line];
+          for (const chunk of chunks) root.child?.stdout.emit("data", Buffer.from(chunk));
+        }, world.gracefulDelayMs);
+        setTimeout(() => world.exit(pid, 0), world.cliExitDelayMs);
       } else if (mode === "unknown_dropped") {
         setTimeout(() => {
           child.stderr.emit("data", Buffer.from(unknownText));
@@ -864,6 +878,29 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
       expect(value.stopEvidence.askRefusedLine).toBeNull();
       expect(logLines().some((line) => /asking status=expedited ms=\d+/.test(line))).toBe(true);
       expect(logLines().some((line) => /asking status=(refused|expired)/.test(line))).toBe(false);
+    });
+
+    it.each([
+      ["in one chunk", false],
+      ["split across two output chunks", true],
+    ])("a gateway that falls back to an in-process restart (%s) is stopped at once, not after the whole ask grace (GST-2578)", async (_label, split) => {
+      const { launcherPid } = await bootManaged(gateway, world);
+      world.restartCli = "in_place";
+      world.inPlaceSplit = split;
+      const askAt = Date.now();
+      const { value, error } = await runRestart({ source: "api:restart", ladder: { ...ladder, askGraceMs: 60_000 } }, 6000);
+      expect(error).toBeNull();
+      expect(value.how).toBe("sigterm");
+      const [first] = world.signalLog.filter((entry) => entry.pid === -launcherPid && entry.sig === "SIGTERM");
+      expect(first.at - askAt).toBeGreaterThanOrEqual(world.gracefulDelayMs);
+      expect(first.at - askAt).toBeLessThan(world.gracefulDelayMs + 1000);
+      expect(world.signalLog.some((entry) => entry.pid === -launcherPid && entry.sig === "SIGKILL")).toBe(false);
+      expect(value.stopEvidence.askExit).toBe("restarted_in_place");
+      expect(value.stopEvidence.askRestartedInPlaceLine).toMatch(/falling back to in-process restart/);
+      expect(value.stopEvidence.askRefusedLine).toBeNull();
+      expect(logLines().some((line) => /asking status=restarted_in_place ms=\d+ .*line=.*falling back to in-process restart/.test(line))).toBe(true);
+      expect(logLines().some((line) => /asking status=(refused|expired)/.test(line))).toBe(false);
+      expect(world.spawned.filter((entry) => entry.kind === "run")).toHaveLength(2);
     });
   });
 

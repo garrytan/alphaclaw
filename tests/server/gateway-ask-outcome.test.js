@@ -5,6 +5,7 @@ const {
   classifyAskExit,
   classifyAskProbe,
   decideAfterAskExit,
+  isInPlaceRestartLine,
 } = require("../../lib/server/gateway-ask-outcome");
 
 // Verbatim from the pinned CLI (dist/transport-error-*.mjs), as the incident
@@ -63,5 +64,31 @@ describe("gateway-ask-outcome: what a non-zero 'gateway restart --wait' exit mea
     expect(decideAfterAskExit({ exitClass: "rejected", states: [INCONCLUSIVE] })).toBe(kAskDecisions.ESCALATE);
     expect(decideAfterAskExit({ exitClass: "unknown", states: [INCONCLUSIVE, INCONCLUSIVE] })).toBe(kAskDecisions.WAIT);
     expect(decideAfterAskExit({ exitClass: "failed", states: [] })).toBe(kAskDecisions.WAIT);
+  });
+});
+
+describe("gateway-ask-outcome: a gateway that restarted inside its own process (GST-2578)", () => {
+  it("recognises OpenClaw's in-process fallback lines and nothing else", () => {
+    // Verbatim from dist/run-*.mjs handleRestartAfterServerClose (2026.11.3; 2026.11.5 logged the first).
+    for (const line of [
+      "2026-11-12T13:47:01.002+00:00 [gateway] external supervisor restart handoff could not be persisted; falling back to in-process restart",
+      "[gateway] full process restart failed (spawn EAGAIN); falling back to in-process restart",
+      "[gateway] launchd restart handoff failed to spawn; falling back to in-process restart",
+      "[gateway] restart mode: in-process restart (OPENCLAW_NO_RESPAWN)",
+      "\u001b[90m2026-11-12T13:47:01.002+00:00\u001b[39m \u001b[36m[gateway]\u001b[39m \u001b[33mexternal supervisor restart handoff could not be persisted; falling back to in-process restart\u001b[39m",
+    ]) {
+      expect(isInPlaceRestartLine(line)).toBe(true);
+    }
+    for (const line of [
+      "[gateway] restart mode: full process restart (supervisor restart)",
+      "[gateway] external supervisor restart handoff could not be persisted; the replaced runtime cannot resume",
+      "[gateway] failed to reacquire gateway lock for in-process restart: busy",
+      "[agent/embedded] tool exec failed: grep -rn \"falling back to in-process restart\" exited 1",
+      "[agents/agent-command] provider error: upstream said: [gateway] restart mode: in-process restart (OPENCLAW_NO_RESPAWN)",
+      "",
+      null,
+    ]) {
+      expect(isInPlaceRestartLine(line)).toBe(false);
+    }
   });
 });
