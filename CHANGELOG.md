@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 Your own trusted Capy threads can again commit a change whose message says "OpenClaw (the runtime)", or run a Python script whose text puts a word in parentheses next to OpenClaw, its gateway or its config. The relay guard counted every `(` as a part the shell fills in, so ordinary prose in a commit message or a here-document looked like an `openclaw` command it could not read, and the turn was refused as a change to what decides relay trust.
 
 ### Fixed
-- A `(` that starts a word, and whose group holds no pattern character, now only separates words. A shell runs that as a subshell, whose words the guard reads like any others, or rejects it, so nothing in it is filled in. A `(` inside a word, an extglob or zsh pattern group, `$(`, `<(`, `>(` and backticks still count, and every real `openclaw config`, `plugins` or `gateway` change, including one inside a subshell, stays refused.
+- Two kinds of `(` now only separate words: one that opens a command and closes at its end (a subshell, whose words the guard reads like any others), and a whole word in parentheses that holds only plain text, with no quotes, backslashes, `$`, backticks or pattern characters. A shell runs those as a subshell or rejects them, so nothing in them is filled in. Every other `(`, `$(`, `<(`, `>(` and backticks still count, and every real `openclaw config`, `plugins` or `gateway` change, including one inside a subshell or a zsh pattern group, stays refused.
 
 ## [0.10.270] - 2026-11-12
 
