@@ -75,6 +75,7 @@ describe("gateway-ask-outcome: a gateway that restarted inside its own process (
       "[gateway] full process restart failed (spawn EAGAIN); falling back to in-process restart",
       "[gateway] launchd restart handoff failed to spawn; falling back to in-process restart",
       "[gateway] restart mode: in-process restart (OPENCLAW_NO_RESPAWN)",
+      "\u001b[90m2026-11-12T13:47:01.002+00:00\u001b[39m \u001b[36m[gateway]\u001b[39m \u001b[33mexternal supervisor restart handoff could not be persisted; falling back to in-process restart\u001b[39m",
     ]) {
       expect(isInPlaceRestartLine(line)).toBe(true);
     }
@@ -82,6 +83,8 @@ describe("gateway-ask-outcome: a gateway that restarted inside its own process (
       "[gateway] restart mode: full process restart (supervisor restart)",
       "[gateway] external supervisor restart handoff could not be persisted; the replaced runtime cannot resume",
       "[gateway] failed to reacquire gateway lock for in-process restart: busy",
+      "[agent/embedded] tool exec failed: grep -rn \"falling back to in-process restart\" exited 1",
+      "[agents/agent-command] provider error: upstream said: [gateway] restart mode: in-process restart (OPENCLAW_NO_RESPAWN)",
       "",
       null,
     ]) {
