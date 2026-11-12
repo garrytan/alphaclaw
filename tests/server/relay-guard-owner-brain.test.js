@@ -40,11 +40,12 @@ describe("relay guard: the owner's brain connector for the owner's own thread (G
   });
 
   it("never lets an operator's delegate tool list open the owner's brain server", () => {
-    const delegateTools = ["gbrain_owner__*", "gbrain_owner__search", "gbrain_owner__put_page"];
+    const delegateTools = ["gbrain_owner__*", "gbrain_owner__search", "gbrain_owner__put_page", "gbrain_owner-2__*"];
     for (const ownerThread of [false, true]) {
       expect(decideRelayToolCall({ toolName: "gbrain_owner__put_page", trust: delegate, delegateTools, ownerThread }).allow, String(ownerThread)).toBe(false);
     }
     expect(decideRelayToolCall({ toolName: "gbrain_owner__search", trust: delegate, delegateTools, ownerThread: false }).allow).toBe(false);
+    expect(decideRelayToolCall({ toolName: "gbrain_owner-2__search", trust: delegate, delegateTools, ownerThread: false }).allow).toBe(false);
     expect(decideRelayToolCall({ toolName: "gbrain_owner__search", trust: delegate, delegateTools, ownerThread: true })).toEqual({ allow: true });
   });
 
@@ -67,6 +68,16 @@ describe("relay guard: the owner's brain connector for the owner's own thread (G
       expect(await ctx.call(run, "gbrain_owner__search", { query: "x" })).toEqual({});
       expect(await ctx.call(run, "gbrain_owner__get_page", { slug: "x" })).toEqual({});
       expect((await ctx.call(run, "gbrain_owner__think", { question: "x" })).block).toBe(true);
+    });
+
+    it("refuses a look-alike server name for the pinned owner thread, whatever its case", async () => {
+      ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+      const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+      for (const toolName of ["GBRAIN_OWNER__search", "Gbrain_Owner__get_page", "gbrain_owner__SEARCH", "gbrain_owner-2__search"]) {
+        const result = await ctx.call(run, toolName, { query: "x" });
+        expect(result.block, toolName).toBe(true);
+      }
+      expect(await ctx.call(run, "gbrain_owner__search", { query: "x" })).toEqual({});
     });
 
     it("refuses them for a delegate on a binding that is not pinned", async () => {
