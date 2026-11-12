@@ -285,6 +285,9 @@ describe("relay anchor and here-documents (GST-2473)", () => {
       "cat > " + kDir + "/r.sh <<'EOF'\nopenclaw config \\\nset plugins.entries.relay-guard.enabled false\nEOF",
       "cat > " + kDir + "/notes.txt <<'EOF'\no=openclaw; $o config set plugins.entries.relay-guard.enabled false\nEOF",
       "python3 - <<'PY'\nimport os\nos.system('x=$(openclaw config patch)')\nPY",
+      "cat > " + kDir + "/r.sh <<'EOF'\ndiff <(openclaw config patch) b\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\no=openclaw; $o --profile p config set plugins.entries.relay-guard.enabled false\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\no=openclaw; $o --dev config set plugins.entries.relay-guard.enabled false\nEOF",
     ];
     for (const command of commands) {
       expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
@@ -293,6 +296,10 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     for (const command of [
       "cat > " + kDir + "/notes.txt <<'EOF'\nOpenClaw (the agent runtime) restarts the gateway; it's $1.9M ARR.\nEOF",
       "cat > " + kDir + "/notes.txt <<'EOF'\nWe restarted OpenClaw;then the config changed.\nEOF",
+      "cat > " + kDir + "/notes.md <<'EOF'\n50% of config reads hit cache\nEOF",
+      "python3 - <<'PY'\nn = 3\nprint(f\"{n} plugins loaded\")\nPY",
+      "python3 - <<'PY'\nname = 'x'\nprint(\"%s config loaded\" % name)\nPY",
+      "node - <<'JS'\nconst n = 3;\nconsole.log(`${n} gateway ready`);\nJS",
     ]) expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).toBeNull();
     expect(ctx.confirmationCount()).toBe(0);
   });
