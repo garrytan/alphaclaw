@@ -273,4 +273,27 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     expect(classifyAnchor({ toolName: "exec", params: { command: prose }, rootDir: ctx.rootDir })).toBeNull();
     expect(ctx.confirmationCount()).toBe(0);
   });
+  it("still refuses a change a later shell could run from a text body: joined by ; && | $( or a backtick, split by a backslash at a line's end, or named by a variable", async () => {
+    const run = await pinnedRun();
+    const commands = [
+      "cat >> ~/.bashrc <<'EOF'\nx=$(openclaw gateway call config.apply)\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\ntrue;openclaw gateway call config.apply\nEOF",
+      "tee -a ~/.profile >/dev/null <<'EOF'\ntrue&&openclaw config patch\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\nx=`openclaw config patch`\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\ntrue;openclaw plugins reload\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\necho x|openclaw config patch\nEOF",
+      "cat > " + kDir + "/r.sh <<'EOF'\nopenclaw config \\\nset plugins.entries.relay-guard.enabled false\nEOF",
+      "cat > " + kDir + "/notes.txt <<'EOF'\no=openclaw; $o config set plugins.entries.relay-guard.enabled false\nEOF",
+      "python3 - <<'PY'\nimport os\nos.system('x=$(openclaw config patch)')\nPY",
+    ];
+    for (const command of commands) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expectRefusedOutright(await ctx.call(run, "exec", { command }), command);
+    }
+    for (const command of [
+      "cat > " + kDir + "/notes.txt <<'EOF'\nOpenClaw (the agent runtime) restarts the gateway; it's $1.9M ARR.\nEOF",
+      "cat > " + kDir + "/notes.txt <<'EOF'\nWe restarted OpenClaw;then the config changed.\nEOF",
+    ]) expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).toBeNull();
+    expect(ctx.confirmationCount()).toBe(0);
+  });
 });
