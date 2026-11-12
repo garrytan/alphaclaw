@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.274] - 2026-11-12
+
+A gateway restart no longer waits three minutes and then forces the gateway down when OpenClaw restarts in place. OpenClaw 2026.11.5 sometimes cannot write the handoff it leaves for AlphaClaw when it stops for a restart (its own restart command briefly holds the state database lock), and it then restarts inside the same process instead of exiting. AlphaClaw kept waiting for an exit that would never come, used up the whole 180-second grace, and only then sent SIGTERM.
+
+### Fixed
+- The stop ladder watches the gateway's output while it asks for a graceful restart. When OpenClaw logs that it is "falling back to in-process restart", its drain has already finished, so AlphaClaw moves to SIGTERM at once and starts a fresh gateway as usual. Only OpenClaw's own `[gateway]` log line counts, which keeps ordinary tool or provider error text that quotes the phrase from ending the ask. It does not treat the in-place restart as the restart it asked for, because that process keeps the old environment and the old OpenClaw binary, and work that needs the gateway down (Doctor during Retry upgrade, the team-mode auth write) would run against a live gateway. The restart log line reads `asking status=restarted_in_place` with OpenClaw's line, and the restart's evidence card says OpenClaw restarted inside the same process instead of saying it refused.
+
 ## [0.10.273] - 2026-11-12
 
 "Back up now" no longer gives up after a flat 30 minutes on a large state. A 34 GB state timed out with its archive half written, and the unfinished 14 GB file stayed on disk.

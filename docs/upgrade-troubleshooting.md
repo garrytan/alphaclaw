@@ -248,7 +248,7 @@ human-only).
 OpenClaw 2026.11.5 sometimes restarts inside the same process instead of
 exiting (it logs `[gateway] … falling back to in-process restart` when it
 cannot write its restart handoff). Its drain is already done, so since
-v0.10.272 AlphaClaw ends the wait at once, logs `asking
+v0.10.274 AlphaClaw ends the wait at once, logs `asking
 status=restarted_in_place`, stops it with SIGTERM and starts a fresh gateway;
 the stop evidence says OpenClaw restarted inside the same process.
 
