@@ -1,7 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { createOpenclawRuntime } = require("../../lib/server/openclaw-runtime");
+const { createOpenclawRuntime, resolveBackupTimeoutMs } = require("../../lib/server/openclaw-runtime");
 
 describe("server/openclaw-runtime", () => {
   let root;
@@ -125,6 +125,46 @@ describe("server/openclaw-runtime", () => {
       runtime.startBackup();
       calls[0].callback(Object.assign(new Error("killed"), { killed: true, signal: "SIGKILL" }), "", "partial");
       expect(runtime.getBackupStatus().last).toMatchObject({ ok: false, error: "openclaw backup create timed out" });
+    });
+
+    it("sizes the timeout to the state: 30 minutes plus 2 per GiB, at most 12 hours (GST-2578)", () => {
+      const GiB = 1024 ** 3;
+      expect(resolveBackupTimeoutMs(0)).toBe(30 * 60 * 1000);
+      expect(resolveBackupTimeoutMs(34e9)).toBe(30 * 60 * 1000 + Math.ceil((34e9 / GiB) * 2 * 60 * 1000));
+      expect(resolveBackupTimeoutMs(34e9)).toBeGreaterThan(90 * 60 * 1000);
+      expect(resolveBackupTimeoutMs(1024 * GiB)).toBe(12 * 60 * 60 * 1000);
+      expect(resolveBackupTimeoutMs(null)).toBe(12 * 60 * 60 * 1000);
+    });
+
+    it("measures the state dir, skipping the backups dir, before it spawns the backup (GST-2578)", () => {
+      const { runtime, calls } = createBackupHarness();
+      const stateFile = path.join(root, ".openclaw", "state", "openclaw.sqlite");
+      write(stateFile, "");
+      fs.truncateSync(stateFile, 5 * 1024 ** 3);
+      write(path.join(root, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite"), "x".repeat(1024));
+      runtime.startBackup();
+      expect(calls[0].options.timeout).toBe(resolveBackupTimeoutMs(5 * 1024 ** 3 + 1024));
+      expect(calls[0].options.timeout).toBe(40 * 60 * 1000 + 1);
+    });
+
+    it("a timed-out backup is a failure that leaves no unfinished archive behind (GST-2578)", () => {
+      const { runtime, calls } = createBackupHarness();
+      const earlier = path.join(backupsDir, ".openclaw-backup-publish-earlier-abc");
+      const finished = path.join(backupsDir, "2026-11-11-openclaw-backup.tar.gz");
+      write(path.join(earlier, "archive.tar.gz.tmp"), "someone else's");
+      write(finished, "done");
+      runtime.startBackup();
+      const staging = path.join(backupsDir, ".openclaw-backup-publish-cd8abc72-2uNR8j");
+      write(path.join(staging, "archive.tar.gz.tmp"), "half an archive");
+      calls[0].callback(Object.assign(new Error("killed"), { killed: true, signal: "SIGKILL" }), "", "");
+      expect(fs.existsSync(staging)).toBe(false);
+      expect(fs.existsSync(path.join(earlier, "archive.tar.gz.tmp"))).toBe(true);
+      expect(fs.readFileSync(finished, "utf8")).toBe("done");
+      expect(runtime.getBackupStatus()).toMatchObject({
+        running: false,
+        last: { ok: false, archivePath: null, error: "openclaw backup create timed out", timeoutMs: 30 * 60 * 1000, stateBytes: 0, partialArchivesRemoved: 1 },
+      });
+      expect(runtime.readBackupReceipt()).toBeNull();
     });
 
     it.each([
