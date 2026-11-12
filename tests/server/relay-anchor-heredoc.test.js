@@ -239,4 +239,23 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     }
     expect(ctx.confirmationCount()).toBe(0);
   });
+  it("still refuses a change or an anchor name split by a backslash at a line's end in a program body", async () => {
+    const run = await pinnedRun();
+    const relay = path.join(ctx.rootDir, "relay");
+    const commands = [
+      "python3 - <<'PY'\nopen('" + relay.slice(0, -2) + "\\\n" + relay.slice(-2) + "/grants.json', 'w')\nPY",
+      "node - <<'JS'\nrequire('fs').writeFileSync('" + relay.slice(0, -2) + "\\\n" + relay.slice(-2) + "/grants.json', 'x')\nJS",
+      "python3 - <<'PY'\nimport os\nos.environ['ALPHACLAW_RELAY_TRUSTED_\\\nBINDINGS'] = 'x'\nPY",
+      "python3 - <<'PY'\nimport os\nos.system('openclaw config set plugins.entries.relay-\\\nguard.enabled false')\nPY",
+      "python3 - <<'PY'\nimport os\nos.system('openclaw config ' \\\n  'set plugins.enabled false')\nPY",
+      "node - <<'JS'\nrequire('child_process').execSync('openclaw config set plugins.entries.relay-\\\nguard.enabled false')\nJS",
+    ];
+    for (const command of commands) {
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expectRefusedOutright(await ctx.call(run, "exec", { command }), command);
+    }
+    const prose = "python3 - <<'PY'\nx = 1 + \\\n  2\nprint('OpenClaw restarts the \\\ngateway (and drains the running turn).', x)\nPY";
+    expect(classifyAnchor({ toolName: "exec", params: { command: prose }, rootDir: ctx.rootDir })).toBeNull();
+    expect(ctx.confirmationCount()).toBe(0);
+  });
 });
