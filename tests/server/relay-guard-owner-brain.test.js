@@ -39,6 +39,21 @@ describe("relay guard: the owner's brain connector for the owner's own thread (G
     }
   });
 
+  it("never lets an operator's delegate tool list open the owner's brain server", () => {
+    const delegateTools = ["gbrain_owner__*", "gbrain_owner__search", "gbrain_owner__put_page"];
+    for (const ownerThread of [false, true]) {
+      expect(decideRelayToolCall({ toolName: "gbrain_owner__put_page", trust: delegate, delegateTools, ownerThread }).allow, String(ownerThread)).toBe(false);
+    }
+    expect(decideRelayToolCall({ toolName: "gbrain_owner__search", trust: delegate, delegateTools, ownerThread: false }).allow).toBe(false);
+    expect(decideRelayToolCall({ toolName: "gbrain_owner__search", trust: delegate, delegateTools, ownerThread: true })).toEqual({ allow: true });
+  });
+
+  it("matches the tool name exactly, so a server whose name differs only in case is not the owner's", () => {
+    for (const toolName of ["GBRAIN_OWNER__search", "Gbrain_Owner__get_page", "gbrain_owner__SEARCH", " gbrain_owner__search_x"]) {
+      expect(decideRelayToolCall({ toolName, trust: delegate, ownerThread: true }).allow, toolName).toBe(false);
+    }
+  });
+
   describe("through the plugin entry", () => {
     let ctx;
     afterEach(() => {

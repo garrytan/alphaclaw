@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 When Wintermute's owner talks to it from one of his own Capy threads over the agent relay, the relay now lets that thread read his brain through the owner's own read-only brain connector. Before this, only his Telegram DM and forum could use that connector, so once private pages are labelled, his own Capy threads would have lost them.
 
 ### Fixed
-- AlphaClaw's relay guard allows 19 named read tools of the `gbrain_owner` MCP server (search, get_page, recall and the other reads) for a relay session that is the owner's own thread: an attested owner thread or a pinned binding, decided per call as for the owner's other relay tools. Each tool is listed by name, so a tool that server adds later stays closed. A delegate that isn't the owner's thread, a peer, and any `gbrain_owner` tool not on the list are still refused.
+- AlphaClaw's relay guard allows 19 named read tools of the `gbrain_owner` MCP server (search, get_page, recall and the other reads) for a relay session that is the owner's own thread: an attested owner thread or a pinned binding, decided per call as for the owner's other relay tools. Each tool is listed by name, so a tool that server adds later stays closed. A delegate that isn't the owner's thread, a peer, and any `gbrain_owner` tool not on the list are still refused. The name must match exactly, case included, and an operator's `ALPHACLAW_RELAY_DELEGATE_TOOLS` entry can no longer open the `gbrain_owner` server to other delegates; before this, `gbrain_owner__*` there would have opened its write tools too.
 
 ## [0.10.270] - 2026-11-12
 
