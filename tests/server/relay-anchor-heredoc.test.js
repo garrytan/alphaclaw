@@ -108,7 +108,22 @@ describe("relay anchor and here-documents (GST-2473)", () => {
     }
     const prose = "cat > " + kDir + "/notes.txt <<'EOF'\nOpenClaw (the agent runtime) restarts the gateway; it's $1.9M ARR.\nEOF\npython3 " + kScript;
     const withScript = "cat > " + kScript + " <<'PY'\nprint('ok')\nPY\n" + prose;
-    expect(classifyAnchor({ toolName: "exec", params: { command: withScript }, rootDir: ctx.rootDir })).toBeNull();
+    expect(classifyAnchor({ toolName: "exec", params: { command: withScript }, rootDir: ctx.rootDir })).not.toBeNull();
+  });
+
+  it("reads a text body as shell when the command runs a program that could hand it to bash", async () => {
+    const run = await pinnedRun();
+    const runner = "import subprocess\nsubprocess.run(['bash', '" + kDir + "/x.sh'])";
+    for (const body of [
+      "openclaw config \\\nset plugins.entries.relay-guard.enabled false",
+      "o=openclaw; $o config set plugins.entries.relay-guard.enabled false",
+    ]) {
+      const command = "cat > " + kDir + "/x.sh <<'EOF'\n" + body + "\nEOF\ncat > " + kScript + " <<'PY'\n" + runner + "\nPY\npython3 " + kScript;
+      expect(classifyAnchor({ toolName: "exec", params: { command }, rootDir: ctx.rootDir }), command).not.toBeNull();
+      expectRefusedOutright(await ctx.call(run, "exec", { command }), command);
+    }
+    const data = "cat > " + kDir + "/rows.txt <<'EOF'\nquestion,answer\nwhat is b4,a batch\nEOF\ncat > " + kScript + " <<'PY'\nprint(open('" + kDir + "/rows.txt').read())\nPY\npython3 " + kScript;
+    expect(classifyAnchor({ toolName: "exec", params: { command: data }, rootDir: ctx.rootDir })).toBeNull();
   });
 
   it("still refuses the same body when a shell runs it", async () => {
