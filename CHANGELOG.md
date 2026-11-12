@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.273] - 2026-11-12
+
+"Back up now" no longer gives up after a flat 30 minutes on a large state. A 34 GB state timed out with its archive half written, and the unfinished 14 GB file stayed on disk.
+
+### Fixed
+- The backup's timeout is sized to the state it archives: 30 minutes plus 2 minutes per GiB under the state dir, at most 12 hours (about 93 minutes for 34 GB). AlphaClaw measures the state just before the backup starts, within a 250 ms budget, and uses the 12-hour limit when it cannot finish measuring.
+- A backup that times out or fails is reported as failed and leaves no unfinished archive behind: AlphaClaw removes the staging folder OpenClaw was writing into (`.openclaw-backup-publish-*` with its `archive.tar.gz.tmp`). Only folders that run created are removed, never finished archives or another run's folder. A timed-out result also records the timeout and the state size it was based on.
+- A timed-out backup is now actually stopped. OpenClaw's command re-launches itself, so the timeout used to stop only the launcher while the process writing the archive kept running. AlphaClaw now runs the backup without that re-launch, so the timeout stops the writer before the cleanup runs.
+
 ## [0.10.272] - 2026-11-12
 
 Every `plugins.allow` list AlphaClaw writes now includes OpenClaw's own memory plugin, `memory-core`. OpenClaw 2026.11.5's `openclaw memory …` commands (status, index, search) refuse to run while an allow list leaves it out, even though the gateway loads it anyway, and AlphaClaw creates an allow list as soon as it registers its own plugins.

@@ -108,7 +108,7 @@
 ## P3 — Why does `openclaw backup create` idle against a running gateway? (2026-09-09, from the v0.9.81 Upgrade-tab wave; reframed for Back up now in v0.9.99)
 - **What:** capture the `last.error` of the next Back up now failure that times out (`GET /api/openclaw/backup`; it carries the CLI's last three stderr lines) and read the coordinator-lock / audit-lease path in the pinned dist to explain a silent multi-minute attempt with nothing written.
 - **Why:** an operator run on 2026.9.2 showed `backup create` idle for a full 10-minute ceiling against a live gateway. Back up now runs the same command with the gateway up, so a hang shows as a timeout with no explanation.
-- **Context:** `startBackup` in `lib/server/openclaw-runtime.js` (`kBackupTimeoutMs`), `tests/live/openclaw-live-backup.e2e.test.js`. Needs a production sample or a live-tier reproduction against the pin.
+- **Context:** `startBackup` in `lib/server/openclaw-runtime.js` (`resolveBackupTimeoutMs`; since v0.10.273 the timeout is 30 minutes plus 2 minutes per GiB of state, and a timed-out result records `timeoutMs` and `stateBytes`), `tests/live/openclaw-live-backup.e2e.test.js`. Needs a production sample or a live-tier reproduction against the pin.
 - **Effort:** S once a sample exists. **Priority:** P3.
 
 ## ~~P2 — Wire `updates.openclaw.backup.excludes` through both backup walks~~ (COMPLETED 2026-09-16, #99)
