@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.271] - 2026-11-12
+
+When Wintermute's owner talks to it from one of his own Capy threads over the agent relay, the relay now lets that thread read his brain through the owner's own read-only brain connector. Before this, only his Telegram DM and forum could use that connector, so once private pages are labelled, his own Capy threads would have lost them.
+
+### Fixed
+- AlphaClaw's relay guard allows 19 named read tools of the `gbrain_owner` MCP server (search, get_page, recall and the other reads) for a relay session that is the owner's own thread: an attested owner thread or a pinned binding, decided per call as for the owner's other relay tools. Each tool is listed by name, so a tool that server adds later stays closed. A delegate that isn't the owner's thread, a peer, and any `gbrain_owner` tool not on the list are still refused.
+
 ## [0.10.270] - 2026-11-12
 
 The pre-merge check that runs before a pull request is called ready now leaves the live and container test folders to their own CI jobs. Those tests need a real gateway or Docker and are excluded from the plain unit run, so asking the local run to execute them made every check that touched them fail, even when nothing was wrong.
