@@ -317,6 +317,39 @@ describe("guest notes broker", () => {
     expect((await ctx.service.save({ kind: "note", title: "b", text: "two", claim_ref: claimRef(ctx.service) })).status).toBe("saved");
   });
 
+  it("sends a queued save again under the next slug when gbrain later reports a slug conflict, and keeps no page once it settles", async () => {
+    const receipts = {};
+    ctx = await setup({
+      handlers: {
+        put_page: (args) => {
+          if (args.slug.endsWith("-2")) return { request_id: args.request_id, state: "committed", slug: args.slug };
+          receipts[args.request_id] = { request_id: args.request_id, state: "conflict" };
+          return { request_id: args.request_id, state: "queued" };
+        },
+        get_write_request: (args) => receipts[args.request_id],
+      },
+    });
+    const first = await ctx.service.save({ kind: "note", title: "standup", text: "ship it", claim_ref: claimRef(ctx.service) });
+    expect(first.status).toBe("pending");
+    const { openGuestStore } = require("../../lib/server/guest-writes/store");
+    const peek = () => {
+      const store = openGuestStore({ dbPath: ctx.paths.dbFile });
+      const row = store.getSave(store.listUnsettled()[0]?.idemKey || "") || null;
+      store.close();
+      return row;
+    };
+    expect(peek().page).toMatchObject({ title: "standup", body: "ship it" });
+    expect(await ctx.service.sweep()).toMatchObject({ settled: 1 });
+    const puts = ctx.brain.calls.filter((call) => call.name === "put_page");
+    expect(puts).toHaveLength(2);
+    expect(puts[1].args.slug).toBe(puts[0].args.slug + "-2");
+    expect(puts[1].args.content).toContain("ship it");
+    expect(peek()).toBeNull();
+    const store = openGuestStore({ dbPath: ctx.paths.dbFile });
+    expect(store.getSaveBySlug(puts[1].args.slug)).toMatchObject({ state: "saved", page: null });
+    store.close();
+  });
+
   it("maps gbrain receipt states", () => {
     expect(receiptState({ state: "committed" })).toBe("saved");
     expect(receiptState({ state: "queued" })).toBe("pending");

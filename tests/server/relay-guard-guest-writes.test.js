@@ -38,6 +38,10 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     ["a glob in guest-writes", "exec", { command: "head -c 9999 " + dir + "/*" }],
     ["a glob prefix in guest-writes", "exec", { command: "cat " + dir + "/broker-c?ient.json" }],
     ["a recursive grep of guest-writes", "exec", { command: "grep -ra secret " + dir }],
+    ["a glob that stands in for part of the directory name", "exec", { command: "cat " + path.dirname(dir) + "/guest-wr*/broker-client.json" }],
+    ["a glob that stands in for the whole directory name", "exec", { command: "cat " + path.dirname(dir) + "/*/broker-client.json" }],
+    ["a single-character glob in the directory name", "exec", { command: "cat " + path.dirname(dir) + "/guest-write?/internal-secret" }],
+    ["cd into the root, then a relative glob", "exec", { command: "cd " + path.dirname(dir) + " && cat gues*/broker-client.json" }],
     ["a sqlite read of the claims database", "exec", { command: "sqlite3 " + dir + "/broker.db .dump" }],
     ["a read typed into a running shell", "process", { action: "write", sessionId: "s1", data: "cat " + dir + "/broker-client.json\n" }],
   ];
@@ -49,6 +53,7 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     return [
       ["a cat through a symlinked directory", "exec", { command: "cat gw/internal-secret" }],
       ["a cat through a symlinked file", "exec", { command: "cat c.json" }],
+      ["a glob through a symlinked directory", "exec", { command: "cat g*/internal-secret" }],
       ["a read tool through a symlinked file", "read", { path: path.join(workspace, "c.json") }],
     ];
   };
@@ -61,6 +66,7 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     ["ls of the broker directory", "exec", { command: "ls " + dir }],
     ["a broker-client.json outside guest-writes", "exec", { command: "cat /tmp/app/broker-client.json" }],
     ["a note in the workspace", "exec", { command: "echo done >> memory/notes.md" }],
+    ["a glob in the workspace", "exec", { command: "cat memory/*.md" }],
   ];
 
   it("refuses an unattested delegate's reads of the broker's files outright, with no row and no notice", async () => {
