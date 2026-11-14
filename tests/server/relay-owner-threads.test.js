@@ -119,6 +119,43 @@ describe("relay owner threads (GST-2323 PR2): the never-list opens for the owner
     expect((await ctx.call(run, "secrets", { action: "list" })).block).toBe(true);
   });
 
+  // OpenClaw defers tools behind tool_search, and 2026.10.9 offers message
+  // only through its dispatcher (tool_call; dispatch_action from 2026.11.2).
+  // The dispatcher call is a catalog wrapper, and OpenClaw runs the tool it
+  // reaches through this hook again under its own name with the same session
+  // (tests/live/relay-guard.e2e.test.js checks that on both pins), so the
+  // wrapped call gets exactly the direct call's decision (GST-2656).
+  it("gives a send through the dispatcher the direct call's decision, and keeps wrapped relay-file and anchor calls refused", async () => {
+    ctx = setup();
+    const owner = await ctx.deliver((await ctx.attestedAgent()).agent);
+    const unattested = await ctx.deliver(ctx.oauthDelegate().agent);
+    const peer = await ctx.deliver("lupe");
+    const send = { action: "send", channel: "telegram", target: "123", message: "the deploy finished" };
+    const secretsRead = { path: path.join(ctx.rootDir, "relay", "secrets.json") };
+    const guardOff = { command: "openclaw config set plugins.entries.relay-guard.enabled false" };
+    for (const wrapper of ["tool_call", "dispatch_action"]) {
+      expect(await ctx.call(owner, wrapper, { id: "message", args: send }), wrapper).toEqual({});
+      expect(await ctx.call(owner, "message", send), wrapper).toEqual({});
+      expect(await ctx.call(owner, wrapper, { id: "read", args: secretsRead }), wrapper).toEqual({});
+      const keyRead = await ctx.call(owner, "read", secretsRead);
+      expect(keyRead.block, wrapper).toBe(true);
+      expect(keyRead.blockReason, wrapper).toContain("is refused in every relay session");
+      const anchor = await ctx.call(owner, "exec", guardOff);
+      expect(anchor.block, wrapper).toBe(true);
+      expect(anchor.blockReason, wrapper).toContain("would change what decides relay trust on this box");
+
+      expect(await ctx.call(unattested, wrapper, { id: "message", args: send }), wrapper).toEqual({});
+      const unattestedSend = await ctx.call(unattested, "message", send);
+      expect(unattestedSend.block, wrapper).toBe(true);
+      expect(unattestedSend.blockReason, wrapper).toContain("message is not available to a delegate relay session");
+
+      const peerWrapper = await ctx.call(peer, wrapper, { id: "message", args: send });
+      expect(peerWrapper.block, wrapper).toBe(true);
+      expect(peerWrapper.blockReason, wrapper).toContain(wrapper + " is not available in a relay session");
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
   it("lists the plugins tool actions of the pinned OpenClaw", () => {
     expect(kOwnerThreadPluginActions).toEqual(["list", "inspect", "search", "install", "enable", "disable", "uninstall", "reload", "reloadandresume"]);
   });

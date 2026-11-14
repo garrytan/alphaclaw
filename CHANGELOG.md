@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.275] - 2026-11-14
+
+Tests now hold that the owner's own Capy thread can send with OpenClaw's message tool when it reaches the tool through OpenClaw's tool dispatcher, exactly as when it calls the tool directly. OpenClaw 2026.10.9, the pin a Render template holds, offers `message` to a relay turn only through the dispatcher (`tool_call`; `dispatch_action` from 2026.11.2), so that path is the one a send from the owner's thread actually takes. No behaviour changes: on both pins OpenClaw runs the tool the dispatcher reaches through the relay guard again, under its own name and with the relay session attached, and the guard already decides it as a direct call.
+
+### Added
+- A live case in `tests/live/relay-guard.e2e.test.js`, run against a real gateway: a pinned owner-thread binding's dispatched send passes the relay guard, a dispatched read of the relay's own files is still refused, and a peer's dispatcher call is still refused. It passed on OpenClaw 2026.10.9 and 2026.11.3.
+- A hermetic case in `tests/server/relay-owner-threads.test.js` that runs in every PR: under both dispatcher names, the owner's thread sends through the dispatcher and directly, a wrapped read of the relay's files and a wrapped relay-guard config change stay refused, an unattested delegate's send is refused as today, and a peer cannot call the dispatcher at all.
+
 ## [0.10.274] - 2026-11-12
 
 A gateway restart no longer waits three minutes and then forces the gateway down when OpenClaw restarts in place. OpenClaw 2026.11.5 sometimes cannot write the handoff it leaves for AlphaClaw when it stops for a restart (its own restart command briefly holds the state database lock), and it then restarts inside the same process instead of exiting. AlphaClaw kept waiting for an exit that would never come, used up the whole 180-second grace, and only then sent SIGTERM.
