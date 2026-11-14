@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.278] - 2026-11-14
+
+Guest notes' background sweep now reaches every saved note. It used to read only the oldest 100 notes waiting on the brain and the oldest 100 past their retention date, so on a busy box newer notes could wait forever to settle or be kept past the 90 days they were promised.
+
+### Fixed
+- Settling, retention and kept-file cleanup page through every row in one sweep. A row a save is working on is skipped, and a save of a note the sweep is working on answers retry instead of racing it.
+- Kept files past the 72-hour restore window are removed even when the broker has no gbrain credential.
+- A retention delete that gbrain refuses for another reason is logged instead of skipped silently.
+- `alphaclaw guest-notes sweep --apply` marks a note deleted when its page is already gone, instead of counting it failed on every run.
+- The broker's folder is kept at 0700 and its database's WAL and shared-memory files at 0600.
+
 ## [0.10.277] - 2026-11-14
 
 Group members can now save notes and files to your brain as outside guest's notes. When someone other than you asks your agent to write something down in a group, AlphaClaw saves it in your brain's own `guests` source, readable by you and that group, and your brain warns the agent whenever it reads one. It's off for every group until you turn it on, and it can't be turned on until your brain supports the warning.
