@@ -142,7 +142,7 @@ OpenClaw 2026.10.9 offers `message` to a relay turn only through its tool dispat
 
 A turn in a relay session with no relay message in flight (a cron job whose session is the relay session, a wake) still gets the peer policy, the owner's thread's session included: the guard has no record of who started it. A delegate that is not the owner's thread could otherwise start such a turn with `exec` (`openclaw agent --session-key …`, `openclaw cron add`) and have it decided as the owner's. Scheduled work for an owner thread belongs in a session of its own, not the relay session.
 
-The guard used to log a refusal once per session and tool for the life of the gateway, so repeated refusals left one line. Every refusal now logs with its run (`run=<id>`), up to 10 lines per session a minute, and the next line that session logs counts the ones the limit left out (`unlogged=N`); a burst the session never follows with another logged line stays uncounted.
+The guard used to log a refusal once per session and tool for the life of the gateway, so repeated refusals left one line. A refused tool call now logs with its run (`run=<id>`), up to 10 lines per session a minute, and the next line that session logs counts the ones the limit left out (`unlogged=N`); a burst the session never follows with another logged line stays uncounted. The trust-anchor refusal, the relay-file refusal and the hold for the owner's confirmation log a line on every call, without `run=`.
 
 ### The owner thread's full scope (GST-2323 PR2)
 

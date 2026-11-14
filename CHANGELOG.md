@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 Every relay guard refusal now leaves a log line. The guard used to log a refusal only once per session and tool for the life of the gateway, so a turn refused the same way every hour left a single line, and a refusal reported by the agent could not be found in the log. This release also adds tests holding that the owner's own Capy thread can send with OpenClaw's message tool through the tool dispatcher, the only way OpenClaw 2026.10.9 offers it to a relay turn.
 
 ### Fixed
-- Every relay guard refusal logs a line with its run id, at most 10 lines per session a minute. When the limit leaves refusals out, the next line for that session counts them (`unlogged=N`).
+- Every relay guard refusal now logs a line. A refused tool call logs with its run id (`run=`), at most 10 lines per session a minute, and when the limit leaves refusals out, the next line for that session counts them (`unlogged=N`). Trust-anchor refusals, relay-file refusals and calls held for the owner's confirmation log a line on every call, without `run=`.
 
 ### Added
 - A live case against a real gateway (it passed on OpenClaw 2026.10.9 and 2026.11.3): an owner thread's send through the dispatcher (`tool_call`, or `dispatch_action` from 2026.11.2) passes the relay guard as a direct send does, a dispatched read of the relay's own files is refused, and a peer cannot call the dispatcher.
