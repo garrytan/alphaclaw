@@ -17,6 +17,7 @@ describe("boot-cli-verbs isEarlyExitCliCommand", () => {
     // `alphaclaw diagnose [--json]` (#76 A9): commandArgs[1] is the flag.
     { command: "diagnose" },
     { command: "diagnose", commandScope: "--json" },
+    { command: "guest-notes", commandScope: "sweep" },
     { command: "doctor", commandScope: "finding", commandAction: "complete" },
     { command: "telegram", commandScope: "topic", commandAction: "add" },
     { command: "telegram", commandScope: "topic", commandAction: "create" },
@@ -64,6 +65,7 @@ describe("boot-cli-verbs isJsonCliInvocation", () => {
     [["telegram", "topics", "list", "--group", "-100", "--json"]],
     [["admin", "GET", "/api/status", "--json"]],
     [["admin", "manifest", "--json"]],
+    [["guest-notes", "sweep", "--apply", "--json"]],
   ])("is a JSON invocation: %j", (commandArgs) => {
     expect(isJsonCliInvocation(commandArgs)).toBe(true);
   });

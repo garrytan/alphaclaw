@@ -246,6 +246,10 @@ diagnose options:
   --root-dir <path>    Deployment data root; overrides ALPHACLAW_ROOT_DIR, then ~/.alphaclaw
                       Exit 0 means evidence was collected, not that the gateway is healthy.
 
+guest-notes options:
+  --apply             Delete each listed note through the box's gbrain CLI (restorable for 72 h)
+  --json              One JSON line instead of the summary
+
 admin options:
   --json              One JSON line instead of indented JSON or the --summary digest
 

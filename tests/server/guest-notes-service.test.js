@@ -373,6 +373,26 @@ describe("guest notes broker", () => {
     expect(ctx.brain.calls.filter((call) => call.name === "put_page")).toHaveLength(1);
   });
 
+  it("tells a repeat save the truth when gbrain failed the queued write, instead of calling it already saved", async () => {
+    const receipts = {};
+    ctx = await setup({
+      handlers: {
+        put_page: (args) => {
+          receipts[args.request_id] = { request_id: args.request_id, state: "failed", write_error: "storage_full" };
+          return { request_id: args.request_id, state: "queued" };
+        },
+        get_write_request: (args) => receipts[args.request_id],
+      },
+    });
+    const note = { kind: "note", title: "standup", text: "ship it" };
+    expect((await ctx.service.save({ ...note, claim_ref: claimRef(ctx.service) })).status).toBe("pending");
+    await expect(ctx.service.save({ ...note, claim_ref: claimRef(ctx.service) })).rejects.toMatchObject({ code: "guest_save_failed" });
+    const { openGuestStore } = require("../../lib/server/guest-writes/store");
+    const store = openGuestStore({ dbPath: ctx.paths.dbFile });
+    expect(store.listUnsettled()).toEqual([]);
+    store.close();
+  });
+
   it("refuses an oversized note before normalizing it", async () => {
     ctx = await setup();
     const started = Date.now();
