@@ -375,8 +375,7 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
   // tool_search, so a turn often reaches message only through the dispatcher
   // (dispatch_action on 2026.11.2, tool_call on the held 2026.10.9 pin): that
   // call must get the same decision as a direct one, a peer's must not, and a
-  // wrapped call into the relay's own files stays refused, also in a turn the
-  // box starts in that session with no relay message in flight (GST-2656).
+  // wrapped call into the relay's own files stays refused (GST-2656).
   it(
     "an owner-thread delegate sends through the dispatcher exactly as it does directly",
     async () => {
@@ -412,19 +411,6 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       console.log("[live] owner-thread " + wrapperName + " read of relay secrets: " + wrappedKeyRead.slice(0, 240));
       expect(wrappedKeyRead).toContain("[relay-guard]");
       expect(wrappedKeyRead).not.toContain("rk_live_dummy_value");
-
-      // A turn the box itself starts in that session (a cron job, a wake)
-      // has no relay message in flight; the owner's thread's session keeps
-      // the owner-thread decision (GST-2656).
-      const ended = openBridgeStore({ dbPath: paths.bridgeDb });
-      ended.update("7101", { state: "answered" });
-      ended.close();
-      const boxTurn = await runTurn(relay, wrapperName, { id: "message", args: sendArgs });
-      console.log("[live] owner-thread box turn " + wrapperName + " message: " + boxTurn.slice(0, 240));
-      expect(boxTurn).not.toContain("[relay-guard]");
-      const boxKeyRead = await runTurn(relay, wrapperName, { id: "read", args: { path: path.join(kRootDir, "relay", "secrets.json") } });
-      expect(boxKeyRead).toContain("[relay-guard]");
-      expect(boxKeyRead).not.toContain("rk_live_dummy_value");
 
       const peerWrapped = await runTurn("agent:main:relay-capy-peerlive01", wrapperName, { id: "message", args: sendArgs });
       console.log("[live] peer " + wrapperName + " message: " + peerWrapped.slice(0, 240));

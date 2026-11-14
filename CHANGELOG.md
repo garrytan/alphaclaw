@@ -7,14 +7,14 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.275] - 2026-11-14
 
-The owner's own Capy thread can now send through its relay session from a turn the box starts itself, such as an hourly cron job or a wake, not only from a turn that answers one of its relay messages. Before this, the relay guard gave every turn in a relay session that had no relay message in flight the messaging-only policy, even in the owner's own thread's session. On OpenClaw 2026.10.9, where a relay turn reaches the message tool only through the tool dispatcher (`tool_call`), every such send was refused with `tool_call is not available in a relay session`. The guard also logged each refusal only once per session and tool for the life of the gateway, so the hourly refusals after the first left no line.
+Every relay guard refusal now leaves a log line. The guard used to log a refusal only once per session and tool for the life of the gateway, so a turn refused the same way every hour left a single line, and a refusal reported by the agent could not be found in the log. This release also adds tests holding that the owner's own Capy thread can send with OpenClaw's message tool through the tool dispatcher, the only way OpenClaw 2026.10.9 offers it to a relay turn.
 
 ### Fixed
-- A turn in a relay session with no relay message in flight gets the owner-thread decision when the newest message dispatched into that session came from the owner's own thread (a pinned binding, or an attested owner thread) and the box's records still say so on that call: the binding is live and not handed off, and its grant is not revoked. It can send with `message` directly or through the dispatcher, and its high-risk calls run with no confirmation link, the same as in a relay message turn. Changes to the relay's trust anchor, reads of the relay's own files and the rest of the withheld tools stay refused, and it cannot ask AlphaClaw for a gateway restart. Every other relay session, including an unpinned delegate's or a peer's, keeps the messaging-only policy for such turns, and so does a session whose grant was revoked or whose binding was handed off or removed.
-- Every relay guard refusal now leaves a log line with its run id, at most 10 lines per session a minute. When the limit leaves refusals out, the next line for that session counts them (`unlogged=N`).
+- Every relay guard refusal logs a line with its run id, at most 10 lines per session a minute. When the limit leaves refusals out, the next line for that session counts them (`unlogged=N`).
 
 ### Added
-- Tests for the dispatcher path: a live case against a real gateway (it passed on OpenClaw 2026.10.9 and 2026.11.3) and hermetic cases in every PR covering both directions. The owner's thread sends through the dispatcher and directly, both in a relay message turn and in a box-started turn. A revoked grant, a handoff or removed binding, an unpinned delegate and a peer fall back to the messaging-only policy, and wrapped relay-file reads and relay-guard config changes stay refused.
+- A live case against a real gateway (it passed on OpenClaw 2026.10.9 and 2026.11.3): an owner thread's send through the dispatcher (`tool_call`, or `dispatch_action` from 2026.11.2) passes the relay guard as a direct send does, a dispatched read of the relay's own files is refused, and a peer cannot call the dispatcher.
+- A hermetic case that runs in every PR, covering the same decisions under both dispatcher names, a wrapped relay-guard config change, and an unattested delegate's dispatched send, which stays refused.
 
 ## [0.10.274] - 2026-11-12
 
