@@ -78,12 +78,12 @@ describe("alphaclaw guest-notes sweep", () => {
     expect(JSON.parse(out[0]).orphaned).toHaveLength(3);
     const runner = vi.fn(async (args) => {
       const slug = args[args.length - 1];
-      if (args[0] === "get") return { exitCode: 0, json: { slug, guest: { promoted: slug.endsWith("-kept") } } };
+      if (args[0] === "get") return { exitCode: 0, json: { slug, revision: "rev:" + slug, guest: { promoted: slug.endsWith("-kept") } } };
       return { exitCode: slug.endsWith("-slow") ? 10 : 0, json: {} };
     });
     expect(await runGuestNotesCommand({ argv: ["sweep", "--apply"], rootDir, json: true, write: (t) => out.push(t), runner })).toBe(0);
-    expect(runner).toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-a"]);
-    expect(runner).not.toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-kept"]);
+    expect(runner).toHaveBeenCalledWith(["delete", "--source", "guests", "--expected-revision", "rev:guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-a", "--json", "--", "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-a"]);
+    expect(runner.mock.calls.some(([args]) => args[0] === "delete" && args.includes("guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-kept"))).toBe(false);
     expect(JSON.parse(out[1])).toMatchObject({ pending: ["guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-slow"], kept: ["guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-kept"] });
     const after = openGuestStore({ dbPath: paths.dbFile });
     expect(after.getSave("k1").state).toBe("deleted");
@@ -91,6 +91,19 @@ describe("alphaclaw guest-notes sweep", () => {
     expect(after.getSave("k3").state).toBe("saved");
     expect(after.getSave("k4").state).toBe("orphaned");
     after.close();
+  });
+
+  it("counts a note failed instead of deleting it when gbrain's read gives no revision", async () => {
+    const paths = guestWritesPaths(rootDir);
+    const store = openGuestStore({ dbPath: paths.dbFile });
+    const slug = "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-norev";
+    store.insertSave({ requestId: "r", attempt: 1, kind: "note", title: "t", groupKey: "telegram:-1", groupSlug: "g0123456789abcdef", memberSlug: "m0123456789abcdef", audienceMember: "gone", day: "2026-11-14", idemKey: "k8", slug, state: "orphaned" });
+    store.close();
+    const out = [];
+    const runner = vi.fn(async (args) => (args[0] === "get" ? { exitCode: 0, json: { slug, guest: {} } } : { exitCode: 0, json: {} }));
+    expect(await runGuestNotesCommand({ argv: ["sweep", "--apply"], rootDir, json: true, write: (t) => out.push(t), runner })).toBe(1);
+    expect(runner.mock.calls.some(([args]) => args[0] === "delete")).toBe(false);
+    expect(JSON.parse(out[0]).failed).toEqual([{ slug, exitCode: 0, code: "no_revision" }]);
   });
 
   it("lists a note whose page gbrain can't find without deleting it or counting it failed", async () => {
@@ -102,7 +115,7 @@ describe("alphaclaw guest-notes sweep", () => {
     const out = [];
     const runner = vi.fn(async (args) => (args[0] === "get" ? { exitCode: 1, json: { code: "page_not_found" } } : { exitCode: 0, json: {} }));
     expect(await runGuestNotesCommand({ argv: ["sweep", "--apply"], rootDir, json: true, write: (t) => out.push(t), runner })).toBe(0);
-    expect(runner).not.toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", slug]);
+    expect(runner.mock.calls.some(([args]) => args[0] === "delete")).toBe(false);
     expect(JSON.parse(out[0])).toMatchObject({ deleted: [], missing: [slug], failed: [] });
     const after = openGuestStore({ dbPath: paths.dbFile });
     expect(after.getSave("k6").state).toBe("orphaned");
@@ -118,7 +131,7 @@ describe("alphaclaw guest-notes sweep", () => {
     const out = [];
     const runner = vi.fn(async (args) => (args[0] === "get" ? { exitCode: 75, json: { code: "lock_busy" } } : { exitCode: 0, json: {} }));
     expect(await runGuestNotesCommand({ argv: ["sweep", "--apply"], rootDir, json: true, write: (t) => out.push(t), runner })).toBe(1);
-    expect(runner).not.toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", slug]);
+    expect(runner.mock.calls.some(([args]) => args[0] === "delete")).toBe(false);
     expect(JSON.parse(out[0])).toMatchObject({ deleted: [], failed: [{ slug, exitCode: 75, code: "lock_busy" }] });
     const after = openGuestStore({ dbPath: paths.dbFile });
     expect(after.getSave("k5").state).toBe("orphaned");

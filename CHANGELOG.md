@@ -13,6 +13,7 @@ Guest notes now save against gbrain v0.60.722.0, the first gbrain release with g
 - A guest note's `guest_sender` is the same label AlphaClaw sends gbrain beside the call, as gbrain requires. It used to be the member's internal id, so gbrain refused every save (`guest_frontmatter_refused`).
 - The guest's label drops the characters gbrain refuses in a label (`·`, `"`, invisible formatting characters such as zero-width joiners, and line separators) and is cut at 64 characters without splitting an emoji. A name with any of those used to be refused (`guest_attribution_missing`).
 - The 90-day sweep deletes an expired note against the revision it just read, as gbrain requires. Without it, gbrain refused every retention delete (`revision_required`), so expired notes were never removed.
+- `alphaclaw guest-notes sweep --apply` deletes each orphaned note against the revision it just read (`--expected-revision`). gbrain's CLI refuses a delete without one, so the sweep used to fail on every note.
 - A save that gbrain refuses with `guest_page_immutable` (an earlier guest note on that name was deleted, and gbrain never reuses one) moves to the next free name with a new request id, as a taken name already did, instead of telling the member the save failed.
 
 ## [0.10.278] - 2026-11-14
