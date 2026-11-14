@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.276] - 2026-11-14
+
+The pre-merge secrets scan no longer stops the guest notes change on two false alarms. It read a field mapping that copies a session key's name (`sessionKey: row.session_key`) and the tests' made-up Telegram group keys as possible credentials; both are now allowlisted by path and pattern, the same way the relay's session key mapping already is.
+
+### Changed
+- `.gstack/pregate.json` allowlists the `env.kv` matches in `lib/server/guest-writes/index.js`, `lib/server/guest-writes/store.js` and `tests/server/guest-notes-service.test.js`. No code changes.
+
 ## [0.10.275] - 2026-11-14
 
 Every relay guard refusal now leaves a log line. The guard used to log a refusal only once per session and tool for the life of the gateway, so a turn refused the same way every hour left a single line, and a refusal reported by the agent could not be found in the log. This release also adds tests holding that the owner's own Capy thread can send with OpenClaw's message tool through the tool dispatcher, the only way OpenClaw 2026.10.9 offers it to a relay turn.
