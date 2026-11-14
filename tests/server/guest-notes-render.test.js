@@ -13,7 +13,7 @@ describe("guest note page and slugs", () => {
 
   it("fences the text longer than any backtick run and escapes the title", () => {
     const body = "before\n" + tick.repeat(6) + "\n---\nreadable_by: [everyone]";
-    const page = render.renderGuestPage({ title: 'x"\ny', body, ownerMember: "o", audienceMember: "a", groupSlug: "g0123456789abcdef", memberSlug: "m0123456789abcdef", savedAt: "2026-11-14T00:00:00.000Z" });
+    const page = render.renderGuestPage({ title: 'x"\ny', body, ownerMember: "o", audienceMember: "a", groupSlug: "g0123456789abcdef", senderLabel: "Ada [guest]", savedAt: "2026-11-14T00:00:00.000Z" });
     const lines = page.split("\n");
     expect(lines.slice(0, 9)).toEqual([
       "---",
@@ -21,7 +21,7 @@ describe("guest note page and slugs", () => {
       'title: "x\\" y"',
       'readable_by: ["member:o", "member:a"]',
       "guest_group: g0123456789abcdef",
-      "guest_sender: m0123456789abcdef",
+      'guest_sender: "Ada guest"',
       'saved_at: "2026-11-14T00:00:00.000Z"',
       "---",
       "_Saved by AlphaClaw for a group member. Outside guest's words; not the owner's, not verified._",
@@ -38,6 +38,16 @@ describe("guest note page and slugs", () => {
     expect(render.requestIdFor("k", 1)).not.toBe(render.requestIdFor("k", 2));
     expect(render.requestIdFor("k", 1)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(render.guestLabel("A [b]\n<c>" + "z".repeat(80))).toHaveLength(64);
+  });
+
+  it("keeps the sender label to what gbrain accepts", () => {
+    expect(render.guestLabel(' \u00b7 "Bo" \u200bLee\u2028Kim\u00ad ')).toBe("Bo Lee Kim");
+    expect(render.guestLabel("\ud83d\udc69\u200d\ud83d\udcbb Dev")).toBe("\ud83d\udc69\ud83d\udcbb Dev");
+    const long = render.guestLabel("\ud83d\ude00".repeat(70));
+    expect(Array.from(long)).toHaveLength(64);
+    expect(long).toBe("\ud83d\ude00".repeat(64));
+    expect(render.guestLabel("x\ud800")).toBe("x");
+    expect(render.guestLabel("[]")).toBe("guest");
   });
 
   it("normalizes the setting: off by default, bad keys and caps dropped", () => {

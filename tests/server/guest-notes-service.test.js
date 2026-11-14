@@ -103,11 +103,13 @@ describe("guest notes broker", () => {
     expect(put.headers.agentLabel).toBe("alphaclaw-guest-broker");
     expect(put.headers.authorization).toBe("Bearer tok-1");
     expect(put.meta).toEqual({ guest: { sender_label: "Ada guest", group: "g0123456789abcdef" } });
+    expect(put.args.content).toContain('\nguest_sender: "Ada guest"\nsaved_at: ');
+    expect(put.args.content).toContain("\nguest_group: g0123456789abcdef\n");
     expect(put.args).toMatchObject({ source_id: "guests", content_origin: "tool_output" });
     expect(put.args.expected_revision).toBeUndefined();
     expect(put.args.force).toBeUndefined();
     expect(put.args.content).toContain('readable_by: ["member:owner1", "member:groupmember1"]');
-    expect(put.args.content).not.toContain("Ada");
+    expect(put.args.content.replace('\nguest_sender: "Ada guest"\n', "\n")).not.toContain("Ada");
     expect(ctx.brain.tokenRequests[0]).toMatchObject({ grant_type: "client_credentials", client_id: "guest-broker" });
     expect(ctx.logs.join("\n")).not.toContain("Leave at 9");
   });
@@ -173,6 +175,27 @@ describe("guest notes broker", () => {
     expect(puts[0].args.request_id).not.toBe(puts[1].args.request_id);
   });
 
+  it("moves to the next slug when gbrain refuses a deleted guest slug", async () => {
+    let first = true;
+    ctx = await setup({
+      handlers: {
+        put_page: (args) => {
+          if (first) {
+            first = false;
+            throw Object.assign(new Error("deleted"), { code: "guest_page_immutable" });
+          }
+          return { state: "committed", slug: args.slug };
+        },
+      },
+    });
+    const result = await ctx.service.save({ kind: "note", title: "Trip plan", text: "x", claim_ref: claimRef(ctx.service) });
+    expect(result.status).toBe("saved");
+    expect(result.slug.endsWith("-trip-plan-2")).toBe(true);
+    const puts = ctx.brain.calls.filter((call) => call.name === "put_page");
+    expect(puts).toHaveLength(2);
+    expect(puts[0].args.request_id).not.toBe(puts[1].args.request_id);
+  });
+
   it("retries a busy gbrain with the same request id, then answers guest_save_retry and reuses it next time", async () => {
     let busy = true;
     ctx = await setup({
@@ -204,7 +227,7 @@ describe("guest notes broker", () => {
       handlers: {
         get_page: (args) => {
           if (denied.has(args.slug)) throw Object.assign(new Error("no"), { code: "on_behalf_of_not_allowed" });
-          return { slug: args.slug, guest: { promoted: promoted.has(args.slug) } };
+          return { slug: args.slug, revision: "rev:" + args.slug, guest: { promoted: promoted.has(args.slug) } };
         },
         delete_page: (args) => ({ state: "committed", slug: args.slug }),
       },
@@ -220,10 +243,25 @@ describe("guest notes broker", () => {
     const deletes = ctx.brain.calls.filter((call) => call.name === "delete_page");
     expect(deletes.map((call) => call.args.slug)).toEqual([a.slug]);
     expect(deletes[0].headers.onBehalfOf).toBe("member:groupmember1");
-    expect(deletes[0].args.expected_revision).toBeUndefined();
+    expect(deletes[0].args.expected_revision).toBe("rev:" + a.slug);
     for (const call of ctx.brain.calls) expect(call.name === "get_brain_identity" || Boolean(call.headers.onBehalfOf)).toBe(true);
     const status = await ctx.service.status();
     expect(status.groups[kGroupKey]).toMatchObject({ orphaned: 1 });
+  });
+
+  it("leaves an expired note in place when gbrain's read gives no revision to delete against", async () => {
+    ctx = await setup({
+      handlers: {
+        get_page: (args) => ({ slug: args.slug, guest: {} }),
+        delete_page: (args) => ({ state: "committed", slug: args.slug }),
+      },
+    });
+    const a = await ctx.service.save({ kind: "note", title: "a", text: "one", claim_ref: claimRef(ctx.service) });
+    ctx.clock.now += 91 * 24 * 60 * 60 * 1000;
+    const out = await ctx.service.sweep();
+    expect(out).toMatchObject({ deleted: 0, promoted: 0, orphaned: 0 });
+    expect(ctx.brain.calls.filter((call) => call.name === "delete_page")).toHaveLength(0);
+    expect(ctx.logs.join("\n")).toContain("had no revision slug=" + a.slug);
   });
 
   it("keeps each save's file apart, and removes only a deleted save's own copy after the restore window", async () => {
@@ -232,7 +270,7 @@ describe("guest notes broker", () => {
       fsModule: memberOwnedFs,
       config: { groups: { [kGroupKey]: { enabled: true } } },
       handlers: {
-        get_page: (args) => ({ slug: args.slug, guest: { promoted: promoted.has(args.slug) } }),
+        get_page: (args) => ({ slug: args.slug, revision: "r1", guest: { promoted: promoted.has(args.slug) } }),
         delete_page: (args) => ({ state: "committed", slug: args.slug }),
       },
     });
@@ -281,7 +319,7 @@ describe("guest notes broker", () => {
     let deleteAnswer = () => ({ state: "failed", write_error: "write_failed" });
     ctx = await setup({
       handlers: {
-        get_page: (args) => ({ slug: args.slug, guest: {} }),
+        get_page: (args) => ({ slug: args.slug, revision: "r1", guest: {} }),
         delete_page: () => deleteAnswer(),
       },
     });
@@ -424,7 +462,7 @@ describe("guest notes broker", () => {
   it("expires every note past retention in one sweep, more than one page of them, and logs a delete it couldn't make", async () => {
     ctx = await setup({
       handlers: {
-        get_page: (args) => ({ slug: args.slug, guest: {} }),
+        get_page: (args) => ({ slug: args.slug, revision: "r1", guest: {} }),
         delete_page: (args) => {
           if (args.slug.endsWith("-n7")) throw Object.assign(new Error("busy"), { code: "lock_busy" });
           return { state: "committed", slug: args.slug };
