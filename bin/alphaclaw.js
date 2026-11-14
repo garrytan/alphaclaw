@@ -194,6 +194,7 @@ Commands:
   telegram topic create  Create a Telegram forum topic and register it
   telegram topics list  List registered, discovered, and stale Telegram topics
   diagnose  Print a read-only diagnostic bundle from the data volume (boot reports, channel state, pidfile, state DB schema, incidents, backups, log tail)
+  guest-notes sweep [--apply]  List (and with --apply, delete) guest notes AlphaClaw can no longer reach
   admin <METHOD> <path>  Administer AlphaClaw via the local API (requires features.agentAdmin)
   admin manifest  Print the agent-admin operation catalog
   version   Print version
@@ -244,6 +245,10 @@ diagnose options:
   --json              One JSON line instead of markdown (the bundle is redacted either way)
   --root-dir <path>    Deployment data root; overrides ALPHACLAW_ROOT_DIR, then ~/.alphaclaw
                       Exit 0 means evidence was collected, not that the gateway is healthy.
+
+guest-notes options:
+  --apply             Delete each listed note through the box's gbrain CLI (restorable for 72 h)
+  --json              One JSON line instead of the summary
 
 admin options:
   --json              One JSON line instead of indented JSON or the --summary digest
@@ -924,6 +929,17 @@ if (
 // `alphaclaw admin ...` — an out-of-process HTTP client for the running
 // server's /api surface. Early-exit BEFORE the boot instance guard (same
 // contract as the telegram/doctor verbs).
+if (command === "guest-notes") {
+  require("../lib/cli/guest-notes")
+    .runGuestNotesCommand({ argv: commandArgs.slice(1), rootDir, json: kJsonOutput })
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      process.stdout.write(JSON.stringify({ ok: false, code: "cli_error", message: error.message }) + "\n");
+      process.exit(1);
+    });
+  return;
+}
+
 if (command === "admin") {
   const { runAdminCommand } = require("../lib/cli/admin");
   runAdminCommand({ argv: commandArgs.slice(1), rootDir })

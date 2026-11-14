@@ -21,6 +21,7 @@ const kCases = {
   diagnose: { argv: ["diagnose", "--json"], loadsEnv: false },
   "telegram topics list": { argv: ["telegram", "topics", "list", "--json"], loadsEnv: true },
   admin: { argv: ["admin", "GET", "/api/status", "--json"], loadsEnv: true },
+  "guest-notes": { argv: ["guest-notes", "sweep", "--json"], loadsEnv: true },
 };
 
 const readHelpJsonVerbs = (helpText) => {

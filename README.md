@@ -616,6 +616,17 @@ On the liaison's machine, run `tailscaled` in userspace mode with a loopback pro
 
 Every `ALPHACLAW_RELAY*` key is deployment environment only, never honored from `.env`: the agent must not be able to switch off its own audit trail or lift its caps. Errors and their fixes: [`lib/setup/skills/alphaclaw-admin/relay.md`](lib/setup/skills/alphaclaw-admin/relay.md).
 
+## Guest notes
+
+When someone other than you asks your agent to write something down in a group chat, AlphaClaw can save it in your brain as an **outside guest's note**. Your agent can find it later like any page, and every time it reads one, your brain tells it the note came from a guest in that group, never from you. Group members still can't edit your workspace, skills or brain directly.
+
+- **Turn it on per group** in the Groups page's Guest notes section. It's off everywhere by default, and it can't be turned on until your brain (gbrain) supports guest notes (it advertises `guest_marker_v1`), so no guest note is ever saved without its warning.
+- **Limits:** 20 saves a day and 200 kept notes per person in each group, 64 KiB per note and 10 MiB per file. Notes are deleted after 90 days unless you keep one ("keep that note" in your own chat), which promotes it in your brain.
+- **What it needs on the box:** the guard plugin that tells AlphaClaw which member is speaking, and a gbrain OAuth client for AlphaClaw's writer in `<root>/guest-writes/broker-client.json` (0600). The agent's `guest_save` tool appears only while that file exists.
+- **Cleanup:** if a member is removed from the writer's allowed members, AlphaClaw can no longer reach their notes. `alphaclaw guest-notes sweep` lists those notes and `--apply` deletes them through gbrain on the box.
+
+How it works and what it guarantees: `docs/designs/guest-notes.md`.
+
 ## Environment Variables
 
 **The `.env` file format.** AlphaClaw writes one `KEY=value` per line and ends the file with a newline. A value made only of characters a bash assignment takes literally (`A-Z a-z 0-9 _ . / : @ % + = , - ? * ! [ ] ^ { }` and printable non-ASCII, not starting with `=`) is written bare, so scripts that read the file raw (`IFS='=' read`, then export) get it without quotes; anything else is quoted so that bash (`set -a; . <root>/.env; set +a`), OpenClaw's dotenv and AlphaClaw's own readers all read the same bytes: single quotes, or double quotes for a value that holds a single quote and no double quote, `$`, backtick or backslash. The Environment page and `PATCH /api/env` refuse a value with a line break (`env_value_line_break`) or a value that mixes a single quote with a double quote, `$`, backtick or backslash (`env_value_unrepresentable`), naming the key and never the value; set such a value in the deployment environment. Quoted lines written by hand are read the way bash reads them, and bare lines exactly as before. A file written by an older AlphaClaw becomes sourceable at its next save (any save on the Environment page rewrites it). Source it only from scripts that run as AlphaClaw's own user: the agent can write this file, so never source it from root cron (AlphaClaw's own cron script and git shim parse it line by line for that reason).
