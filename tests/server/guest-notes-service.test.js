@@ -350,6 +350,36 @@ describe("guest notes broker", () => {
     store.close();
   });
 
+  it("answers guest_save_retry to the same save while the first is still in flight, then a repeat is a duplicate", async () => {
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    ctx = await setup({
+      handlers: {
+        put_page: async (args) => {
+          await gate;
+          return { request_id: args.request_id, state: "committed", slug: args.slug };
+        },
+      },
+    });
+    const note = { kind: "note", title: "standup", text: "ship it" };
+    const first = ctx.service.save({ ...note, claim_ref: claimRef(ctx.service) });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await expect(ctx.service.save({ ...note, claim_ref: claimRef(ctx.service) })).rejects.toMatchObject({ code: "guest_save_retry" });
+    release();
+    expect((await first).status).toBe("saved");
+    expect((await ctx.service.save({ ...note, claim_ref: claimRef(ctx.service) })).status).toBe("duplicate");
+    expect(ctx.brain.calls.filter((call) => call.name === "put_page")).toHaveLength(1);
+  });
+
+  it("refuses an oversized note before normalizing it", async () => {
+    ctx = await setup();
+    const started = Date.now();
+    await expect(ctx.service.save({ kind: "note", title: "big", text: "a" + " ".repeat(300000) + "b", claim_ref: claimRef(ctx.service) })).rejects.toMatchObject({ code: "guest_note_too_large" });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   it("maps gbrain receipt states", () => {
     expect(receiptState({ state: "committed" })).toBe("saved");
     expect(receiptState({ state: "queued" })).toBe("pending");

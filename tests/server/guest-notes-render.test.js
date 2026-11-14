@@ -4,6 +4,13 @@ const { normalizeGuestNotesConfig, groupSettings } = require("../../lib/server/g
 const tick = String.fromCharCode(96);
 
 describe("guest note page and slugs", () => {
+  it("normalizes a note in linear time, even with a long run of inner whitespace", () => {
+    expect(render.normalizeNoteText("a\r\nb  \n\n")).toBe("a\nb");
+    const started = Date.now();
+    expect(render.normalizeNoteText("a" + " ".repeat(200000) + "b")).toHaveLength(200002);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it("fences the text longer than any backtick run and escapes the title", () => {
     const body = "before\n" + tick.repeat(6) + "\n---\nreadable_by: [everyone]";
     const page = render.renderGuestPage({ title: 'x"\ny', body, ownerMember: "o", audienceMember: "a", groupSlug: "g0123456789abcdef", memberSlug: "m0123456789abcdef", savedAt: "2026-11-14T00:00:00.000Z" });
