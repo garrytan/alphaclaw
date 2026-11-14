@@ -22,12 +22,21 @@ const kClaim = {
   turn_started_at: "2026-11-14T10:00:00.000Z",
 };
 
-const setup = async ({ handlers = {}, config = { groups: { [kGroupKey]: { enabled: true } } }, nowMs = Date.parse("2026-11-14T10:00:00Z") } = {}) => {
+// The member's uid is at least 10100, which a test process is not, so the
+// file owner check sees the member's uid through this fstat.
+const memberOwnedFs = { ...fs, fstatSync: (fd) => Object.assign(Object.create(Object.getPrototypeOf(fs.fstatSync(fd))), fs.fstatSync(fd), { uid: 10101 }) };
+
+const setup = async ({ handlers = {}, config = { groups: { [kGroupKey]: { enabled: true } } }, nowMs = Date.parse("2026-11-14T10:00:00Z"), fsModule = fs } = {}) => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "guest-notes-"));
+  const taken = new Set();
   const brain = await startFakeGbrain({
     handlers: {
       get_brain_identity: () => ({ version: "0.61.0", capabilities: ["large_pages_v1", "guest_marker_v1"] }),
-      put_page: (args) => ({ request_id: args.request_id, state: "committed", slug: args.slug }),
+      put_page: (args) => {
+        if (taken.has(args.slug)) throw Object.assign(new Error("exists"), { code: "revision_required" });
+        taken.add(args.slug);
+        return { request_id: args.request_id, state: "committed", slug: args.slug };
+      },
       ...handlers,
     },
   });
@@ -45,6 +54,7 @@ const setup = async ({ handlers = {}, config = { groups: { [kGroupKey]: { enable
       current = { ...next, guestNotes: normalizeGuestNotesConfig(next.guestNotes) };
     },
     now: () => clock.now,
+    fsModule,
     sleep: async () => {},
     log: (line) => logs.push(line),
   });
@@ -172,7 +182,7 @@ describe("guest notes broker", () => {
           return { state: "queued", request_id: args.request_id };
         },
         get_write_request: () => {
-          throw Object.assign(new Error("missing"), { code: "request_not_found" });
+          throw Object.assign(new Error("missing"), { code: "not_found" });
         },
       },
     });
@@ -214,6 +224,97 @@ describe("guest notes broker", () => {
     for (const call of ctx.brain.calls) expect(call.name === "get_brain_identity" || Boolean(call.headers.onBehalfOf)).toBe(true);
     const status = await ctx.service.status();
     expect(status.groups[kGroupKey]).toMatchObject({ orphaned: 1 });
+  });
+
+  it("keeps each save's file apart, and removes only a deleted save's own copy after the restore window", async () => {
+    const promoted = new Set();
+    ctx = await setup({
+      fsModule: memberOwnedFs,
+      config: { groups: { [kGroupKey]: { enabled: true } } },
+      handlers: {
+        get_page: (args) => ({ slug: args.slug, guest: { promoted: promoted.has(args.slug) } }),
+        delete_page: (args) => ({ state: "committed", slug: args.slug }),
+      },
+    });
+    const scratchRoot = path.join(ctx.rootDir, "scratch");
+    const scratch = path.join(scratchRoot, kClaim.member_slug, "tmp");
+    fs.mkdirSync(scratch, { recursive: true });
+    fs.writeFileSync(path.join(scratch, "plan.txt"), "same bytes");
+    ctx.config().guestNotes.scratchRoot = scratchRoot;
+    const first = await ctx.service.save({ kind: "file", title: "plan", file_path: path.join(scratch, "plan.txt"), claim_ref: claimRef(ctx.service, { run_id: "run-a" }) });
+    const second = await ctx.service.save({ kind: "file", title: "plan", file_path: path.join(scratch, "plan.txt"), claim_ref: claimRef(ctx.service, { run_id: "run-b" }) });
+    const kept = () => fs.readdirSync(path.join(ctx.paths.filesDir, kClaim.group_slug, kClaim.member_slug)).sort();
+    expect(kept()).toHaveLength(2);
+    promoted.add(second.slug);
+    ctx.clock.now += 91 * 24 * 60 * 60 * 1000;
+    expect(await ctx.service.sweep()).toMatchObject({ deleted: 1, promoted: 1 });
+    ctx.clock.now += 73 * 60 * 60 * 1000;
+    expect(await ctx.service.sweep()).toMatchObject({ filesRemoved: 1 });
+    expect(kept()).toHaveLength(1);
+    expect(first.slug).not.toBe(second.slug);
+  });
+
+  it("releases a refused save's file, and counts refused saves toward the daily cap", async () => {
+    ctx = await setup({
+      fsModule: memberOwnedFs,
+      config: { groups: { [kGroupKey]: { enabled: true, dailyCap: 2 } } },
+      handlers: {
+        put_page: () => {
+          throw Object.assign(new Error("no"), { code: "guest_attribution_missing" });
+        },
+      },
+    });
+    const scratchRoot = path.join(ctx.rootDir, "scratch");
+    const scratch = path.join(scratchRoot, kClaim.member_slug, "tmp");
+    fs.mkdirSync(scratch, { recursive: true });
+    fs.writeFileSync(path.join(scratch, "big.bin"), Buffer.alloc(4096));
+    ctx.config().guestNotes.scratchRoot = scratchRoot;
+    const fileSave = (run) => ctx.service.save({ kind: "file", title: "big", file_path: path.join(scratch, "big.bin"), claim_ref: claimRef(ctx.service, { run_id: run }) });
+    await expect(fileSave("r1")).rejects.toMatchObject({ code: "guest_save_failed" });
+    await expect(fileSave("r2")).rejects.toMatchObject({ code: "guest_save_failed" });
+    await expect(fileSave("r3")).rejects.toMatchObject({ code: "guest_cap_reached" });
+    const dir = path.join(ctx.paths.filesDir, kClaim.group_slug, kClaim.member_slug);
+    expect(fs.existsSync(dir) ? fs.readdirSync(dir) : []).toEqual([]);
+  });
+
+  it("marks an expired note deleted only when gbrain confirms the delete, and never reads a denial as not found", async () => {
+    let deleteAnswer = () => ({ state: "failed", write_error: "write_failed" });
+    ctx = await setup({
+      handlers: {
+        get_page: (args) => ({ slug: args.slug, guest: {} }),
+        delete_page: () => deleteAnswer(),
+      },
+    });
+    await ctx.service.save({ kind: "note", title: "a", text: "one", claim_ref: claimRef(ctx.service) });
+    ctx.clock.now += 91 * 24 * 60 * 60 * 1000;
+    expect(await ctx.service.sweep()).toMatchObject({ deleted: 0 });
+    deleteAnswer = () => {
+      throw Object.assign(new Error("scope"), { code: "scope_missing" });
+    };
+    expect(await ctx.service.sweep()).toMatchObject({ deleted: 0 });
+    deleteAnswer = () => ({ state: "queued" });
+    expect(await ctx.service.sweep()).toMatchObject({ deleted: 0 });
+    deleteAnswer = () => ({ state: "committed" });
+    expect(await ctx.service.sweep()).toMatchObject({ deleted: 1 });
+  });
+
+  it("settles a retry row that gbrain never accepted, and frees its live slot", async () => {
+    ctx = await setup({
+      config: { groups: { [kGroupKey]: { enabled: true, liveCap: 1 } } },
+      handlers: {
+        put_page: () => {
+          throw Object.assign(new Error("busy"), { code: "lock_busy" });
+        },
+        get_write_request: () => {
+          throw Object.assign(new Error("missing"), { code: "not_found" });
+        },
+      },
+    });
+    await expect(ctx.service.save({ kind: "note", title: "a", text: "one", claim_ref: claimRef(ctx.service) })).rejects.toMatchObject({ code: "guest_save_retry" });
+    ctx.clock.now += 25 * 60 * 60 * 1000;
+    expect(await ctx.service.sweep()).toMatchObject({ settled: 1 });
+    ctx.brain.handlers.put_page = (args) => ({ state: "committed", slug: args.slug });
+    expect((await ctx.service.save({ kind: "note", title: "b", text: "two", claim_ref: claimRef(ctx.service) })).status).toBe("saved");
   });
 
   it("maps gbrain receipt states", () => {

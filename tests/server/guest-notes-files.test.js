@@ -77,10 +77,10 @@ describe("guest file pickup", () => {
 
   it("keeps a copy at 0600 under 0700 folders and removes it", () => {
     const filesDir = path.join(root, "guest-files");
-    const rel = storeGuestFile({ filesDir, groupSlug: "g0123456789abcdef", memberSlug: kMember, picked: { name: ".hidden a b.txt", buffer: Buffer.from("x"), sha256: "ab".repeat(32) } });
+    const rel = storeGuestFile({ filesDir, groupSlug: "g0123456789abcdef", memberSlug: kMember, saveId: "0123456789abcdef", picked: { name: ".hidden a b.txt", buffer: Buffer.from("x"), sha256: "ab".repeat(32) } });
     const target = path.join(filesDir, rel);
     expect(rel.startsWith("g0123456789abcdef/" + kMember + "/")).toBe(true);
-    expect(path.basename(target)).toBe("ab".repeat(32) + "-hidden_a_b.txt");
+    expect(path.basename(target)).toBe("0123456789abcdef-hidden_a_b.txt");
     expect(fs.statSync(target).mode & 0o777).toBe(0o600);
     expect(fs.statSync(path.dirname(target)).mode & 0o777).toBe(0o700);
     expect(removeGuestFile({ filesDir, rel })).toBe(true);

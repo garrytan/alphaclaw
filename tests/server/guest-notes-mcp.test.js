@@ -70,16 +70,26 @@ describe("alphaclaw guest-notes sweep", () => {
     const base = { requestId: "r", attempt: 1, kind: "note", title: "t", groupKey: "telegram:-1", groupSlug: "g0123456789abcdef", memberSlug: "m0123456789abcdef", audienceMember: "gone", day: "2026-11-14" };
     store.insertSave({ ...base, idemKey: "k1", slug: "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-a", state: "orphaned" });
     store.insertSave({ ...base, idemKey: "k2", slug: "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-b", state: "saved" });
+    store.insertSave({ ...base, idemKey: "k3", slug: "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-kept", state: "orphaned" });
+    store.insertSave({ ...base, idemKey: "k4", slug: "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-slow", state: "orphaned" });
     store.close();
     const out = [];
     expect(await runGuestNotesCommand({ argv: ["sweep"], rootDir, json: true, write: (t) => out.push(t), runner: vi.fn() })).toBe(0);
-    expect(JSON.parse(out[0]).orphaned).toEqual(["guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-a"]);
-    const runner = vi.fn(async () => ({ exitCode: 0, json: {} }));
+    expect(JSON.parse(out[0]).orphaned).toHaveLength(3);
+    const runner = vi.fn(async (args) => {
+      const slug = args[args.length - 1];
+      if (args[0] === "get") return { exitCode: 0, json: { slug, guest: { promoted: slug.endsWith("-kept") } } };
+      return { exitCode: slug.endsWith("-slow") ? 10 : 0, json: {} };
+    });
     expect(await runGuestNotesCommand({ argv: ["sweep", "--apply"], rootDir, json: true, write: (t) => out.push(t), runner })).toBe(0);
     expect(runner).toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-a"]);
+    expect(runner).not.toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-kept"]);
+    expect(JSON.parse(out[1])).toMatchObject({ pending: ["guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-slow"], kept: ["guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-kept"] });
     const after = openGuestStore({ dbPath: paths.dbFile });
     expect(after.getSave("k1").state).toBe("deleted");
     expect(after.getSave("k2").state).toBe("saved");
+    expect(after.getSave("k3").state).toBe("saved");
+    expect(after.getSave("k4").state).toBe("orphaned");
     after.close();
   });
 });
