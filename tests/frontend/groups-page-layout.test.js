@@ -75,7 +75,7 @@ describe("Groups page layout", () => {
   it("polls the account's groups and lists sections in order, then the block list", () => {
     const tree = render();
     expect(usePolling.mock.calls.at(-1)[2]).toEqual({ cacheKey: "/api/telegram/groups?accountId=default" });
-    expect(sectionTitles(tree)).toEqual(["Waiting for you (1)", "Custom (1)", "Approved (1)", "Trusted people (1)", "Blocked (1)", "Blocked people"]);
+    expect(sectionTitles(tree)).toEqual(["Waiting for you (1)", "Custom (1)", "Approved (1)", "Trusted people (1)", "Blocked (1)", "Guest notes", "Blocked people"]);
     const text = collectText(tree);
     expect(text).toContain("1 group waits for you to pick a rule.");
     expect(text).toContain("Anonymous admins are not heard");
