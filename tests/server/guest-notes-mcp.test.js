@@ -93,6 +93,22 @@ describe("alphaclaw guest-notes sweep", () => {
     after.close();
   });
 
+  it("marks a note deleted when its page is already gone", async () => {
+    const paths = guestWritesPaths(rootDir);
+    const store = openGuestStore({ dbPath: paths.dbFile });
+    const slug = "guests/g0123456789abcdef/m0123456789abcdef/2026-11-14-gone";
+    store.insertSave({ requestId: "r", attempt: 1, kind: "note", title: "t", groupKey: "telegram:-1", groupSlug: "g0123456789abcdef", memberSlug: "m0123456789abcdef", audienceMember: "gone", day: "2026-11-14", idemKey: "k6", slug, state: "orphaned" });
+    store.close();
+    const out = [];
+    const runner = vi.fn(async (args) => (args[0] === "get" ? { exitCode: 1, json: { code: "page_not_found" } } : { exitCode: 0, json: {} }));
+    expect(await runGuestNotesCommand({ argv: ["sweep", "--apply"], rootDir, json: true, write: (t) => out.push(t), runner })).toBe(0);
+    expect(runner).not.toHaveBeenCalledWith(["delete", "--source", "guests", "--json", "--", slug]);
+    expect(JSON.parse(out[0])).toMatchObject({ deleted: [slug], failed: [] });
+    const after = openGuestStore({ dbPath: paths.dbFile });
+    expect(after.getSave("k6").state).toBe("deleted");
+    after.close();
+  });
+
   it("deletes nothing when it can't read the page first", async () => {
     const paths = guestWritesPaths(rootDir);
     const store = openGuestStore({ dbPath: paths.dbFile });

@@ -400,6 +400,59 @@ describe("guest notes broker", () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  const insertRows = ({ count, state, ageMs = 0, fileRel = () => null }) => {
+    const { openGuestStore } = require("../../lib/server/guest-writes/store");
+    const store = openGuestStore({ dbPath: ctx.paths.dbFile, now: () => ctx.clock.now - ageMs });
+    for (let i = 0; i < count; i += 1) {
+      const idemKey = String(i).padStart(64, "0");
+      store.insertSave({ idemKey, requestId: "req-" + i, attempt: 1, slug: "guests/g0123456789abcdef/mfedcba9876543210/2026-11-14-n" + i, state, kind: "note", title: "n" + i, groupKey: kGroupKey, groupSlug: "g0123456789abcdef", memberSlug: "mfedcba9876543210", audienceMember: "groupmember1", day: "2026-11-14", fileRel: fileRel(i) });
+    }
+    return store;
+  };
+
+  it("settles every unsettled save in one sweep, more than one page of them", async () => {
+    ctx = await setup({ handlers: { get_write_request: (args) => ({ request_id: args.request_id, state: "committed" }) } });
+    insertRows({ count: 150, state: "pending" }).close();
+    expect(await ctx.service.sweep()).toMatchObject({ settled: 150 });
+    const { openGuestStore } = require("../../lib/server/guest-writes/store");
+    const store = openGuestStore({ dbPath: ctx.paths.dbFile });
+    expect(store.listUnsettled()).toEqual([]);
+    expect(store.countsByGroup()[kGroupKey]).toEqual({ saved: 150 });
+    store.close();
+  });
+
+  it("expires every note past retention in one sweep, more than one page of them, and logs a delete it couldn't make", async () => {
+    ctx = await setup({
+      handlers: {
+        get_page: (args) => ({ slug: args.slug, guest: {} }),
+        delete_page: (args) => {
+          if (args.slug.endsWith("-n7")) throw Object.assign(new Error("busy"), { code: "lock_busy" });
+          return { state: "committed", slug: args.slug };
+        },
+      },
+    });
+    insertRows({ count: 130, state: "saved", ageMs: 91 * 24 * 60 * 60 * 1000 }).close();
+    expect(await ctx.service.sweep()).toMatchObject({ deleted: 129 });
+    expect(ctx.logs.some((line) => line.includes("could not expire a note code=lock_busy") && line.endsWith("-n7"))).toBe(true);
+  });
+
+  it("removes kept files past the restore window even without a gbrain credential", async () => {
+    ctx = await setup();
+    fs.rmSync(ctx.paths.clientFile);
+    fs.mkdirSync(path.join(ctx.paths.filesDir, "g"), { recursive: true });
+    for (let i = 0; i < 120; i += 1) fs.writeFileSync(path.join(ctx.paths.filesDir, "g", "f" + i), "x");
+    insertRows({ count: 120, state: "failed", fileRel: (i) => "g/f" + i }).close();
+    expect(await ctx.service.sweep()).toMatchObject({ filesRemoved: 120 });
+    expect(fs.readdirSync(path.join(ctx.paths.filesDir, "g"))).toEqual([]);
+  });
+
+  it("keeps the broker's database files private", async () => {
+    ctx = await setup({ handlers: { get_write_request: (args) => ({ request_id: args.request_id, state: "committed" }) } });
+    await ctx.service.save({ kind: "note", title: "a", text: "one", claim_ref: claimRef(ctx.service) });
+    expect(fs.statSync(ctx.paths.dir).mode & 0o777).toBe(0o700);
+    for (const suffix of ["", "-wal", "-shm"]) if (fs.existsSync(ctx.paths.dbFile + suffix)) expect(fs.statSync(ctx.paths.dbFile + suffix).mode & 0o777, suffix).toBe(0o600);
+  });
+
   it("maps gbrain receipt states", () => {
     expect(receiptState({ state: "committed" })).toBe("saved");
     expect(receiptState({ state: "queued" })).toBe("pending");
