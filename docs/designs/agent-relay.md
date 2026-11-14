@@ -136,6 +136,14 @@ What a pin rests on: the binding's capability, which does not expire. Whatever h
 
 Residual risks, stated plainly: an attested owner thread is the owner on the box, and its `exec` runs as the gateway's user, so the anchor classifier stops the usual ways to change the anchor, not a command written to dodge it (a path built at run time, a script written by one call and run by another, an automation whose prompt describes the change in words). The anchor check is a tripwire for a confused or steered model, as the confirmations were; the real gates are the owner list, the Capy grant and that a revoke ends the turn. The token, the capability and the access token sit on the same Capy machine, so anything running on that machine as the thread is the thread.
 
+### The dispatcher path and refusal lines (GST-2656)
+
+OpenClaw 2026.10.9 offers `message` to a relay turn only through its tool dispatcher (`tool_call`; `dispatch_action` from 2026.11.2). The dispatcher call is a catalog wrapper the delegate tier allows, and OpenClaw runs the tool it reaches through `before_tool_call` again under that tool's own name with the relay session attached, so an owner thread's dispatched send gets the direct call's decision, and a dispatched read of the relay's files is refused as a direct one is. The live tier holds this on both pins.
+
+A turn in a relay session with no relay message in flight (a cron job whose session is the relay session, a wake) still gets the peer policy, the owner's thread's session included: the guard has no record of who started it. A delegate that is not the owner's thread could otherwise start such a turn with `exec` (`openclaw agent --session-key …`, `openclaw cron add`) and have it decided as the owner's. Scheduled work for an owner thread belongs in a session of its own, not the relay session.
+
+The guard used to log a refusal once per session and tool for the life of the gateway, so repeated refusals left one line. A refused tool call now logs with its run (`run=<id>`), up to 10 lines per session a minute, and the next line that session logs counts the ones the limit left out (`unlogged=N`); a burst the session never follows with another logged line stays uncounted. The trust-anchor refusal, the relay-file refusal and the hold for the owner's confirmation log a line on every call, without `run=`.
+
 ### The owner thread's full scope (GST-2323 PR2)
 
 An attested owner thread is trusted like the owner, so it also gets the never-list tools the owner's own turn has. Nothing else gets them.

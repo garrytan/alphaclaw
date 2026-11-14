@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.275] - 2026-11-14
+
+Every relay guard refusal now leaves a log line. The guard used to log a refusal only once per session and tool for the life of the gateway, so a turn refused the same way every hour left a single line, and a refusal reported by the agent could not be found in the log. This release also adds tests holding that the owner's own Capy thread can send with OpenClaw's message tool through the tool dispatcher, the only way OpenClaw 2026.10.9 offers it to a relay turn.
+
+### Fixed
+- Every relay guard refusal now logs a line. A refused tool call logs with its run id (`run=`), at most 10 lines per session a minute, and when the limit leaves refusals out, the next line for that session counts them (`unlogged=N`). Trust-anchor refusals, relay-file refusals and calls held for the owner's confirmation log a line on every call, without `run=`.
+
+### Added
+- A live case against a real gateway (it passed on OpenClaw 2026.10.9 and 2026.11.3): an owner thread's send through the dispatcher (`tool_call`, or `dispatch_action` from 2026.11.2) passes the relay guard as a direct send does, a dispatched read of the relay's own files is refused, and a peer cannot call the dispatcher.
+- A hermetic case that runs in every PR, covering the same decisions under both dispatcher names, a wrapped relay-guard config change, and an unattested delegate's dispatched send, which stays refused.
+
 ## [0.10.274] - 2026-11-12
 
 A gateway restart no longer waits three minutes and then forces the gateway down when OpenClaw restarts in place. OpenClaw 2026.11.5 sometimes cannot write the handoff it leaves for AlphaClaw when it stops for a restart (its own restart command briefly holds the state database lock), and it then restarts inside the same process instead of exiting. AlphaClaw kept waiting for an exit that would never come, used up the whole 180-second grace, and only then sent SIGTERM.

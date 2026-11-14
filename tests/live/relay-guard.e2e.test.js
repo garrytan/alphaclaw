@@ -7,7 +7,9 @@
 //     the dispatch_action wrapper, reads of relay/secrets.json and
 //     /proc/self/environ, and every path tool on its own workspace files
 //     (relay sessions are messaging-only);
-//   - a main session keeps exec and the MCP tool.
+//   - a main session keeps exec and the MCP tool;
+//   - the owner's own thread sends through the dispatcher (tool_call on
+//     2026.10.9, dispatch_action from 2026.11.2) as it does directly.
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -364,6 +366,55 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       expect(revoked).toContain("[relay-guard]");
       expect(revoked).toContain("messaging-only");
       expect(fs.existsSync(revokedMarker)).toBe(false);
+    },
+    kTestTimeoutMs,
+  );
+
+  // The owner's own thread (GST-2323 PR3, a pinned binding) sends with the
+  // message tool without a carried approval. OpenClaw defers tools behind
+  // tool_search, so a turn often reaches message only through the dispatcher
+  // (dispatch_action on 2026.11.2, tool_call on the held 2026.10.9 pin): that
+  // call must get the same decision as a direct one, a peer's must not, and a
+  // wrapped call into the relay's own files stays refused (GST-2656).
+  it(
+    "an owner-thread delegate sends through the dispatcher exactly as it does directly",
+    async () => {
+      const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
+      const { openRemoteStore } = require("../../lib/server/relay/remote-store");
+      const { relayPaths } = require("../../lib/server/relay/constants");
+      const paths = relayPaths(kRootDir);
+      const agent = "capy-ownerlive01";
+      const relay = "agent:main:relay-" + agent;
+      const clientId = "live-owner-client";
+      const remote = openRemoteStore({ dbPath: paths.remoteDb });
+      remote.clients.insert({ client_id: clientId, client_name: "Capy", redirect_uris: ["https://capy.ai/web/callbacks/mcp"] });
+      remote.clients.markConsented(clientId);
+      remote.bindings.upsert({ agent, threadId: "jam_owner_live", clientId, webhookUrl: "https://api.capy.ai/w/owner", until: Date.now() + 60 * 60 * 1000, capabilityHash: "h2", agentToken: "at2" });
+      const grant = remote.grants.create({ agent, createdBy: "live-test" });
+      remote.close();
+      const bridge = openBridgeStore({ dbPath: paths.bridgeDb });
+      bridge.insert({ messageId: "7101", sender: agent, conversationId: "dm_owner_live", threadRoot: "7101", sessionKey: relay, state: "queued", bindingGeneration: 1 });
+      bridge.update("7101", { state: "dispatched", runId: "relay-7101", trust: "delegate", grantId: grant.id, pinnedBinding: agent, dispatchedAt: Date.now() });
+      bridge.close();
+
+      const sendArgs = { action: "send", channel: "telegram", target: "@owner-live-target", message: "owner send" };
+      const direct = await runTurn(relay, "message", sendArgs);
+      const wrapperName = ["dispatch_action", "tool_call"].find((name) => [...offered.values()].some((names) => names.includes(name))) || "dispatch_action";
+      console.log("[live] owner-thread direct message: " + direct.slice(0, 240));
+      const wrapped = await runTurn(relay, wrapperName, { id: "message", args: sendArgs });
+      console.log("[live] owner-thread " + wrapperName + " message: " + wrapped.slice(0, 240));
+      if (!direct.startsWith("NOT-OFFERED")) expect(direct).not.toContain("[relay-guard]");
+      expect(wrapped.startsWith("NOT-OFFERED")).toBe(false);
+      expect(wrapped).not.toContain("[relay-guard]");
+
+      const wrappedKeyRead = await runTurn(relay, wrapperName, { id: "read", args: { path: path.join(kRootDir, "relay", "secrets.json") } });
+      console.log("[live] owner-thread " + wrapperName + " read of relay secrets: " + wrappedKeyRead.slice(0, 240));
+      expect(wrappedKeyRead).toContain("[relay-guard]");
+      expect(wrappedKeyRead).not.toContain("rk_live_dummy_value");
+
+      const peerWrapped = await runTurn("agent:main:relay-capy-peerlive01", wrapperName, { id: "message", args: sendArgs });
+      console.log("[live] peer " + wrapperName + " message: " + peerWrapped.slice(0, 240));
+      if (!peerWrapped.startsWith("NOT-OFFERED")) expect(peerWrapped).toContain("[relay-guard]");
     },
     kTestTimeoutMs,
   );

@@ -125,14 +125,30 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
     expect(call("session_status", { model: "x", sessionKey: "agent:main:telegram-1" }, kMainSession)).toEqual({});
   });
 
-  it("logs each deny once per tool and session", () => {
-    call("exec", { command: "id" });
-    call("exec", { command: "id -u" });
-    call("write", { path: "x", content: "y" });
-    call("exec", { command: "id" }, { ...kRelaySession, sessionKey: "agent:main:relay-other" });
-    const lines = guard.warnings.filter((line) => line.includes("[relay-guard] denied"));
-    expect(lines).toHaveLength(3);
-    expect(lines.join("\n")).not.toContain("id -u");
+  // GST-2656: a once-per-process log hid every later refusal of the same
+  // tool in a session, so a scheduled turn's hourly refusals left no line.
+  it("logs every deny with its run, up to 10 lines per session a minute, and counts the ones the limit left out", () => {
+    const clock = { now: 1_000_000 };
+    const timed = createApi(root);
+    relayGuard.createRelayGuardPlugin({ now: () => clock.now }).register(timed.api);
+    const timedCall = (toolName, params, ctx = kRelaySession) => timed.handlers.before_tool_call({ toolName, params }, ctx);
+    const denied = () => timed.warnings.filter((line) => line.includes("[relay-guard] denied"));
+    timedCall("exec", { command: "id" });
+    timedCall("exec", { command: "id -u" }, { ...kRelaySession, runId: "cron-hourly-2" });
+    expect(denied()).toHaveLength(2);
+    expect(denied()[0]).toContain("denied tool=exec session=agent:main:relay-capy-a1b2c3d4e5f6 reason=exec is not available in a relay session run=relay-244705956220485632");
+    expect(denied()[1]).toContain("run=cron-hourly-2");
+    expect(denied().join("\n")).not.toContain("id -u");
+    for (let index = 0; index < 13; index += 1) timedCall("write", { path: "x", content: "y" });
+    timedCall("exec", { command: "id" }, { ...kRelaySession, sessionKey: "agent:main:relay-other" });
+    expect(denied()).toHaveLength(11);
+    expect(denied().at(-1)).toContain("session=agent:main:relay-other");
+    clock.now += 60 * 1000;
+    timedCall("write", { path: "x", content: "y" });
+    expect(denied()).toHaveLength(12);
+    expect(denied().at(-1)).toMatch(/denied tool=write .* unlogged=5$/);
+    timedCall("write", { path: "x", content: "y" });
+    expect(denied().at(-1)).not.toContain("unlogged=");
   });
 
   it("with no session key and no run id, applies the relay policy only while a relay run is in flight (F5)", () => {
