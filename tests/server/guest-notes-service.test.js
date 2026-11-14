@@ -173,6 +173,27 @@ describe("guest notes broker", () => {
     expect(puts[0].args.request_id).not.toBe(puts[1].args.request_id);
   });
 
+  it("moves to the next slug when gbrain refuses a deleted guest slug", async () => {
+    let first = true;
+    ctx = await setup({
+      handlers: {
+        put_page: (args) => {
+          if (first) {
+            first = false;
+            throw Object.assign(new Error("deleted"), { code: "guest_page_immutable" });
+          }
+          return { state: "committed", slug: args.slug };
+        },
+      },
+    });
+    const result = await ctx.service.save({ kind: "note", title: "Trip plan", text: "x", claim_ref: claimRef(ctx.service) });
+    expect(result.status).toBe("saved");
+    expect(result.slug.endsWith("-trip-plan-2")).toBe(true);
+    const puts = ctx.brain.calls.filter((call) => call.name === "put_page");
+    expect(puts).toHaveLength(2);
+    expect(puts[0].args.request_id).not.toBe(puts[1].args.request_id);
+  });
+
   it("retries a busy gbrain with the same request id, then answers guest_save_retry and reuses it next time", async () => {
     let busy = true;
     ctx = await setup({

@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.279] - 2026-11-15
+
+A group member's guest note no longer fails when you deleted an earlier note with the same title on the same day. gbrain never saves a guest note over a deleted one, and AlphaClaw now moves the new note to the next free name, the way it already did when the name was taken.
+
+### Fixed
+- A guest save that gbrain refuses with `guest_page_immutable` (the slug belonged to a deleted guest note) is sent again under the next `-n` slug with a new request id, instead of being reported to the member as a failed save.
+
 ## [0.10.278] - 2026-11-14
 
 Guest notes' background sweep now reaches every saved note. It used to read only the oldest 100 notes waiting on the brain and the oldest 100 past their retention date, so on a busy box newer notes could wait forever to settle or be kept past the 90 days they were promised.
