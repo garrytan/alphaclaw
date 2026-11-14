@@ -118,6 +118,23 @@
       ],
       "pattern": "String\\(res\\.headers\\.get\\(\"set-cookie\"\\) \\|\\| \"\"\\)\\.split\\(\";\"\\)\\[0\\];\\s*$",
       "reason": "reads the session cookie a test login just received, to send it on later requests; no literal value"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/server/guest-writes/index.js",
+        "lib/server/guest-writes/store.js"
+      ],
+      "pattern": "(?:b|row)\\.session_key,?\\s*$",
+      "reason": "field mapping: a guest note claim's OpenClaw session key name (agent:<id>:<channel>:group:<chat>), not a credential"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "tests/server/guest-notes-service.test.js"
+      ],
+      "pattern": "(?:\\\"?agent:main:telegram:group:-1001234567890\\\"|kGroupKey),?\\s*$",
+      "reason": "the guest notes tests' fixture session and group keys, built from a made-up Telegram chat id; never a deployed value"
     }
   ]
 }

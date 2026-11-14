@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.276] - 2026-11-14
+## [0.10.277] - 2026-11-14
 
 Group members can now save notes and files to your brain as outside guest's notes. When someone other than you asks your agent to write something down in a group, AlphaClaw saves it in your brain's own `guests` source, readable by you and that group, and your brain warns the agent whenever it reads one. It's off for every group until you turn it on, and it can't be turned on until your brain supports the warning.
 
@@ -13,6 +13,13 @@ Group members can now save notes and files to your brain as outside guest's note
 - The agent's `guest_save` tool, and the AlphaClaw writer behind it. It saves a member's note, or a file from their own scratch folder, only for the member the box's guard plugin names, within 20 saves a day and 200 kept notes per person, and deletes notes after 90 days unless you keep one.
 - A Guest notes section on the Groups page, to turn guest notes on or off for each group.
 - `alphaclaw guest-notes sweep [--apply]`, which lists and deletes the notes of a member AlphaClaw's writer may no longer act for.
+
+## [0.10.276] - 2026-11-14
+
+The pre-merge secrets scan no longer stops the guest notes change on two false alarms. It read a field mapping that copies a session key's name (`sessionKey: row.session_key`) and the tests' made-up Telegram group keys as possible credentials; both are now allowlisted by path and pattern, the same way the relay's session key mapping already is.
+
+### Changed
+- `.gstack/pregate.json` allowlists the `env.kv` matches in `lib/server/guest-writes/index.js`, `lib/server/guest-writes/store.js` and `tests/server/guest-notes-service.test.js`. No code changes.
 
 ## [0.10.275] - 2026-11-14
 
