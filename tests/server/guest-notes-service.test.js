@@ -103,11 +103,13 @@ describe("guest notes broker", () => {
     expect(put.headers.agentLabel).toBe("alphaclaw-guest-broker");
     expect(put.headers.authorization).toBe("Bearer tok-1");
     expect(put.meta).toEqual({ guest: { sender_label: "Ada guest", group: "g0123456789abcdef" } });
+    expect(put.args.content).toContain('\nguest_sender: "Ada guest"\nsaved_at: ');
+    expect(put.args.content).toContain("\nguest_group: g0123456789abcdef\n");
     expect(put.args).toMatchObject({ source_id: "guests", content_origin: "tool_output" });
     expect(put.args.expected_revision).toBeUndefined();
     expect(put.args.force).toBeUndefined();
     expect(put.args.content).toContain('readable_by: ["member:owner1", "member:groupmember1"]');
-    expect(put.args.content).not.toContain("Ada");
+    expect(put.args.content.replace('\nguest_sender: "Ada guest"\n', "\n")).not.toContain("Ada");
     expect(ctx.brain.tokenRequests[0]).toMatchObject({ grant_type: "client_credentials", client_id: "guest-broker" });
     expect(ctx.logs.join("\n")).not.toContain("Leave at 9");
   });

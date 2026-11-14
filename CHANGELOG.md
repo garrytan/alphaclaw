@@ -7,10 +7,12 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.279] - 2026-11-15
 
-A group member's guest note no longer fails when you deleted an earlier note with the same title on the same day. gbrain never saves a guest note over a deleted one, and AlphaClaw now moves the new note to the next free name, the way it already did when the name was taken.
+Guest notes now save against gbrain v0.60.722.0, the first gbrain release with guest sources. Before this, gbrain would have refused every guest note AlphaClaw sent it, because the page named the member's internal id where gbrain expects the guest's label.
 
 ### Fixed
-- A guest save that gbrain refuses with `guest_page_immutable` (the slug belonged to a deleted guest note) is sent again under the next `-n` slug with a new request id, instead of being reported to the member as a failed save.
+- A guest note's `guest_sender` is the same label AlphaClaw sends gbrain beside the call, as gbrain requires. It used to be the member's internal id, so gbrain refused every save (`guest_frontmatter_refused`).
+- The guest's label drops the characters gbrain refuses in a label (`·`, `"`, invisible formatting characters such as zero-width joiners, and line separators) and is cut at 64 characters without splitting an emoji. A name with any of those used to be refused (`guest_attribution_missing`).
+- A save that gbrain refuses with `guest_page_immutable` (an earlier guest note on that name was deleted, and gbrain never reuses one) moves to the next free name with a new request id, as a taken name already did, instead of telling the member the save failed.
 
 ## [0.10.278] - 2026-11-14
 
