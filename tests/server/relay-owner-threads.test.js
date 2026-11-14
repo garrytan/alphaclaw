@@ -140,6 +140,7 @@ describe("relay owner threads (GST-2323 PR2): the never-list opens for the owner
       const keyRead = await ctx.call(owner, "read", secretsRead);
       expect(keyRead.block, wrapper).toBe(true);
       expect(keyRead.blockReason, wrapper).toContain("is refused in every relay session");
+      expect(await ctx.call(owner, wrapper, { id: "exec", args: guardOff }), wrapper).toEqual({});
       const anchor = await ctx.call(owner, "exec", guardOff);
       expect(anchor.block, wrapper).toBe(true);
       expect(anchor.blockReason, wrapper).toContain("would change what decides relay trust on this box");
