@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.280] - 2026-11-15
+
+Your own Capy threads that reach the box over the relay can now use your gbrain.io account through the box's `gbrain_io` MCP server, like they already use your brain. Before this, the relay guard refused those tools to every relay session.
+
+### Fixed
+- The relay guard allows `gbrain_io__shared_search` and `gbrain_io__shared_call` for your own attested or pinned relay threads. The names must match exactly, so another tool on that server, or a server whose name only looks the same, stays closed.
+- Other relay connections stay refused, and `ALPHACLAW_RELAY_DELEGATE_TOOLS` can no longer open any `gbrain_io` server to them.
+
 ## [0.10.279] - 2026-11-15
 
 Guest notes now save against gbrain v0.60.722.0, the first gbrain release with guest sources. Before this, gbrain would have refused every guest note AlphaClaw sent it, because the page named the member's internal id where gbrain expects the guest's label, and every 90-day retention delete, because the delete carried no revision.
