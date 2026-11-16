@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.287] - 2026-11-16
+
+0.10.286's automatic OpenClaw changes now reach boxes whose exec config leaves `ask` or `mode` unset. AlphaClaw read such a config as narrowed and wrote nothing, though OpenClaw itself treats it as Full Access, so those boxes kept waiting for an approval tap on 2026.11.4.
+
+### Fixed
+- AlphaClaw decides whether exec runs with Full Access the way OpenClaw does: an unset `security`, `ask` or `mode` takes OpenClaw's default (full, off), the global `tools.exec` and then each agent's own `tools.exec` apply in turn, and a node or sandbox host counts as narrowed. A config such as `tools.exec: { security: "full" }` now gets `tools.openclaw.autoApproveChanges: true`; ask, allowlist and deny still get nothing.
+
 ## [0.10.286] - 2026-11-16
 
 On OpenClaw 2026.11.4, an agent's own changes through OpenClaw's `openclaw` tool apply at once again, as they did on 2026.11.3. 2026.11.4 holds them for the owner's approval whenever a plugin checks every tool call, which AlphaClaw's relay guard does, so a cron job or heartbeat asking for a change would have waited for a tap.
