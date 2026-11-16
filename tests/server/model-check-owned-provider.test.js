@@ -5,7 +5,7 @@ const kKey = "pai-test-model-check-000000000000000000000000";
 
 // A config with AlphaClaw's Particle block, as the ensure writes it.
 const particleConfig = (mutate = () => {}) => {
-  const config = { agents: { defaults: { model: { primary: "particle/particle-1" } } } };
+  const config = { agents: { defaults: { model: { primary: "particle/particle-ai/particle-1" } } } };
   applyOwnedProviders(config, { env: { PARTICLE_API_KEY: kKey } });
   mutate(config);
   return config;
@@ -27,7 +27,7 @@ const fakeFetch = (answer) => {
 const run = async ({ config, answer, env = { PARTICLE_API_KEY: kKey }, isEnvRestartPending }) => {
   const fake = fakeFetch(answer);
   const check = createModelCheck({ readConfig: () => config, getEnv: () => env, fetchImpl: fake.fetchImpl, isEnvRestartPending, logger: { warn: () => {} } });
-  const result = (await check.run()).results.find((row) => row.ref === "particle/particle-1");
+  const result = (await check.run()).results.find((row) => row.ref === "particle/particle-ai/particle-1");
   return { result, calls: fake.calls };
 };
 
@@ -38,7 +38,7 @@ describe("server/model-check with an AlphaClaw-owned provider", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.particle.ai/v1/chat/completions");
     expect(calls[0].auth).toBe(`Bearer ${kKey}`);
-    expect(calls[0].body).toMatchObject({ model: "particle-1", max_tokens: 16, reasoning_effort: "none" });
+    expect(calls[0].body).toMatchObject({ model: "particle-ai/particle-1", max_tokens: 16, reasoning_effort: "none" });
     expect(result.notes).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain(kKey);
   });

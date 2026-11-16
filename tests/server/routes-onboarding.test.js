@@ -644,7 +644,7 @@ describe("server/routes/onboarding", () => {
     mockGithubVerifyAndCreate();
 
     const res = await request(app).post("/api/onboard").send({
-      modelKey: "particle/particle-1",
+      modelKey: "particle/particle-ai/particle-1",
       vars: [
         { key: "PARTICLE_API_KEY", value: "pai-onboarding-test-123456789" },
         { key: "GITHUB_TOKEN", value: "ghp_test_123456789" },
@@ -660,7 +660,7 @@ describe("server/routes/onboarding", () => {
     const calls = deps.execFileCmd.mock.calls;
     const onboardIndex = calls.findIndex(([file, args]) => file === "openclaw" && args[0] === "onboard");
     const modelsSetIndex = calls.findIndex(([file, args]) => file === "openclaw" && args[0] === "models" && args[1] === "set");
-    expect(calls[modelsSetIndex][1]).toEqual(["models", "set", "--", "particle/particle-1"]);
+    expect(calls[modelsSetIndex][1]).toEqual(["models", "set", "--", "particle/particle-ai/particle-1"]);
     const ensuredAt = deps.ensureOwnedProviders.mock.invocationCallOrder[0];
     expect(onboardIndex).toBeGreaterThanOrEqual(0);
     expect(ensuredAt).toBeGreaterThan(deps.execFileCmd.mock.invocationCallOrder[onboardIndex]);
