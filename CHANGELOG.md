@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.285] - 2026-11-16
+
+AlphaClaw now runs OpenClaw 2026.11.4, the current stable release. It keeps 2026.11.3's database layout, so going back needs no database restore, and a very large conversation no longer crashes the gateway when OpenClaw exports it for memory search. The memory index rebuild on a large session history still fails on 2026.11.4, with a different error; the README says what to do.
+
+### Changed
+- The OpenClaw pin moves from 2026.11.3 to 2026.11.4.
+- With the relay guard on (the default), an agent's own changes through OpenClaw's `openclaw` tool now wait for the owner's approval unless the conversation is in Full Access or `tools.openclaw.autoApproveChanges` is `true`. This is OpenClaw 2026.11.4's new rule for boxes where a plugin watches every tool call; the README's OpenClaw Version section explains it.
+- The README says how to go back from OpenClaw 2026.11.4 to 2026.11.3, and that agents on the Claude CLI runtime hit an OpenClaw 2026.11.4 bug that fails every other turn (openclaw/openclaw#200096).
+
 ## [0.10.284] - 2026-11-16
 
 AlphaClaw keeps managing its Particle setup after OpenClaw renames Particle's model. AlphaClaw wrote the model as `particle-1`; on a box with OpenClaw's Particle plugin installed, the first config change made through the running gateway (`openclaw config set`, or the dashboard) renamed that row to `particle-ai/particle-1` but left every `particle/particle-1` setting as it was. AlphaClaw then took its own block for your edit and stopped updating it, and Check models no longer found `particle/particle-1` in it.
