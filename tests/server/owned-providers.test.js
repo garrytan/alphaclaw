@@ -139,6 +139,19 @@ describe("server/providers renamed model ids (particle-1 -> particle-ai/particle
     expect(config.agents.defaults.model.primary).toBe(newRef);
   });
 
+  it("moves refs held outside the agent scopes: channel overrides, hooks, the exec reviewer and agent decision and failover models", () => {
+    const outside = (ref) => ({
+      channels: { modelByChannel: { discord: { "123": ref, "456": "openai/gpt-5.5" }, telegram: { "-100": ref } } },
+      hooks: { gmail: { model: ref }, mappings: [{ match: { path: "inbox" }, model: ref }, { match: { path: "other" } }] },
+      tools: { exec: { reviewer: { model: ref } } },
+      agents: { defaults: { decisionModel: ref, embeddedAgent: { cyberFailover: { model: ref } } } },
+    });
+    const config = { models: { providers: { particle: blockWith([oldRow()]) } }, ...outside(oldRef) };
+    expect(migrateRenamedOwnedModels(config)).toEqual([{ provider: "particle", from: "particle-1", to: "particle-ai/particle-1", rowRenamed: true, refs: 7 }]);
+    expect(config).toEqual({ models: { providers: { particle: blockWith([newRow()]) } }, ...outside(newRef) });
+    expect(migrateRenamedOwnedModels(config)).toEqual([]);
+  });
+
   it("merges into a models row the new ref already has, the new row's own settings winning", () => {
     const config = {
       models: { providers: { particle: blockWith([newRow()]) } },
