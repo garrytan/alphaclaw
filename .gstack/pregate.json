@@ -135,6 +135,14 @@
       ],
       "pattern": "(?:\\\"?agent:main:telegram:group:-1001234567890\\\"|kGroupKey),?\\s*$",
       "reason": "the guest notes tests' fixture session and group keys, built from a made-up Telegram chat id; never a deployed value"
+    },
+    {
+      "finding": "env.kv",
+      "paths": [
+        "lib/server/model-catalog-curated.json"
+      ],
+      "pattern": "\"key\": \"[a-z0-9-]+(/[a-z0-9.-]+)+\",?\\s*$",
+      "reason": "the curated model catalog's \"key\" field is a provider/model ref such as particle/particle-ai/particle-1, not a credential"
     }
   ]
 }
