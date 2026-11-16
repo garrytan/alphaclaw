@@ -54,7 +54,6 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
         row("old-aborted", { abortedLastRun: true, updatedAt: kLaunchAt - 60 * 60_000 }),
         row("recent-aborted", { abortedLastRun: true, updatedAt: kLaunchAt - 5 * 60_000 }),
         row("recent-idle", { updatedAt: kLaunchAt - 5 * 60_000 }),
-        row("recent-interrupted", { status: "interrupted", updatedAt: kLaunchAt - 5 * 60_000 }),
       ],
       recorded,
       launchAtMs: kLaunchAt,
@@ -65,7 +64,6 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
       ["b", kWedgeReasons.NOT_RESUMED],
       ["c", kWedgeReasons.RECOVERY_GAVE_UP],
       ["recent-aborted", kWedgeReasons.NOT_RESUMED],
-      ["recent-interrupted", kWedgeReasons.NOT_RESUMED],
     ]);
   });
 
@@ -128,7 +126,6 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     expect(gateway.calls.filter((c) => c.method === "sessions.recover").map((c) => c.params)).toEqual([
       { key: "a", agentId: "main" },
       { key: "done", agentId: "main" },
-      { key: "dm", agentId: "main" },
     ]);
     expect(insertEvent.mock.calls.map(([e]) => [e.eventType, e.status, e.details.sessionKey])).toEqual([
       ["session_wedge", "recovered", "a"],
@@ -147,19 +144,19 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     const again = await sweep.onGatewayLaunch({ generation: 8, startedAt: kLaunchAt + 1000 });
     expect(again.alerted).toEqual([]);
     expect(notify).not.toHaveBeenCalled();
-    expect(listCalls).toBe(4);
+    expect(listCalls).toBe(3);
   });
 
   it("a crash relaunch with nothing recorded still finds a recently interrupted session; a recover error other than 'nothing to recover' is recorded, never retried as a reset", async () => {
     const gateway = createGateway({
       "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 30_000 })] } }),
-      "sessions.recover": async () => ({ ok: false, body: { ok: false, error: { code: "INVALID_REQUEST", message: "Session recovery requires a restart-tombstoned session." } } }),
+      "sessions.recover": async () => { throw new Error("must not be called"); },
     });
     const { sweep, notify } = createSweep(gateway);
     const result = await sweep.onGatewayLaunch({ generation: 3, startedAt: kLaunchAt });
     expect(result.alerted).toEqual(["x"]);
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(gateway.calls.map((c) => c.method)).toEqual(["sessions.list", "sessions.recover", "sessions.list"]);
+    expect(gateway.calls.map((c) => c.method)).toEqual(["sessions.list"]);
 
     const failing = createGateway({
       "sessions.list": async (params) => ({ body: { sessions: [row("y", { hasActiveRun: !!params.activeOnly })] } }),
@@ -270,174 +267,83 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     const never = createSweep(gateway, { probeReadiness: vi.fn(async () => ({ ok: true, kind: "not_ready" })), readyTimeoutMs: 20_000 });
     expect(await never.sweep.onGatewayLaunch({ generation: 9 })).toEqual({ skipped: "not_ready" });
   });
-  describe("after any launch, a turn the restart cut off (GST-2884)", () => {
-    const topicKey = "agent:main:telegram:group:-100123:topic:42";
-    const topicRoute = { channel: "telegram", to: "telegram:-100123:topic:42", accountId: "default", threadId: 42 };
-    const cutOff = (extra = {}) => row(topicKey, { status: "interrupted", abortedLastRun: true, updatedAt: kLaunchAt - 40_000, deliveryContext: topicRoute, ...extra });
-    const notRecoverable = async () => ({ ok: false, body: { ok: false, error: { code: "INVALID_REQUEST", message: "Session recovery requires a restart-tombstoned session." } } });
-
-    it("a pod kill records nothing, yet the boot's sweep offers the turn to sessions.recover and, when OpenClaw declines, posts one line to that topic and never resets", async () => {
-      const gateway = createGateway({
-        "sessions.list": async () => ({ body: { sessions: [cutOff()] } }),
-        "sessions.recover": notRecoverable,
-        send: async () => ({ body: { ok: true, messageId: "m1" } }),
-      });
-      const { sweep, notify, insertEvent } = createSweep(gateway);
-      expect(await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [], alerted: [topicKey] });
-      expect(gateway.calls.map((c) => c.method)).toEqual(["sessions.list", "sessions.recover", "sessions.list", "send"]);
-      const send = gateway.calls.find((c) => c.method === "send").params;
-      expect(send).toEqual({
-        channel: "telegram",
-        to: "telegram:-100123:topic:42",
-        accountId: "default",
-        threadId: "42",
-        message: expect.stringContaining("Please send your last message again."),
-        idempotencyKey: `alphaclaw-cut-off-id-${topicKey}-${kLaunchAt - 40_000}`,
-      });
-      expect(send.message).not.toMatch(/\n|reset|\/new/i);
-      expect(notify).not.toHaveBeenCalled();
-      expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.channel, e.details.recorded])).toEqual([["told_chat", "telegram", false]]);
-      expect(lines()).toContain(`[alphaclaw] wedge-sweep told chat session=${topicKey} channel=telegram reason=not_resumed generation=2`);
-      expect(gateway.calls.map((c) => c.method)).not.toContain("sessions.reset");
-
-      // The same cut-off turn is never posted twice.
-      gateway.calls.length = 0;
-      expect(await sweep.onGatewayLaunch({ generation: 3, startedAt: kLaunchAt + 1000 })).toEqual({ recovered: [], alerted: [] });
-      expect(gateway.calls.map((c) => c.method)).toEqual(["sessions.list"]);
-    });
-
-    it("an interrupted turn OpenClaw agrees to resume is recovered, and nobody is told", async () => {
-      const gateway = createGateway({
-        "sessions.list": async () => ({ body: { sessions: [cutOff()] } }),
-        "sessions.recover": async ({ key }) => ({ body: { ok: true, key, continuation: { status: "started", runId: "r9" } } }),
-      });
-      const { sweep, notify } = createSweep(gateway);
-      expect(await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [topicKey], alerted: [] });
-      expect(gateway.calls.map((c) => c.method)).toEqual(["sessions.list", "sessions.recover"]);
-      expect(notify).not.toHaveBeenCalled();
-    });
-
-    it("waits while OpenClaw's own startup recovery is still resuming sessions one at a time, and tells nobody about a session it then resumed", async () => {
-      let resumed = false;
-      const gateway = createGateway({
-        "sessions.list": async () => ({ body: { sessions: [resumed ? cutOff({ status: "running", hasActiveRun: true, abortedLastRun: false }) : cutOff()] } }),
-        "sessions.recover": notRecoverable,
-        send: async () => ({ body: { ok: true } }),
-      });
-      let polls = 0;
+  describe("slow boots and OpenClaw's one-at-a-time restart recovery (GST-2884)", () => {
+    const completeLine = "[gateway] [main-session-recovery] main-session restart recovery startup complete: started=2 settled=0 failed=0 skipped=0 boot=b pass=p\n";
+    const clocked = (gateway, extra = {}) => {
       let clock = kLaunchAt;
-      let sweepRef;
-      const sleep = vi.fn(async (ms) => {
-        clock += ms;
-        if (ms === 5_000 && ++polls === 100) {
-          resumed = true;
-          sweepRef.observeGatewayOutput("[gateway] [main-session-recovery] main-session restart recovery startup complete: started=2 settled=0 failed=0 skipped=0 boot=b pass=p\n");
-        }
-      });
-      const { sweep, notify } = createSweep(gateway, { sleep, now: () => clock });
-      sweepRef = sweep;
-      const pending = sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
-      sweep.observeGatewayOutput("[gateway] [main-session-recovery] marked 2 startup-orphaned main session(s) for restart recovery\n");
-      expect(await pending).toEqual({ recovered: [], alerted: [] });
-      expect(polls).toBe(100);
-      expect(gateway.calls.map((c) => c.method)).toEqual(["sessions.list"]);
-      expect(notify).not.toHaveBeenCalled();
-      expect(lines()).toContain("[alphaclaw] wedge-sweep waiting generation=2 for=openclaw_recovery");
-    });
+      const made = createSweep(gateway, { sleep: vi.fn(async (ms) => { clock += ms; extra.onSleep?.(ms, made); }), now: () => clock, ...extra.overrides });
+      return { ...made, now: () => clock };
+    };
 
-    it("tells nobody when the turn changed during the confirm window, and stops waiting on OpenClaw's recovery after its cap", async () => {
-      let listCalls = 0;
-      const gateway = createGateway({
-        "sessions.list": async () => {
-          listCalls += 1;
-          return { body: { sessions: [listCalls === 1 ? cutOff() : cutOff({ updatedAt: kLaunchAt + 200_000 })] } };
-        },
-        "sessions.recover": notRecoverable,
-        send: async () => { throw new Error("must not be called"); },
-      });
-      const { sweep, notify } = createSweep(gateway, { recoveryWaitCapMs: 60_000 });
-      const pending = sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
-      sweep.observeGatewayOutput("started interrupted main session: agent:main:telegram:group:-100123:topic:7\n");
-      expect(await pending).toEqual({ recovered: [], alerted: [] });
-      expect(notify).not.toHaveBeenCalled();
-      expect(listCalls).toBe(2);
-    });
-
-    it("falls back to the owner alert when the session has no chat route, is webchat, or the send fails", async () => {
-      const rows = [
-        cutOff(),
-        row("agent:main:main", { abortedLastRun: true, updatedAt: kLaunchAt - 10_000, displayName: "Main" }),
-        row("agent:main:dashboard:1", { abortedLastRun: true, updatedAt: kLaunchAt - 10_000, displayName: "Dashboard", deliveryContext: { channel: "webchat", to: "x" } }),
-      ];
-      const gateway = createGateway({
-        "sessions.list": async () => ({ body: { sessions: rows } }),
-        "sessions.recover": notRecoverable,
-        send: async () => ({ ok: false, body: { ok: false, error: { message: "chat not found" } } }),
-      });
-      const { sweep, notify, insertEvent } = createSweep(gateway);
-      const result = await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
-      expect(result.alerted).toEqual([topicKey, "agent:main:main", "agent:main:dashboard:1"]);
-      expect(gateway.calls.filter((c) => c.method === "send")).toHaveLength(1);
-      expect(notify).toHaveBeenCalledTimes(1);
-      expect(notify.mock.calls[0][0]).toContain("3 sessions may be stuck after the gateway restarted:");
-      expect(insertEvent.mock.calls.map(([e]) => e.status)).toEqual(["alerted", "alerted", "alerted"]);
-    });
-
-    it("posts nothing in the chat for a tombstoned session (OpenClaw already told it) or a person's own /stop; those go to the owner alert", async () => {
-      const gateway = createGateway({
-        "sessions.list": async () => ({ body: { sessions: [
-          cutOff({ restartRecoveryStatus: "tombstoned" }),
-          row("agent:main:telegram:group:-100123:topic:9", { abortedLastRun: true, status: "killed", updatedAt: kLaunchAt - 20_000, deliveryContext: { ...topicRoute, threadId: 9 } }),
-        ] } }),
-        "sessions.recover": notRecoverable,
-        send: async () => { throw new Error("must not be called"); },
-      });
-      const { sweep, notify } = createSweep(gateway);
-      const result = await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
-      expect(result.alerted).toHaveLength(2);
-      expect(gateway.calls.map((c) => c.method)).not.toContain("send");
-      expect(notify).toHaveBeenCalledTimes(1);
-      expect(notify.mock.calls[0][0]).toContain("OpenClaw gave up resuming it");
-    });
-
-    it("posts nothing in the chat when the confirming re-read fails", async () => {
-      let listCalls = 0;
-      const gateway = createGateway({
-        "sessions.list": async () => (++listCalls === 1 ? { body: { sessions: [cutOff()] } } : { ok: false, body: null }),
-        "sessions.recover": notRecoverable,
-        send: async () => { throw new Error("must not be called"); },
-      });
-      const { sweep, notify } = createSweep(gateway);
-      expect((await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).alerted).toEqual([topicKey]);
-      expect(notify).toHaveBeenCalledTimes(1);
-      expect(lines()).toContain("[alphaclaw] wedge-sweep confirm read failed generation=2 candidates=1");
-    });
-
-    it("a route without a topic or account is sent as is, and a line told before an AlphaClaw restart is not posted again", async () => {
-      const plain = row("agent:main:telegram:direct:5", { status: "interrupted", abortedLastRun: true, updatedAt: kLaunchAt - 20_000, deliveryContext: { channel: "telegram", to: "telegram:5", accountId: " ", threadId: null } });
-      const gateway = createGateway({
-        "sessions.list": async () => ({ body: { sessions: [plain, cutOff()] } }),
-        "sessions.recover": notRecoverable,
-        send: async () => ({ body: { ok: true } }),
-      });
-      const listToldSince = vi.fn(() => [{ sessionKey: topicKey, sessionId: `id-${topicKey}`, updatedAt: kLaunchAt - 40_000 }]);
-      const { sweep, insertEvent } = createSweep(gateway, { listToldSince });
-      expect((await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).alerted).toEqual([plain.key]);
-      const sends = gateway.calls.filter((c) => c.method === "send").map((c) => c.params);
-      expect(sends).toHaveLength(1);
-      expect(sends[0]).toMatchObject({ channel: "telegram", to: "telegram:5" });
-      expect(sends[0]).not.toHaveProperty("threadId");
-      expect(sends[0]).not.toHaveProperty("accountId");
-      expect(insertEvent.mock.calls[0][0].details).toMatchObject({ sessionKey: plain.key, sessionId: plain.sessionId, updatedAt: plain.updatedAt });
-    });
-
-    it("waits for a slow boot well past the restart ready budget (the box was ready about 8 minutes after it listened)", async () => {
+    it("sweeps a boot that took about 8 minutes to become ready, past the 300 s restart budget", async () => {
       let clock = kLaunchAt;
-      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }) });
       const probeReadiness = vi.fn(async () => ({ ok: true, kind: clock - kLaunchAt >= 460_000 ? "ready" : "starting" }));
-      const { sweep } = createSweep(gateway, { probeReadiness, sleep: vi.fn(async (ms) => { clock += ms; }), now: () => clock });
-      expect(await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [], alerted: [] });
+      const { sweep, notify } = createSweep(gateway, { probeReadiness, sleep: vi.fn(async (ms) => { clock += ms; }), now: () => clock });
+      expect(await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [], alerted: ["x"] });
+      expect(notify).toHaveBeenCalledTimes(1);
       expect(lines().some((line) => line.includes("reason=not_ready"))).toBe(false);
+    });
+
+    it("waits for OpenClaw's own recovery to finish, and does not report a session it resumed meanwhile", async () => {
+      let resumed = false;
+      let polls = 0;
+      const gateway = createGateway({
+        "sessions.list": async () => ({ body: { sessions: [row("topic-b", resumed ? { hasActiveRun: true } : { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }),
+      });
+      const made = clocked(gateway, {
+        onSleep: (ms, { sweep }) => {
+          if (ms === 5_000 && ++polls === 113) {
+            resumed = true;
+            sweep.observeGatewayOutput(completeLine);
+          }
+        },
+      });
+      const pending = made.sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
+      made.sweep.observeGatewayOutput("[gateway] [main-session-recovery] marked 2 startup-orphaned main session(s) for restart recovery\n");
+      expect(await pending).toEqual({ recovered: [], alerted: [] });
+      expect(polls).toBe(113);
+      expect(made.notify).not.toHaveBeenCalled();
+      expect(lines()).toContain("[alphaclaw] wedge-sweep waiting generation=2 for=openclaw_recovery");
+      // The session list reaches back past the launch however long the waits ran.
+      const listed = gateway.calls.find((c) => c.method === "sessions.list").params;
+      expect(listed.activeMinutes).toBeGreaterThanOrEqual(60 + Math.ceil((made.now() - kLaunchAt) / 60_000));
+    });
+
+    it("a restart whose drain marked turns for the next gateway waits even when that gateway never logs a 'started' line; the wait gives up at its cap", async () => {
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }) });
+      const made = clocked(gateway, { overrides: { recoveryWaitCapMs: 60_000 } });
+      made.sweep.observeGatewayOutput("[gateway] [main-session-recovery] marked 1 interrupted main session(s) for restart recovery\n");
+      expect(await made.sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [], alerted: ["x"] });
+      expect(lines()).toContain("[alphaclaw] wedge-sweep waiting generation=2 for=openclaw_recovery");
+      expect(lines()).toContain("[alphaclaw] wedge-sweep recovery wait capped generation=2");
+      // That drain line belongs to one launch only.
+      log.mockClear();
+      expect(await made.sweep.onGatewayLaunch({ generation: 3, startedAt: made.now() })).toMatchObject({ recovered: [] });
+      expect(lines().some((line) => line.includes("for=openclaw_recovery"))).toBe(false);
+    });
+
+    it("a boot with nothing to resume does not wait, and a sweep superseded by a newer launch alerts nobody", async () => {
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }) });
+      const { sweep, notify } = createSweep(gateway);
+      let supersede;
+      const first = sweep.onGatewayLaunch({ generation: 1, startedAt: kLaunchAt });
+      expect(lines().some((line) => line.includes("for=openclaw_recovery"))).toBe(false);
+      expect((await first).alerted).toEqual(["x"]);
+
+      const slow = createGateway({
+        "sessions.list": async () => {
+          supersede();
+          return { body: { sessions: [row("y", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } };
+        },
+      });
+      const second = createSweep(slow);
+      let newer = null;
+      supersede = () => { newer ??= second.sweep.onGatewayLaunch({ generation: 9, startedAt: kLaunchAt }); };
+      expect(await second.sweep.onGatewayLaunch({ generation: 8, startedAt: kLaunchAt })).toEqual({ skipped: "superseded" });
+      expect((await newer).alerted).toEqual(["y"]);
+      expect(second.notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledTimes(1);
     });
   });
 });

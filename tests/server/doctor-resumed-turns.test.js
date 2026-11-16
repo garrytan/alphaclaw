@@ -224,11 +224,11 @@ describe("resumed Doctor turns after a gateway restart", () => {
     });
     await second.onGatewayLaunch({ generation: 1 });
     const sweepRows = (updatedAt) => [{ key, agentId: "main", hasActiveRun: false, abortedLastRun: true, updatedAt }];
-    const runSweep = async (rows, recover = () => { throw new Error("must not resume the stopped Doctor session"); }) => {
+    const runSweep = async (rows) => {
       const notify = vi.fn(async () => ({ ok: true }));
       const gateway = gatewayFor({
         "sessions.list": () => ({ sessions: rows }),
-        "sessions.recover": recover,
+        "sessions.recover": () => { throw new Error("must not resume the stopped Doctor session"); },
       });
       const sweep = createSessionWedgeSweep({
         clawCmd: gateway,
@@ -246,8 +246,7 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect(quiet.result).toEqual({ recovered: [], alerted: [] });
     expect(quiet.notify).not.toHaveBeenCalled();
 
-    // A later stuck turn is offered to OpenClaw first (GST-2884); it declines, so it is reported.
-    const later = await runSweep(sweepRows(stoppedAt + 4 * 60_000), () => ({ ok: false, error: { message: "Session recovery requires a restart-tombstoned session." } }));
+    const later = await runSweep(sweepRows(stoppedAt + 4 * 60_000));
     expect(later.result.alerted).toEqual([key]);
   });
 

@@ -391,15 +391,9 @@ relaunch (2026.10.5+; on 10.4 a killed turn could leave the session refusing
 every new message, the Oct 18 and Oct 22 incidents). One case is still open
 upstream: a channel session whose interrupted turn is never resumed keeps
 refusing new messages ("This conversation changed before your message could
-start"). OpenClaw resumes cut-off sessions one at a time, each after the
-previous resumed turn finished, so on a busy box the last one can start many
-minutes after the gateway is ready, and a message sent to it meanwhile waits
-and is then skipped (2026.11.3, GST-2884). After every launch, once the new
-gateway is ready + 90 s (AlphaClaw waits up to 30 minutes for ready), and once
-OpenClaw has logged `main-session restart recovery startup complete` when it
-had sessions to resume (up to 30 more minutes), AlphaClaw checks the sessions
-that were running when the restart was requested (or, after a pod kill or
-crash, sessions updated in the 15 minutes before the launch) through
+start"). After every launch, once the new gateway is ready + 90 s (AlphaClaw
+waits up to 30 minutes for ready, v0.10.288), AlphaClaw checks the sessions that were running when the restart was requested (or,
+after a crash, sessions active in the 15 minutes before the launch) through
 OpenClaw's own `sessions.list`:
 
 | what it sees | what it does |
@@ -407,23 +401,23 @@ OpenClaw's own `sessions.list`:
 | live work on the session | nothing |
 | a Doctor session (`agent:main:doctor:<n>`) whose restarted Doctor turn AlphaClaw stopped, and that has not changed since (v0.10.233; v0.10.238 remembers the stop across later launches and AlphaClaw restarts through its `resumed_turn_stopped` event) | nothing: no `sessions.recover`, no alert, so the Doctor run is not started again |
 | idle, not marked interrupted, was running before the restart | `sessions.recover` — OpenClaw decides whether the session holds an orphaned claim; if it does, it resumes the turn in the same session (`session_wedge` `recovered`), otherwise it answers "nothing to recover" and nothing is logged |
-| still marked interrupted (`abortedLastRun` or `status: interrupted`), recorded or not | `sessions.recover` first (v0.10.288; on 2026.11.3 and 11.4 OpenClaw accepts only a session it still holds a recovery claim for, so this rarely resumes one); if OpenClaw resumes it, `recovered`; otherwise `not_resumed` |
-| restart recovery gave up (`restartRecoveryStatus: tombstoned`) | `recovery_gave_up` |
+| still marked interrupted (`abortedLastRun`) | alert: `not_resumed` |
+| restart recovery gave up (`restartRecoveryStatus: tombstoned`) | alert: `recovery_gave_up` |
 
-A `not_resumed` session whose turn the restart interrupted (`status:
-interrupted`; a person's own /stop also sets `abortedLastRun`) that still
-looks the same two minutes later gets one line in its own chat or topic, through OpenClaw's
-`send` and the delivery route OpenClaw recorded for it: "⚠️ A gateway restart
-cut off the last reply here before it finished. Please send your last message
-again." (`session_wedge` `told_chat`, log
-`[alphaclaw] wedge-sweep told chat session=<key> channel=<channel>`). A
-session with no chat route (the main DM session, the Control UI), a
-`recovery_gave_up` session (OpenClaw already posted its own notice there and
-refuses a resend until `/new`), a failed send, or a failed confirming read
-goes to the watchdog's admin targets instead (`alerted`). AlphaClaw never
-resets a session (that drops its context) and never reads OpenClaw's SQLite
-files. Each session is told about once per state, across AlphaClaw restarts
-for the chat line (read back from the `told_chat` events).
+AlphaClaw never resets a session (that drops its context), never reads
+OpenClaw's SQLite files and never posts into the session's own chat; the alert
+goes to the watchdog's admin targets. Each session is alerted once per state.
+
+OpenClaw 2026.11.3 and 2026.11.4 resume interrupted sessions one at a time:
+each resumed turn has to finish before the next session starts, so on a busy
+box the last one can start many minutes after the gateway is ready, and a
+message sent to it in the meantime is dropped (GST-2884). When the gateway
+logs that it is resuming sessions (`marked N startup-orphaned main
+session(s)`, `started interrupted main session`, or the old gateway's
+`marked N interrupted main session(s)` while draining), the check waits for
+`main-session restart recovery startup complete` (up to 30 minutes, log
+`wedge-sweep waiting … for=openclaw_recovery`) so a session still in that
+queue is not reported as stuck.
 
 **What to do:** open the session in the Control UI and send a message (on
 2026.10.5+ a Control UI send reconciles an orphaned claim first). If it still
