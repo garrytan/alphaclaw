@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.282] - 2026-11-16
+
+AlphaClaw keeps managing its Particle setup after OpenClaw renames Particle's model. AlphaClaw wrote the model as `particle-1`; on a box with OpenClaw's Particle plugin installed, the first config change made through the running gateway (`openclaw config set`, or the dashboard) renamed that row to `particle-ai/particle-1` but left every `particle/particle-1` setting as it was. AlphaClaw then took its own block for your edit and stopped updating it, and Check models no longer found `particle/particle-1` in it.
+
+### Fixed
+- AlphaClaw now writes Particle's model under the id Particle and OpenClaw use, `particle/particle-ai/particle-1`, and so do the onboarding model list and the thinking default.
+- At boot, a Particle block an earlier AlphaClaw wrote gets its row renamed, and every `particle/particle-1` ref (primary, fallbacks, the models list, heartbeat, subagent and compaction models) moves to the new id, also where OpenClaw already renamed the row. `modelPolicy.allow` entries move at the next gateway launch. A row you edited yourself is left alone.
+
 ## [0.10.280] - 2026-11-15
 
 Your own Capy threads that reach the box over the relay can now use your gbrain.io account through the box's `gbrain_io` MCP server, like they already use your brain. Before this, the relay guard refused those tools to every relay session.

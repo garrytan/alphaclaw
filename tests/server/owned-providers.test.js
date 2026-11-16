@@ -19,7 +19,7 @@ describe("server/providers presets", () => {
     expect(particle).toMatchObject({ envVar: "PARTICLE_API_KEY", baseUrl: "https://api.particle.ai/v1", api: "openai-completions" });
     const [model] = particle.models;
     expect(model).toMatchObject({
-      id: "particle-1",
+      id: "particle-ai/particle-1",
       reasoning: true,
       input: ["text", "image"],
       contextWindow: 1048576,
@@ -30,7 +30,7 @@ describe("server/providers presets", () => {
     // off must send "none".
     expect(model.compat.reasoningEffortMap.off).toBe("none");
     expect(model.compat).toMatchObject({ supportsTools: true, supportsUsageInStreaming: true, supportsPromptCacheKey: true });
-    expect(particle.listedAliases["particle-1"]).toBe("particle-ai/particle-1");
+    expect(particle.renamedModelIds).toEqual({ "particle-1": "particle-ai/particle-1" });
   });
 });
 
@@ -76,19 +76,93 @@ describe("server/providers applyOwnedProviders", () => {
     const previous = { baseUrl: particle.baseUrl, api: particle.api, apiKey: "${PARTICLE_API_KEY}", models: [{ ...particle.models[0], maxTokens: 32000 }] };
     const preset = { ...particle, previousOwned: [previous] };
     const config = { models: { providers: { particle: { ...structuredClone(previous), timeoutSeconds: 300 } } } };
-    expect(classifyOwnedProvider(config, preset)).toEqual({ state: "previous", differs: ["models[particle-1]"] });
+    expect(classifyOwnedProvider(config, preset)).toEqual({ state: "previous", differs: ["models[particle-ai/particle-1]"] });
     expect(applyOwnedProviders(config, { env: { PARTICLE_API_KEY: kKey }, presets: [preset] }).results).toEqual([{ id: "particle", action: "upgraded" }]);
     expect(config.models.providers.particle.models[0].maxTokens).toBe(131072);
     expect(config.models.providers.particle.timeoutSeconds).toBe(300);
   });
 
   it("leaves an operator-edited block untouched and names the owned keys that differ", () => {
-    const edited = { baseUrl: "https://proxy.example.test/v1", api: "openai-completions", apiKey: "${PARTICLE_API_KEY}", models: [{ id: "particle-1", name: "P1", contextWindow: 200000 }] };
+    const edited = { baseUrl: "https://proxy.example.test/v1", api: "openai-completions", apiKey: "${PARTICLE_API_KEY}", models: [{ id: "particle-ai/particle-1", name: "P1", contextWindow: 200000 }] };
     const config = { models: { providers: { particle: structuredClone(edited) } } };
     expect(applyOwnedProviders(config, { env: { PARTICLE_API_KEY: kKey } }).results).toEqual([
-      { id: "particle", action: "left_customized", differs: ["baseUrl", "models[particle-1]"] },
+      { id: "particle", action: "left_customized", differs: ["baseUrl", "models[particle-ai/particle-1]"] },
     ]);
     expect(config.models.providers.particle).toEqual(edited);
+  });
+});
+
+describe("server/providers renamed model ids (particle-1 -> particle-ai/particle-1)", () => {
+  const { migrateRenamedOwnedModels } = require("../../lib/server/providers/renamed-models");
+  const oldRef = "particle/particle-1";
+  const newRef = "particle/particle-ai/particle-1";
+  const oldRow = () => ({ ...structuredClone(particle.models[0]), id: "particle-1" });
+  const newRow = () => structuredClone(particle.models[0]);
+  const blockWith = (rows, extra = {}) => ({ baseUrl: particle.baseUrl, api: particle.api, apiKey: "${PARTICLE_API_KEY}", models: rows, ...extra });
+  // modelPolicy.allow moves at the next launch (model-policy.js), never at boot.
+  const agentsNaming = (ref, allowRef = ref) => ({
+    defaults: {
+      model: { primary: ref, fallbacks: [ref, "anthropic/claude-opus-5-5"] },
+      models: { "anthropic/claude-opus-5-5": {}, [ref]: { alias: "particle", params: { thinking: "high" } } },
+      modelPolicy: { allow: ["anthropic/claude-opus-5-5", allowRef] },
+      heartbeat: { model: ref },
+      subagents: { model: ref },
+      compaction: { model: ref, memoryFlush: { model: ref } },
+    },
+    list: [{ id: "ops", model: ref }, { id: "main", model: { primary: ref }, models: { [ref]: {} }, modelPolicy: { allow: [allowRef] } }],
+  });
+
+  it("a block an earlier AlphaClaw wrote: renames the row, moves every ref, and the preset then sees its own block", () => {
+    const config = { models: { providers: { particle: blockWith([oldRow(), { id: "glm-5.3-flash" }], { timeoutSeconds: 600 }) } }, agents: agentsNaming(oldRef) };
+    expect(migrateRenamedOwnedModels(config)).toEqual([{ provider: "particle", from: "particle-1", to: "particle-ai/particle-1", rowRenamed: true, refs: 10 }]);
+    expect(config.models.providers.particle).toEqual(blockWith([newRow(), { id: "glm-5.3-flash" }], { timeoutSeconds: 600 }));
+    expect(config.agents).toEqual(agentsNaming(newRef, oldRef));
+    expect(classifyOwnedProvider(config, particle).state).toBe("current");
+    const after = structuredClone(config);
+    expect(migrateRenamedOwnedModels(config)).toEqual([]);
+    expect(config).toEqual(after);
+  });
+
+  it("a block OpenClaw's Particle plugin already rewrote: moves the dangling refs and leaves the block alone", () => {
+    const config = { models: { providers: { particle: blockWith([newRow()]) } }, agents: agentsNaming(oldRef) };
+    expect(migrateRenamedOwnedModels(config)).toEqual([{ provider: "particle", from: "particle-1", to: "particle-ai/particle-1", rowRenamed: false, refs: 10 }]);
+    expect(config.models.providers.particle).toEqual(blockWith([newRow()]));
+    expect(config.agents).toEqual(agentsNaming(newRef, oldRef));
+    expect(migrateRenamedOwnedModels(config)).toEqual([]);
+  });
+
+  it("an operator-edited block whose row OpenClaw rewrote: keeps every edit and fixes only the dangling refs", () => {
+    const edited = blockWith([{ ...newRow(), contextWindow: 200000 }], { baseUrl: "https://proxy.example.test/v1" });
+    const config = { models: { providers: { particle: structuredClone(edited) } }, agents: { defaults: { model: { primary: oldRef } } } };
+    expect(migrateRenamedOwnedModels(config)).toEqual([{ provider: "particle", from: "particle-1", to: "particle-ai/particle-1", rowRenamed: false, refs: 1 }]);
+    expect(config.models.providers.particle).toEqual(edited);
+    expect(config.agents.defaults.model.primary).toBe(newRef);
+  });
+
+  it("merges into a models row the new ref already has, the new row's own settings winning", () => {
+    const config = {
+      models: { providers: { particle: blockWith([newRow()]) } },
+      agents: { defaults: { models: { [oldRef]: { alias: "p", params: { thinking: "high", temperature: 0.2 } }, [newRef]: { params: { thinking: "low" } } } } },
+    };
+    migrateRenamedOwnedModels(config);
+    expect(config.agents.defaults.models).toEqual({ [newRef]: { alias: "p", params: { thinking: "low", temperature: 0.2 } } });
+  });
+
+  it.each([
+    ["an operator-edited particle-1 row", () => blockWith([{ ...oldRow(), contextWindow: 200000 }])],
+    ["an earlier block on another baseUrl", () => blockWith([oldRow()], { baseUrl: "https://proxy.example.test/v1" })],
+    ["both rows", () => blockWith([oldRow(), newRow()])],
+  ])("leaves %s and its refs as they are", (_, makeBlock) => {
+    const config = { models: { providers: { particle: makeBlock() } }, agents: agentsNaming(oldRef) };
+    const before = structuredClone(config);
+    expect(migrateRenamedOwnedModels(config)).toEqual([]);
+    expect(config).toEqual(before);
+  });
+
+  it("touches no ref while there is no Particle block", () => {
+    const config = { agents: agentsNaming(oldRef) };
+    expect(migrateRenamedOwnedModels(config)).toEqual([]);
+    expect(config).toEqual({ agents: agentsNaming(oldRef) });
   });
 });
 
@@ -98,7 +172,7 @@ describe("server/providers ensureOwnedProviders", () => {
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-owned-providers-"));
     configPath = path.join(root, "openclaw.json");
-    fs.writeFileSync(configPath, JSON.stringify({ agents: { defaults: { model: { primary: "particle/particle-1" } } } }, null, 2));
+    fs.writeFileSync(configPath, JSON.stringify({ agents: { defaults: { model: { primary: "particle/particle-ai/particle-1" } } } }, null, 2));
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -134,11 +208,11 @@ describe("server/providers ensureOwnedProviders", () => {
 describe("server/providers thinking defaults (GST-121)", () => {
   const { applyOwnedProviderThinkingDefaults, applyOwnedProviderThinkingDefaultsBeforeLaunch } = require("../../lib/server/providers/model-defaults");
   const env = { PARTICLE_API_KEY: kKey };
-  const ref = "particle/particle-1";
+  const ref = "particle/particle-ai/particle-1";
   const withRow = (row, defaults = {}) => ({ agents: { defaults: { model: { primary: ref }, ...defaults, models: { [ref]: row } } } });
 
   it("declares high for particle-1 only", () => {
-    expect(particle.thinkingDefaults).toEqual({ "particle-1": "high" });
+    expect(particle.thinkingDefaults).toEqual({ "particle-ai/particle-1": "high" });
     expect(particle.models[0]).not.toHaveProperty("thinking");
     expect(particle.models[0]).not.toHaveProperty("params");
   });
@@ -206,7 +280,7 @@ describe("server/providers thinking defaults (GST-121)", () => {
       fs.writeFileSync(configPath, JSON.stringify(withRow({}), null, 2));
       const log = vi.fn();
       expect(applyOwnedProviderThinkingDefaultsBeforeLaunch({ openclawDir: root, env, logger: { log, warn: () => {} } })).toEqual({ ok: true, applied: [{ ref, thinking: "high" }] });
-      expect(log).toHaveBeenCalledWith('[alphaclaw] provider defaults: agents.defaults.models["particle/particle-1"].params.thinking=high before launch');
+      expect(log).toHaveBeenCalledWith('[alphaclaw] provider defaults: agents.defaults.models["particle/particle-ai/particle-1"].params.thinking=high before launch');
       const bytes = fs.readFileSync(configPath, "utf8");
       expect(JSON.parse(bytes).agents.defaults.models[ref]).toEqual({ params: { thinking: "high" } });
       const past = new Date(Date.now() - 60_000);
@@ -248,6 +322,28 @@ describe("server/providers at boot", () => {
     expect(JSON.parse(text).models.providers.particle.apiKey).toBe("${PARTICLE_API_KEY}");
     expect(text).not.toContain(kKey);
     expect(normalizeBootConfig(deps())).toEqual({ changed: false });
+  });
+
+  it("moves particle/particle-1 refs to the row OpenClaw's plugin renamed, with or without the key, once, with a log line", () => {
+    for (const env of [{}, { PARTICLE_API_KEY: kKey }]) {
+      const block = { baseUrl: particle.baseUrl, api: particle.api, apiKey: "${PARTICLE_API_KEY}", models: structuredClone(particle.models) };
+      fs.writeFileSync(configPath, JSON.stringify({
+        models: { providers: { particle: block } },
+        agents: { defaults: { model: { primary: "particle/particle-1" }, models: { "particle/particle-1": { params: { thinking: "high" } } }, modelPolicy: { allow: ["particle/particle-1"] } } },
+      }));
+      const log = vi.fn();
+      const run = () => normalizeBootConfig({ ...deps(), env: { OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_STATE_DIR: root, ...env }, logger: { log } });
+      expect(run()).toEqual({ changed: true });
+      const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      expect(saved.models.providers.particle).toEqual(block);
+      expect(saved.agents.defaults).toMatchObject({
+        model: { primary: "particle/particle-ai/particle-1" },
+        models: { "particle/particle-ai/particle-1": { params: { thinking: "high" } } },
+        modelPolicy: { allow: ["particle/particle-1"] },
+      });
+      expect(log).toHaveBeenCalledWith("[alphaclaw] provider particle: model particle-1 is now particle-ai/particle-1, 2 refs updated");
+      expect(run()).toEqual({ changed: false });
+    }
   });
 });
 

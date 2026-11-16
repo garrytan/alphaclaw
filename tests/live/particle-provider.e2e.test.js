@@ -5,7 +5,7 @@
 // with only baseUrl pointed at the stub, and openclaw.json carries an
 // agents.defaults.modelPolicy.allow list that does not name Particle, the
 // shape of a migrated box. It proves:
-//   1. the launch adds particle/particle-1 to modelPolicy.allow while no
+//   1. the launch adds particle/particle-ai/particle-1 to modelPolicy.allow while no
 //      gateway serves (model-policy.js), so the first turn is not refused,
 //      and fills params.thinking=high into its agents.defaults.models row
 //      (providers/model-defaults.js; GST-121);
@@ -115,8 +115,8 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
       agents: {
         defaults: {
           workspace: path.join(OPENCLAW_DIR, "workspace"),
-          model: { primary: "particle/particle-1" },
-          models: { "particle/particle-1": {} },
+          model: { primary: "particle/particle-ai/particle-1" },
+          models: { "particle/particle-ai/particle-1": {} },
           modelPolicy: { allow: ["openai/gpt-6-luna"] },
         },
       },
@@ -168,7 +168,7 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
       expect(block.apiKey).toBe("${PARTICLE_API_KEY}");
       expect(fs.readFileSync(configPath, "utf8")).not.toContain(kKey);
 
-      const listParticle = (env) => runCliJson(repoOpenclawBin(), ["models", "list", "--json"], { env }).models.find((model) => model.key === "particle/particle-1");
+      const listParticle = (env) => runCliJson(repoOpenclawBin(), ["models", "list", "--json"], { env }).models.find((model) => model.key === "particle/particle-ai/particle-1");
       // The modelPolicy list governs: before the launch adds Particle to it,
       // OpenClaw does not offer the model at all.
       expect(listParticle(gateway.gatewayEnv())).toBeUndefined();
@@ -176,8 +176,8 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
       await gateway.startGateway();
       await waitFor(readyzOk, 180_000, "gateway /readyz 200");
       const launched = JSON.parse(fs.readFileSync(configPath, "utf8")).agents.defaults;
-      expect(launched.modelPolicy.allow).toEqual(["openai/gpt-6-luna", "particle/particle-1"]);
-      expect(launched.models["particle/particle-1"]).toEqual({ params: { thinking: "high" } });
+      expect(launched.modelPolicy.allow).toEqual(["openai/gpt-6-luna", "particle/particle-ai/particle-1"]);
+      expect(launched.models["particle/particle-ai/particle-1"]).toEqual({ params: { thinking: "high" } });
       expect(listParticle(gateway.gatewayEnv())).toMatchObject({ available: true, contextWindow: 1048576, input: "text+image" });
 
       send("Hi");
@@ -185,7 +185,7 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
       const first = chatRequests()[0];
       expect(first.auth).toBe(`Bearer ${kKey}`);
       expect(first.body).toMatchObject({
-        model: "particle-1",
+        model: "particle-ai/particle-1",
         stream: true,
         stream_options: { include_usage: true },
         max_completion_tokens: 131072,
@@ -217,7 +217,7 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
 
       const replies = history().filter((message) => message.role === "assistant" && message.provider === "particle");
       expect(replies.length).toBeGreaterThanOrEqual(3);
-      expect(replies[0]).toMatchObject({ model: "particle-1", usage: { input: 12, output: 9, totalTokens: 21 } });
+      expect(replies[0]).toMatchObject({ model: "particle-ai/particle-1", usage: { input: 12, output: 9, totalTokens: 21 } });
       expect(replies[0].usage.cost.input).toBeCloseTo(12 * 0.25 / 1e6, 12);
       expect(replies[0].usage.cost.output).toBeCloseTo(9 * 1 / 1e6, 12);
     },

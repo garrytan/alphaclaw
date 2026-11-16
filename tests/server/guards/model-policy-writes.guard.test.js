@@ -8,8 +8,8 @@
 const { auditTree, formatHits, lineOf, stripComments } = require("./guard-utils");
 
 const kWriteRe = /(?<!\b(?:const|let|var)\s+)\bmodelPolicy\b(?:\s*(?:\.\s*allow|\[\s*["'`]allow["'`]\s*\]))?\s*(?:=(?![=>])|\.\s*(?:push|unshift|splice)\s*\()|["'`]agents\.[^"'`\n]*\bmodelPolicy\b/g;
-const kCallRe = /\b(applyModelPolicyGaps|applyModelPolicyBeforeLaunch)\s*\(/g;
-const kDeclarationRe = /^\s*const\s+(applyModelPolicyGaps|applyModelPolicyBeforeLaunch)\s*=/;
+const kCallRe = /\b(applyModelPolicyGaps|applyModelPolicyBeforeLaunch|renameModelPolicyRefs)\s*\(/g;
+const kDeclarationRe = /^\s*const\s+(applyModelPolicyGaps|applyModelPolicyBeforeLaunch|renameModelPolicyRefs)\s*=/;
 
 const scanModelPolicyWrites = (rawText, relPath) => {
   const text = stripComments(rawText);
@@ -32,7 +32,11 @@ const scanModelPolicyWrites = (rawText, relPath) => {
 const kSanctioned = {
   // The one writer: appends the missing refs to the governing allow list.
   "lib/server/model-policy.js::write#1": true,
-  // applyModelPolicyBeforeLaunch closes the gaps inside its locked write.
+  // Moves a renamed preset model's allow entries (providers/renamed-models.js).
+  "lib/server/model-policy.js::write#2": true,
+  // applyModelPolicyBeforeLaunch closes the gaps and moves renamed entries
+  // inside its locked write.
+  "lib/server/model-policy.js::renameModelPolicyRefs#1": true,
   "lib/server/model-policy.js::applyModelPolicyGaps#1": true,
   // requestGatewayLaunch, in the no-gateway window beside the snapshot sweep.
   "lib/server/gateway.js::applyModelPolicyBeforeLaunch#1": true,
