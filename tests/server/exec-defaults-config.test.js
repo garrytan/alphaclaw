@@ -541,17 +541,40 @@ describe("server/exec-defaults-config openclaw tool auto-approve (OpenClaw 2026.
   it("keeps an operator's own choice: false stays false, other tools.openclaw keys stay, per-agent overrides are untouched", async () => {
     const config = {
       tools: { exec: { mode: "full" }, openclaw: { autoApproveChanges: false } },
-      agents: { list: [{ id: "ops", tools: { openclaw: { autoApproveChanges: false } } }] },
+      agents: { entries: { ops: { tools: { openclaw: { autoApproveChanges: false } } } } },
     };
     const kept = await ensureOn(config, "2026.11.4");
     expect(kept.result.openclawChanged).toBe(false);
     expect(kept.saved.tools.openclaw).toEqual({ autoApproveChanges: false });
+    expect(kept.saved.agents).toEqual(config.agents);
 
     const other = { tools: { exec: { mode: "full" }, openclaw: { note: "x" } } };
     expect(ensureManagedOpenclawExecDefaults(structuredClone(other), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toEqual({ note: "x", autoApproveChanges: true });
 
     const odd = { tools: { exec: { mode: "full" }, openclaw: "on" } };
     expect(ensureManagedOpenclawExecDefaults(structuredClone(odd), { openclawVersion: "2026.11.4" })).toEqual({ config: odd, changed: false });
+  });
+
+  it.each([
+    ["exec mode ask", { tools: { exec: { mode: "ask" } } }],
+    ["exec mode allowlist", { tools: { exec: { mode: "allowlist" } } }],
+    ["exec mode deny", { tools: { exec: { mode: "deny" } } }],
+    ["legacy exec security allowlist", { tools: { exec: { security: "allowlist", ask: "off" } } }],
+    ["mode full with ask on-miss", { tools: { exec: { mode: "full", ask: "on-miss" } } }],
+    ["an agent narrowing exec", { tools: { exec: { mode: "full" } }, agents: { entries: { ops: { tools: { exec: { mode: "ask" } } } } } }],
+    ["a legacy agents.list entry narrowing exec", { tools: { exec: { mode: "full" } }, agents: { list: [{ id: "ops", tools: { exec: { mode: "deny" } } }] } }],
+    ["agent defaults narrowing exec", { tools: { exec: { mode: "full" } }, agents: { defaults: { tools: { exec: { mode: "allowlist" } } } } }],
+  ])("grants nothing without Full Access exec for every agent (%s): the key would skip OpenClaw's exec-policy check", async (_label, config) => {
+    const { result, bytes } = await ensureOn(config, "2026.11.4");
+    expect(result.openclawChanged).toBe(false);
+    expect(bytes).toBe(JSON.stringify(config, null, 2));
+  });
+
+  it("writes the key under legacy full exec and when an agent's exec override keeps Full Access", async () => {
+    const legacy = { tools: { exec: { security: "full", ask: "off" } } };
+    expect(ensureManagedOpenclawExecDefaults(structuredClone(legacy), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toEqual({ autoApproveChanges: true });
+    const agentFull = { tools: { exec: { mode: "full" } }, agents: { entries: { ops: { tools: { exec: { strictInlineEval: true } } } } } };
+    expect(ensureManagedOpenclawExecDefaults(structuredClone(agentFull), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toEqual({ autoApproveChanges: true });
   });
 });
 

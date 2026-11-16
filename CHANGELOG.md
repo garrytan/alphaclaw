@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 On OpenClaw 2026.11.4, an agent's own changes through OpenClaw's `openclaw` tool apply at once again, as they did on 2026.11.3. 2026.11.4 holds them for the owner's approval whenever a plugin checks every tool call, which AlphaClaw's relay guard does, so a cron job or heartbeat asking for a change would have waited for a tap.
 
 ### Changed
-- When the installed OpenClaw is 2026.11.4 or later, AlphaClaw sets `tools.openclaw.autoApproveChanges: true` at boot if the key is absent. A value you set yourself, `false` included, and per-agent settings are left alone. OpenClaw still refuses the tool on any turn the owner did not start.
+- When the installed OpenClaw is 2026.11.4 or later and exec runs with Full Access for every agent (AlphaClaw's default), AlphaClaw sets `tools.openclaw.autoApproveChanges: true` at boot if the key is absent. With exec set to ask, allowlist or deny it writes nothing. A value you set yourself, `false` included, and per-agent settings are left alone. OpenClaw still refuses the tool on any turn the owner did not start.
 
 ## [0.10.285] - 2026-11-16
 
