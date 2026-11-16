@@ -576,5 +576,30 @@ describe("server/exec-defaults-config openclaw tool auto-approve (OpenClaw 2026.
     const agentFull = { tools: { exec: { mode: "full" } }, agents: { entries: { ops: { tools: { exec: { strictInlineEval: true } } } } } };
     expect(ensureManagedOpenclawExecDefaults(structuredClone(agentFull), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toEqual({ autoApproveChanges: true });
   });
+
+  it.each([
+    ["security full with ask unset (Wintermute's global exec)", { tools: { exec: { security: "full", strictInlineEval: false } } }],
+    [
+      "Wintermute's global exec with the main agent's own exec merged over it",
+      {
+        tools: { exec: { security: "full", strictInlineEval: false } },
+        agents: { ownership: "explicit", entries: { main: { tools: { exec: { notifyOnExit: false } } }, "meeting-memory": {} } },
+      },
+    ],
+    ["no mode, security or ask", { tools: { exec: { strictInlineEval: false } } }],
+    ["host gateway", { tools: { exec: { security: "full", host: "gateway" } } }],
+  ])("writes the key under %s, which OpenClaw resolves to Full Access", async (_label, raw) => {
+    expect(ensureManagedOpenclawExecDefaults(structuredClone(raw), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toEqual({ autoApproveChanges: true });
+  });
+
+  it.each([
+    ["an agent narrowing ask over security full", { tools: { exec: { security: "full" } }, agents: { entries: { main: { tools: { exec: { ask: "on-miss" } } } } } }],
+    ["exec on a node host", { tools: { exec: { security: "full", host: "node" } } }],
+    ["exec in a sandbox for one agent", { tools: { exec: { mode: "full" } }, agents: { entries: { main: { tools: { exec: { host: "sandbox" } } } } } }],
+    ["agent defaults full over a global deny", { tools: { exec: { mode: "deny" } }, agents: { defaults: { tools: { exec: { mode: "full" } } } } }],
+    ["mode deny with security full", { tools: { exec: { mode: "deny", security: "full", ask: "off" } } }],
+  ])("writes nothing under %s", async (_label, raw) => {
+    expect(ensureManagedOpenclawExecDefaults(structuredClone(raw), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toBeUndefined();
+  });
 });
 
