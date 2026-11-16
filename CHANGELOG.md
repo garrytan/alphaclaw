@@ -12,7 +12,7 @@ The secret drop page is now an ordinary form that saves once and shows its statu
 ### Changed
 - `/secret/<token>` is a Setup UI page: one Save button that disables itself and shows a spinner while it saves, then "Saved NAME at HH:MM" with whether the key is usable now or after the gateway's next start. A failed save shows its error inline with Retry. A second press while a save runs waits for that save and gets its answer instead of a 409; a press on a stored link writes nothing and shows the stored state.
 - Reopening a used or partly saved link shows what its save did for a day afterwards, instead of "expired or already used". A link that expired unused says nothing was saved with it.
-- Open links survive an AlphaClaw restart within their 15 minutes: AlphaClaw keeps each link's record (name, status, the link token's sha256, the page's CSRF value, which stores hold it; never a value) in `db/secret-drop-requests.json` under its root, mode 0600.
+- Open links survive an AlphaClaw restart within their 15 minutes: AlphaClaw keeps each link's record (name, status, the link token's sha256, the page's CSRF value, which stores hold it; never a value) in `db/secret-drop-requests.json` under its root, mode 0600. A restart in the middle of a save reopens the link saying the save was interrupted and that saving again is safe, never that nothing was saved.
 
 ## [0.10.287] - 2026-11-16
 

@@ -627,6 +627,68 @@ describe("secret drop: reopening, restarts and failures", () => {
     expectNoCanary(h, [during.res, during.status, done, joined]);
   });
 
+it("a restart in the middle of a save reopens the link as interrupted, and saving again clears it", async () => {
+    const store = createStateStore();
+    let openGate;
+    const before = createHarness({ store, lockGate: new Promise((resolve) => { openGate = resolve; }) });
+    const { token, id } = await askForLink(before);
+    const { csrf } = await openPage(before, token);
+    const first = save(before, token, { csrf, value: kCanary }).then((res) => res);
+    await vi.waitFor(() => expect(before.lockEvents).toContain("acquire:secret_drop"));
+    const onDisk = fs.readFileSync(store.path, "utf8");
+    expect(JSON.parse(onDisk).requests[0].saveStartedAt).toEqual(expect.any(Number));
+    expect(onDisk).not.toContain(kPrefix);
+    expect(onDisk).not.toContain(token);
+
+    const after = createHarness({ store });
+    expect(after.lines.join("\n")).toContain(`save interrupted by a restart id=${id} name=GITHUB_TOKEN`);
+    const reopened = await openPage(after, token);
+    expect(reopened.res.status).toBe(200);
+    expect(reopened.status.body.link).toMatchObject({ status: "pending", interrupted: true });
+    const retried = await save(after, token, { csrf, value: kCanary });
+    expect(retried.body.link.status).toBe("stored");
+    expect(retried.body.link.interrupted).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(store.path, "utf8")).requests[0]).toMatchObject({ saveStartedAt: null, interrupted: false });
+    openGate();
+    await first;
+    expectNoCanary(after, [reopened.res, reopened.status, retried]);
+  });
+
+  it("an interrupted link that then expires never says nothing was saved", async () => {
+    const store = createStateStore();
+    let openGate;
+    const before = createHarness({ store, lockGate: new Promise((resolve) => { openGate = resolve; }) });
+    const { token } = await askForLink(before);
+    const { csrf } = await openPage(before, token);
+    const first = save(before, token, { csrf, value: kCanary }).then((res) => res);
+    await vi.waitFor(() => expect(before.lockEvents).toContain("acquire:secret_drop"));
+    const after = createHarness({ store });
+    after.advance(16 * 60 * 1000);
+    const { res, status } = await openPage(after, token);
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain("Nothing was saved");
+    expect(status.body.link).toMatchObject({ status: "expired", interrupted: true });
+    const late = await save(after, token, { csrf, value: kCanary });
+    expect(late.status).toBe(410);
+    expect(late.body.link).toMatchObject({ status: "expired", interrupted: true });
+    expect(after.envWrites).toEqual([]);
+    openGate();
+    await first;
+  });
+
+  it("a refused save clears its in-progress mark, so a restart does not call it interrupted", async () => {
+    const store = createStateStore();
+    const before = createHarness({ store, fail: ["--dry-run"] });
+    const { token } = await askForLink(before);
+    const { csrf } = await openPage(before, token);
+    const refused = await save(before, token, { csrf, value: kCanary });
+    expect(refused.status).toBe(400);
+    const after = createHarness({ store });
+    const { status } = await openPage(after, token);
+    expect(status.body.link.status).toBe("pending");
+    expect(status.body.link.interrupted).toBeUndefined();
+  });
+
   it("ignores records in the state file that are not well formed", () => {
     const store = createStateStore();
     store.write({ requests: [{ id: "sd_nothex", name: "GITHUB_TOKEN", status: "pending" }, { id: "sd_" + "a".repeat(18), name: "bad name", status: "pending", createdAt: 1, expiresAt: 2, tokenHash: "f".repeat(64), csrf: "c" }, "junk"] });
