@@ -383,6 +383,54 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
       expect(insertEvent.mock.calls.map(([e]) => e.status)).toEqual(["alerted", "alerted", "alerted"]);
     });
 
+    it("posts nothing in the chat for a tombstoned session (OpenClaw already told it) or a person's own /stop; those go to the owner alert", async () => {
+      const gateway = createGateway({
+        "sessions.list": async () => ({ body: { sessions: [
+          cutOff({ restartRecoveryStatus: "tombstoned" }),
+          row("agent:main:telegram:group:-100123:topic:9", { abortedLastRun: true, status: "killed", updatedAt: kLaunchAt - 20_000, deliveryContext: { ...topicRoute, threadId: 9 } }),
+        ] } }),
+        "sessions.recover": notRecoverable,
+        send: async () => { throw new Error("must not be called"); },
+      });
+      const { sweep, notify } = createSweep(gateway);
+      const result = await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
+      expect(result.alerted).toHaveLength(2);
+      expect(gateway.calls.map((c) => c.method)).not.toContain("send");
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify.mock.calls[0][0]).toContain("OpenClaw gave up resuming it");
+    });
+
+    it("posts nothing in the chat when the confirming re-read fails", async () => {
+      let listCalls = 0;
+      const gateway = createGateway({
+        "sessions.list": async () => (++listCalls === 1 ? { body: { sessions: [cutOff()] } } : { ok: false, body: null }),
+        "sessions.recover": notRecoverable,
+        send: async () => { throw new Error("must not be called"); },
+      });
+      const { sweep, notify } = createSweep(gateway);
+      expect((await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).alerted).toEqual([topicKey]);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(lines()).toContain("[alphaclaw] wedge-sweep confirm read failed generation=2 candidates=1");
+    });
+
+    it("a route without a topic or account is sent as is, and a line told before an AlphaClaw restart is not posted again", async () => {
+      const plain = row("agent:main:telegram:direct:5", { status: "interrupted", abortedLastRun: true, updatedAt: kLaunchAt - 20_000, deliveryContext: { channel: "telegram", to: "telegram:5", accountId: " ", threadId: null } });
+      const gateway = createGateway({
+        "sessions.list": async () => ({ body: { sessions: [plain, cutOff()] } }),
+        "sessions.recover": notRecoverable,
+        send: async () => ({ body: { ok: true } }),
+      });
+      const listToldSince = vi.fn(() => [{ sessionKey: topicKey, sessionId: `id-${topicKey}`, updatedAt: kLaunchAt - 40_000 }]);
+      const { sweep, insertEvent } = createSweep(gateway, { listToldSince });
+      expect((await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).alerted).toEqual([plain.key]);
+      const sends = gateway.calls.filter((c) => c.method === "send").map((c) => c.params);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toMatchObject({ channel: "telegram", to: "telegram:5" });
+      expect(sends[0]).not.toHaveProperty("threadId");
+      expect(sends[0]).not.toHaveProperty("accountId");
+      expect(insertEvent.mock.calls[0][0].details).toMatchObject({ sessionKey: plain.key, sessionId: plain.sessionId, updatedAt: plain.updatedAt });
+    });
+
     it("waits for a slow boot well past the restart ready budget (the box was ready about 8 minutes after it listened)", async () => {
       let clock = kLaunchAt;
       const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [] } }) });

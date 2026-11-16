@@ -407,19 +407,23 @@ OpenClaw's own `sessions.list`:
 | live work on the session | nothing |
 | a Doctor session (`agent:main:doctor:<n>`) whose restarted Doctor turn AlphaClaw stopped, and that has not changed since (v0.10.233; v0.10.238 remembers the stop across later launches and AlphaClaw restarts through its `resumed_turn_stopped` event) | nothing: no `sessions.recover`, no alert, so the Doctor run is not started again |
 | idle, not marked interrupted, was running before the restart | `sessions.recover` — OpenClaw decides whether the session holds an orphaned claim; if it does, it resumes the turn in the same session (`session_wedge` `recovered`), otherwise it answers "nothing to recover" and nothing is logged |
-| still marked interrupted (`abortedLastRun` or `status: interrupted`), recorded or not | `sessions.recover` first (v0.10.288); if OpenClaw resumes it, `recovered`; otherwise `not_resumed` |
+| still marked interrupted (`abortedLastRun` or `status: interrupted`), recorded or not | `sessions.recover` first (v0.10.288; on 2026.11.3 and 11.4 OpenClaw accepts only a session it still holds a recovery claim for, so this rarely resumes one); if OpenClaw resumes it, `recovered`; otherwise `not_resumed` |
 | restart recovery gave up (`restartRecoveryStatus: tombstoned`) | `recovery_gave_up` |
 
-A `not_resumed` or `recovery_gave_up` session that still looks the same two
-minutes later gets one line in its own chat or topic, through OpenClaw's
+A `not_resumed` session whose turn the restart interrupted (`status:
+interrupted`; a person's own /stop also sets `abortedLastRun`) that still
+looks the same two minutes later gets one line in its own chat or topic, through OpenClaw's
 `send` and the delivery route OpenClaw recorded for it: "⚠️ A gateway restart
 cut off the last reply here before it finished. Please send your last message
 again." (`session_wedge` `told_chat`, log
 `[alphaclaw] wedge-sweep told chat session=<key> channel=<channel>`). A
-session with no chat route (the main DM session, the Control UI) or whose send
-fails is alerted to the watchdog's admin targets instead (`alerted`).
-AlphaClaw never resets a session (that drops its context) and never reads
-OpenClaw's SQLite files. Each session is told about once per state.
+session with no chat route (the main DM session, the Control UI), a
+`recovery_gave_up` session (OpenClaw already posted its own notice there and
+refuses a resend until `/new`), a failed send, or a failed confirming read
+goes to the watchdog's admin targets instead (`alerted`). AlphaClaw never
+resets a session (that drops its context) and never reads OpenClaw's SQLite
+files. Each session is told about once per state, across AlphaClaw restarts
+for the chat line (read back from the `told_chat` events).
 
 **What to do:** open the session in the Control UI and send a message (on
 2026.10.5+ a Control UI send reconciles an orphaned claim first). If it still
