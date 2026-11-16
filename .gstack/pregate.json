@@ -141,7 +141,7 @@
       "paths": [
         "lib/server/model-catalog-curated.json"
       ],
-      "pattern": "\"key\": \"[a-z0-9-]+(/[a-z0-9.-]+)+\",?\\s*$",
+      "pattern": "[a-z0-9-]+(?:/[a-z0-9.-]+)+\",?\\s*$",
       "reason": "the curated model catalog's \"key\" field is a provider/model ref such as particle/particle-ai/particle-1, not a credential"
     }
   ]
