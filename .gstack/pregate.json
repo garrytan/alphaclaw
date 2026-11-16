@@ -6,6 +6,7 @@
       "tests/server/alphaclaw-version.test.js"
     ],
     "tests/browser/**": [],
+    "scripts/build-ui.mjs": [],
     "tests/live/**": [],
     "tests/container/**": []
   },

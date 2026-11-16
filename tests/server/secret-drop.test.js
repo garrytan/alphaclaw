@@ -580,5 +580,59 @@ describe("secret drop: reopening, restarts and failures", () => {
     expect(admin.body.link).toMatchObject({ name: "GITHUB_TOKEN", status: "pending", reason: "open PRs" });
     expect(Object.keys(admin.body.link)).not.toContain("tokenHash");
   });
+
+  it("a state file that cannot be written is removed, so a restart never reopens a spent link", async () => {
+    const store = createStateStore();
+    let failWrites = false;
+    const flaky = { path: store.path, read: () => store.read(), write: (state) => {
+      if (failWrites) throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+      return store.write(state);
+    } };
+    const before = createHarness({ store: flaky });
+    const { token } = await askForLink(before);
+    const { csrf } = await openPage(before, token);
+    failWrites = true;
+    const saved = await save(before, token, { csrf, value: kCanary });
+    expect(saved.body.link.status).toBe("stored");
+    expect(fs.existsSync(store.path)).toBe(false);
+    expect(before.lines.join("\n")).toContain("could not save links, so a restart drops them: ENOSPC");
+
+    const after = createHarness({ store });
+    const { res } = await openPage(after, token);
+    expect(res.status).toBe(410);
+    const replay = await save(after, token, { csrf, value: kCanary + "x" });
+    expect(replay.status).toBe(410);
+    expect(after.envWrites).toEqual([]);
+  });
+
+  it("a save still running when its link expires lands, and a second press gets its answer", async () => {
+    let openGate;
+    const h = createHarness({ lockGate: new Promise((resolve) => { openGate = resolve; }) });
+    const { token, id } = await askForLink(h);
+    const { csrf } = await openPage(h, token);
+    const first = save(h, token, { csrf, value: kCanary }).then((res) => res);
+    await vi.waitFor(() => expect(h.lockEvents).toContain("acquire:secret_drop"));
+    h.advance(16 * 60 * 1000);
+    const during = await openPage(h, token);
+    expect(during.res.status).toBe(200);
+    expect(during.status.body.link.status).toBe("pending");
+    const second = save(h, token, { csrf, value: kCanary + "x" }).then((res) => res);
+    await vi.waitFor(() => expect(h.lines.some((line) => line.includes(`save joined id=${id}`))).toBe(true));
+    openGate();
+    const [done, joined] = await Promise.all([first, second]);
+    expect(done.body.link.status).toBe("stored");
+    expect(joined.body).toEqual(done.body);
+    expect(h.envWrites).toEqual([{ key: "GITHUB_TOKEN", value: kCanary }]);
+    expect((await openPage(h, token)).status.body.link.status).toBe("stored");
+    expectNoCanary(h, [during.res, during.status, done, joined]);
+  });
+
+  it("ignores records in the state file that are not well formed", () => {
+    const store = createStateStore();
+    store.write({ requests: [{ id: "sd_nothex", name: "GITHUB_TOKEN", status: "pending" }, { id: "sd_" + "a".repeat(18), name: "bad name", status: "pending", createdAt: 1, expiresAt: 2, tokenHash: "f".repeat(64), csrf: "c" }, "junk"] });
+    const requests = createSecretDropRequests({ store, nowFn: () => 0 });
+    expect(requests.get("sd_nothex")).toBeNull();
+    expect(requests.get("sd_" + "a".repeat(18))).toBeNull();
+  });
 });
 
