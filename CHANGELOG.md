@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.286] - 2026-11-16
+
+On OpenClaw 2026.11.4, an agent's own changes through OpenClaw's `openclaw` tool apply at once again, as they did on 2026.11.3. 2026.11.4 holds them for the owner's approval whenever a plugin checks every tool call, which AlphaClaw's relay guard does, so a cron job or heartbeat asking for a change would have waited for a tap.
+
+### Changed
+- When the installed OpenClaw is 2026.11.4 or later, AlphaClaw sets `tools.openclaw.autoApproveChanges: true` at boot if the key is absent. A value you set yourself, `false` included, and per-agent settings are left alone. OpenClaw still refuses the tool on any turn the owner did not start.
+
 ## [0.10.285] - 2026-11-16
 
 AlphaClaw now runs OpenClaw 2026.11.4, the current stable release. It keeps 2026.11.3's database layout, so going back needs no database restore, and a very large conversation no longer crashes the gateway when OpenClaw exports it for memory search. The memory index rebuild on a large session history still fails on 2026.11.4, with a different error; the README says what to do.

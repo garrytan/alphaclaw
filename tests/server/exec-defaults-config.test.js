@@ -60,6 +60,7 @@ describe("server/exec-defaults-config", () => {
     );
 
     const result = await ensureManagedExecDefaults({
+      readOpenclawVersion: () => "2026.11.3",
       fsModule: fs,
       openclawDir,
       resolveExecApprovalsBackend: backendResolver("sqlite"),
@@ -132,6 +133,7 @@ describe("server/exec-defaults-config", () => {
     fs.writeFileSync(approvalsPath, approvalsContent, "utf8");
 
     const result = await ensureManagedExecDefaults({
+      readOpenclawVersion: () => "2026.11.3",
       fsModule: fs,
       openclawDir,
       resolveExecApprovalsBackend: backendResolver("sqlite"),
@@ -168,6 +170,7 @@ describe("server/exec-defaults-config", () => {
     );
 
     const result = await ensureManagedExecDefaults({
+      readOpenclawVersion: () => "2026.11.3",
       fsModule: fs,
       openclawDir,
       resolveExecApprovalsBackend: backendResolver("sqlite"),
@@ -503,3 +506,52 @@ describe("server/exec-defaults-config with the real era resolver (refactor plan 
     }
   });
 });
+
+describe("server/exec-defaults-config openclaw tool auto-approve (OpenClaw 2026.11.4+)", () => {
+  const { ensureManagedOpenclawExecDefaults } = require("../../lib/server/exec-defaults-config");
+  const ensureOn = async (config, version) => {
+    const openclawDir = createTempOpenclawDir();
+    const configPath = path.join(openclawDir, "openclaw.json");
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    const result = await ensureManagedExecDefaults({
+      fsModule: fs,
+      openclawDir,
+      resolveExecApprovalsBackend: backendResolver("sqlite"),
+      logger: quietLogger(),
+      readOpenclawVersion: () => version,
+    });
+    return { result, saved: JSON.parse(fs.readFileSync(configPath, "utf8")), bytes: fs.readFileSync(configPath, "utf8") };
+  };
+
+  it.each([["2026.11.4"], ["2026.11.5-beta.1"], ["2026.12.1"]])("on %s writes tools.openclaw.autoApproveChanges=true once, beside the operator's own exec settings", async (version) => {
+    const { result, saved } = await ensureOn({ tools: { exec: { mode: "full" } } }, version);
+    expect(result.openclawChanged).toBe(true);
+    expect(saved.tools).toEqual({ exec: { mode: "full" }, openclaw: { autoApproveChanges: true } });
+    const again = ensureManagedOpenclawExecDefaults(structuredClone(saved), { openclawVersion: version });
+    expect(again.changed).toBe(false);
+  });
+
+  it.each([["2026.11.3"], ["2026.11.4-beta.2"], ["2026.10.9"], [""], ["a1b2c3d"]])("on %j writes no tools.openclaw: an older OpenClaw's schema refuses the key", async (version) => {
+    const config = { tools: { exec: { mode: "full" } } };
+    const { result, bytes } = await ensureOn(config, version);
+    expect(result.openclawChanged).toBe(false);
+    expect(bytes).toBe(JSON.stringify(config, null, 2));
+  });
+
+  it("keeps an operator's own choice: false stays false, other tools.openclaw keys stay, per-agent overrides are untouched", async () => {
+    const config = {
+      tools: { exec: { mode: "full" }, openclaw: { autoApproveChanges: false } },
+      agents: { list: [{ id: "ops", tools: { openclaw: { autoApproveChanges: false } } }] },
+    };
+    const kept = await ensureOn(config, "2026.11.4");
+    expect(kept.result.openclawChanged).toBe(false);
+    expect(kept.saved.tools.openclaw).toEqual({ autoApproveChanges: false });
+
+    const other = { tools: { exec: { mode: "full" }, openclaw: { note: "x" } } };
+    expect(ensureManagedOpenclawExecDefaults(structuredClone(other), { openclawVersion: "2026.11.4" }).config.tools.openclaw).toEqual({ note: "x", autoApproveChanges: true });
+
+    const odd = { tools: { exec: { mode: "full" }, openclaw: "on" } };
+    expect(ensureManagedOpenclawExecDefaults(structuredClone(odd), { openclawVersion: "2026.11.4" })).toEqual({ config: odd, changed: false });
+  });
+});
+
