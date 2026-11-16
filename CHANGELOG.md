@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.283] - 2026-11-16
+
+The pre-merge secrets scan no longer reads a model name in the curated model catalog as a credential. Each catalog row names its model in a field called `key` (for example `"key": "particle/particle-ai/particle-1"`), and the scan took a long enough model name for a secret. Those rows are now allowlisted by path and pattern, the same way earlier false alarms were.
+
+### Changed
+- `.gstack/pregate.json` allowlists `env.kv` matches in `lib/server/model-catalog-curated.json` whose value is a `provider/model` ref. No code changes.
+
 ## [0.10.280] - 2026-11-15
 
 Your own Capy threads that reach the box over the relay can now use your gbrain.io account through the box's `gbrain_io` MCP server, like they already use your brain. Before this, the relay guard refused those tools to every relay session.
