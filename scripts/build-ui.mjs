@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 
 const publicRoot = path.join(projectRoot, "lib", "public");
 const distDir = path.join(publicRoot, "dist");
-const entryPoint = path.join(publicRoot, "js", "app.js");
+const entryPoints = [path.join(publicRoot, "js", "app.js"), path.join(publicRoot, "js", "secret-drop.js")];
 const tailwindConfigPath = path.join(projectRoot, "tailwind.config.cjs");
 const tailwindInputPath = path.join(publicRoot, "css", "tailwind.input.css");
 const tailwindOutputPath = path.join(publicRoot, "css", "tailwind.generated.css");
@@ -50,7 +50,7 @@ await execFileAsync(
 );
 
 await esbuild.build({
-  entryPoints: [entryPoint],
+  entryPoints,
   outdir: distDir,
   bundle: true,
   format: "esm",

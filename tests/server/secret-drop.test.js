@@ -1,8 +1,12 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const express = require("express");
 const request = require("supertest");
 
 const { classifySecretDropKey } = require("../../lib/server/utils/env-keys");
-const { createSecretDropRequests } = require("../../lib/server/secret-drop/requests");
+const { createSecretDropRequests, kSecretDropStateFileName } = require("../../lib/server/secret-drop/requests");
+const { createTeamStateStore } = require("../../lib/server/team/state");
 const { createSecretDropApplier, normalizeSecretValue, configReferencesStoreId } = require("../../lib/server/secret-drop/apply");
 const { registerSecretDropRoutes } = require("../../lib/server/routes/secret-drop");
 const { createTerminalErrorHandler } = require("../../lib/server/terminal-error-handler");
@@ -29,7 +33,7 @@ const createFakeCli = ({ kinds = {}, fail = [] } = {}) => {
   return { execFileCmd, calls };
 };
 
-const createHarness = ({ kinds, fail, envFails = false, config = {}, ttlMs, envVars = [{ key: "OTHER", value: "x" }], lockGate = null } = {}) => {
+const createHarness = ({ kinds, fail, envFails = false, config = {}, ttlMs, envVars = [{ key: "OTHER", value: "x" }], lockGate = null, store = null } = {}) => {
   const cli = createFakeCli({ kinds, fail });
   const envWrites = [];
   const lockEvents = [];
@@ -41,7 +45,7 @@ const createHarness = ({ kinds, fail, envFails = false, config = {}, ttlMs, envV
     error: (line) => lines.push(String(line)),
   };
   let now = 1_800_000_000_000;
-  const requests = createSecretDropRequests({ nowFn: () => now, ...(ttlMs ? { ttlMs } : {}) });
+  const requests = createSecretDropRequests({ nowFn: () => now, logger, ...(ttlMs ? { ttlMs } : {}), ...(store ? { store } : {}) });
   const applier = createSecretDropApplier({
     execFileCmd: cli.execFileCmd,
     gatewayEnv: () => ({ OPENCLAW_STATE_DIR: "/tmp/state" }),
@@ -101,10 +105,18 @@ const askForLink = async (h, name = "GITHUB_TOKEN") => {
   return { res, token, id: res.body.request.id };
 };
 
+// The page is a shell for the Setup UI bundle; the bundle reads the link's
+// state (and its CSRF value) from /secret/:token/status.
 const openPage = async (h, token, who = "admin") => {
   const res = await request(h.app).get(`/secret/${token}`).set("x-test-identity", who);
-  const csrf = /name="csrf" value="([^"]+)"/.exec(res.text)?.[1] || "";
-  return { res, csrf };
+  const status = await request(h.app).get(`/secret/${token}/status`).set("x-test-identity", who);
+  return { res, status, csrf: status.body?.link?.csrf || "" };
+};
+
+// A state file in a fresh directory, as AlphaClaw keeps it under its root.
+const createStateStore = () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "secret-drop-"));
+  return createTeamStateStore({ rootDir, fileName: kSecretDropStateFileName });
 };
 
 const save = (h, token, fields, { who = "admin", origin = kOrigin } = {}) => {
@@ -205,11 +217,13 @@ describe("secret drop: the page and Save", () => {
     expect(page.status).toBe(200);
     expect(page.headers["cache-control"]).toBe("no-store");
     expect(page.headers["referrer-policy"]).toBe("no-referrer");
-    expect(page.text).toContain('type="password"');
+    expect(page.headers["content-security-policy"]).toContain("script-src 'self'");
+    expect(page.text).toContain('src="/dist/secret-drop.bundle.js"');
 
     const saved = await save(h, token, { csrf, value: kCanary + "\n" });
     expect(saved.status).toBe(200);
-    expect(saved.text).toContain("Stored");
+    expect(saved.body.link).toMatchObject({ name: "GITHUB_TOKEN", status: "stored", stores: { env: true, store: true } });
+    expect(saved.body.link.csrf).toBeUndefined();
     expect(h.envWrites).toEqual([{ key: "GITHUB_TOKEN", value: kCanary }]);
     const set = h.cli.calls.filter((call) => call.args[2] === "set");
     expect(set.map((call) => call.args)).toEqual([
@@ -225,8 +239,12 @@ describe("secret drop: the page and Save", () => {
     expect(status.body.request).toMatchObject({ status: "stored", stores: { env: true, store: true } });
     expect(h.notices).toHaveLength(1);
     expect(h.notices[0]).toContain("GITHUB_TOKEN");
-    const reused = await save(h, token, { csrf, value: kCanary });
-    expect(reused.status).toBe(410);
+    const reused = await save(h, token, { csrf, value: kCanary + "x" });
+    expect(reused.status).toBe(200);
+    expect(reused.body.link).toMatchObject({ status: "stored", savedAt: saved.body.link.savedAt });
+    expect(h.envWrites).toHaveLength(1);
+    expect(h.cli.calls.filter((call) => call.args[2] === "set" && !call.args.includes("--dry-run"))).toHaveLength(1);
+    expect(h.notices).toHaveLength(1);
     expectNoCanary(h, [asked, page, saved, status, reused]);
   });
 
@@ -236,7 +254,7 @@ describe("secret drop: the page and Save", () => {
     const { csrf } = await openPage(h, token);
     const saved = await save(h, token, { csrf, value: kCanary });
     expect(saved.status).toBe(200);
-    expect(saved.text).toContain("keeps it that way");
+    expect(saved.body.link.outcome.join(" ")).toContain("keeps it that way");
     expect(h.cli.calls.filter((call) => call.args[2] === "set").map((call) => call.args)).toEqual([
       ["secrets", "store", "set", "GITHUB_TOKEN", "--dry-run"],
       ["secrets", "store", "set", "GITHUB_TOKEN"],
@@ -258,7 +276,10 @@ describe("secret drop: the page and Save", () => {
     const { csrf } = await openPage(h, token);
     const saved = await save(h, token, { csrf, value: kCanary });
     expect(saved.status).toBe(400);
-    expect(saved.text).toContain("Nothing was saved");
+    expect(saved.body).toMatchObject({ ok: false, code: "store_refused" });
+    expect(saved.body.error).toContain("Nothing was saved");
+    expect(saved.body.link).toMatchObject({ status: "pending" });
+    expect(saved.body.link.csrf).toBe(csrf);
     expect(h.envWrites).toEqual([]);
     expect(h.lockEvents).toEqual([]);
     expect(h.notices).toEqual([]);
@@ -278,13 +299,15 @@ describe("secret drop: the page and Save", () => {
     const { csrf } = await openPage(h, token);
     const saved = await save(h, token, { csrf, value: kCanary });
     expect(saved.status).toBe(200);
-    expect(saved.text).toContain("Partly stored");
-    expect(saved.text).toContain('name="value"');
+    expect(saved.body.link).toMatchObject({ status: "partial", stores: { env: true, store: false } });
+    expect(saved.body.link.csrf).toBe(csrf);
     expect(h.requests.get(id)).toMatchObject({ status: "partial", stores: { env: true, store: false } });
     expect(h.notices[0]).toContain("partly");
     const again = await openPage(h, token);
     expect(again.res.status).toBe(200);
-    expectNoCanary(h, [saved, again.res]);
+    expect(again.status.body.link).toMatchObject({ status: "partial" });
+    expect(again.csrf).toBe(csrf);
+    expectNoCanary(h, [saved, again.res, again.status]);
   });
 
   it("a multi-line value goes to the store only, with a notice", async () => {
@@ -298,7 +321,7 @@ describe("secret drop: the page and Save", () => {
     expect(h.cli.calls.find((call) => call.args.join(" ") === "secrets store set TLS_PRIVATE_KEY --kind secret").input).toBe(
       `-----BEGIN KEY-----\n${kCanary}\n-----END KEY-----`,
     );
-    expect(saved.text).toContain("store only");
+    expect(saved.body.link.notices.join(" ")).toContain("store only");
     expectNoCanary(h, [saved]);
   });
 
@@ -309,7 +332,7 @@ describe("secret drop: the page and Save", () => {
     const saved = await save(h, token, { csrf, value_multiline: `-----BEGIN KEY-----\n${kCanary}\n-----END KEY-----` });
     expect(saved.status).toBe(200);
     expect(h.envWrites).toEqual([]);
-    expect(saved.text).toContain(".env still holds an older TLS_PRIVATE_KEY");
+    expect(saved.body.link.notices.join(" ")).toContain(".env still holds an older TLS_PRIVATE_KEY");
     expectNoCanary(h, [saved]);
   });
 
@@ -320,15 +343,18 @@ describe("secret drop: the page and Save", () => {
     const { csrf } = await openPage(h, token);
     const first = save(h, token, { csrf, value: kCanary }).then((res) => res);
     await vi.waitFor(() => expect(h.lockEvents).toContain("acquire:secret_drop"));
-    const second = await save(h, token, { csrf, value: kCanary + "x" });
-    expect(second.status).toBe(409);
+    const second = save(h, token, { csrf, value: kCanary + "x" }).then((res) => res);
+    await vi.waitFor(() => expect(h.lines.some((line) => line.includes(`save joined id=${id}`))).toBe(true));
     openGate();
-    const done = await first;
+    const [done, joined] = await Promise.all([first, second]);
     expect(done.status).toBe(200);
+    expect(joined.status).toBe(200);
+    expect(joined.body).toEqual(done.body);
+    expect(joined.body.link).toMatchObject({ status: "stored", name: "GITHUB_TOKEN" });
     expect(h.envWrites).toEqual([{ key: "GITHUB_TOKEN", value: kCanary }]);
     expect(h.cli.calls.filter((call) => call.args[2] === "set" && !call.args.includes("--dry-run"))).toHaveLength(1);
     expect(h.requests.get(id)).toMatchObject({ status: "stored" });
-    expectNoCanary(h, [second, done]);
+    expectNoCanary(h, [joined, done]);
   });
 
   it("an env write failure is partial and names the store that holds it", async () => {
@@ -337,7 +363,7 @@ describe("secret drop: the page and Save", () => {
     const { csrf } = await openPage(h, token);
     const saved = await save(h, token, { csrf, value: kCanary });
     expect(h.requests.get(id)).toMatchObject({ status: "partial", stores: { env: false, store: true } });
-    expect(saved.text).toContain(".env was not written");
+    expect(saved.body.link.notices.join(" ")).toContain(".env was not written");
     expectNoCanary(h, [saved]);
   });
 
@@ -386,8 +412,7 @@ describe("secret drop: the page and Save", () => {
     h.advance(16 * 60 * 1000);
     const { res: gone } = await openPage(h, token);
     expect(gone.status).toBe(410);
-    expect(gone.text).toContain("This visit saved nothing");
-    expect(gone.text).toContain("only if its page said Stored or Partly stored");
+    expect(gone.text).toContain("Nothing was saved with it");
     expect(gone.text).not.toContain("that save stands");
     expect(h.envWrites).toEqual([]);
     expectNoCanary(h, [failed, gone]);
@@ -404,3 +429,156 @@ describe("secret drop: the page and Save", () => {
     expectNoCanary(h, [json, big]);
   });
 });
+
+describe("secret drop: reopening, restarts and failures", () => {
+  it("reopening a stored link shows its saved status, never a form or an error", async () => {
+    const h = createHarness();
+    const { token } = await askForLink(h);
+    const { csrf } = await openPage(h, token);
+    const saved = await save(h, token, { csrf, value: kCanary });
+    expect(saved.status).toBe(200);
+    h.advance(20 * 60 * 1000);
+    const reopened = await openPage(h, token);
+    expect(reopened.res.status).toBe(200);
+    expect(reopened.status.status).toBe(200);
+    expect(reopened.status.body.link).toMatchObject({
+      name: "GITHUB_TOKEN",
+      status: "stored",
+      savedAt: saved.body.link.savedAt,
+      stores: { env: true, store: true },
+      reach: { env: "never", storeKind: "secret" },
+    });
+    expect(reopened.csrf).toBe("");
+    expectNoCanary(h, [saved, reopened.res, reopened.status]);
+  });
+
+  it("an expired link that never saved says so, and a used one is forgotten after a day", async () => {
+    const h = createHarness();
+    const unused = await askForLink(h);
+    const used = await askForLink(h, "MYSVC_API_KEY");
+    const { csrf } = await openPage(h, used.token);
+    await save(h, used.token, { csrf, value: kCanary });
+    h.advance(16 * 60 * 1000);
+    const expired = await openPage(h, unused.token);
+    expect(expired.res.status).toBe(410);
+    expect(expired.res.text).toContain("Nothing was saved with it");
+    expect(expired.status.body.link).toMatchObject({ status: "expired" });
+    expect(expired.csrf).toBe("");
+    expect((await openPage(h, used.token)).status.body.link.status).toBe("stored");
+    h.advance(25 * 60 * 60 * 1000);
+    expect((await openPage(h, used.token)).res.status).toBe(410);
+    expect(h.requests.get(used.id)).toBeNull();
+  });
+
+  it("a pending link survives an AlphaClaw restart within its 15 minutes and still saves once", async () => {
+    const store = createStateStore();
+    const before = createHarness({ store });
+    const { token, id } = await askForLink(before);
+    const { csrf } = await openPage(before, token);
+    expect(fs.statSync(store.path).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(store.path, "utf8")).not.toContain(token);
+
+    const after = createHarness({ store });
+    after.advance(10 * 60 * 1000);
+    const page = await openPage(after, token);
+    expect(page.res.status).toBe(200);
+    expect(page.csrf).toBe(csrf);
+    const saved = await save(after, token, { csrf, value: kCanary });
+    expect(saved.status).toBe(200);
+    expect(saved.body.link).toMatchObject({ id, status: "stored" });
+    expect(after.envWrites).toEqual([{ key: "GITHUB_TOKEN", value: kCanary }]);
+    expect(fs.readFileSync(store.path, "utf8")).not.toContain(kPrefix);
+
+    const later = createHarness({ store });
+    const reopened = await openPage(later, token);
+    expect(reopened.status.body.link).toMatchObject({ status: "stored", savedAt: saved.body.link.savedAt });
+    const again = await save(later, token, { csrf, value: kCanary + "x" });
+    expect(again.body.link.status).toBe("stored");
+    expect(later.envWrites).toEqual([]);
+    expectNoCanary(after, [saved, page.res, page.status]);
+    expectNoCanary(later, [reopened.res, reopened.status, again]);
+  });
+
+  it("a link restored after a restart still expires 15 minutes after it was made", async () => {
+    const store = createStateStore();
+    const before = createHarness({ store });
+    const { token } = await askForLink(before);
+    const { csrf } = await openPage(before, token);
+    const after = createHarness({ store });
+    after.advance(15 * 60 * 1000);
+    const { res } = await openPage(after, token);
+    expect(res.status).toBe(410);
+    const saved = await save(after, token, { csrf, value: kCanary });
+    expect(saved.status).toBe(410);
+    expect(after.envWrites).toEqual([]);
+  });
+
+  it("a store that cannot be read answers with an error and keeps the link open for Retry", async () => {
+    const h = createHarness();
+    const { token, id } = await askForLink(h);
+    const { csrf } = await openPage(h, token);
+    h.cli.execFileCmd.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("spawn openclaw EAGAIN"), { code: "EAGAIN" });
+    });
+    const failed = await save(h, token, { csrf, value: kCanary });
+    expect(failed.status).toBe(400);
+    expect(failed.body).toMatchObject({ ok: false, code: "store_unreadable", link: { status: "pending", csrf } });
+    expect(h.requests.get(id).status).toBe("pending");
+    const retried = await save(h, token, { csrf, value: kCanary });
+    expect(retried.status).toBe(200);
+    expect(retried.body.link.status).toBe("stored");
+    expectNoCanary(h, [failed, retried]);
+  });
+
+  it("a save that throws answers 500 with the link still open, and Retry stores it", async () => {
+    const h = createHarness();
+    const { token } = await askForLink(h);
+    const { csrf } = await openPage(h, token);
+    const routes = express();
+    const logger = { log: () => {}, warn: () => {}, error: (line) => h.lines.push(String(line)) };
+    let throwOnce = true;
+    registerSecretDropRoutes({
+      app: routes,
+      requireAuth: (req, res, next) => next(),
+      resolveRequestIdentity: () => ({ kind: "legacy", role: "admin" }),
+      requests: h.requests,
+      applier: {
+        apply: async () => {
+          if (throwOnce) {
+            throwOnce = false;
+            throw new Error("boom");
+          }
+          return { status: "stored", stores: { env: true, store: true }, reach: { env: "next_gateway_start", storeKind: "secret" }, notices: [] };
+        },
+      },
+      resolveSetupUrl: () => kOrigin,
+      logger,
+    });
+    const failed = await request(routes).post(`/secret/${token}`).type("form").set("Origin", kOrigin).send({ csrf, value: kCanary });
+    expect(failed.status).toBe(500);
+    expect(failed.body).toMatchObject({ ok: false, code: "failed", link: { status: "pending", csrf } });
+    expect(failed.body.error).toContain("Saving again is safe");
+    const retried = await request(routes).post(`/secret/${token}`).type("form").set("Origin", kOrigin).send({ csrf, value: kCanary });
+    expect(retried.status).toBe(200);
+    expect(retried.body.link).toMatchObject({ status: "stored", reach: { env: "next_gateway_start" } });
+    expectNoCanary(h, [failed, retried]);
+  });
+
+  it("the page's status read needs an admin session and never carries a value", async () => {
+    const h = createHarness();
+    const { token } = await askForLink(h);
+    const signedOut = await request(h.app).get(`/secret/${token}/status`);
+    expect(signedOut.status).toBe(401);
+    expect(signedOut.body.code).toBe("signed_out");
+    const member = await request(h.app).get(`/secret/${token}/status`).set("x-test-identity", "member");
+    expect(member.status).toBe(403);
+    const agent = await request(h.app).get(`/secret/${token}/status`).set("Authorization", "Bearer agent");
+    expect(agent.status).toBe(401);
+    const admin = await request(h.app).get(`/secret/${token}/status`).set("x-test-identity", "admin");
+    expect(admin.status).toBe(200);
+    expect(admin.headers["cache-control"]).toBe("no-store");
+    expect(admin.body.link).toMatchObject({ name: "GITHUB_TOKEN", status: "pending", reason: "open PRs" });
+    expect(Object.keys(admin.body.link)).not.toContain("tokenHash");
+  });
+});
+

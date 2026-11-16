@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.288] - 2026-11-16
+
+The secret drop page is now an ordinary form that saves once and shows its status. Pressing Save twice no longer ends on a card telling you to reopen the link, a link you already used shows what it saved, and a link survives an AlphaClaw restart.
+
+### Changed
+- `/secret/<token>` is a Setup UI page: one Save button that disables itself and shows a spinner while it saves, then "Saved NAME at HH:MM" with whether the key is usable now or after the gateway's next start. A failed save shows its error inline with Retry. A second press while a save runs waits for that save and gets its answer instead of a 409; a press on a stored link writes nothing and shows the stored state.
+- Reopening a used or partly saved link shows what its save did for a day afterwards, instead of "expired or already used". A link that expired unused says nothing was saved with it.
+- Open links survive an AlphaClaw restart within their 15 minutes: AlphaClaw keeps each link's record (name, status, the link token's sha256, the page's CSRF value, which stores hold it; never a value) in `db/secret-drop-requests.json` under its root, mode 0600.
+
 ## [0.10.287] - 2026-11-16
 
 0.10.286's automatic OpenClaw changes now reach boxes whose exec config leaves `ask` or `mode` unset. AlphaClaw read such a config as narrowed and wrote nothing, though OpenClaw itself treats it as Full Access, so those boxes kept waiting for an approval tap on 2026.11.4.
