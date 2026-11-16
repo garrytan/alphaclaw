@@ -84,7 +84,7 @@
       }
     },
     {
-      "key": "particle/particle-1",
+      "key": "particle/particle-ai/particle-1",
       "provider": "particle",
       "label": "Particle-1"
     }

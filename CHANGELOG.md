@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.284] - 2026-11-16
+
+AlphaClaw keeps managing its Particle setup after OpenClaw renames Particle's model. AlphaClaw wrote the model as `particle-1`; on a box with OpenClaw's Particle plugin installed, the first config change made through the running gateway (`openclaw config set`, or the dashboard) renamed that row to `particle-ai/particle-1` but left every `particle/particle-1` setting as it was. AlphaClaw then took its own block for your edit and stopped updating it, and Check models no longer found `particle/particle-1` in it.
+
+### Fixed
+- AlphaClaw now writes Particle's model under the id Particle and OpenClaw use, `particle/particle-ai/particle-1`, and so do the onboarding model list and the thinking default.
+- At boot, a Particle block an earlier AlphaClaw wrote gets its row renamed, and every `particle/particle-1` ref in `openclaw.json` (primary, fallbacks, the models list, heartbeat, subagent, compaction, decision and failover models, per-channel model overrides, hook models and the exec reviewer) moves to the new id, also where OpenClaw already renamed the row. `modelPolicy.allow` entries move at the next gateway launch. A row you edited yourself is left alone. A chat you switched to Particle with `/model particle/particle-1`, or a cron job that names that model, keeps the old id, because OpenClaw stores those itself, so pick `particle/particle-ai/particle-1` there again.
+
 ## [0.10.283] - 2026-11-16
 
 The pre-merge secrets scan no longer reads a model name in the curated model catalog as a credential. Each catalog row names its model in a field called `key` (for example `"key": "particle/particle-ai/particle-1"`), and the scan took a long enough model name for a secret. Those rows are now allowlisted by path and pattern, the same way earlier false alarms were.

@@ -124,7 +124,7 @@ describeReal(`LIVE (paid) Particle real API against the ${readDeclaredPin()} pin
     fs.mkdirSync(process.env.NODE_COMPILE_CACHE, { recursive: true });
     fs.writeFileSync(path.join(OPENCLAW_DIR, "openclaw.json"), JSON.stringify({
       gateway: { mode: "local", bind: "loopback", port, auth: { mode: "token", token } },
-      agents: { defaults: { workspace: path.join(OPENCLAW_DIR, "workspace"), model: { primary: "particle/particle-1" }, models: { "particle/particle-1": {} } } },
+      agents: { defaults: { workspace: path.join(OPENCLAW_DIR, "workspace"), model: { primary: "particle/particle-ai/particle-1" }, models: { "particle/particle-ai/particle-1": {} } } },
       channels: {},
     }, null, 2));
     const presets = kOwnedProviderPresets.map((preset) => ({ ...preset, baseUrl: `http://127.0.0.1:${proxy.server.address().port}/v1` }));

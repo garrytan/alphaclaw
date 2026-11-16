@@ -47,13 +47,13 @@ afterAll(() => {
 describe("server/model-policy gaps", () => {
   it("lists the defaults primary, every models row and an inheriting agent's primary under the defaults list", () => {
     const config = governedConfig();
-    config.agents.defaults.model.primary = "particle/particle-1";
+    config.agents.defaults.model.primary = "particle/particle-ai/particle-1";
     config.agents.defaults.models["openai/gpt-6-astra"] = {};
     config.agents.list.push({ id: "ops", model: { primary: "openai/gpt-6-luna", fallbacks: ["x/y"] } });
     config.agents.list.push({ id: "lab2", model: "google/gemini-3.1-pro", modelPolicy: { allow: ["google/*"] } });
     config.agents.list[1].model = "openai/gpt-6.1-sol";
     expect(findModelPolicyGaps(config)).toEqual([
-      { agentId: null, ref: "particle/particle-1" },
+      { agentId: null, ref: "particle/particle-ai/particle-1" },
       { agentId: null, ref: "openai/gpt-6-astra" },
       { agentId: null, ref: "openai/gpt-6-luna" },
       { agentId: "lab", ref: "openai/gpt-6.1-sol" },
@@ -77,22 +77,22 @@ describe("server/model-policy gaps", () => {
 
   it("allowPrimaryModel never touches a modelPolicy list and still extends a pre-migration models map", () => {
     const governed = governedConfig();
-    allowPrimaryModel(governed, "particle/particle-1");
+    allowPrimaryModel(governed, "particle/particle-ai/particle-1");
     allowPrimaryModel(governed, "openai/gpt-6.1-sol", governed.agents.list[1]);
     expect(governed).toEqual(governedConfig());
 
     const legacy = { agents: { defaults: { models: { "anthropic/claude-opus-4-6": {} } } } };
-    allowPrimaryModel(legacy, "particle/particle-1");
-    expect(legacy.agents.defaults.models).toEqual({ "anthropic/claude-opus-4-6": {}, "particle/particle-1": {} });
+    allowPrimaryModel(legacy, "particle/particle-ai/particle-1");
+    expect(legacy.agents.defaults.models).toEqual({ "anthropic/claude-opus-4-6": {}, "particle/particle-ai/particle-1": {} });
   });
 
   it("notes the pending refs and marks the restart reason once per save", () => {
     const restartRequiredState = { markRequired: vi.fn() };
     const config = governedConfig();
-    config.agents.defaults.model.primary = "particle/particle-1";
+    config.agents.defaults.model.primary = "particle/particle-ai/particle-1";
     const noted = noteModelPolicyGaps({ readConfig: () => config, restartRequiredState });
-    expect(noted.modelPolicyPending).toEqual(["particle/particle-1"]);
-    expect(noted.modelPolicyWarning).toContain("particle/particle-1 is added to the model policy (modelPolicy.allow) when the gateway restarts");
+    expect(noted.modelPolicyPending).toEqual(["particle/particle-ai/particle-1"]);
+    expect(noted.modelPolicyWarning).toContain("particle/particle-ai/particle-1 is added to the model policy (modelPolicy.allow) when the gateway restarts");
     expect(restartRequiredState.markRequired).toHaveBeenCalledWith("model_policy_pending");
 
     restartRequiredState.markRequired.mockClear();
@@ -147,22 +147,22 @@ describe("server/model-policy on the hot path (real openclaw.json)", () => {
     registerAgentRoutes({ app, agentsService: createAgentsService({ OPENCLAW_DIR }), restartRequiredState });
 
     const saved = await request(app).put("/api/models/config").send({
-      primary: "particle/particle-1",
-      configuredModels: { "anthropic/claude-opus-4-6": {}, "particle/particle-1": {} },
+      primary: "particle/particle-ai/particle-1",
+      configuredModels: { "anthropic/claude-opus-4-6": {}, "particle/particle-ai/particle-1": {} },
     });
     expect(saved.status).toBe(200);
-    expect(saved.body).toMatchObject({ ok: true, modelPolicyPending: ["particle/particle-1"] });
+    expect(saved.body).toMatchObject({ ok: true, modelPolicyPending: ["particle/particle-ai/particle-1"] });
     const created = await request(app).post("/api/agents").send({ id: "intake", model: { primary: "openai/gpt-6-luna" } });
     expect(created.status).toBe(201);
-    expect(created.body.modelPolicyPending).toEqual(["particle/particle-1", "openai/gpt-6-luna"]);
+    expect(created.body.modelPolicyPending).toEqual(["particle/particle-ai/particle-1", "openai/gpt-6-luna"]);
     const updated = await request(app).put("/api/agents/lab").send({ model: { primary: "openai/gpt-6.1-sol" } });
     expect(updated.status).toBe(200);
-    expect(updated.body.modelPolicyPending).toEqual(["particle/particle-1", "openai/gpt-6-luna", "openai/gpt-6.1-sol"]);
+    expect(updated.body.modelPolicyPending).toEqual(["particle/particle-ai/particle-1", "openai/gpt-6-luna", "openai/gpt-6.1-sol"]);
     expect(restartRequiredState.markRequired).toHaveBeenCalledWith("model_policy_pending");
 
     const afterSaves = readConfig();
-    expect(afterSaves.agents.defaults.model.primary).toBe("particle/particle-1");
-    expect(afterSaves.agents.defaults.models["particle/particle-1"]).toEqual({});
+    expect(afterSaves.agents.defaults.model.primary).toBe("particle/particle-ai/particle-1");
+    expect(afterSaves.agents.defaults.models["particle/particle-ai/particle-1"]).toEqual({});
     expect(afterSaves.models.providers.particle.apiKey).toBe("${PARTICLE_API_KEY}");
     expect(JSON.stringify(afterSaves)).not.toContain(kParticleKey);
     expect(policies(afterSaves)).toEqual(before);
@@ -171,16 +171,16 @@ describe("server/model-policy on the hot path (real openclaw.json)", () => {
     expect(applyModelPolicyBeforeLaunch({ openclawDir: OPENCLAW_DIR, logger })).toEqual({
       ok: true,
       added: [
-        { agentId: null, ref: "particle/particle-1" },
+        { agentId: null, ref: "particle/particle-ai/particle-1" },
         { agentId: null, ref: "openai/gpt-6-luna" },
         { agentId: "lab", ref: "openai/gpt-6.1-sol" },
       ],
     });
     expect(policies(readConfig())).toEqual({
-      defaults: { allow: ["anthropic/claude-opus-4-6", "particle/particle-1", "openai/gpt-6-luna"] },
+      defaults: { allow: ["anthropic/claude-opus-4-6", "particle/particle-ai/particle-1", "openai/gpt-6-luna"] },
       lab: { allow: ["google/*", "openai/gpt-6.1-sol"] },
     });
-    expect(logger.log).toHaveBeenCalledWith("[alphaclaw] model policy: added particle/particle-1 to agents.defaults modelPolicy.allow before launch");
+    expect(logger.log).toHaveBeenCalledWith("[alphaclaw] model policy: added particle/particle-ai/particle-1 to agents.defaults modelPolicy.allow before launch");
     expect(logger.log).toHaveBeenCalledWith("[alphaclaw] model policy: added openai/gpt-6.1-sol to agent lab modelPolicy.allow before launch");
   });
 
@@ -196,5 +196,38 @@ describe("server/model-policy on the hot path (real openclaw.json)", () => {
     expect(applyModelPolicyBeforeLaunch({ openclawDir: OPENCLAW_DIR, logger })).toEqual({ ok: false, added: [] });
     expect(fs.readFileSync(kConfigPath, "utf8")).toBe("{ not json");
     expect(logger.warn.mock.calls[0][0]).toMatch(/^\[alphaclaw\] model policy: update before launch failed \(.+\); retried on the next launch$/);
+  });
+
+  it("moves particle/particle-1 allow entries to the renamed row's ref at launch, once, and only once the block has the new row", () => {
+    const { kOwnedProviderPresets } = require("../../lib/server/providers/presets");
+    const [particle] = kOwnedProviderPresets;
+    const oldRef = "particle/particle-1";
+    const newRef = "particle/particle-ai/particle-1";
+    const withRows = (ids) => ({
+      models: { providers: { particle: { baseUrl: particle.baseUrl, api: particle.api, apiKey: "${PARTICLE_API_KEY}", models: ids.map((id) => ({ ...particle.models[0], id })) } } },
+      agents: {
+        defaults: { model: { primary: newRef }, models: { [newRef]: {} }, modelPolicy: { allow: ["openai/gpt-6-luna", oldRef] } },
+        entries: { lab: { model: { primary: newRef }, modelPolicy: { allow: [oldRef, newRef] } }, ops: { modelPolicy: { allow: [oldRef] } } },
+      },
+    });
+
+    for (const ids of [["particle-1"], ["particle-1", "particle-ai/particle-1"]]) {
+      writeConfig(withRows(ids));
+      applyModelPolicyBeforeLaunch({ openclawDir: OPENCLAW_DIR, logger: quietLogger() });
+      expect(readConfig().agents.entries.ops.modelPolicy.allow).toEqual([oldRef]);
+    }
+
+    writeConfig(withRows(["particle-ai/particle-1"]));
+    const logger = quietLogger();
+    expect(applyModelPolicyBeforeLaunch({ openclawDir: OPENCLAW_DIR, logger })).toEqual({ ok: true, added: [] });
+    const saved = readConfig().agents;
+    expect(saved.defaults.modelPolicy.allow).toEqual(["openai/gpt-6-luna", newRef]);
+    expect(saved.entries.lab.modelPolicy.allow).toEqual([newRef]);
+    expect(saved.entries.ops.modelPolicy.allow).toEqual([newRef]);
+    expect(logger.log).toHaveBeenCalledWith(`[alphaclaw] model policy: renamed ${oldRef} to ${newRef} in agents.defaults modelPolicy.allow before launch`);
+    expect(logger.log).toHaveBeenCalledWith(`[alphaclaw] model policy: renamed ${oldRef} to ${newRef} in agent ops modelPolicy.allow before launch`);
+    const bytes = fs.readFileSync(kConfigPath);
+    expect(applyModelPolicyBeforeLaunch({ openclawDir: OPENCLAW_DIR, logger: quietLogger() })).toEqual({ ok: true, added: [] });
+    expect(fs.readFileSync(kConfigPath).equals(bytes)).toBe(true);
   });
 });
