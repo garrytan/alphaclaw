@@ -11,7 +11,7 @@ AlphaClaw keeps managing its Particle setup after OpenClaw renames Particle's mo
 
 ### Fixed
 - AlphaClaw now writes Particle's model under the id Particle and OpenClaw use, `particle/particle-ai/particle-1`, and so do the onboarding model list and the thinking default.
-- At boot, a Particle block an earlier AlphaClaw wrote gets its row renamed, and every `particle/particle-1` ref in `openclaw.json` (primary, fallbacks, the models list, heartbeat, subagent, compaction, decision and failover models, per-channel model overrides, hook models and the exec reviewer) moves to the new id, also where OpenClaw already renamed the row. `modelPolicy.allow` entries move at the next gateway launch. A row you edited yourself is left alone. A chat you switched to Particle with `/model particle/particle-1`, or a cron job that names that model, keeps the old id, because OpenClaw stores those itself: pick `particle/particle-ai/particle-1` there again.
+- At boot, a Particle block an earlier AlphaClaw wrote gets its row renamed, and every `particle/particle-1` ref in `openclaw.json` (primary, fallbacks, the models list, heartbeat, subagent, compaction, decision and failover models, per-channel model overrides, hook models and the exec reviewer) moves to the new id, also where OpenClaw already renamed the row. `modelPolicy.allow` entries move at the next gateway launch. A row you edited yourself is left alone. A chat you switched to Particle with `/model particle/particle-1`, or a cron job that names that model, keeps the old id, because OpenClaw stores those itself, so pick `particle/particle-ai/particle-1` there again.
 
 ## [0.10.280] - 2026-11-15
 
