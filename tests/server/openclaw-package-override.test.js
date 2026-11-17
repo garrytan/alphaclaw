@@ -338,24 +338,24 @@ describe("applyOpenclawPackageAtBoot", () => {
   });
 });
 
-describe("on a filesystem that cannot rename the image's directories (Docker overlayfs, EXDEV)", () => {
-  const overlayFs = (install) => {
-    const lower = new Set();
-    const walk = (dir) => {
-      const stat = fs.statSync(dir, { bigint: true });
-      lower.add(`${stat.ino}:${stat.birthtimeNs}`);
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory()) walk(path.join(dir, entry.name));
-    };
-    walk(install.stock);
-    return Object.assign(Object.create(fs), {
-      renameSync: (from, to) => {
-        const stat = fs.lstatSync(from, { bigint: true });
-        if (stat.isDirectory() && lower.has(`${stat.ino}:${stat.birthtimeNs}`)) throw Object.assign(new Error(`EXDEV: cross-device link not permitted, rename '${from}'`), { code: "EXDEV" });
-        return fs.renameSync(from, to);
-      },
-    });
+const overlayFs = (install) => {
+  const lower = new Set();
+  const walk = (dir) => {
+    const stat = fs.statSync(dir, { bigint: true });
+    lower.add(`${stat.ino}:${stat.birthtimeNs}`);
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory()) walk(path.join(dir, entry.name));
   };
+  walk(install.stock);
+  return Object.assign(Object.create(fs), {
+    renameSync: (from, to) => {
+      const stat = fs.lstatSync(from, { bigint: true });
+      if (stat.isDirectory() && lower.has(`${stat.ino}:${stat.birthtimeNs}`)) throw Object.assign(new Error(`EXDEV: cross-device link not permitted, rename '${from}'`), { code: "EXDEV" });
+      return fs.renameSync(from, to);
+    },
+  });
+};
 
+describe("on a filesystem that cannot rename the image's directories (Docker overlayfs, EXDEV)", () => {
   it("applies by copying the image's directories, and restores stock the same way", () => {
     const install = makeInstall();
     const pkgFile = makePackage();
@@ -383,6 +383,94 @@ describe("on a filesystem that cannot rename the image's directories (Docker ove
     expect(apply(install, {})).toMatchObject({ status: "stock" });
     expectStockIntact(install);
     expect(fs.readdirSync(nodeModules).filter((name) => name.startsWith(".openclaw-"))).toEqual([]);
+  });
+});
+
+describe("a start killed in the middle of applying or restoring", () => {
+  // The process dies at the chosen call: that call and every later one fail,
+  // so no in-process cleanup runs. The next start uses the real filesystem.
+  const crashable = (base, killAt = () => false) => {
+    let dead = false;
+    const fsModule = Object.create(base);
+    for (const key of Object.keys(fs)) {
+      if (typeof fs[key] !== "function" || !key.endsWith("Sync")) continue;
+      fsModule[key] = (...args) => {
+        if (!dead && killAt(key, args)) dead = true;
+        if (dead) throw new Error("killed");
+        return base[key](...args);
+      };
+    }
+    return { fsModule, kill: () => { dead = true; } };
+  };
+  const startKilled = (install, env, extra) => {
+    try {
+      apply(install, env, extra);
+    } catch {}
+  };
+  const asideOf = (install) => path.join(install.installDir, "node_modules", ".openclaw-stock-" + kVersion);
+
+  it("during the postinstall, after the stock tree's nested dependencies moved to staging", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) };
+    const crash = crashable(fs);
+    startKilled(install, env, { fsModule: crash.fsModule, runPostinstall: () => { crash.kill(); throw new Error("killed"); } });
+    expect(fs.existsSync(path.join(install.stock, "node_modules", "nested-dep"))).toBe(false);
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+    expectStockIntact(install);
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+  });
+
+  it("while copying the stock tree aside on overlayfs, after its nested dependencies moved", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const crash = crashable(overlayFs(install), (key, args) => key === "cpSync" && args[0] === install.stock);
+    startKilled(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) }, { fsModule: crash.fsModule });
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+    expectStockIntact(install);
+  });
+
+  it("while removing a nested dependency from the stock tree after its copy reached staging on overlayfs", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const nested = path.join(install.stock, "node_modules", "nested-dep");
+    const crash = crashable(overlayFs(install), (key, args) => key === "rmSync" && args[0] === nested);
+    startKilled(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) }, { fsModule: crash.fsModule });
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+    expectStockIntact(install);
+    expect(fs.readdirSync(path.join(install.stock, "node_modules")).filter((name) => name.endsWith(".moved") || name.endsWith(".partial"))).toEqual([]);
+  });
+
+  it("while restoring, between moving the package out and moving stock back in", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) };
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+    const aside = asideOf(install);
+    const crash = crashable(fs, (key, args) => key === "renameSync" && args[0] === aside);
+    startKilled(install, {}, { fsModule: crash.fsModule });
+    expect(fs.existsSync(install.stock)).toBe(false);
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+    expectStockIntact(install);
+    expect(fs.existsSync(aside)).toBe(false);
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+  });
+
+  it("while restoring on overlayfs, during the copy of stock back in and during the removal of its aside copy", () => {
+    for (const killAt of [
+      (aside) => (key, args) => key === "cpSync" && args[0] === aside,
+      (aside) => (key, args) => key === "rmSync" && args[0] === aside,
+    ]) {
+      const install = makeInstall();
+      const pkgFile = makePackage();
+      expect(apply(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) })).toMatchObject({ status: "applied" });
+      const aside = asideOf(install);
+      const crash = crashable(overlayFs({ stock: aside }), killAt(aside));
+      startKilled(install, {}, { fsModule: crash.fsModule });
+      expect(apply(install, {})).toMatchObject({ status: "stock" });
+      expectStockIntact(install);
+      expect(fs.readdirSync(path.join(install.installDir, "node_modules")).filter((name) => name.startsWith(".openclaw-") || name.endsWith(".moved") || name.endsWith(".partial"))).toEqual([]);
+    }
   });
 });
 
