@@ -31,7 +31,7 @@ const thread = (id, fields = {}) => ({
 // Capy's public API as documented (docs.capy.ai/api-reference): bearer auth,
 // keyset cursors for threads and automations, after cursors for messages
 // that end in null, 429 with retry-after.
-const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "org" }], threads = [], messages = {}, automations = [], runs = {}, pageSize = 2 } = {}) => {
+const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "org" }], threads = [], messages = {}, automations = [], runs = {}, captains = [], pageSize = 2 } = {}) => {
   const requests = [];
   const state = { rateLimit: 0, fail: null };
   const answer = (status, body, headers = {}) => ({ status, headers: { get: (name) => headers[name.toLowerCase()] ?? null }, json: async () => body });
@@ -48,6 +48,10 @@ const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "or
     const failed = state.fail?.(route, query);
     if (failed) return answer(failed, { _tag: "capy/InternalError" });
     if (route === "/projects") return answer(200, { items: projects });
+    if (route === "/captains") {
+      const { items, next } = page(captains, Number((query.cursor || "0:x").split(":")[0]));
+      return answer(200, { items, cursor: next === null ? null : next + ":x" });
+    }
     if (route === "/threads" || route === "/automations") {
       const list = (route === "/threads" ? threads : automations).filter((item) => item.projectId === query.projectId);
       const { items, next } = page(list, Number((query.cursor || "0:x").split(":")[0]));
@@ -64,7 +68,7 @@ const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "or
     }
     return answer(404, { _tag: "capy/NotFound" });
   };
-  return { fetchImpl, requests, state, threads, messages };
+  return { fetchImpl, requests, state, threads, messages, captains };
 };
 
 describe("scripts/capy-agentrun-reporter.mjs", () => {
@@ -145,6 +149,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     const e = [user("plain " + kMarker, 15), reply("answer " + kMarker, 14)];
     const capy = createFakeCapy({
       threads: [thread("jam_D", { captain: { jamId: "jam_crew1", name: "Crew One", avatar: {} } }), thread("jam_E", { title: "VISIBLE-TITLE" })],
+      captains: [{ id: "jam_crew1", projectId: "p1", visibility: "org", name: "Crew One" }],
       messages: { jam_D: d, jam_E: e },
       automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
       runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(32), startedAt: at(31) }] },
@@ -156,7 +161,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(auto.completion).toMatchObject({ status: "completed", answer: "AUTO-REPLY", session_id: "jam_D", evidence_complete: false });
     expect(runFor("jam_D", d[3]).start.input).toMatch(/^Capy thread turn in thread jam_D/);
     expect(runFor("jam_E", e[0]).start.input).toContain('"VISIBLE-TITLE"');
-    expect(fake.agents.get("capy-captain-jam_crew1").definition.name).toBe("Capy crew jam_crew1");
+    expect(fake.agents.get("capy-captain-jam_crew1").definition.name).toBe("Capy crew: Crew One");
     expect(allBodies()).not.toContain(kMarker);
   });
 
@@ -359,21 +364,108 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 
-  it("names crew agents by Captain id only, for a private thread and for a queued private row whose Captain is listed later", async () => {
+  const captain = (id, name, fields = {}) => ({ id, projectId: "p1", visibility: "org", name, ...fields });
+  const inCrew = (id, crewId, fields = {}) => thread(id, { captain: { jamId: crewId, name: "THREAD-SIDE-NAME", avatar: {} }, ...fields });
+  const turnOf = (id) => [user(id + "-1", 30), reply(id + "-r1", 29)];
+
+  it("names an org crew from its live Captain at send, never stores the name, and puts private threads under one shared agent", async () => {
     const capy = createFakeCapy({
-      threads: [thread("jam_V", { visibility: "private", captain: { jamId: "jam_crewT", name: "CAPTAIN-TITLE", avatar: {} } })],
-      messages: { jam_V: [user("v1", 30), reply("rv1", 29)], jam_W: [user("w1", -40), reply("rw1", -41)] },
+      captains: [captain("jam_crewR", "READABLE-CREW")],
+      threads: [inCrew("jam_R", "jam_crewR"), inCrew("jam_V", "jam_crewR", { visibility: "private" })],
+      messages: { jam_R: turnOf("jam_R"), jam_V: turnOf("jam_V") },
+    });
+    fake.state.down = true;
+    await run(capy);
+    expect(fs.readFileSync(statePath, "utf8")).not.toContain("READABLE-CREW");
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew: READABLE-CREW");
+    expect(fake.agents.get("capy-private-threads").definition.name).toBe("Capy private threads");
+    expect(starts().map((request) => request.path).sort()).toEqual(["/agents/capy-captain-jam_crewR/sdk-runs", "/agents/capy-private-threads/sdk-runs"]);
+    expect(fs.readFileSync(statePath, "utf8")).not.toContain("READABLE-CREW");
+    expect(allBodies()).not.toContain("THREAD-SIDE-NAME");
+  });
+
+  it("sends no crew name for queued rows whose Captain is listed before they go, and never stores it", async () => {
+    const capy = createFakeCapy({
+      captains: [captain("jam_crewR", "SECRET-CREW")],
+      threads: [inCrew("jam_R", "jam_crewR"), inCrew("jam_V", "jam_crewR", { visibility: "private" })],
+      messages: { jam_R: turnOf("jam_R"), jam_V: turnOf("jam_V") },
     });
     fake.state.down = true;
     await run(capy);
     fake.state.down = false;
     clock += 60 * 60 * 1000;
-    capy.threads.push(thread("jam_W", { visibility: "private", lastActivityAt: at(-41), captain: { jamId: "jam_crewU", name: "OTHER-CAPTAIN", avatar: {} } }));
-    expect((await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_crewT" })).code).toBe(0);
-    expect(fake.runs.size).toBe(2);
-    expect(fake.agents.get("capy-captain-jam_crewT").definition.name).toBe("Capy crew jam_crewT");
-    expect(fake.agents.get("capy-captain-jam_crewU").definition.name).toBe("Capy crew jam_crewU");
-    expect(allBodies()).not.toMatch(/CAPTAIN-TITLE|OTHER-CAPTAIN/);
+    const later = await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_crewR" });
+    expect(later.lines.join("\n")).toContain("content_revoked op=capy count=1");
+    expect(fake.runs.size).toBe(1);
+    expect(allBodies()).not.toContain("SECRET-CREW");
+    expect(fs.readFileSync(statePath, "utf8")).not.toContain("SECRET-CREW");
+  });
+
+  it("falls back to the crew id for a listed Captain, a private Captain, a Captain in a private project and a Captain the key cannot see", async () => {
+    const capy = createFakeCapy({
+      projects: [
+        { id: "p1", name: "Alpha", visibility: "org" },
+        { id: "p9", name: "Hidden", visibility: "private" },
+      ],
+      captains: [captain("jam_crewL", "NAME-L"), captain("jam_crewP", "NAME-P", { visibility: "private" }), captain("jam_crewQ", "NAME-Q", { projectId: "p9" })],
+      threads: [inCrew("jam_L1", "jam_crewL"), inCrew("jam_P1", "jam_crewP"), inCrew("jam_Q1", "jam_crewQ"), inCrew("jam_N1", "jam_crewN")],
+      messages: Object.fromEntries(["jam_L1", "jam_P1", "jam_Q1", "jam_N1"].map((id) => [id, turnOf(id)])),
+    });
+    expect((await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_crewL" })).code).toBe(0);
+    for (const id of ["L", "P", "Q", "N"]) expect(fake.agents.get("capy-captain-jam_crew" + id).definition.name).toBe("Capy crew jam_crew" + id);
+    expect(allBodies()).not.toMatch(/NAME-[LPQ]/);
+  });
+
+  it("falls back to the crew id when the Captain lookup fails", async () => {
+    const capy = createFakeCapy({ captains: [captain("jam_crewR", "NAME-R")], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
+    capy.state.fail = (route) => (route === "/captains" ? 500 : null);
+    const result = await run(capy);
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("capy_error op=captains id=all status=500");
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
+    expect(allBodies()).not.toContain("NAME-R");
+  });
+
+  it("falls back to the crew id for a row of an unknown class", async () => {
+    const capy = createFakeCapy({ captains: [captain("jam_crewR", "NAME-R")], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
+    fake.state.down = true;
+    await run(capy);
+    const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    saved.rows[0].class = "mystery";
+    fs.writeFileSync(statePath, JSON.stringify(saved));
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
+    expect(allBodies()).not.toContain("NAME-R");
+  });
+
+  it("renames a crew agent to its id in the next pass after its Captain turns private, with no new turn", async () => {
+    const capy = createFakeCapy({ captains: [captain("jam_crewR", "NAME-R")], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew: NAME-R");
+    capy.captains[0].visibility = "private";
+    clock += 60 * 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(1);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
+    const puts = () => fake.requests.filter((request) => request.method === "PUT").length;
+    const before = puts();
+    clock += 60 * 60 * 1000;
+    await run(capy);
+    expect(puts()).toBe(before);
+  });
+
+  it("renames a crew agent to its id in the next pass after its Captain is listed", async () => {
+    const capy = createFakeCapy({ captains: [captain("jam_crewR", "NAME-R")], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew: NAME-R");
+    clock += 60 * 60 * 1000;
+    expect((await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_crewR" })).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
   });
 
   it("retries a started turn through two failed rounds within the same pass", async () => {

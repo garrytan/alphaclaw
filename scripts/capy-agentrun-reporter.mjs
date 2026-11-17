@@ -20,8 +20,11 @@
 // (single) automation thread's turns and every other turn send metadata plus
 // the thread title. A title or contents goes only when the same pass's
 // complete listing proved the thread not private; otherwise the turn stays
-// queued. Agent names never carry a Captain's name. Tool inputs and outputs
-// are never read into a row. Values of keys and tokens are never printed. Exit 0 on success, 1 on a failed pass, 2 on a usage error.
+// queued. Private threads report under one shared agent with no crew in its
+// name; a crew agent is named after its Captain only at send, from this pass's
+// live Captain when it and its project are org and it is not listed, and
+// otherwise by id; the name is never stored. Tool inputs and outputs are never
+// read into a row. Values of keys and tokens are never printed. Exit 0 on success, 1 on a failed pass, 2 on a usage error.
 // Contract and log codes: docs/designs/agentrun-reporter.md, "Capy reporter".
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -33,7 +36,7 @@ import { parseArgs } from "node:util";
 const require = createRequire(import.meta.url);
 const { createAgentrunClient } = require("../lib/server/agentrun-reporter/agentrun-client.js");
 const { createSender } = require("../lib/server/agentrun-reporter/sender.js");
-const { cut } = require("../lib/server/agentrun-reporter/bodies.js");
+const { agentDefinition, cut } = require("../lib/server/agentrun-reporter/bodies.js");
 
 const kCapyBaseUrl = "https://api.capy.ai/api/v1";
 const kDefaultRuntime = "claude-agent-sdk";
@@ -50,6 +53,10 @@ const kAutomationEarlyMs = 2 * 60 * 1000;
 const kAutomationLateMs = 10 * 60 * 1000;
 const kRetryRounds = 5;
 const kMaxRetryWaitMs = 60000;
+const kCrewPrefix = "capy-captain-";
+const kCrewDescription = "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter.";
+const kPrivateAgent = { id: "capy-private-threads", name: "Capy private threads", description: "Private Capy threads' turns, metadata only, reported by AlphaClaw's Capy reporter." };
+const hashOf = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 
 const listOf = (value) =>
   String(value || "")
@@ -119,12 +126,14 @@ const splitTurns = (entries) => {
 
 // The state file is the queue: rows wait in it until sent, and the sender
 // sees it through the same small interface as the SQLite outbox.
-const createStateOutbox = ({ state, save, now, sendable = () => true }) => ({
+// nameOf gives the agent name a row goes out with; it lives only on the copy
+// the sender gets, so a resolved crew name never reaches the state file.
+const createStateOutbox = ({ state, save, now, sendable = () => true, nameOf = (row) => row.agent_name }) => ({
   due: (limit = 50) =>
     state.rows
       .filter((row) => row.state === "queued" && row.next_attempt_at <= now() && sendable(row))
       .slice(0, limit)
-      .map((row) => ({ ...row })),
+      .map((row) => ({ ...row, agent_name: nameOf(row) })),
   update: (id, fields) => {
     const row = state.rows.find((entry) => entry.id === id);
     if (row) Object.assign(row, fields);
@@ -185,13 +194,18 @@ export const runCapyReporter = async ({
   const seenIds = new Set();
   const privateNow = new Set();
   const listedOpen = new Set();
+  const projectsById = new Map();
+  const captains = new Map();
   let failed = false;
 
+  // Agent ids are stable. A private thread (it or its project not org, or the
+  // thread listed) goes under one shared agent with no crew in its name. A
+  // crew row stores only the id-based name; the readable one is resolved at
+  // send from this pass's live Captain (crewNameOf) and never stored.
   const agentOf = (thread, project) => {
+    if (thread.visibility !== "org" || project?.visibility !== "org" || privateIds.has(thread.id)) return kPrivateAgent;
     const captainId = String((typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId) || "");
-    if (captainId) {
-      return { id: `capy-captain-${captainId}`, name: `Capy crew ${captainId}`, description: "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter." };
-    }
+    if (captainId) return { id: `${kCrewPrefix}${captainId}`, name: `Capy crew ${captainId}`, description: kCrewDescription };
     const projectId = String(thread.projectId || project.id || "none");
     const name = project.visibility === "org" && project.name ? `Capy project: ${project.name}` : `Capy project ${projectId}`;
     return { id: `capy-project-${projectId}`, name, description: "A Capy project's thread turns outside any crew, reported by AlphaClaw's Capy reporter." };
@@ -199,6 +213,17 @@ export const runCapyReporter = async ({
 
   // A private project limits everything in it (docs.capy.ai/admin/security),
   // so a thread is shared only when it and its project are both org-visible.
+  // "Capy crew: <name>" only when this pass read the Captain, it is not
+  // listed, and it and its project are org; otherwise the id.
+  const crewNameOf = (captainId) => {
+    const captain = captains.get(captainId);
+    const name = String(captain?.name || "").trim();
+    const shared = captain && !privateIds.has(captainId) && captain.visibility === "org" && projectsById.get(captain.projectId)?.visibility === "org";
+    return shared && name ? `Capy crew: ${name}` : `Capy crew ${captainId}`;
+  };
+  const sendNameOf = (row) =>
+    row.agent_key.startsWith(kCrewPrefix) && (row.class === "thread" || row.class === "automation") ? crewNameOf(row.agent_key.slice(kCrewPrefix.length)) : row.agent_name;
+
   const isPrivate = (thread, project) => {
     const captainId = typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId;
     return thread.visibility !== "org" || project?.visibility !== "org" || privateIds.has(thread.id) || (captainId && privateIds.has(captainId));
@@ -335,6 +360,12 @@ export const runCapyReporter = async ({
   // status; list order is never trusted to stop early.
   const collect = async () => {
     const projects = (await capy.get("/projects"))?.items || [];
+    for (const project of projects) projectsById.set(project.id, project);
+    try {
+      for (const captain of await capy.all("/captains")) captains.set(captain.id, captain);
+    } catch (error) {
+      readFailed("captains", "all", error);
+    }
     let complete = true;
     for (const project of projects) {
       try {
@@ -418,10 +449,12 @@ export const runCapyReporter = async ({
   // transcript read succeeded. A missing thread, a failed or partial listing
   // or a failed read leaves it held in the queue for a later pass.
   const sendable = (row) => row.class === "private" || listedOpen.has(row.session_label);
+  const client = createAgentrunClient({ baseUrl: String(env.AGENTRUN_BASE_URL).trim().replace(/\/+$/, ""), fetchImpl });
+  const token = String(env.AGENTRUN_CAPY_REPORTER_TOKEN).trim();
   const sender = createSender({
-    outbox: createStateOutbox({ state, save, now, sendable }),
-    client: createAgentrunClient({ baseUrl: String(env.AGENTRUN_BASE_URL).trim().replace(/\/+$/, ""), fetchImpl }),
-    token: String(env.AGENTRUN_CAPY_REPORTER_TOKEN).trim(),
+    outbox: createStateOutbox({ state, save, now, sendable, nameOf: sendNameOf }),
+    client,
+    token,
     getRuntime: () => runtime,
     contentAllowed: (row) => row.class === "automation",
     now,
@@ -442,6 +475,32 @@ export const runCapyReporter = async ({
   }
   const held = state.rows.filter((row) => row.state === "queued" && !sendable(row)).length;
   if (held) log(`row_held op=send count=${held} (their threads were not listed as not private this pass; kept for a later pass)`);
+  // A crew agent AgentRun already holds is renamed to its id as soon as its
+  // readable name is no longer allowed (a Captain gone private, listed or
+  // unreadable), without waiting for that crew's next turn. A readable name
+  // only ever goes out with a turn.
+  for (const [agentKey, known] of Object.entries(state.agents)) {
+    if (sent.paused || !agentKey.startsWith(kCrewPrefix)) continue;
+    const captainId = agentKey.slice(kCrewPrefix.length);
+    if (crewNameOf(captainId) !== `Capy crew ${captainId}`) continue;
+    const definition = agentDefinition({ agentId: agentKey, name: `Capy crew ${captainId}`, description: kCrewDescription, runtime });
+    const definitionHash = hashOf(definition);
+    if (known.definition_hash === definitionHash) continue;
+    const path = `/agents/${encodeURIComponent(agentKey)}`;
+    const got = await client.call({ method: "GET", path, token });
+    if (got.kind === "not_found") {
+      delete state.agents[agentKey];
+      continue;
+    }
+    const current = got.body?.definition || {};
+    const stale = current.sdk?.runtime !== runtime || current.name !== definition.name || current.learning !== false;
+    const put =
+      got.kind === "ok" && stale
+        ? await client.call({ method: "PUT", path: `${path}/definition`, token, ifMatch: got.etag, body: { definition: { ...definition, description: String(current.description ?? definition.description) } } })
+        : got;
+    if (put.kind === "ok") state.agents[agentKey] = { ...known, definition_hash: definitionHash };
+    else log(`agent_rename_error op=agent agent=${agentKey} status=${put.status || put.kind} (name kept; the next pass tries again)`);
+  }
   state.rows = state.rows.filter((row) => row.state === "queued");
   save();
   const stuck = state.rows.filter((row) => row.attempts >= kStuckAttempts).length;
