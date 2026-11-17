@@ -529,8 +529,20 @@ export const runCapyReporter = async ({
   // start was built (it may have reached AgentRun) keeps that start and every
   // heartbeat it stored, sent or not; its events and completion follow them.
   // One never built is replaced.
+  // A live row whose class changed before its turn finished (its thread
+  // turned private, say) is dropped with its stored start body and batches,
+  // and the turn is not sent: they were built for the old class.
+  const dropReclassified = (row) => {
+    const index = state.rows.findIndex((entry) => entry.id === row.id);
+    if (index < 0 || state.rows[index].state !== "live" || state.rows[index].class === row.class) return false;
+    state.rows.splice(index, 1);
+    log("content_revoked op=capy count=1 (a live turn's class changed before it finished; not sent)");
+    return true;
+  };
+
   const queue = (rows) => {
     for (const row of rows) {
+      if (dropReclassified(row)) continue;
       const index = state.rows.findIndex((entry) => entry.id === row.id);
       if (index < 0) {
         state.rows.push(row);
@@ -562,7 +574,7 @@ export const runCapyReporter = async ({
 
   const queueLive = (args) => {
     const row = rowOf({ ...args, live: true, startFields: true });
-    if (!state.rows.some((entry) => entry.id === row.id)) state.rows.push(row);
+    if (!dropReclassified(row) && !state.rows.some((entry) => entry.id === row.id)) state.rows.push(row);
   };
 
   const processThread = async (thread, project, automationRuns) => {
@@ -613,7 +625,7 @@ export const runCapyReporter = async ({
       const known = state.subagents[subagent.id];
       if (known && known.activity === activity && known.status === subagent.status) continue;
       if (!known && timeOf(activity) < now() - kFirstSightMs) {
-        state.subagents[subagent.id] = { thread: thread.id, activity, status: subagent.status, after: null, reported: [], since: new Date(now()).toISOString(), credits: null };
+        state.subagents[subagent.id] = { thread: thread.id, activity, status: subagent.status, archived: subagent.archived === true, after: null, reported: [], since: new Date(now()).toISOString(), credits: null };
         continue;
       }
       const prior = known || { after: null, reported: [], since: new Date(now() - kFirstSightMs).toISOString(), credits: null };
@@ -629,7 +641,16 @@ export const runCapyReporter = async ({
           ),
         );
         if (live && openNew && subagent.status === "working") queueLive({ thread, subagent, turn: open, cls, agent });
-        state.subagents[subagent.id] = { thread: thread.id, activity, status: subagent.status, after: nextAfter, reported: kept, since: prior.since, credits: credits.next };
+        state.subagents[subagent.id] = {
+          thread: thread.id,
+          activity,
+          status: subagent.status,
+          archived: subagent.archived === true,
+          after: nextAfter,
+          reported: kept,
+          since: prior.since,
+          credits: credits.next,
+        };
         counts.subagents += 1;
         counts.queued += fresh.length;
         save();
@@ -703,18 +724,24 @@ export const runCapyReporter = async ({
         if (error?.status !== 404) readFailed("thread", thread.id, error);
       }
     }
+    // A thread is watched while one of its subagents was last seen
+    // unfinished, or while its subagent listing failed (subagents_pending)
+    // and has not succeeded since.
     const watched = new Set(
       Object.values(state.subagents)
-        .filter((known) => !kSubagentClosedStatuses.has(known.status))
+        .filter((known) => !known.archived && !kSubagentClosedStatuses.has(known.status))
         .map((known) => known.thread),
     );
+    for (const thread of threads) if (state.threads[thread.id]?.subagents_pending) watched.add(thread.id);
     const changedIds = new Set(changed.map((thread) => thread.id));
     for (const thread of threads) {
       if (!readable.has(thread.id) && (changedIds.has(thread.id) || !watched.has(thread.id))) continue;
       try {
         await processSubagents(thread, project);
+        if (state.threads[thread.id]) delete state.threads[thread.id].subagents_pending;
       } catch (error) {
         listedOpen.delete(thread.id);
+        if (state.threads[thread.id]) state.threads[thread.id].subagents_pending = true;
         if (error?.status !== 404) readFailed("subagents", thread.id, error);
       }
     }
@@ -723,13 +750,14 @@ export const runCapyReporter = async ({
   // Live turns need AgentRun's sdk_runs capability (started_at, title and
   // labels on a start, and empty event batches as heartbeats). It is read at
   // most once an hour and kept in the state file; without it nothing starts
-  // before its turn ends.
+  // before its turn ends. Only an ok answer that advertises it turns live
+  // mode on: a failed read or a 404 means off.
   const liveOn = async () => {
     const known = state.capabilities;
     if (known && now() - timeOf(known.checked_at) < kCapabilitiesMs) return known.sdk_runs === true;
     const got = await client.call({ method: "GET", path: "/capabilities", token });
     const flag = got.body?.features?.sdk_runs;
-    const sdkRuns = got.kind === "ok" ? flag === true || (Boolean(flag) && typeof flag === "object" && flag.enabled !== false) : known?.sdk_runs === true;
+    const sdkRuns = got.kind === "ok" && (flag === true || (Boolean(flag) && typeof flag === "object" && flag.enabled !== false));
     state.capabilities = { checked_at: new Date(now()).toISOString(), sdk_runs: sdkRuns };
     return sdkRuns;
   };
@@ -817,12 +845,12 @@ export const runCapyReporter = async ({
       state.rows = state.rows.filter((row) => !revoked.includes(row));
       log(`content_revoked op=capy count=${revoked.length} (the thread became private before these turns were sent; not sent)`);
     }
-    // A live turn whose thread a complete listing no longer shows, or that has
-    // been working for 24 hours, is dropped rather than kept beating forever.
-    const stale = state.rows.filter((row) => row.state === "live" && ((listedAll && !seenIds.has(row.session_label)) || now() - Number(row.started_at || 0) > kFirstSightMs));
+    // A live turn whose thread a complete listing no longer shows is dropped
+    // rather than kept beating forever.
+    const stale = state.rows.filter((row) => row.state === "live" && listedAll && !seenIds.has(row.session_label));
     if (stale.length) {
       state.rows = state.rows.filter((row) => !stale.includes(row));
-      log(`live_dropped op=capy count=${stale.length} (their thread is gone or the turn ran past 24 hours; not completed)`);
+      log(`live_dropped op=capy count=${stale.length} (their thread is gone; not completed)`);
     }
     const unsent = state.rows.filter((row) => row.state === "queued");
     if (unsent.length > kMaxUnsentRows) {

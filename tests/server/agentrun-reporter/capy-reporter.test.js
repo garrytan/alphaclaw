@@ -860,6 +860,55 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 
+  it("drops a live automation turn whose thread turns private before its start reached AgentRun, and never sends its prompt", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const capy = createFakeCapy({
+      threads: [thread("jam_D", { status: "working", lastActivityAt: at(0), title: "PUBLIC-TITLE" })],
+      messages: { jam_D: [user("AUTO-PROMPT " + kMarker, 0), reply("AUTO-REPLY " + kMarker, -0.2)] },
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "running", jamId: "jam_D", createdAt: at(1), startedAt: at(1) }] },
+    });
+    fake.state.failNext.push({ path: /\/sdk-runs$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    let privateFrom = null;
+    const watched = onPass(capy, (pass) => {
+      if (pass !== 2) return;
+      privateFrom = fake.requests.length;
+      Object.assign(capy.threads[0], { visibility: "private", status: "idle", lastActivityAt: at(-0.5) });
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    const later = fake.requests.slice(privateFrom).map((request) => request.body).join("\n");
+    expect(later).not.toContain(kMarker);
+    expect(later).not.toContain("PUBLIC-TITLE");
+    expect(result.lines.join("\n")).toContain("content_revoked op=capy count=1");
+    expect(fake.runs.size).toBe(0);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("reads a thread's subagents again on later passes after its subagent listing failed", async () => {
+    const s1 = [user("t1", 30), reply("r1", 29)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_A")],
+      messages: { jam_A: [user("a1", 30), reply("r1", 29)] },
+      subagents: { jam_A: [sub("s1", "jam_A")] },
+      subagentMessages: { s1 },
+    });
+    capy.state.fail = (route) => (route === "/threads/jam_A/subagents" ? 500 : null);
+    const failed = await run(capy);
+    expect(failed.code).toBe(1);
+    expect(failed.lines.join("\n")).toContain("capy_error op=subagents id=jam_A status=500");
+    clock += 60000;
+    const again = await run(capy);
+    expect(again.code).toBe(1);
+    capy.state.fail = null;
+    clock += 60000;
+    expect((await run(capy)).code).toBe(0);
+    expect(keys().filter((key) => key.includes(":sub:"))).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id]);
+    const listings = capy.requests.filter((request) => request.route === "/threads/jam_A/subagents").length;
+    clock += 60000;
+    expect((await run(capy)).code).toBe(0);
+    expect(capy.requests.filter((request) => request.route === "/threads/jam_A/subagents").length).toBe(listings);
+  });
+
   it("exits non-zero with one line naming what is missing, never a value", () => {
     const result = spawnSync(process.execPath, [kScript, "--state", path.join(dir, "state.json")], {
       env: { PATH: process.env.PATH, AGENTRUN_CAPY_REPORTER_TOKEN: "tok-VALUE-123" },
