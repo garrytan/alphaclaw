@@ -12,12 +12,16 @@
 // threads are always private), AGENTRUN_CAPY_RUNTIME (default
 // claude-agent-sdk), AGENTRUN_CAPY_STATE (instead of --state).
 //
-// Privacy: a private thread (visibility private or missing, or the thread or
-// its Captain listed) sends metadata without its title; the one turn an
-// automation run started sends its input, replies and one-line tool
-// summaries; every other turn sends metadata plus the thread title. Tool
-// inputs and outputs are never read into a row. Values of keys and tokens are
-// never printed. Exit 0 on success, 1 on a failed pass, 2 on a usage error.
+// Privacy: a thread is private unless both it and its project have visibility
+// org, and it is private whenever it or its Captain is listed; a private
+// thread sends metadata without its title. Only the first user entry of a
+// thread that a threadMode "new" automation run made, inside the run's time
+// window, sends its input, replies and one-line tool summaries; a standing
+// (single) automation thread's turns and every other turn send metadata plus
+// the thread title. A title or contents goes only when the same pass's
+// complete listing proved the thread not private; otherwise the turn stays
+// queued. Agent names never carry a Captain's name. Tool inputs and outputs
+// are never read into a row. Values of keys and tokens are never printed. Exit 0 on success, 1 on a failed pass, 2 on a usage error.
 // Contract and log codes: docs/designs/agentrun-reporter.md, "Capy reporter".
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -186,8 +190,7 @@ export const runCapyReporter = async ({
   const agentOf = (thread, project) => {
     const captainId = String((typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId) || "");
     if (captainId) {
-      const name = privateIds.has(captainId) ? `Capy crew ${captainId} (private)` : `Capy crew: ${thread.captain?.name || captainId}`;
-      return { id: `capy-captain-${captainId}`, name, description: "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter." };
+      return { id: `capy-captain-${captainId}`, name: `Capy crew ${captainId}`, description: "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter." };
     }
     const projectId = String(thread.projectId || project.id || "none");
     const name = project.visibility === "org" && project.name ? `Capy project: ${project.name}` : `Capy project ${projectId}`;
@@ -427,15 +430,15 @@ export const runCapyReporter = async ({
   });
   const sent = await sender.sendDue({ limit: state.rows.length || 1 });
   // The pass runs hourly, past AgentRun's one-hour window, so a turn that met
-  // a passing failure is retried here, within the round cap and wait limit.
-  for (let round = 0, retry = sent.retry; round < kRetryRounds && retry && !sent.paused; round += 1) {
+  // a passing failure is retried here while a started or failed turn falls
+  // due within the wait limit, at most kRetryRounds rounds.
+  for (let round = 0; round < kRetryRounds && !sent.paused; round += 1) {
     const waiting = state.rows.filter((row) => row.state === "queued" && row.attempts > 0 && sendable(row)).map((row) => row.next_attempt_at);
     const waitMs = Math.max(0, Math.min(...waiting) - now());
     if (!waiting.length || waitMs > kMaxRetryWaitMs) break;
     await sleep(waitMs);
     const again = await sender.sendDue({ limit: state.rows.length || 1 });
     for (const key of Object.keys(sent)) sent[key] = key === "retry" ? again.retry : sent[key] + again[key];
-    retry = again.retry;
   }
   const held = state.rows.filter((row) => row.state === "queued" && !sendable(row)).length;
   if (held) log(`row_held op=send count=${held} (their threads were not listed as not private this pass; kept for a later pass)`);

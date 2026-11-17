@@ -156,7 +156,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(auto.completion).toMatchObject({ status: "completed", answer: "AUTO-REPLY", session_id: "jam_D", evidence_complete: false });
     expect(runFor("jam_D", d[3]).start.input).toMatch(/^Capy thread turn in thread jam_D/);
     expect(runFor("jam_E", e[0]).start.input).toContain('"VISIBLE-TITLE"');
-    expect(fake.agents.get("capy-captain-jam_crew1").definition.name).toBe("Capy crew: Crew One");
+    expect(fake.agents.get("capy-captain-jam_crew1").definition.name).toBe("Capy crew jam_crew1");
     expect(allBodies()).not.toContain(kMarker);
   });
 
@@ -179,7 +179,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect((await run(capy)).code).toBe(0);
     expect(fake.runs.size).toBe(4);
     for (const item of fake.runs.values()) expect(item.start.input).toMatch(/^Capy private turn in thread jam_P\d; started/);
-    expect(fake.agents.get("capy-captain-jam_privatecrew").definition.name).toBe("Capy crew jam_privatecrew (private)");
+    expect(fake.agents.get("capy-captain-jam_privatecrew").definition.name).toBe("Capy crew jam_privatecrew");
     expect(allBodies()).not.toContain(kMarker);
     expect(allBodies()).not.toContain("PRIVATE-TITLE");
   });
@@ -349,6 +349,31 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(sleeps).toHaveLength(1);
     expect(sleeps[0]).toBeLessThanOrEqual(60000);
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("completes two turns that each met a 503 in the same round within one pass", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A"), thread("jam_B")], messages: { jam_A: [user("a1", 30), reply("r1", 29)], jam_B: [user("b1", 30), reply("rb1", 29)] } });
+    for (let i = 0; i < 2; i += 1) fake.state.failNext.push({ path: /\/events$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    expect((await run(capy)).code).toBe(0);
+    expect([...fake.runs.values()].map((item) => item.completion?.status)).toEqual(["completed", "completed"]);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("names crew agents by Captain id only, for a private thread and for a queued private row whose Captain is listed later", async () => {
+    const capy = createFakeCapy({
+      threads: [thread("jam_V", { visibility: "private", captain: { jamId: "jam_crewT", name: "CAPTAIN-TITLE", avatar: {} } })],
+      messages: { jam_V: [user("v1", 30), reply("rv1", 29)], jam_W: [user("w1", -40), reply("rw1", -41)] },
+    });
+    fake.state.down = true;
+    await run(capy);
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    capy.threads.push(thread("jam_W", { visibility: "private", lastActivityAt: at(-41), captain: { jamId: "jam_crewU", name: "OTHER-CAPTAIN", avatar: {} } }));
+    expect((await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_crewT" })).code).toBe(0);
+    expect(fake.runs.size).toBe(2);
+    expect(fake.agents.get("capy-captain-jam_crewT").definition.name).toBe("Capy crew jam_crewT");
+    expect(fake.agents.get("capy-captain-jam_crewU").definition.name).toBe("Capy crew jam_crewU");
+    expect(allBodies()).not.toMatch(/CAPTAIN-TITLE|OTHER-CAPTAIN/);
   });
 
   it("retries a started turn through two failed rounds within the same pass", async () => {
