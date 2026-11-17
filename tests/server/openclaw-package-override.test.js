@@ -554,10 +554,10 @@ describe("the launch, watchdog and notification paths", () => {
     code: "openclaw_package_sha_mismatch",
     reason: "sha_mismatch",
     hookPath: null,
-    message: "the package file's sha256 is not the one in the setting (expected d4eec2d5fdb6…, file 0123456789ab…)",
+    message: "the package file's sha256 is not the one in the setting (expected 0f1e2d3c4b5a…, file 0123456789ab…)",
     site: "managed launch",
     packageFile: "openclaw-2026.11.4-patched.tgz",
-    packageSha256: "d4eec2d5fdb6825063b881c9c99f12a589f5335253ae0866bbd34686022c1ea5",
+    packageSha256: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
     durationMs: 4,
     exitCode: null,
     signal: null,
@@ -605,9 +605,9 @@ describe("the launch, watchdog and notification paths", () => {
     expect(watchdog.recordOperationEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "openclaw_package", status: "refused" }));
     expect(notify).toHaveBeenCalledTimes(1);
     const [message, opts] = notify.mock.calls[0];
-    expect(opts).toEqual({ eventType: "openclaw_package", id: "openclaw-package-sha_mismatch-d4eec2d5fdb6-2026-11-17" });
+    expect(opts).toEqual({ eventType: "openclaw_package", id: "openclaw-package-sha_mismatch-0f1e2d3c4b5a-2026-11-17" });
     expect(message).toContain("Gateway not started: the pinned OpenClaw package was refused");
-    expect(message).toContain("Package: openclaw-2026.11.4-patched.tgz (d4eec2d5fdb6…)");
+    expect(message).toContain("Package: openclaw-2026.11.4-patched.tgz (0f1e2d3c4b5a…)");
     expect(message).toContain("remove ALPHACLAW_OPENCLAW_PACKAGES");
     expect(watchdog.onPrelaunchHook).toHaveBeenCalledTimes(2);
   });
