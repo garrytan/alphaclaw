@@ -415,9 +415,12 @@ message sent to it in the meantime is dropped (GST-2884). When the gateway
 logs that it is resuming sessions (`marked N startup-orphaned main
 session(s)`, `started interrupted main session`, or the old gateway's
 `marked N interrupted main session(s)` while draining), the check waits for
-`main-session restart recovery startup complete` (up to 30 minutes, log
-`wedge-sweep waiting … for=openclaw_recovery`) so a session still in that
-queue is not reported as stuck.
+OpenClaw to finish (up to 30 minutes, log `wedge-sweep waiting …
+for=openclaw_recovery`) so a session still in that queue is not reported as
+stuck. Finished means a `main-session restart recovery startup complete` line
+with `failed=0`, the third such line (OpenClaw retries a pass with failures
+twice), `main-session restart recovery gave up`, or `restart-loop breaker
+tripped; automatic main-session restart recovery paused`.
 
 **What to do:** open the session in the Control UI and send a message (on
 2026.10.5+ a Control UI send reconciles an orphaned claim first). If it still
