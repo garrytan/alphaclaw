@@ -840,3 +840,37 @@ describe("agentrun reporter: an agent another writer just created", () => {
     expect(logs.join("\n")).toContain("agent_refused op=agent_create source=openclaw agent=openclaw-agent-main code=agent_exists");
   });
 });
+
+describe("agentrun reporter: answers from something other than AgentRun", () => {
+  it.each([
+    [408, "text/plain", "Request Timeout"],
+    [405, "text/html", "<html>Method Not Allowed</html>"],
+    [400, "text/plain", "Bad Request"],
+  ])("keeps the turn queued on a %s without an AgentRun error code", async (status, type, text) => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const now = () => clock;
+    const fake = createFakeAgentrun();
+    let proxyFails = true;
+    const proxy = async (url, init) => (proxyFails ? new Response(text, { status, headers: { "content-type": type } }) : fake.fetchImpl(url, init));
+    const { source, outbox, logs } = makePipeline(rootDir, { fake, now });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: proxy }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      random: () => 0.5,
+      now,
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect(await sender.sendDue()).toMatchObject({ retry: 1, dropped: 0 });
+    expect(outbox.counts()).toEqual({ queued: 1 });
+    proxyFails = false;
+    clock += 60 * 1000;
+    expect((await sender.sendDue()).sent).toBe(1);
+    expect(logs.join("\n")).not.toContain("agent_refused");
+  });
+});
