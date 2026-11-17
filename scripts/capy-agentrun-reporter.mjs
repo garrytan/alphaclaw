@@ -41,6 +41,11 @@ const kMaxRetryAfterMs = 120000;
 const kMaxUnsentRows = 20000;
 const kStuckAttempts = 6;
 const kAutomationRunsRead = 100;
+const kAutomationRunStatuses = new Set(["running", "completed", "failed"]);
+const kAutomationEarlyMs = 2 * 60 * 1000;
+const kAutomationLateMs = 10 * 60 * 1000;
+const kRetryRounds = 2;
+const kMaxRetryWaitMs = 60000;
 
 const listOf = (value) =>
   String(value || "")
@@ -173,6 +178,8 @@ export const runCapyReporter = async ({
   };
   const capy = createCapyClient({ apiKey: String(env.CAPY_REPORTER_API_KEY).trim(), fetchImpl: capyFetchImpl, sleep, baseUrl: capyBaseUrl });
   const counts = { threads: 0, queued: 0 };
+  const seenIds = new Set();
+  const privateNow = new Set();
   let failed = false;
 
   const agentOf = (thread, project) => {
@@ -249,17 +256,18 @@ export const runCapyReporter = async ({
     };
   };
 
-  // Automation runs by thread: the run's turn is the first user entry at or
-  // after the run was created. A run whose turn may lie before the part of
-  // the transcript read this pass is not matched, so it fails closed to
-  // metadata (docs.capy.ai/api-reference/schemas/AutomationRunEncoded).
+  // Automation runs by thread: only a run that started (running, completed or
+  // failed) has a turn, and its turn is the first user entry from 2 minutes
+  // before to 10 minutes after the run's startedAt. Anything else, or a run
+  // whose turn may lie before the part of the transcript read this pass,
+  // fails closed to metadata (docs.capy.ai/api-reference/schemas/AutomationRunEncoded).
   const readAutomationRuns = async (projectId) => {
     const byThread = new Map();
     for (const automation of await capy.all("/automations", { projectId })) {
       const page = await capy.get(`/automations/${encodeURIComponent(automation.id)}/runs`, { limit: kAutomationRunsRead });
       for (const run of page?.items || []) {
-        if (!run.jamId) continue;
-        byThread.set(run.jamId, [...(byThread.get(run.jamId) || []), timeOf(run.createdAt)]);
+        if (!run.jamId || !kAutomationRunStatuses.has(run.status) || !timeOf(run.startedAt)) continue;
+        byThread.set(run.jamId, [...(byThread.get(run.jamId) || []), timeOf(run.startedAt)]);
       }
     }
     return byThread;
@@ -269,15 +277,18 @@ export const runCapyReporter = async ({
     const known = state.threads[thread.id] || { after: null, reported: [], since: new Date(now() - kFirstSightMs).toISOString(), credits: null };
     const { entries, lastPageStart, complete } = await readTranscript(capy, thread.id, known.after);
     const turns = splitTurns(entries);
-    const settled = complete && kClosedStatuses.has(thread.status);
+    // A thread that moved after the listing (an entry newer than its
+    // lastActivityAt) keeps its last turn open until the next pass.
+    const newest = timeOf(entries[entries.length - 1]?.createdAt);
+    const settled = complete && kClosedStatuses.has(thread.status) && !(timeOf(thread.lastActivityAt) && newest > timeOf(thread.lastActivityAt));
     const open = turns.find((turn, index) => index === turns.length - 1 && !settled) || null;
     const reported = new Set(known.reported);
     const viewStart = known.after === null ? 0 : timeOf(entries[0]?.createdAt) || Infinity;
     const automationTurns = new Set();
     for (const runAt of automationRuns.get(thread.id) || []) {
-      if (runAt < viewStart) continue;
-      const turn = turns.find((candidate) => timeOf(candidate.user.createdAt) >= runAt && !candidate.user.sender);
-      if (turn) automationTurns.add(turn.user.id);
+      if (runAt - kAutomationEarlyMs < viewStart) continue;
+      const turn = turns.find((candidate) => timeOf(candidate.user.createdAt) >= runAt - kAutomationEarlyMs);
+      if (turn && !turn.user.sender && timeOf(turn.user.createdAt) <= runAt + kAutomationLateMs) automationTurns.add(turn.user.id);
     }
     const fresh = [];
     turns.forEach((turn, index) => {
@@ -317,6 +328,12 @@ export const runCapyReporter = async ({
     const projects = (await capy.get("/projects"))?.items || [];
     for (const project of projects) {
       const threads = await capy.all("/threads", { projectId: project.id });
+      for (const thread of threads) {
+        seenIds.add(thread.id);
+        const captainId = typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId;
+        if (captainId) seenIds.add(captainId);
+        if (isPrivate(thread)) privateNow.add(thread.id);
+      }
       const changed = threads.filter((thread) => {
         const known = state.threads[thread.id];
         const activity = thread.lastActivityAt || thread.updatedAt || "";
@@ -337,6 +354,9 @@ export const runCapyReporter = async ({
       }
     }
     save();
+    for (const id of privateIds) {
+      if (!seenIds.has(id)) log(`private_unmatched op=capy entry=${id} (no thread or Captain id this key can see matches it; list jam_ ids)`);
+    }
   };
 
   try {
@@ -347,6 +367,18 @@ export const runCapyReporter = async ({
     else log(`capy_error op=read ${String(error?.message || error).slice(0, 200)} (the next pass reads again from the saved cursors)`);
   }
 
+  // Private wins at send too: a queued turn whose thread is now private, or
+  // whose thread or crew is now listed, is dropped, never rebuilt (a rebuilt
+  // start under the same key would not match one AgentRun may already hold).
+  const revoked = state.rows.filter(
+    (row) =>
+      row.class !== "private" &&
+      (privateNow.has(row.session_label) || privateIds.has(row.session_label) || privateIds.has(row.agent_key.replace(/^capy-captain-/, ""))),
+  );
+  if (revoked.length) {
+    state.rows = state.rows.filter((row) => !revoked.includes(row));
+    log(`content_revoked op=capy count=${revoked.length} (the thread became private before these turns were sent; not sent)`);
+  }
   const unsent = state.rows.filter((row) => row.state === "queued");
   if (unsent.length > kMaxUnsentRows) {
     const drop = new Set(unsent.slice(0, unsent.length - kMaxUnsentRows).map((row) => row.id));
@@ -358,13 +390,22 @@ export const runCapyReporter = async ({
     client: createAgentrunClient({ baseUrl: String(env.AGENTRUN_BASE_URL).trim().replace(/\/+$/, ""), fetchImpl }),
     token: String(env.AGENTRUN_CAPY_REPORTER_TOKEN).trim(),
     getRuntime: () => runtime,
-    contentAllowed: (row) =>
-      row.class === "automation" && !privateIds.has(row.session_label) && !privateIds.has(row.agent_key.replace(/^capy-captain-/, "")),
+    contentAllowed: (row) => row.class === "automation",
     now,
     logger,
     source: "capy",
   });
   const sent = await sender.sendDue({ limit: state.rows.length || 1 });
+  // The pass runs hourly, past AgentRun's one-hour window, so a turn that met
+  // a passing failure is retried here, but only while AgentRun answers.
+  for (let round = 0; round < kRetryRounds && sent.retry && !sent.paused && sent.sent + sent.dropped + sent.expired > 0; round += 1) {
+    const waiting = state.rows.filter((row) => row.state === "queued").map((row) => row.next_attempt_at);
+    const waitMs = Math.max(0, Math.min(...waiting) - now());
+    if (!waiting.length || waitMs > kMaxRetryWaitMs) break;
+    await sleep(waitMs);
+    const again = await sender.sendDue({ limit: state.rows.length || 1 });
+    for (const key of Object.keys(sent)) sent[key] = key === "retry" ? again.retry : sent[key] + again[key];
+  }
   state.rows = state.rows.filter((row) => row.state === "queued");
   save();
   const stuck = state.rows.filter((row) => row.attempts >= kStuckAttempts).length;

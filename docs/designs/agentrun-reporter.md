@@ -88,12 +88,13 @@ node scripts/capy-agentrun-reporter.mjs --state <path to state.json>
 
 Each pass reads every project the key can see, every page of each project's threads (a thread is read again only when its `lastActivityAt` or status changed; list order is never trusted), each changed thread's messages from its saved cursor, and the project's automations and their latest 100 runs. Then it sends every queued turn and exits.
 
-- **A turn** is one user entry and everything after it until the next user entry. It is reported only once it is closed: the next user entry exists, or the thread is `idle`, `failed` or `archived`. A `waiting` or `working` thread's last turn waits for a later pass. The last turn of a `failed` thread is reported as `failed`, every other turn as `completed`.
+- **A turn** is one user entry and everything after it until the next user entry. It is reported only once it is closed: the next user entry exists, or the thread is `idle`, `failed` or `archived`. A `waiting` or `working` thread's last turn waits for a later pass, and so does the last turn of a thread whose newest entry is later than the `lastActivityAt` the listing showed (it moved while the pass read it). The last turn of a `failed` thread is reported as `failed`, every other turn as `completed`.
 - **Agents.** One AgentRun agent per Captain crew, `capy-captain-<captain thread id>`, and one per project for threads in no crew, `capy-project-<project id>`, all with `learning: false`. The run's session id is the thread id.
 - **Each turn is reported once.** The start key is `alphaclaw:capy:<thread id>:<user entry id>`, and the tool event ids come from that key too. A thread first seen by the reporter reports only turns from the 24 hours before that pass.
 - **Credits.** The change in the thread's credit total since the previous report is written in the metadata line of the last turn a pass reports for that thread as an estimate, never as `cost_usd`.
 - **State.** One JSON file (mode 0600, written whole and renamed) keeps each thread's cursor and the turns not yet sent, including their stored request bodies. Keep it in the automation's Drive location. Losing it only re-sends recent turns under their old keys: AgentRun answers an identical start with the run it already has, and a start that differs (a renamed thread, a changed credit figure) with `idempotency_mismatch`, which the sender books as `run_exists` without making a second run.
 - **Capy rate limits.** A 429 waits the `retry-after` seconds (at most 2 minutes, 5 times per request) and sends the same request again.
+- **Retries.** The pass runs hourly, which is past AgentRun's one-hour window for a started run, so a turn that meets a passing failure is retried in the same pass (at most twice, waiting at most a minute) while AgentRun is answering other turns.
 - **Exit code.** 0 after a good pass; 1 when Capy refused the key or failed a read, AgentRun refused the token, or a turn has failed to send on 6 passes (`rows_waiting`); 2 when a setting is missing. Queued turns are still sent after a failed read.
 
 ### Capy classes
@@ -101,10 +102,10 @@ Each pass reads every project the key can see, every page of each project's thre
 | Class | When | Sent |
 | --- | --- | --- |
 | `private` | The thread's visibility is `private` or missing, or the thread id or its Captain's id is in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Metadata only, without the title. Wins over `automation`. |
-| `automation` | The one turn an automation run started: the first user entry at or after the run was created | The user entry's text, the assistant replies, and one line per tool call (`Tool call: bash (1.2s)`) |
+| `automation` | The one turn an automation run started: for a run that is `running`, `completed` or `failed`, the first user entry from 2 minutes before to 10 minutes after its `startedAt`, with no `sender` | The user entry's text, the assistant replies, and one line per tool call (`Tool call: bash (1.2s)`) |
 | `thread` | Every other turn | Metadata plus the thread title |
 
-Metadata is the class, thread id, start time, duration, status, number of replies and tool calls, the model and each tool's name. Tool inputs and outputs are never read into a turn, for any class. An automation run whose turn may lie before the part of the transcript a pass read is not matched, so that turn fails closed to `thread`. Contents are checked again at send: a queued `automation` turn whose thread or crew has since been listed as private is dropped (`content_revoked`).
+Metadata is the class, thread id, start time, duration, status, number of replies and tool calls, the model and each tool's name. Tool inputs and outputs are never read into a turn, for any class. An automation run whose turn may lie before the part of the transcript a pass read is not matched, so that turn fails closed to `thread`. Private wins at send too: a queued turn whose thread is now private, or whose thread or crew is now listed, is dropped before sending (`content_revoked`), title and contents alike.
 
 ### Capy settings
 
@@ -115,13 +116,13 @@ Set them as the Capy project's environment variables; the key and the token are 
 | `CAPY_REPORTER_API_KEY` | A Capy API key of a `read_only` service user (Settings → API). Required. |
 | `AGENTRUN_BASE_URL` | AgentRun's API base, ending in `/v2`. Required. |
 | `AGENTRUN_CAPY_REPORTER_TOKEN` | An AgentRun API token for this reporter. Required. |
-| `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Comma-separated thread or Captain ids whose threads are always `private`. Empty by default. |
+| `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Comma-separated thread or Captain ids (`jam_…`, not thread codes) whose threads are always `private`. Empty by default. |
 | `AGENTRUN_CAPY_RUNTIME` | SDK runtime for the agents and runs, default `claude-agent-sdk`. |
 | `AGENTRUN_CAPY_STATE` | The state file, when `--state` is not given. |
 
 ### Capy log lines
 
-The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source=capy` on the sender's lines (`token_rejected`, `row_dropped`, `run_expired`, `agent_refused`, `content_revoked`, `run_exists`, `send_error`). Its own codes:
+The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source=capy` on the sender's lines (`token_rejected`, `row_dropped`, `run_expired`, `agent_refused`, `run_exists`, `send_error`). Its own codes:
 
 | Code | Meaning |
 | --- | --- |
@@ -129,6 +130,8 @@ The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source
 | `capy_rejected` | Capy answered 401 or 403; check `CAPY_REPORTER_API_KEY` and the service user's project access. |
 | `capy_error` | Another Capy read failed; the next pass reads again from the saved cursors. |
 | `state_reset` | The state file could not be read; the pass starts empty and re-sends under the old keys. |
+| `private_unmatched` | An entry of `AGENTRUN_CAPY_PRIVATE_CAPTAINS` matches no thread or Captain id the key can see (for example a thread code instead of its `jam_` id); it protects nothing. |
+| `content_revoked` | Queued turns whose thread became private before they were sent; dropped, not sent. |
 | `rows_waiting` | Turns that have failed to send on 6 or more passes; check `AGENTRUN_BASE_URL`. |
 | `queue_overflow` | More than 20,000 unsent turns; the oldest were dropped. |
 | `runtime_invalid` | `AGENTRUN_CAPY_RUNTIME` is not a runtime name; using `claude-agent-sdk`. |

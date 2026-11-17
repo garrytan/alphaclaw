@@ -95,7 +95,10 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
       fetchImpl: fake.fetchImpl,
       capyFetchImpl: capy.fetchImpl,
       now: () => clock,
-      sleep: async (ms) => sleeps.push(ms),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
       logger: { warn: (line) => lines.push(line), log: (line) => lines.push(line) },
     });
     return { code, lines };
@@ -142,7 +145,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
       threads: [thread("jam_D", { captain: { jamId: "jam_crew1", name: "Crew One", avatar: {} } }), thread("jam_E", { title: "VISIBLE-TITLE" })],
       messages: { jam_D: d, jam_E: e },
       automations: [{ id: "au1", projectId: "p1" }],
-      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(31) }] },
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(32), startedAt: at(31) }] },
     });
     expect((await run(capy)).code).toBe(0);
     const auto = runFor("jam_D", d[0]);
@@ -169,7 +172,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
       threads,
       messages: Object.fromEntries(threads.map((item) => [item.id, turn()])),
       automations: [{ id: "au1", projectId: "p1" }],
-      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_P3", createdAt: at(31) }] },
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_P3", createdAt: at(32), startedAt: at(31) }] },
     });
     expect((await run(capy)).code).toBe(0);
     expect(fake.runs.size).toBe(4);
@@ -185,7 +188,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
       threads: [thread("jam_D", { captain: { jamId: "jam_crew1", name: "Crew One", avatar: {} } })],
       messages: { jam_D: d },
       automations: [{ id: "au1", projectId: "p1" }],
-      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(31) }] },
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(32), startedAt: at(31) }] },
     });
     fake.state.down = true;
     expect((await run(capy)).code).toBe(0);
@@ -193,9 +196,67 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     fake.state.down = false;
     clock += 60 * 60 * 1000;
     const later = await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_crew1" });
-    expect(later.lines.join("\n")).toContain("content_revoked op=send source=capy");
+    expect(later.lines.join("\n")).toContain("content_revoked op=capy count=1");
     expect(fake.runs.size).toBe(0);
     expect(allBodies()).not.toContain("AUTO-");
+  });
+
+  it("drops a queued title once its thread turns private, and never claims a person's turn for an automation", async () => {
+    const a = [user("a1", 30), reply("r1", 29)];
+    const h = [user("PERSON-TEXT", 40), reply("PERSON-REPLY", 39), user("LATE-PERSON", 5), reply("late reply", 4)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_A", { title: "SECRET-TITLE" }), thread("jam_H", { lastActivityAt: at(3) })],
+      messages: { jam_A: a, jam_H: h },
+      automations: [{ id: "au1", projectId: "p1" }],
+      runs: {
+        au1: [
+          { id: "skipped", automationId: "au1", status: "skipped", jamId: "jam_H", createdAt: at(41), startedAt: null },
+          { id: "early", automationId: "au1", status: "completed", jamId: "jam_H", createdAt: at(31), startedAt: at(30) },
+        ],
+      },
+    });
+    fake.state.down = true;
+    expect((await run(capy)).code).toBe(0);
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    capy.threads[0].visibility = "private";
+    const later = await run(capy);
+    expect(later.lines.join("\n")).toContain("content_revoked op=capy count=1");
+    expect(allBodies()).not.toContain("SECRET-TITLE");
+    expect(fake.runs.size).toBe(2);
+    expect(allBodies()).not.toMatch(/PERSON-TEXT|PERSON-REPLY|LATE-PERSON/);
+  });
+
+  it("holds the last turn of a thread that moved after the listing, and names private entries that match nothing", async () => {
+    const a = [user("a1", 30), reply("r1", 29), user("a2", 2)];
+    const capy = createFakeCapy({ threads: [thread("jam_A", { lastActivityAt: at(29) })], messages: { jam_A: a } });
+    const result = await run(capy, { AGENTRUN_CAPY_PRIVATE_CAPTAINS: "XYZ-1" });
+    expect(result.code).toBe(0);
+    expect(starts().map((request) => request.headers["idempotency-key"])).toEqual(["alphaclaw:capy:jam_A:" + a[0].id]);
+    expect(result.lines.join("\n")).toContain("private_unmatched op=capy entry=XYZ-1");
+  });
+
+  it("logs capy_rejected and exits 1 on a refused key, and still sends what is queued", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    fake.state.down = true;
+    await run(capy);
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    const refused = { fetchImpl: async () => ({ status: 401, headers: { get: () => null }, json: async () => ({ _tag: "capy/Unauthorized" }) }) };
+    const result = await run(refused);
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("capy_rejected op=read status=401");
+    expect(fake.runs.size).toBe(1);
+  });
+
+  it("retries a passing AgentRun failure within the same pass while AgentRun answers", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A"), thread("jam_B")], messages: { jam_A: [user("a1", 30), reply("r1", 29)], jam_B: [user("b1", 30), reply("rb1", 29)] } });
+    fake.state.failNext.push({ status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(2);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeLessThanOrEqual(60000);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 
   it("waits out a Capy 429 for its retry-after and sends the same request again", async () => {
