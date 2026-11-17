@@ -561,3 +561,115 @@ describe("agentrun reporter: settings and plugin entry", () => {
     expect(kDeploymentSecretEnvKeys).toContain("ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN");
   });
 });
+
+describe("agentrun reporter: gateway start and refused agents", () => {
+  it("keeps a turn that is running when gateway_start fires as one completed run", async () => {
+    const rootDir = makeRoot();
+    let generation = 1000;
+    const { handlers } = registerPlugin(rootDir, { generationId: () => String((generation += 1)) });
+    const ctx = { runId: "r1", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r1" }, ctx);
+    handlers.gateway_start({ port: 1 }, {});
+    handlers.llm_output({ runId: "r1", model: "claude", assistantTexts: ["hi"], usage: { input: 7, output: 3 } }, ctx);
+    handlers.agent_end({ runId: "r1", success: true, durationMs: 50 }, ctx);
+    const fake = createFakeAgentrun();
+    const { outbox, sender } = makePipeline(rootDir, { fake });
+    const logs = [];
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: (line) => logs.push(line) } });
+    expect(source.ingest().added).toBe(1);
+    expect(logs).toEqual([]);
+    expect((await sender.sendDue()).sent).toBe(1);
+    const [run] = fake.runs.values();
+    expect(run.completion.status).toBe("completed");
+    expect(run.completion.usage).toMatchObject({ input_tokens: 7, output_tokens: 3 });
+  });
+
+  it("drops an agent's turns when AgentRun refuses the agent, with one log line per hour", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    driveTurn(handlers, { runId: "r2", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const now = () => clock;
+    const fake = createFakeAgentrun();
+    const refusing = async (url, init) => {
+      if (String(url).endsWith("/agents") && init.method === "POST") {
+        return new Response(JSON.stringify({ error: { code: "input_invalid", message: "bad definition" } }), { status: 422 });
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const { source, outbox, logs } = makePipeline(rootDir, { fake, now });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: refusing }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      now,
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect(await sender.sendDue()).toMatchObject({ dropped: 2, retry: 0 });
+    expect(outbox.counts()).toEqual({ dropped: 2 });
+    expect(logs.filter((line) => line.includes("agent_refused"))).toHaveLength(1);
+    expect(logs[0]).toContain("agent=openclaw-agent-main code=input_invalid count=1");
+    expect(await sender.sendDue()).toMatchObject({ dropped: 0, retry: 0 });
+    driveTurn(handlers, { runId: "r3", sessionKey: "agent:main:main" });
+    source.ingest();
+    clock += 61 * 60 * 1000;
+    expect((await sender.sendDue()).dropped).toBe(1);
+    expect(logs.filter((line) => line.includes("agent_refused"))).toHaveLength(2);
+    expect(logs[logs.length - 1]).toContain("count=2");
+  });
+
+  it("drops a turn whose start AgentRun refuses for its runtime twice", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const refusing = async (url, init) => {
+      if (String(url).endsWith("/sdk-runs") && init.method === "POST") {
+        return new Response(JSON.stringify({ error: { code: "input_invalid", message: "The SDK runtime must match the registered agent." } }), { status: 422 });
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const { source, outbox, logs } = makePipeline(rootDir, { fake });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: refusing }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect((await sender.sendDue()).dropped).toBe(1);
+    expect(logs.join("\n")).toContain("agent_refused op=start_runtime");
+    expect(fake.runs.size).toBe(0);
+  });
+
+  it("retries an agent edit that lost an If-Match race instead of dropping it", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const first = makePipeline(rootDir, { fake });
+    first.source.ingest();
+    expect((await first.sender.sendDue()).sent).toBe(1);
+    driveTurn(handlers, { runId: "r2", sessionKey: "agent:main:main" });
+    first.source.ingest();
+    const racing = async (url, init) => {
+      if (String(url).endsWith("/definition") && init.method === "PUT") {
+        return new Response(JSON.stringify({ error: { code: "precondition_failed", message: "moved" } }), { status: 412 });
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const sender = createSender({
+      outbox: first.outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: racing }),
+      token: fake.token,
+      getRuntime: () => "openclaw",
+      logger: { warn: () => {} },
+    });
+    expect(await sender.sendDue()).toMatchObject({ retry: 1, dropped: 0 });
+    expect(first.outbox.counts()).toEqual({ sent: 1, queued: 1 });
+  });
+});
