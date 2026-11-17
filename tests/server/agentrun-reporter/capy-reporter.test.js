@@ -1085,6 +1085,40 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(fs.existsSync(leasePath())).toBe(false);
   });
 
+  it("writes a live heartbeat to the state file before posting it, so a crash never renumbers the turn's events", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const w = [user("w1", 0), reply("rw1", -0.5)];
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: w } });
+    const agentrunFetch = fake.fetchImpl;
+    let beatPosted = false;
+    fake.fetchImpl = async (url, init) => {
+      const answer = await agentrunFetch(url, init);
+      if (/\/events$/.test(new URL(url).pathname)) beatPosted = true;
+      return answer;
+    };
+    const realRename = fs.renameSync;
+    const rename = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (beatPosted && to === statePath) throw Object.assign(new Error("EIO: the Drive mount failed"), { code: "EIO" });
+      return realRename(from, to);
+    });
+    try {
+      await expect(run(capy, {}, { watchMinutes: 11 })).rejects.toThrow("EIO");
+    } finally {
+      rename.mockRestore();
+      fake.fetchImpl = agentrunFetch;
+    }
+    w.push(reply("done", -11));
+    Object.assign(capy.threads[0], { status: "idle", lastActivityAt: at(-11) });
+    fs.rmSync(leasePath(), { force: true });
+    const result = await run(capy);
+    expect(result.code).toBe(0);
+    expect(result.lines.join("\n")).not.toContain("row_dropped");
+    expect(fake.runs.size).toBe(1);
+    const [item] = [...fake.runs.values()];
+    expect(item.batches[0]).toEqual({ sequence: 1, events: [] });
+    expect(item.completion).toMatchObject({ status: "completed", session_id: "jam_W" });
+  });
+
   it("exits non-zero with one line naming what is missing, never a value", () => {
     const result = spawnSync(process.execPath, [kScript, "--state", path.join(dir, "state.json")], {
       env: { PATH: process.env.PATH, AGENTRUN_CAPY_REPORTER_TOKEN: "tok-VALUE-123" },

@@ -837,8 +837,8 @@ export const runCapyReporter = async ({
 
   // A live turn starts in AgentRun as soon as it is seen working and sends an
   // empty event batch at most every 10 minutes while it works; its events and
-  // completion go with the finished turn. Its changes are written with the
-  // pass's one write after sending.
+  // completion go with the finished turn. A new heartbeat is written before
+  // it is posted; the rest is written with the pass's write after sending.
   const sendLive = async () => {
     for (const row of state.rows.filter((entry) => entry.state === "live" && Number(entry.next_attempt_at || 0) <= now() && sendable(entry))) {
       const started = await sender.startOnly({ ...row, agent_name: sendNameOf(row) });
@@ -848,15 +848,17 @@ export const runCapyReporter = async ({
         counts.live += 1;
         continue;
       }
-      // A beat is kept on its row before it is posted, so one whose answer
-      // was lost is posted again before anything else and the finished
-      // turn's events are numbered after it.
+      // A beat is written to the state file before it is posted (at most one
+      // write per live turn every 10 minutes), so one whose answer was lost,
+      // or whose pass ended before its last write, is posted again before
+      // anything else and the finished turn's events are numbered after it.
       const beats = JSON.parse(row.beats_json || "[]");
       const confirmed = Number(row.batches_sent || 0);
       if (beats.length <= confirmed) {
         if (now() - Number(row.heartbeat_at || 0) < kHeartbeatMs) continue;
         beats.push({ sequence: beats.length + 1, events: [] });
         row.beats_json = JSON.stringify(beats);
+        save();
       }
       const beat = beats[confirmed];
       const result = await client.call({ method: "POST", path: `/sdk-runs/${encodeURIComponent(row.agentrun_run_id)}/events`, token: started.runToken, body: beat });
