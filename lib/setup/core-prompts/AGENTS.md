@@ -34,6 +34,7 @@ For plugins, local tooling and other durable artifacts:
 Anytime you add, edit, or remove workspace files, openclaw.json, cron/jobs.json, skills, or external resources (third-party pages, databases, integrations), **commit and push your changes to git**. Other processes write to this repository too, so:
 
 {{GIT_RULES}}
+- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`). Pass one per command, reset first: `git -c credential.helper= -c credential.helper=...`.
 
 Whenever you do this, end your message with a **Changes committed** summary. Use workspace-relative paths for local files.
 

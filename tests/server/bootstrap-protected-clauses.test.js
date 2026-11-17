@@ -70,6 +70,12 @@ const kAnchors = [
     text: () => "- Commit only the paths you changed (`git commit -- <paths>`), then push.",
     when: (v) => !v.writer,
   },
+  {
+    id: "P14",
+    text: () =>
+      "- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`)",
+  },
+  { id: "P14", text: () => "Pass one per command, reset first: `git -c credential.helper= -c credential.helper=...`." },
   { id: "P5", text: () => "end your message with a **Changes committed** summary. Use workspace-relative paths for local files." },
   { id: "P5", text: () => "Changes committed ([abc1234](commit url)): <-- linked abbreviated hash, no backticks" },
   {
@@ -299,18 +305,18 @@ describe("slim bootstrap files (ALPH-58)", () => {
     vi.restoreAllMocks();
   });
 
-  it("keeps the rules file at most 5,000 chars on a default install with the machine profile", () => {
+  it("keeps the rules file at most 5,200 chars on a default install with the machine profile", () => {
     const { rules } = renderVariant(kVariants.machine);
     expect(rules).toContain("## Machine Resources");
-    expect(rules.length).toBeLessThanOrEqual(5000);
+    expect(rules.length).toBeLessThanOrEqual(5200);
   });
 
-  it("keeps the rules file at most 5,800 chars with the git writer, the admin stanza and the Telegram rule", () => {
+  it("keeps the rules file at most 6,000 chars with the git writer, the admin stanza and the Telegram rule", () => {
     const { rules } = renderVariant(kVariants.full);
     expect(rules).toContain("sanctioned writer");
     expect(rules).toContain("### AlphaClaw Administration");
     expect(rules).toContain("- **Topics:**");
-    expect(rules.length).toBeLessThanOrEqual(5800);
+    expect(rules.length).toBeLessThanOrEqual(6000);
   });
 
   it("renders no duplicate ## or ### heading in any variant", () => {

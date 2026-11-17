@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.304] - 2026-11-17
+
+The agent's injected rules now forbid writing a global or system git credential helper, so one repository's push setup can no longer send another repository's pushes out as the wrong GitHub account.
+
+### Changed
+
+- The git rules in `hooks/bootstrap/AGENTS.md` gain one line that forbids `gh auth setup-git` and `git config --global credential.*` and says to pass a helper per command after an empty reset (`git -c credential.helper= -c credential.helper=...`), because a helper added without the reset still answers after a global one. The rules file's size caps rise by 200 characters (5,000 to 5,200 on a default install, 5,800 to 6,000 with the git writer) to make room.
+
 ## [0.10.303] - 2026-11-17
 
 AlphaClaw can now watch the git checkouts whose pushes matter and tell the owner when one would push with the wrong GitHub credential, cannot reach its remote, or has commits that have not gone out for half an hour, or tracks files its ignore rules exclude.
