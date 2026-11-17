@@ -383,12 +383,17 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
       expect(polls()).toBe(15);
     });
 
-    it("stops at once when OpenClaw gives up or its restart-loop breaker pauses recovery", async () => {
+    it("stops at once when OpenClaw gives up", async () => {
       const gaveUp = await waitFor([[4, "[gateway] [main-session-recovery] main-session restart recovery gave up: Error: boom\n"]], { rows: stuck });
       expect(gaveUp.polls()).toBe(4);
-      const paused = await waitFor([[6, "[gateway] [main-session-recovery] restart-loop breaker tripped; automatic main-session restart recovery paused until 2026-11-17T01:00:00.000Z\n"]], { rows: stuck });
-      expect(paused.polls()).toBe(6);
+      expect(gaveUp.result.alerted).toEqual(["x"]);
+    });
+
+    it("keeps waiting through a restart-loop breaker pause, which OpenClaw follows with the same attempt", async () => {
+      const paused = await waitFor([[6, "[gateway] [main-session-recovery] restart-loop breaker tripped; automatic main-session restart recovery paused until 2026-11-17T01:00:00.000Z\n"], [12, pass(0)]], { rows: stuck });
+      expect(paused.polls()).toBe(12);
       expect(paused.result.alerted).toEqual(["x"]);
+      expect(lines()).not.toContain("[alphaclaw] wedge-sweep recovery wait capped generation=2");
     });
 
     it("a check superseded while sessions.recover runs books no alert, so the newer check still sends it", async () => {
