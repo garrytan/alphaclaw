@@ -33,7 +33,7 @@ const thread = (id, fields = {}) => ({
 // that end in null, 429 with retry-after.
 const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "org" }], threads = [], messages = {}, automations = [], runs = {}, pageSize = 2 } = {}) => {
   const requests = [];
-  const state = { rateLimit: 0 };
+  const state = { rateLimit: 0, fail: null };
   const answer = (status, body, headers = {}) => ({ status, headers: { get: (name) => headers[name.toLowerCase()] ?? null }, json: async () => body });
   const page = (list, start) => ({ items: list.slice(start, start + pageSize), next: start + pageSize < list.length ? start + pageSize : null });
   const fetchImpl = async (url, init = {}) => {
@@ -45,6 +45,8 @@ const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "or
       state.rateLimit -= 1;
       return answer(429, { _tag: "capy/RateLimited", retryAfterSeconds: 3 }, { "retry-after": "3" });
     }
+    const failed = state.fail?.(route, query);
+    if (failed) return answer(failed, { _tag: "capy/InternalError" });
     if (route === "/projects") return answer(200, { items: projects });
     if (route === "/threads" || route === "/automations") {
       const list = (route === "/threads" ? threads : automations).filter((item) => item.projectId === query.projectId);
@@ -236,8 +238,11 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(result.lines.join("\n")).toContain("private_unmatched op=capy entry=XYZ-1");
   });
 
-  it("logs capy_rejected and exits 1 on a refused key, and still sends what is queued", async () => {
-    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+  it("logs capy_rejected and exits 1 on a refused key, holds queued titles and still sends metadata-only turns", async () => {
+    const capy = createFakeCapy({
+      threads: [thread("jam_A", { title: "SECRET-TITLE" }), thread("jam_P", { visibility: "private" })],
+      messages: { jam_A: [user("a1", 30), reply("r1", 29)], jam_P: [user("p1", 30), reply("rp1", 29)] },
+    });
     fake.state.down = true;
     await run(capy);
     fake.state.down = false;
@@ -246,7 +251,65 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     const result = await run(refused);
     expect(result.code).toBe(1);
     expect(result.lines.join("\n")).toContain("capy_rejected op=read status=401");
+    expect(result.lines.join("\n")).toContain("row_held op=send count=1");
     expect(fake.runs.size).toBe(1);
+    expect(allBodies()).not.toContain("SECRET-TITLE");
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(2);
+  });
+
+  it("holds a queued title whose thread dropped out of the listing", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A", { title: "SECRET-TITLE" })], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    fake.state.down = true;
+    await run(capy);
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    capy.threads.splice(0);
+    const result = await run(capy);
+    expect(result.code).toBe(0);
+    expect(result.lines.join("\n")).toContain("row_held op=send count=1");
+    expect(fake.runs.size).toBe(0);
+    expect(allBodies()).not.toContain("SECRET-TITLE");
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toHaveLength(1);
+  });
+
+  it("holds queued titles of a project whose listing failed part way, and still reports the next project", async () => {
+    const capy = createFakeCapy({
+      projects: [
+        { id: "p1", name: "Alpha", visibility: "org" },
+        { id: "p2", name: "Beta", visibility: "org" },
+      ],
+      threads: [thread("jam_A", { title: "SECRET-A" }), thread("jam_B", { title: "SECRET-B" }), thread("jam_C", { title: "SECRET-C" }), thread("jam_Z", { projectId: "p2" })],
+      messages: Object.fromEntries(["jam_A", "jam_B", "jam_C", "jam_Z"].map((id) => [id, [user(id + "-1", 30), reply(id + "-r1", 29)]])),
+    });
+    fake.state.down = true;
+    await run(capy);
+    fake.state.down = false;
+    clock += 60 * 60 * 1000;
+    capy.state.fail = (route, query) => (route === "/threads" && query.projectId === "p1" && query.cursor ? 500 : null);
+    const result = await run(capy);
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("capy_error op=project id=p1 status=500");
+    expect(result.lines.join("\n")).toContain("row_held op=send count=3");
+    expect(fake.runs.size).toBe(1);
+    expect(allBodies()).not.toMatch(/SECRET-[ABC]/);
+  });
+
+  it("skips a thread whose read fails and still reports the threads after it", async () => {
+    const capy = createFakeCapy({
+      threads: [thread("jam_A"), thread("jam_B", { title: "SECRET-B" }), thread("jam_C")],
+      messages: { jam_A: [user("a1", 30), reply("ra1", 29)], jam_B: [user("b1", 30), reply("rb1", 29)], jam_C: [user("c1", 30), reply("rc1", 29)] },
+    });
+    capy.state.fail = (route) => (route === "/threads/jam_B/messages" ? 500 : null);
+    const result = await run(capy);
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("capy_error op=thread id=jam_B status=500");
+    expect(result.lines.join("\n")).not.toContain("capy-key");
+    expect(starts().map((request) => request.headers["idempotency-key"].split(":")[2])).toEqual(["jam_A", "jam_C"]);
+    capy.state.fail = null;
+    clock += 60 * 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(3);
   });
 
   it("retries a passing AgentRun failure within the same pass while AgentRun answers", async () => {
@@ -256,6 +319,15 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(fake.runs.size).toBe(2);
     expect(sleeps).toHaveLength(1);
     expect(sleeps[0]).toBeLessThanOrEqual(60000);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("retries a single started turn within the same pass when no other turn moves", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    fake.state.failNext.push({ path: /\/events$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.requests.filter((request) => /\/events$/.test(request.path))).toHaveLength(2);
+    expect(sleeps).toHaveLength(1);
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 

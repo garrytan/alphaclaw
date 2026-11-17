@@ -94,8 +94,8 @@ Each pass reads every project the key can see, every page of each project's thre
 - **Credits.** The change in the thread's credit total since the previous report is written in the metadata line of the last turn a pass reports for that thread as an estimate, never as `cost_usd`.
 - **State.** One JSON file (mode 0600, written whole and renamed) keeps each thread's cursor and the turns not yet sent, including their stored request bodies. Keep it in the automation's Drive location. Losing it only re-sends recent turns under their old keys: AgentRun answers an identical start with the run it already has, and a start that differs (a renamed thread, a changed credit figure) with `idempotency_mismatch`, which the sender books as `run_exists` without making a second run.
 - **Capy rate limits.** A 429 waits the `retry-after` seconds (at most 2 minutes, 5 times per request) and sends the same request again.
-- **Retries.** The pass runs hourly, which is past AgentRun's one-hour window for a started run, so a turn that meets a passing failure is retried in the same pass (at most twice, waiting at most a minute) while AgentRun is answering other turns.
-- **Exit code.** 0 after a good pass; 1 when Capy refused the key or failed a read, AgentRun refused the token, or a turn has failed to send on 6 passes (`rows_waiting`); 2 when a setting is missing. Queued turns are still sent after a failed read.
+- **Retries.** The pass runs hourly, which is past AgentRun's one-hour window for a started run, so a turn that meets a passing failure is retried in the same pass, round after round (at most 5 rounds, each waiting at most a minute for the earliest retry), until a round moves nothing. A single turn is retried even when no other turn moved.
+- **Exit code.** 0 after a good pass; 1 when Capy refused the key or failed a read, AgentRun refused the token, or a turn has failed to send 6 times (`rows_waiting`); 2 when a setting is missing. A failed read of one project's threads or of one thread's transcript skips only that project or thread, and the pass goes on. After a failed read, queued metadata-only turns are still sent; turns that carry a title or contents are held (see below).
 
 ### Capy classes
 
@@ -106,6 +106,8 @@ Each pass reads every project the key can see, every page of each project's thre
 | `thread` | Every other turn | Metadata plus the thread title |
 
 Metadata is the class, thread id, start time, duration, status, number of replies and tool calls, the model and each tool's name. Tool inputs and outputs are never read into a turn, for any class. An automation run whose turn may lie before the part of the transcript a pass read is not matched, so that turn fails closed to `thread`. Private wins at send too: a queued turn whose thread is now private, or whose thread or crew is now listed, is dropped before sending (`content_revoked`), title and contents alike.
+
+A queued turn that carries a title or contents (`thread` or `automation`) is sent only when the same pass listed every thread of its project without an error, the listing showed its thread as not private (`org` visibility, and neither the thread nor its crew in `AGENTRUN_CAPY_PRIVATE_CAPTAINS`), and the thread's transcript read did not fail. A thread missing from the listing (for example one that turned private and is no longer visible to the key), a failed or partial listing, or a failed read leaves the turn held in the queue, neither sent nor dropped (`row_held`). A later pass that proves the thread not private sends it; one that shows it private drops it (`content_revoked`). Metadata-only (`private`) turns are never held. A turn whose thread never comes back stays held until `queue_overflow` drops it.
 
 ### Capy settings
 
@@ -128,11 +130,12 @@ The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source
 | --- | --- |
 | `config_missing` | A required setting is not set; names the setting, never a value. Nothing is read or sent; exit 2. |
 | `capy_rejected` | Capy answered 401 or 403; check `CAPY_REPORTER_API_KEY` and the service user's project access. |
-| `capy_error` | Another Capy read failed; the next pass reads again from the saved cursors. |
+| `capy_error` | Another Capy read failed. `op=project` or `op=thread` names the project or thread id and the HTTP status (or `network`) and skips only that project or thread this pass; `op=read` means the project list itself failed. The next pass reads again from the saved cursors. |
 | `state_reset` | The state file could not be read; the pass starts empty and re-sends under the old keys. |
 | `private_unmatched` | An entry of `AGENTRUN_CAPY_PRIVATE_CAPTAINS` matches no thread or Captain id the key can see (for example a thread code instead of its `jam_` id); it protects nothing. |
 | `content_revoked` | Queued turns whose thread became private before they were sent; dropped, not sent. |
-| `rows_waiting` | Turns that have failed to send on 6 or more passes; check `AGENTRUN_BASE_URL`. |
+| `row_held` | Queued turns that carry a title or contents whose thread this pass did not prove not private (missing from the listing, a failed or partial listing, or a failed read); kept unsent for a later pass. |
+| `rows_waiting` | Turns that have failed to send 6 or more times (in-pass retries count); check `AGENTRUN_BASE_URL`. |
 | `queue_overflow` | More than 20,000 unsent turns; the oldest were dropped. |
 | `runtime_invalid` | `AGENTRUN_CAPY_RUNTIME` is not a runtime name; using `claude-agent-sdk`. |
 | `capy_pass` | One summary line per pass: threads read, turns queued, sent, retried, dropped, expired, still waiting. |

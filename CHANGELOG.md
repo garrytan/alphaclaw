@@ -11,6 +11,7 @@ Capy threads can now show up in AgentRun beside OpenClaw's turns. A new script, 
 
 ### Added
 - `scripts/capy-agentrun-reporter.mjs`: reports each finished Capy thread turn as an AgentRun run, under one AgentRun agent per Captain crew and one per project for threads in no crew. A turn sends metadata (when, how long, status, model, tool names) and its thread title; the turn an automation started also sends its prompt, replies and one line per tool call. Threads that are private, have no visibility, or belong to a crew listed in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` send metadata only, with no title. Tool inputs and outputs are never sent.
+- A queued turn that carries a title or contents is sent only when the same pass's complete listing showed its thread as not private. A thread missing from the listing, a failed or partial listing, or a failed read holds the turn unsent (`row_held`); metadata-only turns still go. One failing project or thread read skips only that project or thread, and a turn that meets a passing AgentRun failure is retried in the same pass until a retry round moves nothing.
 - The script keeps its cursors and unsent turns in one JSON state file. A lost state file re-sends recent turns under their old keys, and AgentRun answers with the runs it already has. Settings: `CAPY_REPORTER_API_KEY`, `AGENTRUN_BASE_URL`, `AGENTRUN_CAPY_REPORTER_TOKEN`, `AGENTRUN_CAPY_PRIVATE_CAPTAINS`, `AGENTRUN_CAPY_RUNTIME`. See "Capy reporter" in docs/designs/agentrun-reporter.md.
 
 ### Changed

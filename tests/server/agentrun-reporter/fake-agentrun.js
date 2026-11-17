@@ -18,7 +18,8 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
 
   const handle = (method, path, headers, body) => {
     if (state.down) throw new TypeError("fetch failed");
-    const injected = state.failNext.shift();
+    const index = state.failNext.findIndex((item) => !item.path || item.path.test(path));
+    const injected = index < 0 ? null : state.failNext.splice(index, 1)[0];
     if (injected) return injected;
     const auth = String(headers.authorization || "").replace(/^Bearer /, "");
     let match;
