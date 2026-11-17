@@ -17,11 +17,13 @@ const {
 //
 // On the #144 layout (state dir symlinked under /data, /data root:node 2775):
 //   preflight says unavailable at /data (ancestor_replaceable), fixable by the
-//   sticky bit  ⇔  the real `openclaw doctor --fix` prints "Original state
-//   capture was unavailable: … /data"
+//   sticky bit  ⇔  the real `openclaw doctor --fix` prints "Pre-repair
+//   recovery copy was unavailable: … /data" (2026.11.5's wording; up to
+//   2026.11.4 "Original state capture was unavailable: … /data")
 //   then Enable snapshots (applySnapshotEnable, the route's primitive) sets
 //   +t on exactly /data, the preflight flips to available  ⇔  the real Doctor
-//   retains a pre-repair capture manifest.
+//   retains a pre-repair capture manifest (2026.11.5 writes it without
+//   printing its path).
 //
 // Opt-in via OPENCLAW_CONTAINER_E2E=1 (npm run test:container).
 // -----------------------------------------------------------------------------
@@ -46,7 +48,11 @@ const preflight = async () => {
   );
   return JSON.parse(out.slice(out.indexOf("PREFLIGHT ") + "PREFLIGHT ".length).trim().split("\n")[0]);
 };
-const doctor = () => run(`cd /tmp && ${kEnv} openclaw doctor --fix --non-interactive 2>&1; echo DOCTOR_EXIT=$?`);
+// AlphaClaw's Doctor runner clears the setgid bit the state dir inherits from
+// /data first (OpenClaw 2026.11.5's Doctor refuses to create directories under
+// it), so the real Doctor runs the way AlphaClaw runs it.
+const doctor = () =>
+  run(`chmod g-s /data/.openclaw/ && cd /tmp && ${kEnv} openclaw doctor --fix --non-interactive 2>&1; echo DOCTOR_EXIT=$?`);
 
 describeContainer("container: snapshot preflight vs the pinned Doctor (#144 layout)", () => {
   beforeAll(async () => {
@@ -75,7 +81,7 @@ describeContainer("container: snapshot preflight vs the pinned Doctor (#144 layo
       fixable: { canFix: true, reason: "sticky_bit" },
     });
     const out = await doctor();
-    expect(out).toContain("Original state capture was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data");
+    expect(out).toContain("Pre-repair recovery copy was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data");
     expect(out).toContain("DOCTOR_EXIT=0");
   }, 15 * 60 * 1000);
 
@@ -95,8 +101,11 @@ describeContainer("container: snapshot preflight vs the pinned Doctor (#144 layo
     });
     expect((await run("stat -c %a /data")).trim()).toBe("3775");
     expect(await preflight()).toMatchObject({ captureAvailable: true, failingPath: null });
+    const before = await run("ls -d /data/stronghold-wm/wintermute.update-captures/doctor-*/manifest.json 2>/dev/null | wc -l");
     const doctorOut = await doctor();
-    expect(doctorOut).toMatch(/Pre-repair state retained for manual recovery at \/data\/stronghold-wm\/wintermute\.update-captures\/doctor-[0-9a-f-]+\/manifest\.json/);
-    expect(doctorOut).not.toContain("Original state capture was unavailable");
+    expect(doctorOut).toContain("DOCTOR_EXIT=0");
+    expect(doctorOut).not.toContain("recovery copy was unavailable");
+    const after = await run("ls -d /data/stronghold-wm/wintermute.update-captures/doctor-*/manifest.json 2>/dev/null | wc -l");
+    expect(Number(after.trim())).toBe(Number(before.trim()) + 1);
   }, 15 * 60 * 1000);
 });

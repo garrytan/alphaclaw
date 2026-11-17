@@ -63,6 +63,26 @@ const heartbeatLines = (logger) =>
     .filter((line) => line.startsWith("[alphaclaw] doctor heartbeat "));
 
 describe("server/doctor-fix-runner", () => {
+  it("clears only the setgid bit on the state dir before doctor runs (OpenClaw 2026.11.5 on a 2775 /data)", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(openclawDir, 0o2755);
+    let modeAtRunTime = null;
+    const runStream = {
+      runStreamed: vi.fn(async () => {
+        modeAtRunTime = fs.statSync(openclawDir).mode & 0o7777;
+        return { ok: true, tail: "Doctor complete\n" };
+      }),
+    };
+    const { run, logger } = createRunner(openclawDir, { runStream });
+    await run();
+    expect(modeAtRunTime).toBe(0o755);
+    expect(logger.log.mock.calls.map(([line]) => String(line))).toContainEqual(expect.stringContaining("cleared the setgid bit on the OpenClaw state dir"));
+    fs.chmodSync(openclawDir, 0o700);
+    await run();
+    expect(fs.statSync(openclawDir).mode & 0o7777).toBe(0o700);
+  });
+
   it("writes the rolling pre-doctor backup, then runs doctor inside the guard", async () => {
     const openclawDir = mkOpenclawDir();
     writeJson(openclawDir, "openclaw.json", { keep: 1 });
@@ -534,6 +554,16 @@ describe("server/doctor-fix-runner heartbeat", () => {
         ["doctor", "--fix", "--yes"],
         ["doctor", "--fix", "--force", "--yes"],
       ]);
+    });
+
+    it("reads OpenClaw 2026.11.5's renamed recovery-copy line as an unavailable capture", async () => {
+      const managedDir = mkOpenclawDir();
+      const line =
+        "- Pre-repair recovery copy was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data.\n";
+      const run = makeRunner({ managedDir, exit: 0, version: "2026.11.5", chunks: [[line, "stdout"]] });
+      await run({ source: "boot" });
+      expect(readRecord(managedDir).lastOutcome).toMatchObject({ status: "ok", captureState: "unavailable" });
+      expect(readRecord(managedDir).lastOutcome.captureCause).toContain("/data");
     });
 
     it("latches capture and failure lines split across chunks on stderr, even after more than 64 KiB of later output", async () => {
