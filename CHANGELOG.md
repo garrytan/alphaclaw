@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.309] - 2026-11-17
+
+AlphaClaw now sees a running OpenClaw gateway before it changes the pinned build, and removing a pinned Codex plugin works on boxes pinned by v0.10.307 too.
+
+### Fixed
+- A running OpenClaw gateway is now detected even though OpenClaw renames its process to `openclaw-gateway`, so a start never swaps the pinned build or the Codex plugin out from under it.
+- Removing the setting on a box pinned by v0.10.307 (which kept no record of the Codex plugin before it) now reinstalls npm's release of the pinned Codex version instead of leaving the pinned plugin.
+- A failed Codex rollback is retried at most every 30 minutes and waits at most 2 minutes for npm, instead of up to 5 minutes on every start.
+- The "setting removed" notice is sent even when an earlier start deferred, and a recorded Codex version that isn't a plain version number is never passed to npm.
+- Reading OpenClaw's plugin list no longer fails when a log line before the JSON contains a `{`.
+
 ## [0.10.308] - 2026-11-17
 
 Removing a pinned OpenClaw build now also puts back the Codex plugin it replaced, and a pinned build that is refused no longer keeps running outside the gateway.
