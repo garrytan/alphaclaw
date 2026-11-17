@@ -6,10 +6,10 @@ const reporterPlugin = require("../../../lib/plugin/agentrun-reporter");
 const { classifySession, isIncognitoSessionKey } = require("../../../lib/plugin/agentrun-reporter/classify");
 const { createAgentrunReporter } = require("../../../lib/server/agentrun-reporter");
 const { openOutbox } = require("../../../lib/server/agentrun-reporter/outbox");
-const { createOpenclawSource } = require("../../../lib/server/agentrun-reporter/openclaw-source");
+const { createOpenclawSource, contentStillAllowed } = require("../../../lib/server/agentrun-reporter/openclaw-source");
 const { createAgentrunClient } = require("../../../lib/server/agentrun-reporter/agentrun-client");
 const { createSender } = require("../../../lib/server/agentrun-reporter/sender");
-const { eventBatches } = require("../../../lib/server/agentrun-reporter/bodies");
+const { eventBatches, cut } = require("../../../lib/server/agentrun-reporter/bodies");
 const {
   applyAgentrunReporterEntry,
   resolveAgentrunReporterConfig,
@@ -93,6 +93,7 @@ const makePipeline = (rootDir, { fake, contentCron = [], cronJobs = [], token, r
     client: createAgentrunClient({ baseUrl: kBase, fetchImpl: fake.fetchImpl }),
     token: token ?? fake.token,
     getRuntime: () => settings.runtime,
+    contentAllowed: (row) => contentStillAllowed(row, new Set(contentCron)),
     random: () => 0.5,
     logger: { warn: (line) => logs.push(line) },
     ...(now ? { now } : {}),
@@ -671,5 +672,96 @@ describe("agentrun reporter: gateway start and refused agents", () => {
     });
     expect(await sender.sendDue()).toMatchObject({ retry: 1, dropped: 0 });
     expect(first.outbox.counts()).toEqual({ sent: 1, queued: 1 });
+  });
+});
+
+describe("agentrun reporter: revoked content, live directories and unreadable spool", () => {
+  it("drops a queued contents turn whose job left the allowlist, sending none of its text", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r-cron", sessionKey: "agent:main:cron:brief", trigger: "cron", jobId: "brief" });
+    const fake = createFakeAgentrun();
+    const queued = makePipeline(rootDir, { fake, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Brief", payload: { message: "Summarize" } }] });
+    expect(queued.source.ingest().added).toBe(1);
+    queued.outbox.close();
+    const revoked = makePipeline(rootDir, { fake, contentCron: [] });
+    expect((await revoked.sender.sendDue()).dropped).toBe(1);
+    expect(revoked.outbox.counts()).toEqual({ dropped: 1 });
+    expect(revoked.logs.join("\n")).toContain("content_revoked op=send source=openclaw agent=openclaw-cron-brief");
+    expect(fake.requests.map((request) => request.body).join("\n")).not.toContain(kMarker);
+    expect(fake.runs.size).toBe(0);
+  });
+
+  it("reads a dead gateway's open files as interrupted and leaves a live one's alone, whatever the clock says", () => {
+    const rootDir = makeRoot();
+    const livePid = 4242;
+    const deadPid = 999999;
+    const dead = registerPlugin(rootDir, { generationId: () => `2000000000000-${deadPid}` });
+    dead.handlers.model_call_started({ runId: "r-dead" }, { runId: "r-dead", sessionKey: "agent:main:main" });
+    const live = registerPlugin(rootDir, { generationId: () => `1000000000000-${livePid}` });
+    live.handlers.model_call_started({ runId: "r-live" }, { runId: "r-live", sessionKey: "agent:main:main" });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, isProcessAlive: (pid) => pid === livePid, logger: { warn: () => {} } });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT source_run_id, status FROM turns").all()).toEqual([{ source_run_id: "r-dead", status: "cancelled" }]);
+    expect(fs.existsSync(path.join(rootDir, "agentrun-spool", `2000000000000-${deadPid}`))).toBe(false);
+    live.handlers.agent_end({ runId: "r-live", success: true }, { runId: "r-live", sessionKey: "agent:main:main" });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT status FROM turns WHERE source_run_id = 'r-live'").get()).toEqual({ status: "completed" });
+  });
+
+  it("skips a spool directory it cannot read, logs it once an hour, and keeps reading the others", () => {
+    const rootDir = makeRoot();
+    const bad = registerPlugin(rootDir, { generationId: () => "1000-1" });
+    driveTurn(bad.handlers, { runId: "r-bad", sessionKey: "agent:main:main" });
+    const good = registerPlugin(rootDir, { generationId: () => "2000-2" });
+    driveTurn(good.handlers, { runId: "r-good", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const logs = [];
+    const flaky = {
+      ...fs,
+      readdirSync: (dir, ...rest) => {
+        if (String(dir).endsWith("1000-1")) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return fs.readdirSync(dir, ...rest);
+      },
+    };
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, fsModule: flaky, now: () => clock, isProcessAlive: () => true, logger: { warn: (line) => logs.push(line) } });
+    expect(source.ingest().added).toBe(1);
+    expect(source.ingest().added).toBe(0);
+    expect(logs.filter((line) => line.includes("dir=1000-1 EACCES"))).toHaveLength(1);
+    clock += 61 * 60 * 1000;
+    source.ingest();
+    expect(logs.filter((line) => line.includes("dir=1000-1 EACCES"))).toHaveLength(2);
+  });
+
+  it("keeps sending when the spool cannot be read at all", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const first = makePipeline(rootDir, { fake });
+    expect(first.source.ingest().added).toBe(1);
+    first.outbox.close();
+    fs.rmSync(path.join(rootDir, "agentrun-spool"), { recursive: true, force: true });
+    fs.writeFileSync(path.join(rootDir, "agentrun-spool"), "not a directory");
+    const lines = [];
+    const reporter = createAgentrunReporter({
+      env: { ALPHACLAW_AGENTRUN_URL: kBase, ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN: fake.token },
+      rootDir,
+      fetchImpl: fake.fetchImpl,
+      logger: { warn: (line) => lines.push(line), log: () => {} },
+    });
+    const result = await reporter.tick();
+    expect(result.sent.sent).toBe(1);
+    expect(lines.join("\n")).toContain("capture_error op=ingest dir=agentrun-spool ENOTDIR");
+    reporter.stop();
+  });
+
+  it("cuts to the budget even when it is shorter than the cut marker", () => {
+    expect(cut("abcdefghij", 3)).toBe("abc");
+    expect(cut("abcdefghij", 0)).toBe("");
+    expect(cut("abcdefghij", 8)).toBe("ab [cut]");
+    expect(cut("abc", 3)).toBe("abc");
   });
 });
