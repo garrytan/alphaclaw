@@ -61,9 +61,9 @@ const makeStandIn = ({ rootDir, probeFile }) => {
   const entry = path.join(pkgRoot, "openclaw.mjs");
   const text = fs.readFileSync(entry, "utf8");
   const shebang = text.startsWith("#!") ? text.slice(0, text.indexOf("\n") + 1) : "";
-  const probe = `try { (await import("node:fs")).appendFileSync($\\{JSON.stringify(probeFile)}, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2, 4) }) + "\\n"); } catch {}\n`;
+  const probe = `try { (await import("node:fs")).appendFileSync(${JSON.stringify(probeFile)}, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2, 4) }) + "\n"); } catch {}\n`;
   fs.writeFileSync(entry, shebang + probe + text.slice(shebang.length));
-  const file = path.join(rootDir, "openclaw-packages", `openclaw-$\\{stockPkg.version}-standin.tgz`);
+  const file = path.join(rootDir, "openclaw-packages", `openclaw-${stockPkg.version}-standin.tgz`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   tar.c({ gzip: true, file, cwd: src, sync: true, portable: true }, ["package"]);
   fs.chmodSync(file, 0o600);
@@ -92,7 +92,7 @@ const bootGateway = async ({ rootDir, installDir, openclawDir }) => {
     } catch {}
     await waitFor(async () => {
       try {
-        await fetch(`http://127.0.0.1:$\\{kPort}/healthz`);
+        await fetch(`http://127.0.0.1:${kPort}/healthz`);
         return false;
       } catch {
         return true;
@@ -102,7 +102,7 @@ const bootGateway = async ({ rootDir, installDir, openclawDir }) => {
   try {
     await waitFor(async () => {
       try {
-        return (await fetch(`http://127.0.0.1:$\\{kPort}/healthz`)).ok;
+        return (await fetch(`http://127.0.0.1:${kPort}/healthz`)).ok;
       } catch {
         return false;
       }
@@ -135,12 +135,12 @@ describeLive("live: the gateway boots from a sha-pinned OpenClaw package", () =>
       expect(fs.existsSync(probeFile)).toBe(false);
 
       const standIn = makeStandIn({ rootDir, probeFile });
-      const env = { ALPHACLAW_OPENCLAW_PACKAGES: `$\\{standIn.version}:$\\{standIn.file}:$\\{standIn.sha256}` };
+      const env = { ALPHACLAW_OPENCLAW_PACKAGES: `${standIn.version}:${standIn.file}:${standIn.sha256}` };
       const startedAt = Date.now();
       const verdict = override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: { ...env, PATH: process.env.PATH, HOME: rootDir } });
       const applyMs = Date.now() - startedAt;
       expect(verdict).toMatchObject({ status: "applied", version: standIn.version, sha256: standIn.sha256, bundledExtras: [standIn.extra] });
-      console.log(`[pinned-package] applied in $\\{applyMs} ms, $\\{verdict.files} files, extra bundled $\\{standIn.extra}`);
+      console.log(`[pinned-package] applied in ${applyMs} ms, ${verdict.files} files, extra bundled ${standIn.extra}`);
       expect(fs.existsSync(path.join(installDir, "node_modules", "openclaw", ".openclaw-lifecycle-pending"))).toBe(false);
       expect(override.checkOpenclawPackageBeforeLaunch({ installDir, managedDir, env })).toMatchObject({ status: "applied" });
 

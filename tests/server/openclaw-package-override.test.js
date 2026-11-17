@@ -492,6 +492,15 @@ describe("the launch, watchdog and notification paths", () => {
     expect(watchdog.onPrelaunchHook).toHaveBeenCalledTimes(2);
   });
 
+  it("a restart the package check refuses before the stop says nothing was stopped", () => {
+    const { classifyRestartFailure } = require("../../lib/server/restart-failure-copy");
+    const { GatewayOpenclawPackageError } = require("../../lib/server/gateway");
+    const failure = classifyRestartFailure(new GatewayOpenclawPackageError("refused", { reason: "missing" }));
+    expect(failure.code).toBe("openclaw_package_refused");
+    expect(failure.error).toContain("nothing was stopped");
+    expect(classifyRestartFailure({ code: "stop_refused" }).code).toBe("stop_refused");
+  });
+
   it("requestGatewayLaunch aborts a launch the package check refuses, before anything is spawned", async () => {
     const gateway = require("../../lib/server/gateway");
     const original = process.env.ALPHACLAW_OPENCLAW_PACKAGES;
