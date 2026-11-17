@@ -61,7 +61,7 @@ const makeStandIn = ({ rootDir, probeFile }) => {
   const entry = path.join(pkgRoot, "openclaw.mjs");
   const text = fs.readFileSync(entry, "utf8");
   const shebang = text.startsWith("#!") ? text.slice(0, text.indexOf("\n") + 1) : "";
-  const probe = `try { (await import("node:fs")).appendFileSync(${JSON.stringify(probeFile)}, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2, 4) }) + "\n"); } catch {}\n`;
+  const probe = `try { (await import("node:fs")).appendFileSync(${JSON.stringify(probeFile)}, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2, 4) }) + "\\n"); } catch {}\n`;
   fs.writeFileSync(entry, shebang + probe + text.slice(shebang.length));
   const file = path.join(rootDir, "openclaw-packages", `openclaw-${stockPkg.version}-standin.tgz`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -85,7 +85,10 @@ const bootGateway = async ({ rootDir, installDir, openclawDir }) => {
     NODE_COMPILE_CACHE: path.join(rootDir, "compile-cache"),
   });
   const build = describeExecutingBuild({ installDir });
-  const child = spawn(process.execPath, [build.bin, "gateway", "run", "--port", String(kPort)], { env, cwd: rootDir, stdio: "ignore", detached: true });
+  const logFile = path.join(rootDir, "gateway.log");
+  const logFd = fs.openSync(logFile, "a");
+  const child = spawn(process.execPath, [build.bin, "gateway", "run", "--port", String(kPort)], { env, cwd: rootDir, stdio: ["ignore", logFd, logFd], detached: true });
+  fs.closeSync(logFd);
   const stop = async () => {
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -109,6 +112,7 @@ const bootGateway = async ({ rootDir, installDir, openclawDir }) => {
     }, 150000, "gateway /healthz");
   } catch (error) {
     await stop();
+    error.message += `\n--- gateway output (tail) ---\n${fs.readFileSync(logFile, "utf8").slice(-3000)}`;
     throw error;
   }
   return { build, stop };

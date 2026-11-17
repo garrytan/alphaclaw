@@ -11,11 +11,15 @@ A deployment can now run its own sha-pinned build of the exact OpenClaw version 
 
 ### Added
 - `ALPHACLAW_OPENCLAW_PACKAGES` (deployment env only): `<version>:<absolute path to .tgz>:<sha256>` entries, comma or newline separated. At every `alphaclaw start`, after the "updating" page holds the port and before anything runs `openclaw`, AlphaClaw verifies the file's sha256, unpacks it, refuses it unless its version, dependencies, declared database schemas and Node.js range match the image's stock build of that version, runs the package's own postinstall and swaps it into `node_modules/openclaw`. Entries for other versions are ignored, so the next pin's build can be staged early. It never selects a version.
+- An `@openclaw/codex@<version>:<path>:<sha256>` entry pins the Codex plugin too, which OpenClaw's npm package does not include. At start every file it ships must match `<state dir>/extensions/codex` exactly; if not, AlphaClaw installs it with `openclaw plugins install` and checks again.
 - Before every gateway launch (boot, restarts, watchdog relaunches and repairs) AlphaClaw checks that every file the package shipped is still in place and unchanged; plugin installs OpenClaw writes under `dist/extensions` don't count.
 - Any problem refuses the gateway: the Watchdog shows `openclaw_package_refused`, the restart card says nothing was stopped, and one important notification per reason and day names the file and the two ways out. A missing or replaced file heals by itself: AlphaClaw re-checks the path every minute and restarts once it verifies. Removing the setting puts the stock build back at the next start, with one notice.
 - `alphaclaw openclaw-package check [--pin <version>] [--json]` verifies a setting without changing anything (exit 0 ok, 1 refused, 2 usage) and names the checks it could not run for a version the image has not installed.
 - `alphaclaw diagnose` and the build identity show the pinned build as `<version>+<sha prefix>` with the package file, and the last verdict. The relay guard treats the setting and `<root>/openclaw-packages/` as protected.
 - `tar` is now a direct dependency (it was already installed through OpenClaw's npm).
+
+### Fixed
+- While a prelaunch hook or the pinned package keeps the gateway down, the Watchdog's degraded reason stays `prelaunch_hook_failed` / `openclaw_package_refused` instead of being replaced by the health probe's "fetch failed".
 
 ## [0.10.305] - 2026-11-17
 

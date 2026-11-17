@@ -144,8 +144,8 @@ describe("parseOpenclawPackagesSetting", () => {
     expect(override.parseOpenclawPackagesSetting(` 2026.11.4:/data/openclaw-packages/a b.tgz:${sha}\n2026.11.5:/data/p/c.tgz:${"b".repeat(64)} `)).toEqual({
       set: true,
       entries: [
-        { version: "2026.11.4", file: "/data/openclaw-packages/a b.tgz", sha256: "a".repeat(64) },
-        { version: "2026.11.5", file: "/data/p/c.tgz", sha256: "b".repeat(64) },
+        { name: "openclaw", version: "2026.11.4", file: "/data/openclaw-packages/a b.tgz", sha256: "a".repeat(64) },
+        { name: "openclaw", version: "2026.11.5", file: "/data/p/c.tgz", sha256: "b".repeat(64) },
       ],
       errors: [],
     });
@@ -156,8 +156,20 @@ describe("parseOpenclawPackagesSetting", () => {
     const parsed = override.parseOpenclawPackagesSetting(
       [`2026.11.4:data/a.tgz:${sha}`, `2026.11.4:/data/a.tgz:abc`, `2026.11.4:/data/../a.tgz:${sha}`, `2026.11.4:/data/a.tgz:${sha}`, `2026.11.4:/data/b.tgz:${sha}`].join(","),
     );
-    expect(parsed.entries).toEqual([{ version: "2026.11.4", file: "/data/a.tgz", sha256: sha }]);
+    expect(parsed.entries).toEqual([{ name: "openclaw", version: "2026.11.4", file: "/data/a.tgz", sha256: sha }]);
     expect(parsed.errors).toHaveLength(4);
+  });
+
+  it("reads an @openclaw/codex entry beside the OpenClaw entry for the same version, and only that plugin", () => {
+    const sha = "d".repeat(64);
+    const parsed = override.parseOpenclawPackagesSetting(
+      [`2026.11.4:/data/a.tgz:${sha}`, `@openclaw/codex@2026.11.4:/data/c.tgz:${sha}`, `@openclaw/codex@2026.11.4:/data/d.tgz:${sha}`, `@openclaw/discord@2026.11.4:/data/e.tgz:${sha}`].join("\n"),
+    );
+    expect(parsed.entries).toEqual([
+      { name: "openclaw", version: "2026.11.4", file: "/data/a.tgz", sha256: sha },
+      { name: "@openclaw/codex", version: "2026.11.4", file: "/data/c.tgz", sha256: sha },
+    ]);
+    expect(parsed.errors).toHaveLength(2);
   });
 });
 
@@ -323,6 +335,114 @@ describe("applyOpenclawPackageAtBoot", () => {
     expect(apply(install, {})).toMatchObject({ status: "stock" });
     expectStockIntact(install);
     expect(fs.existsSync(path.join(nodeModules, ".openclaw-package-swap.json"))).toBe(false);
+  });
+});
+
+describe("on a filesystem that cannot rename the image's directories (Docker overlayfs, EXDEV)", () => {
+  const overlayFs = (install) => {
+    const lower = new Set();
+    const walk = (dir) => {
+      const stat = fs.statSync(dir, { bigint: true });
+      lower.add(`${stat.ino}:${stat.birthtimeNs}`);
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory()) walk(path.join(dir, entry.name));
+    };
+    walk(install.stock);
+    return Object.assign(Object.create(fs), {
+      renameSync: (from, to) => {
+        const stat = fs.lstatSync(from, { bigint: true });
+        if (stat.isDirectory() && lower.has(`${stat.ino}:${stat.birthtimeNs}`)) throw Object.assign(new Error(`EXDEV: cross-device link not permitted, rename '${from}'`), { code: "EXDEV" });
+        return fs.renameSync(from, to);
+      },
+    });
+  };
+
+  it("applies by copying the image's directories, and restores stock the same way", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) };
+    const fsModule = overlayFs(install);
+    const verdict = apply(install, env, { fsModule });
+    expect(verdict, JSON.stringify(verdict)).toMatchObject({ status: "applied" });
+    expect(fs.readFileSync(path.join(install.stock, "dist", "index.js"), "utf8")).toContain("patched");
+    expect(fs.existsSync(path.join(install.stock, "node_modules", "@scope", "nested", "package.json"))).toBe(true);
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+    expect(fs.readdirSync(path.join(install.installDir, "node_modules")).filter((name) => name.endsWith(".partial"))).toEqual([]);
+    expect(apply(install, {}, { fsModule })).toMatchObject({ status: "stock", restored: true });
+    expectStockIntact(install);
+  });
+
+  it("recovers a start that died while removing the stock tree after its copy was set aside", () => {
+    const install = makeInstall();
+    const nodeModules = path.join(install.installDir, "node_modules");
+    const aside = path.join(nodeModules, ".openclaw-stock-2026.11.4");
+    fs.cpSync(install.stock, aside, { recursive: true });
+    fs.rmSync(path.join(install.stock, "dist"), { recursive: true });
+    fs.mkdirSync(path.join(nodeModules, ".openclaw-next-abc"));
+    fs.mkdirSync(path.join(nodeModules, ".openclaw-stock-2026.11.4x.partial"));
+    writeJson(path.join(nodeModules, ".openclaw-package-swap.json"), { stagingDir: path.join(nodeModules, ".openclaw-next-abc"), stockAsideDir: aside, movedNested: [], sha256: "a".repeat(64) });
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+    expectStockIntact(install);
+    expect(fs.readdirSync(nodeModules).filter((name) => name.startsWith(".openclaw-"))).toEqual([]);
+  });
+});
+
+describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
+  const makeCodex = ({ name = "@openclaw/codex", version = kVersion } = {}) => {
+    const src = tmp("codex-src-");
+    writeJson(path.join(src, "package", "package.json"), { name, version, openclaw: { extensions: ["./dist/index.js"] } });
+    write(path.join(src, "package", "dist", "index.js"), "export const harness = 'patched';\n");
+    write(path.join(src, "package", "openclaw.plugin.json"), "{}\n");
+    const file = path.join(tmp("codex-out-"), "openclaw-codex-patched.tgz");
+    tar.c({ gzip: true, file, cwd: src, sync: true, portable: true }, ["package"]);
+    fs.chmodSync(file, 0o600);
+    return { file, sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") };
+  };
+  const codexSetting = (core, codex) => ({ ALPHACLAW_OPENCLAW_PACKAGES: `${settingOf(core)}\n@openclaw/codex@${kVersion}:${codex.file}:${codex.sha256}` });
+  const fakeInstaller = () =>
+    vi.fn(({ archivePath, openclawDir }) => {
+      const dir = path.join(openclawDir, "extensions", "codex");
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true });
+      tar.x({ file: archivePath, cwd: dir, sync: true, strip: 1 });
+      write(path.join(dir, "node_modules", "ws", "index.js"), "runtime dependency\n");
+      return { ok: true };
+    });
+
+  it("installs it when absent, then only verifies it at the next start, and the launch check covers its files", () => {
+    const install = makeInstall();
+    const env = codexSetting(makePackage(), makeCodex());
+    const runPluginInstall = fakeInstaller();
+    const verdict = apply(install, env, { runPluginInstall });
+    expect(verdict).toMatchObject({ status: "applied", codex: { name: "@openclaw/codex", installed: true, files: 3, dir: path.join(install.openclawDir, "extensions", "codex") } });
+    expect(runPluginInstall).toHaveBeenCalledTimes(1);
+    expect(apply(install, env, { runPluginInstall })).toMatchObject({ status: "applied", reused: true, codex: { installed: false } });
+    expect(runPluginInstall).toHaveBeenCalledTimes(1);
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+
+    const shipped = path.join(install.openclawDir, "extensions", "codex", "dist", "index.js");
+    const stat = fs.statSync(shipped);
+    fs.writeFileSync(shipped, "export const harness = 'stock!!';\n");
+    fs.utimesSync(shipped, stat.atime, new Date(stat.mtimeMs + 5000));
+    expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason: "tree_changed", detail: "extensions/codex: 1 file(s), first dist/index.js (modified)" }));
+    expect(apply(install, env, { runPluginInstall })).toMatchObject({ status: "applied", codex: { installed: true } });
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+  });
+
+  it("refuses the gateway when the plugin cannot be installed or is not @openclaw/codex", () => {
+    const install = makeInstall();
+    const env = codexSetting(makePackage(), makeCodex());
+    const failed = apply(install, env, { runPluginInstall: () => ({ ok: false, detail: "exit 1: npm ERR! network" }) });
+    expect(failed).toMatchObject({ status: "refused", reason: "plugin_install_failed", plugin: "@openclaw/codex", detail: "exit 1: npm ERR! network" });
+    expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason: "plugin_install_failed" }));
+
+    const install2 = makeInstall();
+    const env2 = codexSetting(makePackage(), makeCodex({ name: "@openclaw/discord" }));
+    expect(apply(install2, env2, { runPluginInstall: fakeInstaller() })).toMatchObject({ status: "refused", reason: "plugin_mismatch" });
+
+    const install3 = makeInstall();
+    const env3 = codexSetting(makePackage(), { file: "/nonexistent/codex.tgz", sha256: "e".repeat(64) });
+    const missing = apply(install3, env3, { runPluginInstall: fakeInstaller() });
+    expect(missing).toMatchObject({ status: "refused", reason: "missing", pluginFile: "codex.tgz" });
   });
 });
 

@@ -706,8 +706,17 @@ and entries are separated by commas or newlines:
 ALPHACLAW_OPENCLAW_PACKAGES=2026.11.4:/data/openclaw-packages/openclaw-2026.11.4-fix.tgz:<64 hex sha256>
 ```
 
-Keep the file on the data disk, outside the OpenClaw state directory, and not
-writable by group or others (`chmod 600`). Entries for other versions are
+OpenClaw's npm package does not include the Codex plugin, so a build that
+patches it too ships a second package. Name it in the same setting with an
+`@openclaw/codex@` prefix and the same version:
+
+```
+ALPHACLAW_OPENCLAW_PACKAGES=2026.11.4:/data/openclaw-packages/openclaw-2026.11.4-fix.tgz:<sha256>,@openclaw/codex@2026.11.4:/data/openclaw-packages/openclaw-codex-2026.11.4-fix.tgz:<sha256>
+```
+
+An `@openclaw/codex` entry only goes with an OpenClaw entry for the same
+version. Keep the files on the data disk, outside the OpenClaw state
+directory, and not writable by group or others (`chmod 600`). Entries for other versions are
 ignored, so you can stage the build for the next pin before the pin moves.
 It never picks a version: the version still comes from `package.json`.
 
@@ -717,10 +726,18 @@ file's sha256, unpacks it beside the image's stock build, and refuses it
 unless it has the same version, the same dependencies (extra bundled copies
 of declared dependencies are allowed), the same declared database schemas
 and a Node.js range that includes the running Node. It then runs the
-package's own postinstall and swaps it into `node_modules/openclaw`. On a
-restart in the same container it re-checks the file and reuses the tree.
-Before **every** gateway launch it checks that each file the package shipped
-is still there and unchanged. Files OpenClaw adds at run time (plugin
+package's own postinstall and swaps it into `node_modules/openclaw`. Where
+the filesystem cannot rename the image's directories (Docker's overlayfs),
+the swap copies them instead, which adds a few seconds. On a restart in the
+same container it re-checks the file and reuses the tree. With an
+`@openclaw/codex` entry it then checks that every file that package ships is
+byte-identical in `<state dir>/extensions/codex`. The state directory is on
+the data disk, so after a redeploy this is only a check; when the plugin is
+missing or different, AlphaClaw runs `openclaw plugins install <file> --force
+--accept-capabilities` (which fetches the plugin's own dependencies from npm)
+and checks again.
+Before **every** gateway launch it checks that each file the package (and the
+pinned `@openclaw/codex`, if any) shipped is still there and unchanged. Files OpenClaw adds at run time (plugin
 installs under `dist/extensions`) don't count.
 
 **When something is wrong it refuses, it never falls back.** The stock build
@@ -756,6 +773,10 @@ the image has not installed yet it says which checks it could not run
   the same OpenClaw version.
 - `postinstall_failed`, `lifecycle_pending`: the package's own postinstall
   failed. Its output is in the AlphaClaw process log.
+- `plugin_install_failed`, `plugin_mismatch`: the `@openclaw/codex` entry
+  could not be installed (its output tail is in the detail; the install needs
+  npm to reach the registry), or its file is not `@openclaw/codex` at that
+  version.
 - `tree_changed`: something changed a file the package shipped after it
   was applied. Restart AlphaClaw (a redeploy or a container restart) to
   apply it again.
