@@ -475,17 +475,17 @@ export const runCapyReporter = async ({
   }
   const held = state.rows.filter((row) => row.state === "queued" && !sendable(row)).length;
   if (held) log(`row_held op=send count=${held} (their threads were not listed as not private this pass; kept for a later pass)`);
-  // A crew agent AgentRun already holds is renamed to its id as soon as its
-  // readable name is no longer allowed (a Captain gone private, listed or
-  // unreadable), without waiting for that crew's next turn. A readable name
-  // only ever goes out with a turn.
+  // Every pass, each known crew agent whose name must be its id is read back
+  // from AgentRun and renamed if AgentRun shows any other name (a Captain gone
+  // private, listed or unreadable), without waiting for that crew's next turn.
+  // The cached hash never decides this: a rename whose answer was lost leaves
+  // it stale. A readable name only ever goes out with a turn.
   for (const [agentKey, known] of Object.entries(state.agents)) {
     if (sent.paused || !agentKey.startsWith(kCrewPrefix)) continue;
     const captainId = agentKey.slice(kCrewPrefix.length);
     if (crewNameOf(captainId) !== `Capy crew ${captainId}`) continue;
     const definition = agentDefinition({ agentId: agentKey, name: `Capy crew ${captainId}`, description: kCrewDescription, runtime });
     const definitionHash = hashOf(definition);
-    if (known.definition_hash === definitionHash) continue;
     const path = `/agents/${encodeURIComponent(agentKey)}`;
     const got = await client.call({ method: "GET", path, token });
     if (got.kind === "not_found") {
@@ -498,8 +498,12 @@ export const runCapyReporter = async ({
       got.kind === "ok" && stale
         ? await client.call({ method: "PUT", path: `${path}/definition`, token, ifMatch: got.etag, body: { definition: { ...definition, description: String(current.description ?? definition.description) } } })
         : got;
-    if (put.kind === "ok") state.agents[agentKey] = { ...known, definition_hash: definitionHash };
-    else log(`agent_rename_error op=agent agent=${agentKey} status=${put.status || put.kind} (name kept; the next pass tries again)`);
+    if (put.kind === "ok") {
+      state.agents[agentKey] = { ...known, definition_hash: definitionHash };
+      continue;
+    }
+    failed = true;
+    log(`agent_rename_error op=agent agent=${agentKey} status=${put.status || put.kind} (name kept; the next pass tries again)`);
   }
   state.rows = state.rows.filter((row) => row.state === "queued");
   save();

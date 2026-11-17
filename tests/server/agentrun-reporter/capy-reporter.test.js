@@ -459,6 +459,39 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(puts()).toBe(before);
   });
 
+  it("renames a crew agent to its id after a readable-name update whose answer was lost, once its Captain turns private", async () => {
+    const capy = createFakeCapy({ captains: [captain("jam_crewR", "LOST-NAME", { visibility: "private" })], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
+    capy.captains[0].visibility = "org";
+    clock += 60 * 60 * 1000;
+    capy.messages.jam_R.push(user("jam_R-2", -50), reply("jam_R-r2", -51));
+    capy.threads[0].lastActivityAt = at(-51);
+    fake.state.loseAnswer = /\/definition$/;
+    await run(capy);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew: LOST-NAME");
+    fake.state.down = false;
+    capy.captains[0].visibility = "private";
+    clock += 60 * 60 * 1000;
+    await run(capy);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
+  });
+
+  it("logs a failed crew rename, exits 1 and renames on the next pass", async () => {
+    const capy = createFakeCapy({ captains: [captain("jam_crewR", "NAME-R")], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
+    expect((await run(capy)).code).toBe(0);
+    capy.captains[0].visibility = "private";
+    clock += 60 * 60 * 1000;
+    fake.state.failNext.push({ path: /^\/agents\/capy-captain-jam_crewR$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    const failedPass = await run(capy);
+    expect(failedPass.code).toBe(1);
+    expect(failedPass.lines.join("\n")).toContain("agent_rename_error op=agent agent=capy-captain-jam_crewR status=503");
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew: NAME-R");
+    clock += 60 * 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.agents.get("capy-captain-jam_crewR").definition.name).toBe("Capy crew jam_crewR");
+  });
+
   it("renames a crew agent to its id in the next pass after its Captain is listed", async () => {
     const capy = createFakeCapy({ captains: [captain("jam_crewR", "NAME-R")], threads: [inCrew("jam_R", "jam_crewR")], messages: { jam_R: turnOf("jam_R") } });
     expect((await run(capy)).code).toBe(0);
