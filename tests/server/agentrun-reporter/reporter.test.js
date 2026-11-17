@@ -1167,6 +1167,29 @@ describe("agentrun reporter: cron runs", () => {
     expect(wire).toContain("with a heartbeat turn of agent main");
   });
 
+  it("leaves a heartbeat during an isolated job's run alone, and keeps a cron run's turn when its queue write fails once", async () => {
+    const { clock, handlers, source, outbox } = setup({ contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the news" } }] });
+    cronEvent(handlers, "started", "brief", recurring, { runAtMs: T0 });
+    clock.t += 500;
+    driveTurn(handlers, { runId: "hb1", sessionKey: "agent:main:main", trigger: "heartbeat" });
+    isolatedTurn(handlers, clock, "brief", "r1");
+    clock.t += 1000;
+    cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 4000, status: "ok", sessionKey: "agent:main:cron:brief:run:r1" });
+    const addTurn = outbox.addTurn;
+    let refused = 0;
+    outbox.addTurn = (row) => {
+      if (row.source === "openclaw-cron" && refused++ === 0) throw new Error("SQLITE_BUSY: database is locked");
+      return addTurn.call(outbox, row);
+    };
+    expect(source.ingest().added).toBe(1);
+    expect(source.ingest().added).toBe(1);
+    const rows = outbox.db.prepare("SELECT source, class, contents, agent_key FROM turns ORDER BY id").all();
+    expect(rows).toEqual([
+      { source: "openclaw", class: "heartbeat", contents: 0, agent_key: "openclaw-agent-main" },
+      { source: "openclaw-cron", class: "cron", contents: 1, agent_key: "openclaw-cron-brief" },
+    ]);
+  });
+
   it("names recurring jobs, hides listed names, and files one-shot jobs and script runs as metadata", async () => {
     const { clock, handlers, fake, source, sender, outbox } = setup({
       hiddenCron: ["secretjob-123456"],
