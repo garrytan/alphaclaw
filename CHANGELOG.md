@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.294] - 2026-11-17
+
+The AgentRun reporter no longer drops a queued turn when something between it and AgentRun answers with an error, such as a proxy's request timeout.
+
+### Fixed
+- A 408, or any 4xx that carries no AgentRun error code (a proxy or a wrong base URL answered, not AgentRun), is now retried with the usual backoff. Since 0.10.293 such an answer to an agent read, update or create counted as a refusal and dropped the turn for good. Only AgentRun's own error code now proves a refusal.
+
 ## [0.10.293] - 2026-11-17
 
 Fixes to the AgentRun reporter before anyone turns it on: taking a cron job off the contents list now stops its queued turns from sending their text, and the reporter no longer misreports turns around a gateway start or retries agents AgentRun has refused for good.
