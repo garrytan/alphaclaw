@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.291] - 2026-11-17
+
+When OpenClaw's own resume pass after a restart fails for some sessions, it tries again twice. AlphaClaw's check for stuck sessions now waits for those retries instead of reporting sessions OpenClaw is still working on.
+
+### Fixed
+- The post-restart session check treats OpenClaw's resume pass as finished only when it reports no failures, after its third failed pass, or when it logs that it gave up. A restart-loop breaker pause keeps it waiting, because OpenClaw runs the same pass again when the pause ends. It used to stop waiting at the first "startup complete" line, even one with failures that OpenClaw was about to retry.
+- A post-restart check that a newer restart has replaced no longer sends an alert. It used to finish its alert list before noticing.
+
 ## [0.10.290] - 2026-11-17
 
 A secret link save now refuses to run when AlphaClaw cannot record it on its disk, so a restart can never reopen a link that was already used.

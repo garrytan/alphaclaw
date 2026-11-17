@@ -346,4 +346,75 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
       expect(notify).toHaveBeenCalledTimes(1);
     });
   });
+  describe("OpenClaw's recovery retries, give-ups and a superseded check (GST-2884 follow-up)", () => {
+    const pass = (failed) => `[gateway] [main-session-recovery] main-session restart recovery startup complete: started=1 settled=0 failed=${failed} skipped=0 boot=b pass=p\n`;
+    const waitFor = async (lines, { rows }) => {
+      let clock = kLaunchAt;
+      let polls = 0;
+      let sweepRef;
+      const at = new Map(lines.map(([poll, text]) => [poll, text]));
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: rows() } }) });
+      const made = createSweep(gateway, {
+        sleep: vi.fn(async (ms) => {
+          clock += ms;
+          if (ms !== 5_000) return;
+          polls += 1;
+          if (at.has(polls)) sweepRef.observeGatewayOutput(at.get(polls));
+        }),
+        now: () => clock,
+      });
+      sweepRef = made.sweep;
+      const pending = made.sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
+      made.sweep.observeGatewayOutput("[gateway] [main-session-recovery] started interrupted main session: agent:main:telegram:group:-1:topic:2\n");
+      const result = await pending;
+      return { result, polls: () => polls, notify: made.notify };
+    };
+    const stuck = () => [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })];
+
+    it("keeps waiting through a pass with failed>0 and stops at the retry that ends with failed=0", async () => {
+      const { result, polls } = await waitFor([[10, pass(1)], [20, pass(0)]], { rows: stuck });
+      expect(polls()).toBe(20);
+      expect(result.alerted).toEqual(["x"]);
+      expect(lines()).not.toContain("[alphaclaw] wedge-sweep recovery wait capped generation=2");
+    });
+
+    it("stops after OpenClaw's third failed pass, which it does not retry", async () => {
+      const { polls } = await waitFor([[5, pass(2)], [10, pass(2)], [15, pass(1)]], { rows: stuck });
+      expect(polls()).toBe(15);
+    });
+
+    it("stops at once when OpenClaw gives up", async () => {
+      const gaveUp = await waitFor([[4, "[gateway] [main-session-recovery] main-session restart recovery gave up: Error: boom\n"]], { rows: stuck });
+      expect(gaveUp.polls()).toBe(4);
+      expect(gaveUp.result.alerted).toEqual(["x"]);
+    });
+
+    it("keeps waiting through a restart-loop breaker pause, which OpenClaw follows with the same attempt", async () => {
+      const paused = await waitFor([[6, "[gateway] [main-session-recovery] restart-loop breaker tripped; automatic main-session restart recovery paused until 2026-11-17T01:00:00.000Z\n"], [12, pass(0)]], { rows: stuck });
+      expect(paused.polls()).toBe(12);
+      expect(paused.result.alerted).toEqual(["x"]);
+      expect(lines()).not.toContain("[alphaclaw] wedge-sweep recovery wait capped generation=2");
+    });
+
+    it("a check superseded while sessions.recover runs books no alert, so the newer check still sends it", async () => {
+      let newer = null;
+      let sweepRef;
+      const gateway = createGateway({
+        "sessions.list": async (params) => params.activeOnly
+          ? { body: { sessions: [row("a", { hasActiveRun: true })] } }
+          : { body: { sessions: [row("a"), row("b", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } },
+        "sessions.recover": async () => {
+          newer ??= sweepRef.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
+          return { ok: false, body: { ok: false, error: { code: "INVALID_REQUEST", message: "Session recovery requires a restart-tombstoned session." } } };
+        },
+      });
+      const { sweep, notify, insertEvent } = createSweep(gateway);
+      sweepRef = sweep;
+      await sweep.recordRunningSessions();
+      expect(await sweep.onGatewayLaunch({ generation: 1, startedAt: kLaunchAt })).toEqual({ skipped: "superseded" });
+      expect((await newer).alerted).toEqual(["b"]);
+      expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.sessionKey, e.details.generation])).toEqual([["alerted", "b", 2]]);
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+  });
 });
