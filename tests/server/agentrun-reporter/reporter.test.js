@@ -372,6 +372,58 @@ describe("agentrun reporter: queue and sender", () => {
     expect(readSpool(rootDir)).toBe("");
   });
 
+  it("keeps a spool file it cannot read and reports the turn on a later tick", () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    let failing = true;
+    const flaky = {
+      ...fs,
+      readFileSync: (file, ...rest) => {
+        if (failing && String(file).endsWith(".done")) throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+        return fs.readFileSync(file, ...rest);
+      },
+    };
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const logs = [];
+    const source = createOpenclawSource({ rootDir, outbox, fsModule: flaky, logger: { warn: (line) => logs.push(line) } });
+    expect(source.ingest().added).toBe(0);
+    expect(readSpool(rootDir)).not.toBe("");
+    expect(logs.join("\n")).toContain("kept for the next tick");
+    failing = false;
+    expect(source.ingest().added).toBe(1);
+    expect(readSpool(rootDir)).toBe("");
+    expect(outbox.counts()).toEqual({ queued: 1 });
+  });
+
+  it("drops a spool file only after it fails five ticks in a row", () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const logs = [];
+    const broken = createOpenclawSource({
+      rootDir,
+      outbox,
+      fsModule: {
+        ...fs,
+        readFileSync: (file, ...rest) => {
+          if (String(file).endsWith(".done")) throw new Error("bad file");
+          return fs.readFileSync(file, ...rest);
+        },
+      },
+      logger: { warn: (line) => logs.push(line) },
+    });
+    for (let tick = 1; tick < 5; tick += 1) {
+      expect(broken.ingest().added).toBe(0);
+      expect(readSpool(rootDir)).not.toBe("");
+    }
+    expect(broken.ingest().added).toBe(0);
+    expect(readSpool(rootDir)).toBe("");
+    expect(logs.filter((line) => line.includes("kept for the next tick"))).toHaveLength(4);
+    expect(logs.some((line) => line.includes("dropped after 5 tries"))).toBe(true);
+  });
+
   it("reports a model-fallback run as its first attempt, once, even when a file is read twice", async () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);
