@@ -133,6 +133,7 @@ const runningNeighbours = () => [
   ["eval", "eval 'openclaw config patch' >> memory/n.md"],
   ["sh -c", "sh -c 'openclaw config patch' >> memory/n.md"],
   ["bash -c", "bash -c 'openclaw config patch' >> memory/n.md"],
+  ["printf %n naming an array element, whose subscript zsh expands", "printf 'x%n' 'a[$(openclaw config patch)]' >> memory/n.md"],
   ["zsh -c with the (N) glob qualifier (#423)", "zsh -c '" + kChange.replace("set", "set (N)") + "'"],
   ["xargs", "echo plugins.allow | xargs openclaw config unset"],
   ["env", "env openclaw config patch >> memory/n.md"],
@@ -227,7 +228,7 @@ const readNeighbours = () => [
   ["sort -o", "sort -o openclaw.json notes.txt"],
   ["find -exec", "find . -name openclaw.json -exec openclaw config patch ';'"],
   ["find -delete", "find . -name openclaw.json -delete"],
-  ["rg --pre", "rg --pre openclaw x openclaw.json"],
+  ["rg --pre", "rg --pre openclaw x openclaw.json", "rg"],
   ["xargs", "grep -h . notes.txt | xargs openclaw config unset"],
   ["a pipe into sh", "grep -h openclaw notes.txt openclaw.json | sh"],
   ["a pipe into bash", "cat notes.txt openclaw.json | bash"],
@@ -351,9 +352,10 @@ describe("relay guard and read-only lines that name openclaw.json (GST-2940)", (
   });
 
   it("still refuses every neighbour that writes a file or runs openclaw in bash, zsh or dash", () => {
-    for (const [label, command] of readNeighbours()) {
+    for (const [label, command, needs] of readNeighbours()) {
       expect(textLineOf(command, { rootDir: root }), label).not.toBe("read");
       expect(anchorOf(command), label).not.toBeNull();
+      if (needs && !which(needs)) continue;
       const { ran, changed } = effectsOf(command);
       expect(ran.length + changed.length, label + " should run the stub or change a file in some shell").toBeGreaterThan(0);
     }
