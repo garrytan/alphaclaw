@@ -179,11 +179,11 @@ export const runCapyReporter = async ({
     const captainId = String((typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId) || "");
     if (captainId) {
       const name = privateIds.has(captainId) ? `Capy crew ${captainId} (private)` : `Capy crew: ${thread.captain?.name || captainId}`;
-      return { key: `capy-captain-${captainId}`, name, description: "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter." };
+      return { id: `capy-captain-${captainId}`, name, description: "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter." };
     }
     const projectId = String(thread.projectId || project.id || "none");
     const name = project.visibility === "org" && project.name ? `Capy project: ${project.name}` : `Capy project ${projectId}`;
-    return { key: `capy-project-${projectId}`, name, description: "A Capy project's thread turns outside any crew, reported by AlphaClaw's Capy reporter." };
+    return { id: `capy-project-${projectId}`, name, description: "A Capy project's thread turns outside any crew, reported by AlphaClaw's Capy reporter." };
   };
 
   const isPrivate = (thread) => {
@@ -215,11 +215,12 @@ export const runCapyReporter = async ({
       `Capy ${cls} turn in thread ${thread.id}${title ? ` "${cut(title, 200)}"` : ""}; ` +
       `started ${startedAt ? new Date(startedAt).toISOString() : "unknown"}, ${describeDuration(endedAt - startedAt)}, status ${status}; ` +
       `${replies.length} replies, ${tools.length} tool calls.${creditsNote}`;
+    const { id: agent_key } = agent;
     return {
       id: crypto.createHash("sha256").update(sourceRunId).digest("hex").slice(0, 16),
       source: "capy",
       source_run_id: sourceRunId,
-      agent_key: agent.key,
+      agent_key,
       agent_name: agent.name,
       agent_description: agent.description,
       class: cls,
