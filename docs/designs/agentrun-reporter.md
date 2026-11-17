@@ -14,8 +14,8 @@ flowchart LR
   D -->|start, events, complete| E[AgentRun /v2]
 ```
 
-1. **Capture (inside the gateway).** `lib/plugin/agentrun-reporter` listens to `model_call_started`, `llm_output`, `after_tool_call`, `agent_end`, `run_stopped` and `gateway_start`. It appends small JSON lines to one spool file per run and renames the file to `.done` when the run ends. It makes no network or database call, never throws into OpenClaw, and logs at most 10 `capture_error` lines when the disk refuses writes. It writes text into the spool only for a cron session (the server decides later whether that job is listed). An incognito session is not recorded at all.
-2. **Queue (AlphaClaw).** Every 15 s `lib/server/agentrun-reporter` turns `.done` files into rows of a SQLite queue (mode 0600), one row per run (`UNIQUE (source, source_run_id)`), and deletes the files. Spool files left by an earlier gateway process become runs with status `cancelled` and `evidence_complete: false` ("interrupted by gateway restart"). Session keys are replaced by a keyed hash (`<root>/db/agentrun-reporter.salt`), so AgentRun never sees chat ids or phone numbers.
+1. **Capture (inside the gateway).** `lib/plugin/agentrun-reporter` listens to `model_call_started`, `llm_output`, `after_tool_call`, `agent_end` and `gateway_start`. A run's class is decided by the first hook that carries its trigger and job id (`model_call_started` has neither, so the class it records is provisional and is replaced by a second open record). A stopped run reaches `agent_end` as a failure with no error and is reported as `cancelled` (stopped). It appends small JSON lines to one spool file per run and renames the file to `.done` when the run ends. It makes no network or database call, never throws into OpenClaw, and logs at most 10 `capture_error` lines when the disk refuses writes. It writes text into the spool only for a cron session (the server decides later whether that job is listed). An incognito session is not recorded at all.
+2. **Queue (AlphaClaw).** Every 15 s `lib/server/agentrun-reporter` turns `.done` files into rows of a SQLite queue (mode 0600), one row per run (`UNIQUE (source, source_run_id)`), and deletes the files. A file whose queue write fails stays for the next tick. OpenClaw ends each model-fallback attempt with its own `agent_end`, so a later attempt of a run arrives as a second file; it is folded into the run's row while nothing has been sent (the later ending wins, tools, texts and usage add up), and logged as `late_attempt` once the run was sent. Spool files left by an earlier gateway process become runs with status `cancelled` and `evidence_complete: false` ("interrupted by gateway restart"). Session keys are replaced by a keyed hash (`<root>/db/agentrun-reporter.salt`), so AgentRun never sees chat ids or phone numbers.
 3. **Send.** For each due row the sender makes sure the AgentRun agent exists (one per OpenClaw agent, `openclaw-agent-<id>`, and one per cron job, `openclaw-cron-<job>`, all with `learning: false`), then starts an SDK run, posts the events in batches (at most 100 events and 200 KB each) and completes it.
 
 ## Session classes
@@ -47,7 +47,7 @@ All are deployment-environment only (never `.env`, never passed to the gateway).
 | --- | --- |
 | `ALPHACLAW_AGENTRUN_URL` | AgentRun's API base, ending in `/v2`. Setting it turns the reporter on (the plugin is added to `openclaw.json` at the next gateway start). |
 | `ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN` | An AgentRun API token for this reporter. Without it turns are captured and queued but not sent (`token_missing`, logged once). |
-| `ALPHACLAW_AGENTRUN_RUNTIME` | SDK runtime for the agents and runs, default `claude-agent-sdk`. An invalid value turns the reporter off. |
+| `ALPHACLAW_AGENTRUN_RUNTIME` | SDK runtime for the agents and runs, default `claude-agent-sdk`. An invalid value logs `runtime_invalid` and falls back to `claude-agent-sdk`. |
 | `ALPHACLAW_AGENTRUN_CONTENT_CRON` | Comma-separated cron job ids whose turns may carry their input and answer. Empty by default. |
 
 ## Log lines
@@ -62,4 +62,7 @@ Every line starts `[alphaclaw] agentrun-reporter`; none carries a token, a promp
 | `row_dropped` | AgentRun refused a row for good (for example invalid input); not retried. |
 | `queue_overflow` | The queue passed 20,000 unsent rows and dropped the oldest. |
 | `send_error` | An unexpected error in a send pass; the next tick tries again. |
+| `runtime_invalid` | `ALPHACLAW_AGENTRUN_RUNTIME` is not a runtime name; using `claude-agent-sdk`. |
+| `queue_error` | A spool file could not be written to the queue; it is kept and read again next tick. |
+| `late_attempt` | A later attempt of a run arrived after the run was sent; that attempt is not reported. |
 | `capture_error` | (gateway log) the plugin could not write its spool; the turn is not reported. |

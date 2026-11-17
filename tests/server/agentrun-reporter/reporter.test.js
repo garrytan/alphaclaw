@@ -40,10 +40,11 @@ const registerPlugin = (rootDir, { fsModule, generationId } = {}) => {
 };
 
 // One full turn through the plugin's hooks, with marker text everywhere a
-// turn can carry contents.
+// turn can carry contents. model_call_started gets the context OpenClaw
+// 2026.11.4 really sends it: no trigger and no job id.
 const driveTurn = (handlers, { runId, sessionKey, trigger = "user", jobId, agentId = "main", fail = false, tools = 2 }) => {
   const ctx = { runId, sessionKey, trigger, jobId, agentId, channel: "telegram" };
-  handlers.model_call_started({ runId, sessionKey, provider: "anthropic", model: "claude" }, ctx);
+  handlers.model_call_started({ runId, sessionKey, provider: "anthropic", model: "claude" }, { runId, sessionKey, agentId, modelProviderId: "anthropic", modelId: "claude" });
   handlers.llm_output(
     {
       runId,
@@ -158,16 +159,29 @@ describe("agentrun reporter: capture plugin", () => {
     expect(readSpool(rootDir)).toBe("");
   });
 
-  it("opens a row for a turn that ends before its first model call, and closes stopped runs", () => {
+  it("opens a row for a turn that ends before its first model call, and reports a stopped run as cancelled", () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);
     handlers.agent_end({ runId: "r-early", success: false, error: "no model" }, { runId: "r-early", sessionKey: "agent:main:main" });
     handlers.model_call_started({ runId: "r-stop" }, { runId: "r-stop", sessionKey: "agent:main:main" });
-    handlers.run_stopped({ source: "channel", sessions: [], runIds: ["r-stop", "r-unknown"] }, {});
+    handlers.agent_end({ runId: "r-stop", success: false, durationMs: 5 }, { runId: "r-stop", sessionKey: "agent:main:main", trigger: "user" });
     const spool = readSpool(rootDir);
     expect(spool).toContain('"runId":"r-early"');
-    expect(spool).toContain('"status":"cancelled"');
+    expect(spool).toContain('"status":"cancelled","reason":"stopped"');
     expect(spool).not.toContain("no model");
+    expect(Object.keys(handlers).sort()).toEqual(["after_tool_call", "agent_end", "gateway_start", "llm_output", "model_call_started"]);
+  });
+
+  it("decides a cron run's class from the first hook that carries its trigger", () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const sessionKey = "agent:main:cron:brief";
+    handlers.model_call_started({ runId: "r", sessionKey }, { runId: "r", sessionKey, agentId: "main" });
+    handlers.llm_output({ runId: "r", assistantTexts: ["hi"] }, { runId: "r", sessionKey, trigger: "cron", jobId: "brief" });
+    handlers.agent_end({ runId: "r", success: true }, { runId: "r", sessionKey, trigger: "cron", jobId: "brief" });
+    const records = readSpool(rootDir).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(records.filter((record) => record.t === "open").map((record) => record.class)).toEqual(["unknown", "cron"]);
+    expect(records.find((record) => record.t === "llm").text).toBe("hi");
   });
 
   it("never throws into OpenClaw and stays fast when the disk refuses writes", () => {
@@ -325,6 +339,58 @@ describe("agentrun reporter: queue and sender", () => {
     expect(outbox.counts()).toEqual({ queued: 1 });
     expect(logs.join("\n")).toContain("token_rejected");
     expect(logs.join("\n")).not.toContain("w".repeat(40));
+  });
+
+  it("pauses on a 403 and keeps the row", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const { source, sender, outbox } = makePipeline(rootDir, { fake });
+    source.ingest();
+    fake.state.failNext.push({ status: 403, body: { error: { code: "forbidden" } } });
+    expect((await sender.sendDue()).paused).toBe(1);
+    expect(outbox.counts()).toEqual({ queued: 1 });
+  });
+
+  it("keeps a spool file whose queue write fails and reads it again next tick", () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    let calls = 0;
+    const outbox = {
+      addTurn: () => {
+        calls += 1;
+        if (calls === 1) throw new Error("database is locked");
+        return true;
+      },
+      mergeTurn: () => false,
+    };
+    const source = createOpenclawSource({ rootDir, outbox, getContentCronJobs: () => new Set(), logger: { warn: () => {} } });
+    expect(source.ingest().added).toBe(0);
+    expect(readSpool(rootDir)).not.toBe("");
+    expect(source.ingest().added).toBe(1);
+    expect(readSpool(rootDir)).toBe("");
+  });
+
+  it("folds a model-fallback attempt into its run while nothing is sent", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r1", sessionKey, trigger: "cron", jobId: "brief" };
+    handlers.llm_output({ runId: "r1", assistantTexts: ["first"], usage: { input: 10, output: 1 } }, ctx);
+    handlers.agent_end({ runId: "r1", success: false, error: "overloaded" }, ctx);
+    handlers.llm_output({ runId: "r1", assistantTexts: ["second"], usage: { input: 20, output: 2 } }, ctx);
+    handlers.after_tool_call({ toolName: "read", runId: "r1", durationMs: 1 }, ctx);
+    handlers.agent_end({ runId: "r1", success: true }, ctx);
+    const fake = createFakeAgentrun();
+    const { source, sender, outbox } = makePipeline(rootDir, { fake, contentCron: ["brief"] });
+    expect(source.ingest().added).toBe(2);
+    expect(outbox.counts()).toEqual({ queued: 1 });
+    expect((await sender.sendDue()).sent).toBe(1);
+    const [run] = fake.runs.values();
+    expect(run.completion).toMatchObject({ status: "completed", answer: "second" });
+    expect(run.completion.usage).toMatchObject({ input_tokens: 30, output_tokens: 3 });
   });
 
   it("switches an agent's runtime and rebuilds a queued body built for the old one", async () => {
