@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.298] - 2026-11-17
+## [0.10.299] - 2026-11-17
 
 The relay guard no longer refuses a shell command that only writes a note or only reads a file just because the text mentions OpenClaw, and it now refuses reads of a process's environment.
 
@@ -16,6 +16,8 @@ The relay guard no longer refuses a shell command that only writes a note or onl
 
 ### Security
 - The relay guard refuses, for every relay session, a read tool call, a shell command or input typed into a process that reaches `/proc/<pid>/environ`, `/proc/self/environ` or `/proc/<pid>/task/<tid>/environ`, followed through `cd`, symlinks and globs. A process's environment holds the box's keys and tokens. This is defense in depth: the box's user separation is the boundary, and the box's own guards already refuse these reads.
+
+## [0.10.298] - 2026-11-17
 
 Capy turns now reach AgentRun within about a minute of finishing instead of once an hour, and subagent turns are reported too, as metadata only.
 
