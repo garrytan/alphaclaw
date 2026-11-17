@@ -235,6 +235,48 @@ describe("authoritative cron outcomes", () => {
     expect(days[0].totalTokens).toBe(7);
   });
 
+  it("reads OpenClaw 2026.11.5's task history, whose only cron index is partial on runtime = 'cron'", () => {
+    const { db, insert, service } = makeFixture();
+    db.exec(`
+      PRAGMA user_version = 36;
+      DROP INDEX idx_task_runs_runtime_source_ended;
+      DROP INDEX idx_task_runs_runtime_ended;
+      CREATE INDEX idx_task_runs_cron_source_order ON task_runs(source_id, created_at, task_id) WHERE runtime = 'cron';
+    `);
+    insert("task-a", { summary: "on 2026.11.5" });
+    insert("task-b", { summary: "not cron" }, { runtime: "subagent" });
+    db.close();
+    const plans = [];
+    const prepare = DatabaseSync.prototype.prepare;
+    vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (sql) {
+      const statement = prepare.call(this, sql);
+      if (!/^SELECT/.test(sql) || !/FROM task_runs/.test(sql)) return statement;
+      for (const method of ["all", "get"]) {
+        const native = statement[method].bind(statement);
+        statement[method] = (...params) => {
+          plans.push(prepare.call(this, `EXPLAIN QUERY PLAN ${sql}`).all(...params).map((row) => row.detail));
+          return native(...params);
+        };
+      }
+      return statement;
+    });
+    expect(service.getJobRuns({ jobId: "job-a", limit: 5 })).toMatchObject({ total: 1, entries: [{ summary: "on 2026.11.5" }] });
+    expect(plans.length).toBeGreaterThan(0);
+    expect(plans.flat().some((line) => line.includes("idx_task_runs_cron_source_order"))).toBe(true);
+  });
+
+  it("refuses a 2026.11.5-shaped partial index that does not filter on cron", () => {
+    const { db, insert, service } = makeFixture();
+    db.exec(`
+      DROP INDEX idx_task_runs_runtime_source_ended;
+      DROP INDEX idx_task_runs_runtime_ended;
+      CREATE INDEX idx_task_runs_other ON task_runs(source_id, created_at, task_id) WHERE runtime = 'subagent';
+    `);
+    insert("task-a");
+    db.close();
+    expect(() => service.getJobRuns({ jobId: "job-a" })).toThrow();
+  });
+
   it("uses indexed bounded pages and batched bulk reads on a large task history", () => {
     const { root, db, insert, service } = makeFixture();
     const jobs = Array.from({ length: 60 }, (_, index) => ({ id: `job-${index}` }));

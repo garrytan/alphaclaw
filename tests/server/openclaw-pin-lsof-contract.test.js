@@ -16,6 +16,7 @@ const readChunks = (prefix) => {
   return names.map((name) => ({ name, text: fs.readFileSync(path.join(kDistDir, name), "utf8") }));
 };
 
+const escapeId = (name) => name.replace(/\$/g, "\\$");
 const explain = (fact) => `${fact}; if OpenClaw now discovers the listener another way, ${kRetire}`;
 
 describe("openclaw pin: lsof contract behind `gateway restart`", () => {
@@ -34,7 +35,7 @@ describe("openclaw pin: lsof contract behind `gateway restart`", () => {
       /: \["\/usr\/bin\/lsof", "\/usr\/sbin\/lsof"\]/,
     );
     expect(text, explain("resolveLsofCommandSync no longer probes X_OK")).toMatch(
-      /function resolveLsofCommandSync\(\) \{[\s\S]*?fs\.accessSync\(candidate, fs\.constants\.X_OK\);[\s\S]*?return "lsof";\n\}/,
+      /function resolveLsofCommandSync\(\) \{[\s\S]*?(?:fs\.accessSync\(candidate, fs\.constants\.X_OK\);|canAccessSync\([\w$]+, fs\.constants\.X_OK\))[\s\S]*?return "lsof";\n\}/,
     );
   });
 
@@ -42,44 +43,57 @@ describe("openclaw pin: lsof contract behind `gateway restart`", () => {
     const chunks = readChunks("restart-stale-pids-");
     expect(chunks.length, explain("no restart-stale-pids-*.mjs chunk in the dist")).toBeGreaterThan(0);
     const text = chunks.map((chunk) => chunk.text).join("\n");
-    const scan = /function findGatewayPidsOnPortWithProtectedPidSync\([\s\S]*?\n\}/.exec(text)?.[0];
-    expect(scan, explain("findGatewayPidsOnPortWithProtectedPidSync is gone")).toBeTruthy();
+    // 2026.11.5 ships a minified dist: local names are mangled (`e`, `t`), so
+    // the patterns below capture them instead of naming them.
+    const scanMatch = /function findGatewayPidsOnPortWithProtectedPidSync\(([\w$]+), ([\w$]+)[^)]*\) \{[\s\S]*?\n\}/.exec(text);
+    expect(scanMatch, explain("findGatewayPidsOnPortWithProtectedPidSync is gone")).toBeTruthy();
+    const [scan, portArg, timeoutArg] = scanMatch;
     // 2026.10.5 moved the spawn into scanListeningPort, shared with pollPortOnce.
-    expect(scan).toMatch(/const res = scanListeningPort\(port, lsofTimeoutMs\);/);
-    const spawn = /function scanListeningPort\(port, timeout\) \{[\s\S]*?\n\}/.exec(text)?.[0];
-    expect(spawn, explain("scanListeningPort is gone")).toBeTruthy();
-    expect(spawn).toMatch(/const lsof = resolveLsofCommandSync\(\);/);
+    expect(scan).toMatch(new RegExp(`const ([\\w$]+) = scanListeningPort\\(${escapeId(portArg)}, ${escapeId(timeoutArg)}\\);`));
+    const res = new RegExp(`const ([\\w$]+) = scanListeningPort\\(`).exec(scan)[1];
+    const spawnMatch = /function scanListeningPort\(([\w$]+), ([\w$]+)\) \{[\s\S]*?\n\}/.exec(text);
+    expect(spawnMatch, explain("scanListeningPort is gone")).toBeTruthy();
+    const [spawn, spawnPort] = spawnMatch;
+    const lsofVar = /const ([\w$]+) = resolveLsofCommandSync\(\);/.exec(spawn)?.[1];
+    expect(lsofVar, explain("scanListeningPort no longer resolves the lsof binary")).toBeTruthy();
     expect(spawn).toMatch(
-      /spawnSync\(lsof, \[\s*"-nP",\s*`-iTCP:\$\{port\}`,\s*"-sTCP:LISTEN",\s*"-Fpc"\s*\], \{\s*env: resolveDiagnosticProcessEnv\(\),/,
+      new RegExp(
+        `spawnSync\\(${escapeId(lsofVar)}, \\[\\s*"-nP",\\s*\`-iTCP:\\$\\{${escapeId(spawnPort)}\\}\`,\\s*"-sTCP:LISTEN",\\s*"-Fpc"\\s*\\], \\{\\s*env: resolveDiagnosticProcessEnv\\(\\),`,
+      ),
     );
     // ENOENT → [] is the bug: a missing binary reads as "no listeners".
-    expect(scan, explain("ENOENT is no longer swallowed as 'no listeners'")).toMatch(/if \(code === "ENOENT"\) return \[\];/);
+    expect(scan, explain("ENOENT is no longer swallowed as 'no listeners'")).toMatch(/if \([\w$]+ === "ENOENT"\) return \[\];/);
     // status 1 → [] is lsof's "nothing matched" — the shim's free answer.
-    expect(scan, explain("status 1 is no longer 'port free'")).toMatch(/if \(res\.status === 1\) return \[\];/);
+    expect(scan, explain("status 1 is no longer 'port free'")).toMatch(new RegExp(`if \\(${escapeId(res)}\\.status === 1\\) return \\[\\];`));
     // Any other non-zero status (the shim's exit 2) warns and skips — never
     // treated as free.
-    expect(scan).toMatch(/if \(res\.status !== 0\) \{[\s\S]*?return \[\];/);
+    expect(scan).toMatch(new RegExp(`if \\(${escapeId(res)}\\.status !== 0\\) \\{[\\s\\S]*?return \\[\\];`));
     expect(text, explain("parsePidsFromLsofOutput no longer keys on `p` lines")).toMatch(
-      /line\.startsWith\("p"\) \? parseStrictPositiveInteger\(line\.slice\(1\)\)/,
+      /([\w$]+)\.startsWith\("p"\) \? parseStrictPositiveInteger\(\1\.slice\(1\)\)/,
     );
   });
 
   it("pollPortOnce reads status 1 + empty stdout as free and status 1 + output as busy", () => {
     const text = readChunks("restart-stale-pids-").map((chunk) => chunk.text).join("\n");
-    const poll = /function pollPortOnce\(port\) \{[\s\S]*?\n\}/.exec(text)?.[0];
-    expect(poll, explain("pollPortOnce is gone")).toBeTruthy();
-    expect(poll).toMatch(/const res = scanListeningPort\(port, POLL_SPAWN_TIMEOUT_MS\);/);
-    expect(poll).toMatch(/if \(res\.status === 1\) return res\.stdout\.trim\(\) \? \{ free: false \} : \{ free: true \};/);
+    const pollMatch = /function pollPortOnce\(([\w$]+)\) \{[\s\S]*?\n\}/.exec(text);
+    expect(pollMatch, explain("pollPortOnce is gone")).toBeTruthy();
+    const [poll, pollPort] = pollMatch;
+    const res = new RegExp(`const ([\\w$]+) = scanListeningPort\\(${escapeId(pollPort)}, POLL_SPAWN_TIMEOUT_MS\\);`).exec(poll)?.[1];
+    expect(res, explain("pollPortOnce no longer scans with POLL_SPAWN_TIMEOUT_MS")).toBeTruthy();
+    expect(poll).toMatch(
+      new RegExp(`if \\(${escapeId(res)}\\.status === 1\\) return ${escapeId(res)}\\.stdout\\.trim\\(\\) \\? \\{ free: false \\} : \\{ free: true \\};`),
+    );
   });
 
   it("`gateway restart` under an external supervisor reaches that scan (the refusal AlphaClaw works around)", () => {
     const lifecycle = readChunks("lifecycle-").map((chunk) => chunk.text).join("\n");
     expect(lifecycle, explain("the external-supervisor restart no longer refuses on an empty scan")).toMatch(
-      /No verified gateway process is listening on port \$\{lockIdentity\.port\}/,
+      /No verified gateway process is listening on port \$\{[\w$]+\.port\}/,
     );
-    const schtasks = readChunks("schtasks-").map((chunk) => chunk.text).join("\n");
+    // 2026.11.5 moved it from schtasks-*.mjs to gateway-processes-*.mjs.
+    const schtasks = [...readChunks("schtasks-"), ...readChunks("gateway-processes-")].map((chunk) => chunk.text).join("\n");
     expect(schtasks, explain("findVerifiedGatewayListenerPidsOnPortSync no longer uses findGatewayPidsOnPortSync")).toMatch(
-      /function findVerifiedGatewayListenerPidsOnPortSync\(port, context = \{\}\) \{\s*const rawPids = process\.platform === "win32" \? [\w$]+\(port\) : findGatewayPidsOnPortSync\(port\);/,
+      /function findVerifiedGatewayListenerPidsOnPortSync\(([\w$]+), [\w$]+ = \{\}\) \{\s*const [\w$]+ = process\.platform === "win32" \? [\w$]+\(\1\) : findGatewayPidsOnPortSync\(\1\);/,
     );
   });
 

@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.306] - 2026-11-17
+
+AlphaClaw now runs OpenClaw 2026.11.5. Its first boot migrates OpenClaw's data one way (state schema 22 to 36, agent schema 27 to 38), and AlphaClaw handles what changed with it so the box keeps starting by itself.
+
+### Changed
+- The OpenClaw pin moves from 2026.11.4 to 2026.11.5. Its first boot's Doctor migrates the state database from schema 22 to 36 and each agent database from 27 to 38, and 2026.11.4 cannot read the result. The README's OpenClaw Version section has the backup advice and the way back (the `*.pre-startup-migration-*.bak` databases plus `.alphaclaw/openclaw.json.pre-2026.11.5`).
+
+### Fixed
+- After a container exits uncleanly (killed, out of memory, host lost), OpenClaw 2026.11.5 no longer lets the next container take over the dead gateway's state locks after 90 seconds as 2026.11.4 did: its gateway waited 95 seconds and exited 1 on every start, and Doctor could not run, until someone ran `openclaw gateway recover-lock` by hand. Before each gateway launch and each Doctor run, AlphaClaw now waits until every lock holder from another host or PID namespace has missed 90 seconds of heartbeats, then runs OpenClaw's own `recover-lock` inspection and confirms the exact fingerprint it printed. A holder in AlphaClaw's own container is left to OpenClaw, and a launch with no lock files runs no extra command.
+- OpenClaw 2026.11.5's Doctor stops before migrating anything when the state directory carries the setgid bit, as a fresh one under a 2775 `/data` does ("Failed migrating daemon runtime pins: FsSafeError: created directory admission failed"). AlphaClaw clears only that bit on the state directory before each Doctor run; 2026.11.4's Doctor cleared it by tightening the directory to 0700.
+- The shared auth store (sign-ins and model keys) was refused as too new on 2026.11.5's state schema 36. AlphaClaw now reads schemas 12 to 36; the auth rows themselves did not change.
+- Cron run history answered "unavailable" on 2026.11.5, which replaced the task-run index AlphaClaw required with a partial index on cron runs. Both shapes are accepted.
+- Doctor's renamed "Pre-repair recovery copy was unavailable" line is recognized, so a missing pre-repair copy is recorded and shown as before.
+- The relay guard's list of tools a delegate may use follows 2026.11.5's tool catalog, which dropped `structured_output`; the name stays allowed for a deployment that holds 2026.11.4.
+
 ## [0.10.305] - 2026-11-17
 
 Gateway clients that reach OpenClaw through AlphaClaw's public address without signing in to AlphaClaw (phones, nodes, remote CLIs, A2A peers) are now treated by the gateway as the remote clients they are, instead of as programs running on the box.

@@ -18,7 +18,17 @@ const CronService = await loadExport("service-", "CronService");
 const GatewayScheduler = await loadExport("gateway-scheduler-", "GatewayScheduler");
 // 2026.9.7 retired the Tasks-era readCronTaskRunHistoryPage; the gateway's
 // cron.runs handler now reads records and projects the page in two steps.
-const readCronRunRecords = await loadExport("read-only-", "readCronRunRecords");
+// 2026.11.5 split it in two, as its cron.runs handler reads: candidate rows
+// for the job, then the full records for their ids.
+const readCronRunRecords = await loadExport("read-only-", "readCronRunRecords").catch(() => null);
+const readCronRunHistoryCandidates = readCronRunRecords ? null : await loadExport("read-only-", "readCronRunHistoryCandidates");
+const readCronRunHistoryRecords = readCronRunRecords ? null : await loadExport("read-only-", "readCronRunHistoryRecords");
+const readRuns = async (storePath, jobId) => {
+  if (readCronRunRecords) return readCronRunRecords(storePath, jobId);
+  const storeKey = path.resolve(storePath);
+  const { records } = await readCronRunHistoryCandidates(storeKey, jobId);
+  return readCronRunHistoryRecords(storeKey, records.map((record) => record.id));
+};
 // 2026.10.10 moved it from jobs-*.mjs to run-history-*.mjs.
 const projectCronRunHistoryPage = await loadExport(["run-history-", "jobs-"], "projectCronRunHistoryPage");
 const root = process.env.OPENCLAW_STATE_DIR;
@@ -33,6 +43,9 @@ const cron = new CronService({
   defaultAgentId: "main",
   log: { info() {}, debug() {}, warn: (...args) => console.error(...args), error: (...args) => console.error(...args) },
   enqueueSystemEvent: () => { queued += 1; },
+  // 2026.11.5 runs a main-session job's text through the session controller
+  // (runSessionEvent) instead of queueing it as a system event.
+  runSessionEvent: async () => { queued += 1; return { status: "ok" }; },
   requestHeartbeat: () => {},
   onEvent: (event) => events.push(event),
 });
@@ -44,7 +57,7 @@ try {
     payload: { kind: "systemEvent", text: "Pinned runtime cron outcome" },
   });
   const result = await cron.run(job.id, "force");
-  const history = projectCronRunHistoryPage(await readCronRunRecords(storePath, job.id), { storeKey: storePath, jobId: job.id });
+  const history = projectCronRunHistoryPage(await readRuns(storePath, job.id), { storeKey: storePath, jobId: job.id });
   const version = JSON.parse(fs.readFileSync("node_modules/openclaw/package.json", "utf8")).version;
   fs.writeFileSync(process.argv[2], JSON.stringify({ version, jobId: job.id, result, queued, history, events }));
 } finally {
