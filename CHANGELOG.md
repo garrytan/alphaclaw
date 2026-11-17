@@ -11,7 +11,7 @@ The agent's injected rules now forbid writing a global or system git credential 
 
 ### Changed
 
-- The git rules in `hooks/bootstrap/AGENTS.md` gain one line: never run `gh auth setup-git` or `git config --global credential.*`; pass a helper per command after an empty reset (`git -c credential.helper= -c credential.helper=...`), because a helper added without the reset still answers after a global one. The rules file's size caps rise by 200 characters (5,000 to 5,200 on a default install, 5,800 to 6,000 with the git writer) to make room.
+- The git rules in `hooks/bootstrap/AGENTS.md` gain one line that forbids `gh auth setup-git` and `git config --global credential.*` and says to pass a helper per command after an empty reset (`git -c credential.helper= -c credential.helper=...`), because a helper added without the reset still answers after a global one. The rules file's size caps rise by 200 characters (5,000 to 5,200 on a default install, 5,800 to 6,000 with the git writer) to make room.
 
 ## [0.10.303] - 2026-11-17
 
