@@ -710,6 +710,25 @@ describe("agentrun reporter: revoked content, live directories and unreadable sp
     expect(outbox.db.prepare("SELECT status FROM turns WHERE source_run_id = 'r-live'").get()).toEqual({ status: "completed" });
   });
 
+  it.runIf(process.platform === "linux")("reads an earlier gateway's open files as interrupted when a later process reuses its pid", () => {
+    const rootDir = makeRoot();
+    registerPlugin(rootDir).handlers.gateway_start({}, {});
+    const [ownName] = fs.readdirSync(path.join(rootDir, "agentrun-spool"));
+    fs.rmSync(path.join(rootDir, "agentrun-spool", ownName), { recursive: true });
+    const [, pid, ticks] = ownName.split("-");
+    expect(Number(pid)).toBe(process.pid);
+    expect(ticks).toMatch(/^\d+$/);
+    const earlier = registerPlugin(rootDir, { generationId: () => `1000000000000-${process.pid}-${Number(ticks) + 1}` });
+    earlier.handlers.model_call_started({ runId: "r-earlier" }, { runId: "r-earlier", sessionKey: "agent:main:main" });
+    const current = registerPlugin(rootDir, { generationId: () => `2000000000000-${process.pid}-${ticks}` });
+    current.handlers.model_call_started({ runId: "r-current" }, { runId: "r-current", sessionKey: "agent:main:main" });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} } });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT source_run_id, status FROM turns").all()).toEqual([{ source_run_id: "r-earlier", status: "cancelled" }]);
+    expect(fs.existsSync(path.join(rootDir, "agentrun-spool", `2000000000000-${process.pid}-${ticks}`))).toBe(true);
+  });
+
   it("skips a spool directory it cannot read, logs it once an hour, and keeps reading the others", () => {
     const rootDir = makeRoot();
     const bad = registerPlugin(rootDir, { generationId: () => "1000-1" });

@@ -12,7 +12,7 @@ Fixes to the AgentRun reporter before anyone turns it on: taking a cron job off 
 ### Fixed
 - A turn queued with contents is sent only while its cron job is still listed in `ALPHACLAW_AGENTRUN_CONTENT_CRON`. A job taken off the list has its queued contents turns dropped unsent (`content_revoked`). Before, a turn kept the permission it had when it was queued.
 - A turn running when the gateway's `gateway_start` hook fires is reported once, as itself. Before, it was reported as cancelled with no usage and its real ending was dropped.
-- An earlier gateway's unfinished turns are recognised by whether that gateway process is still running, not by the clock, so a clock step backwards no longer reports live turns as cancelled.
+- An earlier gateway's unfinished turns are recognised by whether that gateway process is still running, not by the clock, so a clock step backwards no longer reports live turns as cancelled. The check uses the process's start time as well as its pid, so a container restart that hands the old pid to a new process does not hide them.
 - When AgentRun refuses an agent for good (an invalid definition, an id it keeps for another agent, or a runtime it refuses again), that agent's turns are dropped with one `agent_refused` line per agent per hour. Before, they were retried forever without a log line. An agent edit that lost a race with another edit is still retried.
 - A spool directory or file the reporter cannot read or delete is skipped and logged at most once an hour. Before, one unreadable directory stopped all sending.
 - A text cut to fewer than 6 characters now fits its limit.
