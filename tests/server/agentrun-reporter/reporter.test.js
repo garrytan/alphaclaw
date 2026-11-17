@@ -364,7 +364,6 @@ describe("agentrun reporter: queue and sender", () => {
         if (calls === 1) throw new Error("database is locked");
         return true;
       },
-      mergeTurn: () => false,
     };
     const source = createOpenclawSource({ rootDir, outbox, getContentCronJobs: () => new Set(), logger: { warn: () => {} } });
     expect(source.ingest().added).toBe(0);
@@ -373,7 +372,7 @@ describe("agentrun reporter: queue and sender", () => {
     expect(readSpool(rootDir)).toBe("");
   });
 
-  it("folds a model-fallback attempt into its run while nothing is sent", async () => {
+  it("reports a model-fallback run as its first attempt, once, even when a file is read twice", async () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);
     const sessionKey = "agent:main:cron:brief";
@@ -384,13 +383,23 @@ describe("agentrun reporter: queue and sender", () => {
     handlers.after_tool_call({ toolName: "read", runId: "r1", durationMs: 1 }, ctx);
     handlers.agent_end({ runId: "r1", success: true }, ctx);
     const fake = createFakeAgentrun();
-    const { source, sender, outbox } = makePipeline(rootDir, { fake, contentCron: ["brief"] });
-    expect(source.ingest().added).toBe(2);
+    const spoolFiles = fs
+      .readdirSync(path.join(rootDir, "agentrun-spool"), { recursive: true })
+      .map((name) => path.join(rootDir, "agentrun-spool", String(name)))
+      .filter((file) => fs.statSync(file).isFile());
+    const copies = spoolFiles.map((file) => [file, fs.readFileSync(file)]);
+    const logs = [];
+    const { outbox, sender } = makePipeline(rootDir, { fake, contentCron: ["brief"] });
+    const source = createOpenclawSource({ rootDir, outbox, getContentCronJobs: () => new Set(["brief"]), logger: { warn: (line) => logs.push(line) } });
+    expect(source.ingest().added).toBe(1);
+    for (const [file, bytes] of copies) fs.writeFileSync(file, bytes);
+    expect(source.ingest().added).toBe(0);
     expect(outbox.counts()).toEqual({ queued: 1 });
+    expect(logs.filter((line) => line.includes("late_attempt"))).toHaveLength(3);
     expect((await sender.sendDue()).sent).toBe(1);
     const [run] = fake.runs.values();
-    expect(run.completion).toMatchObject({ status: "completed", answer: "second" });
-    expect(run.completion.usage).toMatchObject({ input_tokens: 30, output_tokens: 3 });
+    expect(run.completion.status).toBe("failed");
+    expect(run.completion.usage).toMatchObject({ input_tokens: 10, output_tokens: 1 });
   });
 
   it("switches an agent's runtime and rebuilds a queued body built for the old one", async () => {
