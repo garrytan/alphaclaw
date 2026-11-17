@@ -92,6 +92,36 @@ describe("server/watchdog-terminal-ws catch-all proxy identity", () => {
   });
 });
 
+describe("server/watchdog-terminal-ws catch-all client locality", () => {
+  const upgradeFrom = (remoteAddress, headers, resolveRequestIdentity = () => null) => {
+    const server = new EventEmitter();
+    const proxied = [];
+    createWatchdogTerminalWsBridge({
+      server,
+      proxy: { ws: vi.fn((req) => proxied.push({ ...req.headers })) },
+      getGatewayUrl: () => "http://127.0.0.1:18789",
+      isAuthorizedRequest: () => true,
+      watchdogTerminal: { createOrReuseSession: () => null, subscribe: () => ({}) },
+      resolveRequestIdentity,
+    });
+    server.emit("upgrade", { url: "/", socket: { remoteAddress }, headers: { host: "claw.example.com", ...headers } }, createSocket({ once: vi.fn() }), Buffer.alloc(0));
+    expect(proxied).toHaveLength(1);
+    return proxied[0];
+  };
+
+  it("presents a sessionless upgrade from a public address as that remote client", () => {
+    expect(upgradeFrom("198.51.100.44", {})["x-forwarded-for"]).toBe("198.51.100.44");
+  });
+
+  it("leaves a loopback upgrade with no forwarded headers local", () => {
+    expect(upgradeFrom("127.0.0.1", {})["x-forwarded-for"]).toBeUndefined();
+  });
+
+  it("leaves a signed-in session's upgrade as it was", () => {
+    expect(upgradeFrom("198.51.100.45", {}, () => ({ memberId: null }))["x-forwarded-for"]).toBeUndefined();
+  });
+});
+
 describe("server/watchdog-terminal-ws catch-all browser Origin", () => {
   const upgrade = (headers) => {
     const { server, proxied } = createBridge({ resolveProxyIdentity: () => null });

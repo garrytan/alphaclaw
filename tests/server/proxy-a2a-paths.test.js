@@ -163,10 +163,27 @@ describe("A2A HTTP identity boundary", () => {
     expect(seen[0].headers.authorization).toBe("Bearer peer-token");
     expect(seen[0].headers.cookie).toBe("preference=dark");
     for (const key of [...kStrippedIdentityHeaders, ...kForwardedEvidenceHeaders]) {
+      if (key === "x-forwarded-for") continue;
       expect(seen[0].headers[key], key).toBeUndefined();
     }
+    // A loopback peer that sends forwarded headers is a proxy hop, never a
+    // local client; one that names no usable client is presented as itself,
+    // which the gateway refuses as an unattributable proxy (proxy-identity.js).
+    expect(seen[0].headers["x-forwarded-for"]).toMatch(/^(127\.0\.0\.1|::1)$/);
     expect(requireAuth).not.toHaveBeenCalled();
     expect(resolveProxyIdentity).not.toHaveBeenCalled();
+  });
+
+  it("presents a sessionless /api forward to the gateway by its client address", async () => {
+    requireAuth.mockImplementation((_req, _res, next) => next());
+    resolveProxyIdentity.mockReturnValue(null);
+    const res = await request(app).get("/api/proxy-e2e/echo")
+      .set("Authorization", "Bearer agent-token")
+      .set("X-Forwarded-For", "203.0.113.70")
+      .timeout(3000);
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].headers["x-forwarded-for"]).toBe("203.0.113.70");
   });
 
   it.each([
