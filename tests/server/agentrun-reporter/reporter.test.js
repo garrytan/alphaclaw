@@ -363,6 +363,9 @@ describe("agentrun reporter: queue and sender", () => {
     driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
     let calls = 0;
     const outbox = {
+      rowOf: () => null,
+      openRows: () => [],
+      countLive: () => 0,
       addTurn: () => {
         calls += 1;
         if (calls === 1) throw new Error("database is locked");
@@ -562,7 +565,7 @@ describe("agentrun reporter: settings and plugin entry", () => {
   });
 
   it("keeps its settings deployment-only and out of the gateway's env", () => {
-    for (const key of ["ALPHACLAW_AGENTRUN_URL", "ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN", "ALPHACLAW_AGENTRUN_RUNTIME", "ALPHACLAW_AGENTRUN_CONTENT_CRON"]) {
+    for (const key of ["ALPHACLAW_AGENTRUN_URL", "ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN", "ALPHACLAW_AGENTRUN_RUNTIME", "ALPHACLAW_AGENTRUN_CONTENT_CRON", "ALPHACLAW_AGENTRUN_LIVE"]) {
       expect(kDeploymentOnlyEnvKeys).toContain(key);
       expect(admitsGatewayEnvKey(key)).toBe(false);
     }
@@ -1263,6 +1266,7 @@ describe("agentrun reporter: cron runs", () => {
     const rootDir = makeRoot();
     const dbPath = path.join(rootDir, "db", "agentrun-outbox.db");
     const old = openOutbox({ dbPath });
+    for (const column of ["live", "ended", "tools_batched", "last_record_at", "last_batch_at", "attempt_ended_at", "attempt_files", "key_suffix"]) old.db.exec(`ALTER TABLE turns DROP COLUMN ${column}`);
     old.db.exec("DROP TABLE agent_archives; ALTER TABLE turns DROP COLUMN job_id; PRAGMA user_version = 0;");
     old.db
       .prepare("INSERT INTO turns (source, source_run_id, agent_key, agent_name, class, status, input_text, created_at, updated_at) VALUES ('openclaw', 'old-1', 'openclaw-cron-brief', 'Cron job brief', 'cron', 'completed', 'old turn', 1, 1)")
@@ -1270,7 +1274,7 @@ describe("agentrun reporter: cron runs", () => {
     old.close();
     const fake = createFakeAgentrun();
     const { sender, outbox } = makePipeline(rootDir, { fake, cronJobs: [{ id: "brief", name: "Morning brief" }] });
-    expect(outbox.db.prepare("PRAGMA user_version").get().user_version).toBe(1);
+    expect(outbox.db.prepare("PRAGMA user_version").get().user_version).toBe(2);
     expect(await sender.sendDue()).toMatchObject({ sent: 1 });
     expect(fake.agents.get("openclaw-cron-brief").definition.name).toBe("Cron: Morning brief");
   });
@@ -1294,5 +1298,414 @@ describe("agentrun reporter: cron runs", () => {
     clock.t += 31_000;
     expect(source.ingest().added).toBe(1);
     expect(outbox.db.prepare("SELECT status FROM turns").get().status).toBe("completed");
+  });
+});
+
+describe("agentrun reporter: live runs", () => {
+  const T0 = 1_800_000_000_000;
+  const dm = "agent:main:telegram:direct:424242";
+  const iso = (ms) => new Date(ms).toISOString();
+  // The whole reporter (settings, capabilities, ingest and sender) on one
+  // clock with the plugin and the fake AgentRun. timeoutSeconds is
+  // openclaw.json's agents.defaults.timeoutSeconds (0: unset, OpenClaw's 48 h).
+  const setup = ({ timeoutSeconds = 1200, sdkRuns = false, env = {}, cronJobs = [] } = {}) => {
+    const rootDir = makeRoot();
+    const clock = { t: T0 };
+    const now = () => clock.t;
+    const { handlers } = registerPlugin(rootDir, { now });
+    const fake = createFakeAgentrun({ now });
+    fake.state.sdkRuns = sdkRuns;
+    const lines = [];
+    const make = () =>
+      createAgentrunReporter({
+        env: { ALPHACLAW_AGENTRUN_URL: kBase, ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN: fake.token, ...env },
+        rootDir,
+        readCronJobs: () => cronJobs,
+        readOpenclawConfig: () => (timeoutSeconds ? { agents: { defaults: { timeoutSeconds } } } : {}),
+        fetchImpl: fake.fetchImpl,
+        now,
+        logger: { warn: (line) => lines.push(line), log: () => {} },
+      });
+    const ctx = (runId) => ({ runId, sessionKey: dm, trigger: "user", agentId: "main", channel: "telegram" });
+    const open = (runId) => handlers.model_call_started({ runId }, { runId, sessionKey: dm, agentId: "main" });
+    const tool = (runId, name) => handlers.after_tool_call({ toolName: name, runId, durationMs: 5 }, ctx(runId));
+    const end = (runId, { success = true, usage = { input: 10, output: 2 } } = {}) => {
+      handlers.agent_end({ runId, success, error: success ? undefined : "overloaded", durationMs: 1000 }, ctx(runId));
+      handlers.llm_output({ runId, provider: "anthropic", model: "claude", usage }, ctx(runId));
+    };
+    const state = { reporter: make() };
+    const tick = () => state.reporter.tick();
+    const restart = () => {
+      state.reporter.stop();
+      state.reporter = make();
+    };
+    const at = (ms) => {
+      clock.t += ms;
+    };
+    return { rootDir, clock, handlers, fake, lines, state, tick, restart, open, tool, end, at };
+  };
+  const toolNames = (batch) => batch.events.filter((event) => event.type === "tool" && event.status === "started").map((event) => event.name);
+  const onlyRun = (fake) => {
+    expect(fake.runs.size).toBe(1);
+    return [...fake.runs.values()][0];
+  };
+
+  it("starts a live run only once a hook decided its class, never from model_call_started alone", async () => {
+    const s = setup();
+    s.open("r1");
+    await s.tick();
+    expect(readSpool(s.rootDir)).toContain('"provisional":true');
+    s.at(15_000);
+    await s.tick();
+    expect(s.fake.runs.size).toBe(0);
+    s.tool("r1", "read");
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start.input).toBe(`Telegram DM (main)\nStarted ${iso(T0)}`);
+    expect(run.completion).toBe(null);
+  });
+
+  it("sends a live run's tools batch by batch and completes it with the same bytes after a restart", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start.input).not.toMatch(/running|completed|·/);
+    expect(run.batches[0].events[0]).toMatchObject({ type: "session" });
+    s.at(15_000);
+    s.tool("r1", "exec");
+    s.tool("r1", "write");
+    // The second batch is carried out but its answer is lost.
+    s.fake.state.loseAnswer = /\/events$/;
+    await s.tick();
+    s.fake.state.down = false;
+    s.at(15_000);
+    await s.tick();
+    s.at(30_000);
+    await s.tick();
+    expect(run.batches.map(toolNames)).toEqual([["read"], ["exec", "write"]]);
+    s.end("r1");
+    s.fake.state.loseAnswer = /\/complete$/;
+    s.at(15_000);
+    await s.tick();
+    expect(run.completion).not.toBe(null);
+    s.restart();
+    s.fake.state.down = false;
+    s.at(60_000);
+    await s.tick();
+    const bodies = (pattern) => s.fake.requests.filter((request) => pattern.test(request.path)).map((request) => request.body);
+    expect(bodies(/\/sdk-runs$/).length).toBeGreaterThan(1);
+    expect(new Set(bodies(/\/sdk-runs$/)).size).toBe(1);
+    expect(bodies(/\/events$/)).toHaveLength(3);
+    expect(new Set(bodies(/\/events$/)).size).toBe(2);
+    expect(bodies(/\/complete$/)).toHaveLength(2);
+    expect(new Set(bodies(/\/complete$/)).size).toBe(1);
+    expect(onlyRun(s.fake)).toBe(run);
+    expect(run.batches).toHaveLength(2);
+    expect(run.completion).toMatchObject({ status: "completed", usage: { input_tokens: 10, output_tokens: 2 } });
+    expect(s.state.reporter.status()).toEqual({ sent: 1 });
+  });
+
+  it("stays finished-only without the capability under OpenClaw's 48 h default, and goes live under a 20-minute timeout or a short cron job", async () => {
+    const slow = setup({ timeoutSeconds: 0 });
+    slow.open("r1");
+    slow.tool("r1", "read");
+    await slow.tick();
+    expect(slow.fake.runs.size).toBe(0);
+    slow.end("r1");
+    slow.at(15_000);
+    await slow.tick();
+    const finished = onlyRun(slow.fake);
+    expect(finished.start.input).toMatch(/^Telegram DM \(main\) · 1s · completed — 1 tool call; /);
+    expect(finished.start).not.toHaveProperty("started_at");
+
+    const quick = setup({ timeoutSeconds: 1200 });
+    quick.open("r1");
+    quick.tool("r1", "read");
+    await quick.tick();
+    expect(onlyRun(quick.fake).completion).toBe(null);
+
+    const job = setup({ timeoutSeconds: 0, cronJobs: [{ id: "brief", name: "Brief", payload: { kind: "agentTurn", timeoutSeconds: 600 } }] });
+    job.handlers.cron_changed({ action: "started", jobId: "brief", job: { name: "Brief", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", agentId: "main" }, runAtMs: T0 }, {});
+    await job.tick();
+    expect(onlyRun(job.fake).start.input).toBe(`Cron: Brief\nStarted ${iso(T0)}`);
+  });
+
+  it("appends a model-fallback attempt to the same live row, and completes a failed run 30 s after its last attempt", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    s.at(5_000);
+    s.end("r1", { success: false, usage: { input: 10, output: 1 } });
+    s.at(5_000);
+    s.open("r1");
+    s.tool("r1", "exec");
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.completion).toBe(null);
+    expect(run.batches.map(toolNames)).toEqual([["read"], ["exec"]]);
+    s.at(5_000);
+    s.end("r1", { usage: { input: 20, output: 2 } });
+    s.at(15_000);
+    await s.tick();
+    expect(run.completion).toMatchObject({ status: "completed", usage: { input_tokens: 30, output_tokens: 3 } });
+    expect(s.lines.join("\n")).not.toContain("late_attempt");
+
+    const failing = setup();
+    failing.open("r2");
+    failing.tool("r2", "read");
+    await failing.tick();
+    failing.end("r2", { success: false });
+    failing.at(15_000);
+    await failing.tick();
+    const failed = onlyRun(failing.fake);
+    expect(failed.completion).toBe(null);
+    failing.at(31_000);
+    await failing.tick();
+    expect(failed.completion).toMatchObject({ status: "failed" });
+  });
+
+  it("completes a live row as cancelled after 30 minutes without a record, or once its file is gone without an end", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    const run = onlyRun(s.fake);
+    s.at(29 * 60_000);
+    await s.tick();
+    expect(run.completion).toBe(null);
+    s.at(2 * 60_000);
+    await s.tick();
+    expect(run.completion).toMatchObject({ status: "cancelled", error: "ended without a report" });
+
+    const gone = setup();
+    gone.open("r2");
+    gone.tool("r2", "read");
+    await gone.tick();
+    const spool = path.join(gone.rootDir, "agentrun-spool");
+    for (const name of fs.readdirSync(spool, { recursive: true })) if (String(name).endsWith(".jsonl")) fs.rmSync(path.join(spool, String(name)));
+    gone.at(15_000);
+    await gone.tick();
+    expect(onlyRun(gone.fake).completion).toMatchObject({ status: "cancelled", error: "ended without a report" });
+  });
+
+  it("reports a live run AgentRun expired once more under :final when it ends", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    for (let index = 0; index < 4; index += 1) {
+      s.at(20 * 60_000);
+      s.tool("r1", `t${index}`);
+      await s.tick();
+    }
+    expect(s.lines.some((line) => line.includes("run_expired") && line.includes("live=1"))).toBe(true);
+    expect(s.fake.runs.size).toBe(1);
+    s.end("r1");
+    s.at(15_000);
+    await s.tick();
+    expect(s.fake.runs.size).toBe(2);
+    const [live, final] = [...s.fake.runs.values()];
+    expect(live.completion).toBe(null);
+    expect(final.start.input).toMatch(/^Telegram DM \(main\) · .* · completed — 5 tool calls; /);
+    expect(final.batches.flatMap(toolNames)).toEqual(["read", "t0", "t1", "t2", "t3"]);
+    expect(final.completion).toMatchObject({ status: "completed" });
+    const starts = s.fake.requests.filter((request) => /\/sdk-runs$/.test(request.path)).map((request) => request.headers["idempotency-key"]);
+    expect([...new Set(starts)]).toEqual(["alphaclaw:openclaw:r1", "alphaclaw:openclaw:r1:final"]);
+  });
+
+  it("logs run_ended_elsewhere, not run_expired, for a live run stopped in AgentRun's console", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    const run = onlyRun(s.fake);
+    s.fake.stop(run.id);
+    s.at(15_000);
+    s.tool("r1", "exec");
+    await s.tick();
+    expect(s.lines.some((line) => line.includes("run_ended_elsewhere op=events") && line.includes("fix="))).toBe(true);
+    expect(s.lines.some((line) => line.includes("run_expired"))).toBe(false);
+    expect(s.state.reporter.status()).toEqual({ sent: 1 });
+    s.end("r1");
+    s.at(15_000);
+    await s.tick();
+    expect(onlyRun(s.fake).completion).toBe(null);
+  });
+
+  it("keeps at most 15 live rows open and reports a turn past the cap when it ends, logging live_cap once an hour", async () => {
+    const s = setup();
+    const ids = Array.from({ length: 16 }, (_, index) => `r${String(index).padStart(2, "0")}`);
+    for (const id of ids) {
+      s.open(id);
+      s.tool(id, "read");
+    }
+    await s.tick();
+    expect(s.fake.runs.size).toBe(15);
+    s.at(15_000);
+    await s.tick();
+    expect(s.fake.runs.size).toBe(15);
+    const capLines = s.lines.filter((line) => line.includes("live_cap"));
+    expect(capLines).toHaveLength(1);
+    expect(capLines[0]).toMatch(/count=1 open=15 .*fix=/);
+    s.end("r15");
+    s.at(15_000);
+    await s.tick();
+    expect(s.fake.runs.size).toBe(16);
+    const late = [...s.fake.runs.values()].find((run) => run.completion);
+    expect(late.start.input).toMatch(/^Telegram DM \(main\) · .* · completed/);
+  });
+
+  it("sends an empty batch every 10 minutes and the new start fields only while AgentRun advertises features.sdk_runs", async () => {
+    const s = setup({ timeoutSeconds: 0, sdkRuns: true });
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start).toMatchObject({ started_at: iso(T0), title: "Telegram DM (main)", labels: ["source:openclaw", "class:dm"] });
+    s.at(5 * 60_000);
+    await s.tick();
+    expect(run.batches).toHaveLength(1);
+    s.at(6 * 60_000);
+    await s.tick();
+    expect(run.batches.map((batch) => batch.events.length)).toEqual([3, 0]);
+    s.at(15_000);
+    await s.tick();
+    expect(run.batches).toHaveLength(2);
+
+    const plain = setup({ timeoutSeconds: 1200 });
+    plain.open("r1");
+    plain.tool("r1", "read");
+    await plain.tick();
+    plain.at(11 * 60_000);
+    await plain.tick();
+    const plainRun = onlyRun(plain.fake);
+    expect(plainRun.batches).toHaveLength(1);
+    expect(plainRun.start).not.toHaveProperty("started_at");
+    expect(plainRun.start).not.toHaveProperty("labels");
+
+    // The capability was read, then the server stopped taking the fields:
+    // the start is rebuilt once without them.
+    const downgraded = setup({ timeoutSeconds: 1200, sdkRuns: true });
+    await downgraded.tick();
+    downgraded.fake.state.sdkRuns = false;
+    downgraded.open("r1");
+    downgraded.tool("r1", "read");
+    await downgraded.tick();
+    const starts = downgraded.fake.requests.filter((request) => /\/sdk-runs$/.test(request.path)).map((request) => JSON.parse(request.body));
+    expect(starts.map((body) => "started_at" in body)).toEqual([true, false]);
+    expect(onlyRun(downgraded.fake).start.input).toBe(`Telegram DM (main)\nStarted ${iso(T0)}`);
+  });
+
+  it("sends a listed cron job's message and text only after the run ends, never in its start", async () => {
+    const s = setup({
+      timeoutSeconds: 0,
+      env: { ALPHACLAW_AGENTRUN_CONTENT_CRON: "brief" },
+      cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize " + kMarker, timeoutSeconds: 600 } }],
+    });
+    const job = { name: "Morning brief", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
+    s.handlers.cron_changed({ action: "started", jobId: "brief", job, agentId: "main", sessionTarget: "isolated", runAtMs: T0 }, {});
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start.input).toBe(`Cron: Morning brief\nStarted ${iso(T0)}`);
+    const sessionKey = "agent:main:cron:brief:run:r1";
+    const ctx = { runId: "r1", sessionKey, trigger: "cron", jobId: "brief", agentId: "main" };
+    s.at(1000);
+    s.handlers.model_call_started({ runId: "r1" }, { runId: "r1", sessionKey, agentId: "main" });
+    s.handlers.after_tool_call({ toolName: "search", runId: "r1", durationMs: 5 }, ctx);
+    s.handlers.llm_output({ runId: "r1", provider: "anthropic", model: "claude", assistantTexts: [`answer ${kMarker}`], usage: { input: 3, output: 4 } }, ctx);
+    s.at(15_000);
+    await s.tick();
+    s.at(45_000);
+    await s.tick();
+    expect(run.batches.map(toolNames)).toEqual([["search"]]);
+    expect(s.fake.requests.map((request) => request.body).join("\n")).not.toContain(kMarker);
+    s.handlers.agent_end({ runId: "r1", success: true, durationMs: 60_000 }, ctx);
+    s.handlers.cron_changed({ action: "finished", jobId: "brief", job, runAtMs: T0, durationMs: 62_000, status: "ok", sessionKey, provider: "anthropic", model: "claude" }, {});
+    s.at(15_000);
+    await s.tick();
+    expect(onlyRun(s.fake)).toBe(run);
+    expect(run.start.input).not.toContain(kMarker);
+    const texts = run.batches.flatMap((batch) => batch.events).filter((event) => event.type === "text").map((event) => event.text);
+    expect(texts).toEqual([`Job message: Summarize ${kMarker}`, `answer ${kMarker}`]);
+    expect(run.batches[run.batches.length - 1].sequence).toBe(2);
+    expect(run.completion).toMatchObject({ status: "completed", answer: `answer ${kMarker}`, usage: { input_tokens: 3, output_tokens: 4 } });
+  });
+
+  it("keeps finished-only reporting with ALPHACLAW_AGENTRUN_LIVE=off, and keeps live on with live_invalid for any other value", async () => {
+    const s = setup({ env: { ALPHACLAW_AGENTRUN_LIVE: "off" } });
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    expect(s.fake.runs.size).toBe(0);
+    s.end("r1");
+    s.at(15_000);
+    await s.tick();
+    expect(onlyRun(s.fake).start.input).toMatch(/^Telegram DM \(main\) · 1s · completed/);
+
+    const odd = setup({ env: { ALPHACLAW_AGENTRUN_LIVE: "sometimes" } });
+    expect(odd.state.reporter.settings.live).toBe(true);
+    odd.state.reporter.start();
+    odd.state.reporter.stop();
+    expect(odd.lines.some((line) => line.includes("live_invalid") && line.includes("fix="))).toBe(true);
+  });
+
+  it("keeps a quiet live run open past 30 minutes while it is within its timeout, and reports its real end", async () => {
+    const s = setup({ timeoutSeconds: 2700, cronJobs: [{ id: "backup", name: "Backup", payload: { kind: "command", timeoutSeconds: 2700 } }] });
+    const job = { name: "Backup", schedule: { kind: "cron" }, payload: { kind: "command" }, sessionTarget: "isolated", agentId: "main" };
+    s.handlers.cron_changed({ action: "started", jobId: "backup", job, agentId: "main", sessionTarget: "isolated", runAtMs: T0 }, {});
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    expect(s.fake.runs.size).toBe(2);
+    s.at(35 * 60_000);
+    await s.tick();
+    expect([...s.fake.runs.values()].every((run) => run.completion === null)).toBe(true);
+    s.tool("r1", "exec");
+    s.end("r1");
+    s.handlers.cron_changed({ action: "finished", jobId: "backup", job, runAtMs: T0, durationMs: 35 * 60_000, status: "ok" }, {});
+    s.at(15_000);
+    await s.tick();
+    const runs = [...s.fake.runs.values()];
+    expect(runs.map((run) => run.completion?.status)).toEqual(["completed", "completed"]);
+    expect(s.lines.join("\n")).not.toContain("late_attempt");
+  });
+
+  it("adds a failed attempt's tools and usage once when its file is read again after a crash", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    s.end("r1", { success: false, usage: { input: 10, output: 2 } });
+    const spool = path.join(s.rootDir, "agentrun-spool");
+    const files = fs.readdirSync(spool, { recursive: true }).map((name) => path.join(spool, String(name))).filter((file) => fs.statSync(file).isFile());
+    const copies = files.map((file) => [file, fs.readFileSync(file)]);
+    await s.tick();
+    for (const [file, bytes] of copies) fs.writeFileSync(file, bytes);
+    s.at(15_000);
+    await s.tick();
+    s.at(31_000);
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.completion).toMatchObject({ status: "failed", usage: { input_tokens: 10, output_tokens: 2 } });
+    expect(run.batches.flatMap(toolNames)).toEqual(["read"]);
+  });
+
+  it("opens a queue written by v0.10.297 and sends the runs waiting in it", async () => {
+    const rootDir = makeRoot();
+    const dbPath = path.join(rootDir, "db", "agentrun-outbox.db");
+    const old = openOutbox({ dbPath });
+    for (const column of ["live", "ended", "tools_batched", "last_record_at", "last_batch_at", "attempt_ended_at", "attempt_files", "key_suffix"]) old.db.exec(`ALTER TABLE turns DROP COLUMN ${column}`);
+    old.db.exec("PRAGMA user_version = 1;");
+    old.db
+      .prepare("INSERT INTO turns (source, source_run_id, agent_key, agent_name, class, status, input_text, created_at, updated_at) VALUES ('openclaw', 'old-1', 'openclaw-agent-main', 'OpenClaw agent main', 'main', 'completed', 'old turn', 1, 1)")
+      .run();
+    old.close();
+    const fake = createFakeAgentrun();
+    const { sender, outbox } = makePipeline(rootDir, { fake });
+    expect(outbox.db.prepare("PRAGMA user_version").get().user_version).toBe(2);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    expect(onlyRun(fake).completion.status).toBe("completed");
   });
 });
