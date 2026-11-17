@@ -1266,7 +1266,7 @@ describe("agentrun reporter: cron runs", () => {
     const rootDir = makeRoot();
     const dbPath = path.join(rootDir, "db", "agentrun-outbox.db");
     const old = openOutbox({ dbPath });
-    for (const column of ["live", "ended", "tools_batched", "last_record_at", "last_batch_at", "attempt_ended_at", "key_suffix"]) old.db.exec(`ALTER TABLE turns DROP COLUMN ${column}`);
+    for (const column of ["live", "ended", "tools_batched", "last_record_at", "last_batch_at", "attempt_ended_at", "attempt_files", "key_suffix"]) old.db.exec(`ALTER TABLE turns DROP COLUMN ${column}`);
     old.db.exec("DROP TABLE agent_archives; ALTER TABLE turns DROP COLUMN job_id; PRAGMA user_version = 0;");
     old.db
       .prepare("INSERT INTO turns (source, source_run_id, agent_key, agent_name, class, status, input_text, created_at, updated_at) VALUES ('openclaw', 'old-1', 'openclaw-cron-brief', 'Cron job brief', 'cron', 'completed', 'old turn', 1, 1)")
@@ -1652,11 +1652,51 @@ describe("agentrun reporter: live runs", () => {
     expect(odd.lines.some((line) => line.includes("live_invalid") && line.includes("fix="))).toBe(true);
   });
 
+  it("keeps a quiet live run open past 30 minutes while it is within its timeout, and reports its real end", async () => {
+    const s = setup({ timeoutSeconds: 2700, cronJobs: [{ id: "backup", name: "Backup", payload: { kind: "command", timeoutSeconds: 2700 } }] });
+    const job = { name: "Backup", schedule: { kind: "cron" }, payload: { kind: "command" }, sessionTarget: "isolated", agentId: "main" };
+    s.handlers.cron_changed({ action: "started", jobId: "backup", job, agentId: "main", sessionTarget: "isolated", runAtMs: T0 }, {});
+    s.open("r1");
+    s.tool("r1", "read");
+    await s.tick();
+    expect(s.fake.runs.size).toBe(2);
+    s.at(35 * 60_000);
+    await s.tick();
+    expect([...s.fake.runs.values()].every((run) => run.completion === null)).toBe(true);
+    s.tool("r1", "exec");
+    s.end("r1");
+    s.handlers.cron_changed({ action: "finished", jobId: "backup", job, runAtMs: T0, durationMs: 35 * 60_000, status: "ok" }, {});
+    s.at(15_000);
+    await s.tick();
+    const runs = [...s.fake.runs.values()];
+    expect(runs.map((run) => run.completion?.status)).toEqual(["completed", "completed"]);
+    expect(s.lines.join("\n")).not.toContain("late_attempt");
+  });
+
+  it("adds a failed attempt's tools and usage once when its file is read again after a crash", async () => {
+    const s = setup();
+    s.open("r1");
+    s.tool("r1", "read");
+    s.end("r1", { success: false, usage: { input: 10, output: 2 } });
+    const spool = path.join(s.rootDir, "agentrun-spool");
+    const files = fs.readdirSync(spool, { recursive: true }).map((name) => path.join(spool, String(name))).filter((file) => fs.statSync(file).isFile());
+    const copies = files.map((file) => [file, fs.readFileSync(file)]);
+    await s.tick();
+    for (const [file, bytes] of copies) fs.writeFileSync(file, bytes);
+    s.at(15_000);
+    await s.tick();
+    s.at(31_000);
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.completion).toMatchObject({ status: "failed", usage: { input_tokens: 10, output_tokens: 2 } });
+    expect(run.batches.flatMap(toolNames)).toEqual(["read"]);
+  });
+
   it("opens a queue written by v0.10.297 and sends the runs waiting in it", async () => {
     const rootDir = makeRoot();
     const dbPath = path.join(rootDir, "db", "agentrun-outbox.db");
     const old = openOutbox({ dbPath });
-    for (const column of ["live", "ended", "tools_batched", "last_record_at", "last_batch_at", "attempt_ended_at", "key_suffix"]) old.db.exec(`ALTER TABLE turns DROP COLUMN ${column}`);
+    for (const column of ["live", "ended", "tools_batched", "last_record_at", "last_batch_at", "attempt_ended_at", "attempt_files", "key_suffix"]) old.db.exec(`ALTER TABLE turns DROP COLUMN ${column}`);
     old.db.exec("PRAGMA user_version = 1;");
     old.db
       .prepare("INSERT INTO turns (source, source_run_id, agent_key, agent_name, class, status, input_text, created_at, updated_at) VALUES ('openclaw', 'old-1', 'openclaw-agent-main', 'OpenClaw agent main', 'main', 'completed', 'old turn', 1, 1)")
