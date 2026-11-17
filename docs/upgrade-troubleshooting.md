@@ -735,13 +735,15 @@ byte-identical in `<state dir>/extensions/codex`. The state directory is on
 the data disk, so after a redeploy this is only a check; when the plugin is
 missing or different, AlphaClaw runs `openclaw plugins install <file> --force
 --accept-capabilities` (which fetches the plugin's own dependencies from npm)
-and checks again.
+and checks again. Before that first install it notes which `@openclaw/codex`
+version OpenClaw had installed, if any, so the plugin can be put back later.
 Before **every** gateway launch it checks that each file the package (and the
 pinned `@openclaw/codex`, if any) shipped is still there and unchanged. Files OpenClaw adds at run time (plugin
 installs under `dist/extensions`) don't count.
 
 **When something is wrong it refuses, it never falls back.** The stock build
-stays in place, the gateway is not started, the Watchdog shows
+is in place (a package applied at an earlier start is swapped back out), the
+gateway is not started, the Watchdog shows
 `openclaw_package_refused`, and one important notification per reason and
 day names the reason, the file and the two ways out. Commands that run
 outside the gateway (the boot migration's `doctor --fix`, cron's CLI calls,
@@ -781,11 +783,23 @@ the image has not installed yet it says which checks it could not run
   was applied. Restart AlphaClaw (a redeploy or a container restart) to
   apply it again.
 - `deferred`: a gateway was already running from the OpenClaw tree when
-  AlphaClaw started. Restart the container.
+  AlphaClaw started (an old gateway still draining, or a second
+  `alphaclaw start` run by hand against a live install), so nothing was
+  changed (the Codex plugin is neither installed nor put back while a
+  gateway runs). A gateway already running keeps its own checks. Stop the other
+  AlphaClaw, or restart the container.
+- `restore_failed`: the setting was removed but the stock build could not be
+  put back. The gateway stays down until a start restores it; the detail
+  names the cause.
 
 To go back to the stock build on purpose, remove
 `ALPHACLAW_OPENCLAW_PACKAGES` and redeploy. AlphaClaw puts the image's
-build back at the next start and sends one notice saying so. `alphaclaw
+build back at the next start and sends one notice saying so. If AlphaClaw
+installed a pinned `@openclaw/codex`, it also puts back the version OpenClaw
+had before (`openclaw plugins install @openclaw/codex@<version>` from npm), or
+uninstalls the plugin if there was none; dropping only the Codex entry does
+the same. If that fails, the notice says so and the next start tries again;
+the gateway still starts. `alphaclaw
 diagnose` shows the setting's entries, the last verdict and the build that
 is running (`<version>+<sha prefix>` for a pinned package).
 
