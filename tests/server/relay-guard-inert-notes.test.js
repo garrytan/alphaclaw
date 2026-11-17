@@ -1,0 +1,452 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawnSync } = require("child_process");
+const { classifyAnchor, classifyKeyRead, textLineOf } = require("../../lib/plugin/relay-guard/confirm");
+const { setup } = require("./helpers/relay-attested-harness");
+
+// GST-2940: an exec that appended a single-quoted note to a memory file was
+// refused as a change to relay trust, because the note held a backtick pair
+// around the words openclaw qr and the guard read every backtick as a
+// command substitution whatever the quotes; a read-only grep that named
+// openclaw.json was refused too. The guard now reads a line whose every
+// command is cd, echo, printf, cat, head, tail, grep, wc, ls, stat, jq, pwd
+// or true as text (textLineOf), with quote state tracked as the shell tracks
+// it ('"'"' splices included) and nothing unquoted that can expand, and lets
+// a line that only reads name an anchor file.
+// Every case here also runs in real bash, zsh and dash, as a plain -c and
+// inside the eval OpenClaw's exec wraps a command in (bash --noprofile
+// --norc -c, zsh -f -c), with a stub openclaw on PATH that records each
+// call: a command the guard lets through must never run the stub in any of
+// them, and a read-only line must leave every file as it was.
+const BT = "\x60";
+const kPinned = "capy-25cf4e98b5b6";
+const which = (name) => {
+  const found = spawnSync("sh", ["-c", "command -v " + name], { encoding: "utf8" });
+  return found.status === 0 ? found.stdout.trim() : "";
+};
+const shQuote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
+const kBash = which("bash");
+const kZsh = which("zsh");
+const kDash = which("dash") || which("sh");
+const kRunners = [
+  ["bash", kBash, (command) => ["-c", command]],
+  ["zsh", kZsh, (command) => ["-c", command]],
+  ["dash", kDash, (command) => ["-c", command]],
+  ["openclaw-bash", kBash, (command) => ["--noprofile", "--norc", "-c", "eval " + shQuote(command)]],
+  ["openclaw-zsh", kZsh, (command) => ["-f", "-c", "eval " + shQuote(command)]],
+];
+const kMissing = [["bash", kBash], ["zsh", kZsh], ["dash", kDash]].filter(([, file]) => !file).map(([name]) => name);
+
+let root;
+let workspace;
+let stubLog;
+let shellEnv;
+const kConfig = JSON.stringify({ plugins: { allow: ["relay-guard"] } });
+// The files a read-only line may name, recreated before every run: the
+// box's openclaw.json beside a note whose text is an openclaw change.
+const resetFixture = () => {
+  for (const entry of fs.readdirSync(workspace)) fs.rmSync(path.join(workspace, entry), { recursive: true, force: true });
+  fs.mkdirSync(path.join(workspace, "memory"));
+  fs.writeFileSync(path.join(workspace, "openclaw.json"), kConfig);
+  fs.writeFileSync(path.join(workspace, "notes.txt"), "openclaw config patch\n");
+};
+const treeOf = (dir) =>
+  fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.name !== "memory")
+    .map((entry) => (entry.isDirectory() ? entry.name + "/{" + treeOf(path.join(dir, entry.name)) + "}" : entry.name + "=" + fs.readFileSync(path.join(dir, entry.name), "utf8")))
+    .sort()
+    .join("\n");
+beforeAll(() => {
+  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "relay-inert-")));
+  workspace = path.join(root, ".openclaw", "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const bin = path.join(root, "stub-bin");
+  fs.mkdirSync(bin);
+  stubLog = path.join(root, "stub.log");
+  fs.writeFileSync(path.join(bin, "openclaw"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$STUB_LOG\"\n", { mode: 0o755 });
+  shellEnv = { PATH: bin + ":/usr/local/bin:/usr/bin:/bin", HOME: root, ZDOTDIR: root, STUB_LOG: stubLog, LANG: "C" };
+});
+afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+// Which runners ran the stub, and which left a file other than a memory/
+// note changed, each from a fresh fixture.
+const effectsOf = (command) => {
+  const ran = [];
+  const changed = [];
+  for (const [name, file, argv] of kRunners) {
+    if (!file) continue;
+    fs.rmSync(stubLog, { force: true });
+    resetFixture();
+    const before = treeOf(workspace);
+    spawnSync(file, argv(command), { cwd: workspace, env: shellEnv, timeout: 5000, stdio: "ignore" });
+    if (fs.existsSync(stubLog) && fs.readFileSync(stubLog, "utf8").length) ran.push(name);
+    if (treeOf(workspace) !== before) changed.push(name);
+  }
+  fs.rmSync(stubLog, { force: true });
+  return { ran, changed };
+};
+const stubRunsOf = (command) => effectsOf(command).ran;
+const anchorOf = (command) => classifyAnchor({ toolName: "exec", params: { command }, rootDir: root });
+const kChange = "openclaw config set plugins.allow x";
+
+// Notes the guard now lets through. None of them runs openclaw anywhere.
+// The first is the box's refused shape with a synthetic note.
+const allowedNotes = () => [
+  "cd ROOT/.openclaw/workspace && printf '%s\n' '- 08:10 Paired the phone: ran " + BT + "openclaw qr" + BT + " setup code, the owner'\"'\"'s request (gateway config untouched)' >> memory/2026-11-17.md && tail -c 200 memory/2026-11-17.md",
+  "printf '%s\n' 'it'\"'\"'s " + BT + "openclaw config patch" + BT + " $(x)' >> memory/n.md; cat memory/n.md | grep -c x",
+  "echo 'openclaw qr (pairing) config' ",
+  "echo 'openclaw qr (x) config' > memory/a.md > memory/b.md",
+  "echo 'openclaw qr (x) config' 2>memory/n.md",
+  "cat memory/x.md >> memory/n.md <<'EOF'\nopenclaw qr (x) config\nEOF",
+  "cat <<'A' <<'B' > memory/n.md\nopenclaw qr (x) config\nA\nB",
+  "grep -c x memory/n.md <<'EOF' || echo '" + BT + "openclaw config patch" + BT + "' >> memory/n.md\n$(openclaw config apply)\nEOF",
+  "echo 'ran openclaw qr (pairing) for the gateway config' >> memory/2026-11-17.md",
+  "echo \"ran openclaw qr (pairing) for the gateway config\" >> memory/2026-11-17.md",
+  "printf '\\n- 08:10 Ran openclaw qr for pairing (gateway token)\\n' >> memory/2026-11-17.md",
+  "printf '%s\\n' '" + kChange + "' >> memory/n.md",
+  "echo '" + kChange + "; $(openclaw config patch) " + BT + "openclaw config apply" + BT + "' > memory/n.md",
+  "echo 'openclaw config set (N) plugins.entries.relay-guard.enabled false' >> memory/n.md",
+  "echo \"openclaw config unset (plugins.allow|x) !x (^y) <1-2> {a,b} * ?\" > memory/n.md",
+  "echo -e 'openclaw\\tconfig patch' >> memory/n.md",
+  "echo 'first line\nopenclaw config patch\nthird line' >> memory/n.md",
+  "echo \"x xxx OpenClaw x (xxx:<gid>:x) xx; a && b | c\" >> memory/n.md",
+  "cat >> memory/2026-11-17.md <<'EOF'\n- Ran " + BT + "openclaw qr" + BT + " to pair; $(openclaw config patch)\n(openclaw plugins disable x)\nEOF",
+  "cat >> memory/n.md <<\"EOF\"\n$(openclaw config apply) " + BT + "openclaw config patch" + BT + "\nEOF",
+  "cat >> memory/n.md << 'EOF'\n" + kChange + "\nEOF\n",
+  "cat <<'EOF' >> memory/n.md\nopenclaw config patch\nEOF",
+  "cat >> memory/n.md <<EOF\n- Ran openclaw qr (pairing) for the gateway config; a | b && c\nEOF",
+  "cat > memory/n.md <<'EOF'\n EOF\nopenclaw config patch\nEOF \n\tEOF\nopenclaw config apply\nEOF",
+  "cat >> " + "ROOT/.openclaw/workspace/memory/n.md <<'EOF'\nopenclaw qr\nEOF",
+];
+
+// Refused neighbours that really run openclaw in at least one shell.
+const runningNeighbours = () => [
+  ["; after the note", "echo x >> memory/n.md; openclaw config patch"],
+  ["&& after the note", "echo x >> memory/n.md && openclaw config patch"],
+  ["|| after a failed note", "echo x > nosuch/n.md || openclaw config patch"],
+  ["& after the note", "echo x >> memory/n.md & openclaw config patch"],
+  ["a pipe into sh", "echo 'openclaw config patch' | sh"],
+  ["a pipe after the note", "echo x >> memory/n.md | openclaw config patch"],
+  ["a second line", "echo x >> memory/n.md\nopenclaw config patch"],
+  ["eval", "eval 'openclaw config patch' >> memory/n.md"],
+  ["sh -c", "sh -c 'openclaw config patch' >> memory/n.md"],
+  ["bash -c", "bash -c 'openclaw config patch' >> memory/n.md"],
+  ["zsh -c with the (N) glob qualifier (#423)", "zsh -c '" + kChange.replace("set", "set (N)") + "'"],
+  ["xargs", "echo plugins.allow | xargs openclaw config unset"],
+  ["env", "env openclaw config patch >> memory/n.md"],
+  ["exec", "exec openclaw config patch >> memory/n.md"],
+  ["command", "command openclaw config patch >> memory/n.md"],
+  ["source of the note", "echo 'openclaw config patch' > memory/n.md; . ./memory/n.md"],
+  ["the note run by bash (laundering through a file)", "echo 'openclaw config patch' > memory/n.md && bash memory/n.md"],
+  ["a function named echo", "echo() { openclaw config patch; }; echo x >> memory/n.md"],
+  ["$( ) in double quotes", "echo \"ran $(openclaw config patch)\" >> memory/n.md"],
+  ["a backtick in double quotes", "echo \"ran " + BT + "openclaw config patch" + BT + "\" >> memory/n.md"],
+  ["$( ) in the target", "echo x >> \"memory/$(openclaw config patch).md\""],
+  ["$( ) unquoted", "echo $(openclaw config patch) >> memory/n.md"],
+  ["$( ) in an unquoted here-document", "cat >> memory/n.md <<EOF\n$(openclaw config patch)\nEOF"],
+  ["a backtick in an unquoted here-document", "cat >> memory/n.md <<EOF\n" + BT + "openclaw config patch" + BT + "\nEOF"],
+  ["<<- ending at a tab-indented delimiter", "cat >> memory/n.md <<-'EOF'\n\tEOF\nopenclaw config patch\n"],
+  ["a command after the here-document", "cat > memory/n.md <<'EOF'\nx\nEOF\nopenclaw config patch"],
+  ["a here-document piped into sh", "cat <<'EOF' | sh\nopenclaw config patch\nEOF"],
+  ["a here-document fed to sh", "sh <<'EOF' > memory/n.md\nopenclaw config patch\nEOF"],
+  ["a here-string", "cat <<< \"$(openclaw config patch)\" >> memory/n.md"],
+  ["process substitution", "cat > memory/n.md < <(openclaw config patch)"],
+  ["zsh =( )", "cat =(openclaw config patch) > memory/n.md"],
+  ["a subshell", "(openclaw config patch) >> memory/n.md"],
+  ["a brace group", "{ openclaw config patch; } >> memory/n.md"],
+  ["a script then sh (laundering through a file)", "echo 'openclaw config patch' > run.sh && sh run.sh"],
+  ["openclaw with a filled-in part (#423)", "bash -c \"openclaw $(echo config) set plugins.allow x\""],
+  ["a subshell around openclaw (#423)", "(openclaw config set plugins.allow x)"],
+  ["prose then a subshell (#423)", "git commit -m \"OpenClaw (the runtime)\" ; (openclaw config patch)"],
+  ["a zsh pattern group (#423)", "touch plugins.allow && zsh -c \"openclaw config unset (')'|plugins.allow)\""],
+  ["a variable holding openclaw", "o=openclaw; $o config patch >> memory/n.md"],
+];
+
+// Shapes that run openclaw and that the guard let through before GST-2940
+// too: an alias whose value is the openclaw command, and xargs supplying
+// every word after openclaw. They are not literal notes, so this change
+// leaves their verdict as it was; closing them is separate work.
+const unchangedGaps = () => [
+  ["an alias named echo", "alias echo='openclaw config patch'\necho x >> memory/n.md"],
+  ["xargs supplying the group and verb", "echo config patch | xargs openclaw"],
+];
+
+// Refused neighbours that do not run the stub here, refused because they are
+// not one of the literal shapes.
+const conservativeNeighbours = () => [
+  ["an escaped $ in double quotes", "echo \"\\$(openclaw config patch)\" > memory/n.md"],
+  ["an unquoted openclaw argument", "echo openclaw config patch >> memory/n.md"],
+  ["a target that is not a note", "echo 'openclaw config patch' > memory/n.sh"],
+  ["a dot-file target", "echo 'openclaw config patch' >> .zshenv"],
+  ["a clobber redirect", "echo 'openclaw qr (x) config' >| memory/n.md"],
+  ["an assignment prefix", "PATH=. echo 'openclaw qr (x) config' >> memory/n.md"],
+  ["a partly quoted delimiter", "cat > memory/n.md <<E'OF'\nopenclaw qr (x) config\nEOF"],
+  ["an unterminated here-document", "cat > memory/n.md <<'EOF'\nopenclaw qr (x) config"],
+  ["a CR before the delimiter's newline", "cat > memory/n.md <<'EOF'\nopenclaw qr (x) config\nEOF\r\n"],
+  ["a backslash in an unquoted here-document", "cat > memory/n.md <<EOF\nopenclaw qr (x) config \\\nEOF"],
+  ["an unbalanced quote", "echo 'openclaw qr (x) config >> memory/n.md"],
+  ["a comment", "echo 'openclaw qr (x) config' >> memory/n.md # done"],
+  ["a glob in the target", "echo 'openclaw qr (x) config' >> memory/*.md"],
+  ["a tilde target", "echo 'openclaw qr (x) config' >> ~/n.md"],
+  ["printf -v, which sets a variable", "printf -v PATH '%s' . && cat 'openclaw (x)'"],
+  ["printf with a glob", "printf * 'openclaw (x)' >> memory/n.md"],
+  ["a note into AlphaClaw's relay directory", "echo 'openclaw (x)' >> ROOT/relay/n.md"],
+  ["a note through a cd to a relative directory", "cd memory && echo 'openclaw (x)' >> n.md"],
+  ["a command outside the list", "echo 'openclaw (x)' >> memory/n.md && sort memory/n.md"],
+];
+
+// Read-only lines the guard now lets name openclaw.json. None runs openclaw
+// or changes a file in any shell.
+const allowedReads = () => [
+  "grep -n relay-guard openclaw.json",
+  "grep -rn --include=*.json allow . 2>/dev/null | head -20",
+  "grep -c plugins openclaw.json notes.txt ROOT/.openclaw/workspace/openclaw.json",
+  "cat openclaw.json | jq -r .plugins.allow",
+  "jq '.plugins | keys' openclaw.json && wc -c openclaw.json",
+  "head -c 200 openclaw.json; tail -n 5 notes.txt",
+  "ls -la openclaw.json || stat openclaw.json",
+  "grep -l 'openclaw config set' *.txt *.json",
+  "cat openclaw.json notes.txt | grep -v '$(openclaw config patch)' >/dev/null",
+  "egrep -h \"plugins|gateway\" openclaw.json",
+  "fgrep -e '; openclaw config patch' notes.txt openclaw.json",
+];
+
+// Refused neighbours of a read-only line: each runs openclaw or changes a
+// file in at least one shell.
+const readNeighbours = () => [
+  ["a redirect onto openclaw.json", "grep x openclaw.json > openclaw.json"],
+  ["an append onto openclaw.json", "cat notes.txt >> openclaw.json"],
+  ["a descriptor redirect onto openclaw.json", "grep -n x nosuch 2>openclaw.json"],
+  ["a clobber redirect", "cat notes.txt >| openclaw.json"],
+  ["a redirect with no blank before it", "cat notes.txt>openclaw.json"],
+  ["tee", "cat openclaw.json | tee openclaw.json.bak"],
+  ["sed -i", "sed -i s/relay-guard/x/ openclaw.json"],
+  ["awk system()", "awk 'BEGIN{system(\"openclaw config patch\")}' openclaw.json"],
+  ["sort -o", "sort -o openclaw.json notes.txt"],
+  ["find -exec", "find . -name openclaw.json -exec openclaw config patch ';'"],
+  ["find -delete", "find . -name openclaw.json -delete"],
+  ["rg --pre", "rg --pre openclaw x openclaw.json"],
+  ["xargs", "grep -h . notes.txt | xargs openclaw config unset"],
+  ["a pipe into sh", "grep -h openclaw notes.txt openclaw.json | sh"],
+  ["a pipe into bash", "cat notes.txt openclaw.json | bash"],
+  ["a substitution in an argument", "grep $(openclaw config patch) openclaw.json"],
+  ["a backtick in an argument", "grep " + BT + "openclaw config patch" + BT + " openclaw.json"],
+  ["a substitution in double quotes", "grep \"$(openclaw config patch)\" openclaw.json"],
+  ["a write joined with &&", "grep -q allow openclaw.json && cat notes.txt > openclaw.json"],
+  ["a background job", "grep x openclaw.json & openclaw config patch"],
+  ["a second line", "grep x openclaw.json\nopenclaw config patch"],
+  ["a subshell", "(grep x openclaw.json; openclaw config patch)"],
+  ["process substitution", "cat openclaw.json <(openclaw config patch)"],
+  ["a here-string", "cat openclaw.json <<< \"$(openclaw config patch)\""],
+  ["a here-document", "cat openclaw.json - <<EOF\n$(openclaw config patch)\nEOF"],
+  ["env", "env openclaw config patch openclaw.json"],
+  ["command", "command openclaw config patch openclaw.json"],
+  ["eval", "eval grep x openclaw.json\\; openclaw config patch"],
+  ["sh -c", "sh -c 'openclaw config patch' openclaw.json"],
+  ["an assignment prefix", "PATH=. cat openclaw.json; openclaw config patch"],
+  ["a function named cat", "cat() { openclaw config patch; }; cat openclaw.json"],
+  ["a variable command", "c=openclaw; $c config patch openclaw.json"],
+];
+
+// Process environments (GST-2910), refused for every tier.
+const environReads = () => [
+  ["read", { path: "/proc/self/environ" }],
+  ["read", { path: "/proc/1/task/1/environ" }],
+  ["exec", { command: "cat /proc/1/environ" }],
+  ["exec", { command: "tr '\\0' '\\n' < /proc/self/environ" }],
+  ["exec", { command: "strings /proc/$$/environ" }],
+  ["exec", { command: "cat /proc/*/environ" }],
+  ["exec", { command: "cat /proc/*/env*" }],
+  ["exec", { command: "cat /pro?/self/environ" }],
+  ["exec", { command: "cat /proc/{1,2}/environ" }],
+  ["exec", { command: "cat /proc/1/task/*/environ" }],
+  ["exec", { command: "cat /proc/self/../self/environ" }],
+  ["exec", { command: "cat '/pr''oc/self/environ'" }],
+  ["exec", { command: "cd /proc/self && cat environ" }],
+  ["exec", { command: "cd /proc && cat 1/environ" }],
+  ["exec", { command: "p=/proc/self; cat $p/environ" }],
+  ["exec", { command: "cat environ", workdir: "/proc/self" }],
+  ["exec", { command: "grep -a TOKEN /proc/thread-self/environ" }],
+  ["process", { action: "write", sessionId: "s1", data: "cat /proc/1/environ\n" }],
+];
+const environAllowed = () => [
+  ["exec", { command: "ls /proc/1/environ" }],
+  ["exec", { command: "echo 'checked /proc/self/environ' >> memory/notes.md" }],
+  ["exec", { command: "cat /proc/self/status" }],
+  ["read", { path: "/proc/cpuinfo" }],
+];
+
+const expandRoot = (command) => command.replace(/ROOT/g, root);
+
+describe("relay guard and openclaw in plain notes (GST-2940)", () => {
+  it("has bash, zsh and dash to check against", () => {
+    if (process.env.CI) expect(kMissing).toEqual([]);
+    else if (kMissing.length) console.warn("relay-guard-inert-notes: missing shells " + kMissing.join(", ") + "; their rows are skipped");
+  });
+
+  it("lets through each literal note, and no shell runs openclaw for any of them", () => {
+    for (const raw of allowedNotes()) {
+      const command = expandRoot(raw);
+      expect(anchorOf(command), command).toBeNull();
+      expect(stubRunsOf(command), command).toEqual([]);
+    }
+  });
+
+  it("still refuses every neighbour that runs openclaw in bash, zsh or dash", () => {
+    for (const [label, command] of runningNeighbours()) {
+      expect(textLineOf(command, { rootDir: root }), label).toBe(false);
+      expect(anchorOf(command), label).not.toBeNull();
+      expect(stubRunsOf(command).length, label + " should run the stub in some shell").toBeGreaterThan(0);
+    }
+  });
+
+  it("leaves the shapes the guard already missed to their old verdict: none is a literal note", () => {
+    for (const [label, command] of unchangedGaps()) {
+      expect(textLineOf(command, { rootDir: root }), label).toBe(false);
+      expect(stubRunsOf(command).length, label).toBeGreaterThan(0);
+    }
+  });
+
+  it("still refuses the shapes it cannot prove literal, whether or not they run anything", () => {
+    for (const [label, raw] of conservativeNeighbours()) {
+      const command = expandRoot(raw);
+      expect(textLineOf(command, { rootDir: root }), label).toBe(false);
+      expect(anchorOf(command), label).not.toBeNull();
+    }
+  });
+
+  // Every generated command carries openclaw config patch, which the guard
+  // refused anywhere on a line before GST-2940, so each one let through here
+  // is let through by the literal-note rule alone.
+  it("never lets through a generated command that runs openclaw in any shell", () => {
+    let seed = 2940;
+    const pick = (list) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return list[seed % list.length];
+    };
+    const heads = ["echo", "printf", "cat", "echo -n", "printf '%s\\n'"];
+    const texts = ["'openclaw config patch'", "\"openclaw config patch\"", "'openclaw (N) config patch'", "\"(openclaw config patch)\"", "openclaw config patch", "\"$(openclaw config patch)\"", "'x'\"y\"", "\"" + BT + "openclaw config patch" + BT + "\"", "'a'\\''openclaw config patch'", "\"\\\"openclaw config patch\"", ""];
+    const ops = [" > memory/n.md", " >> memory/n.md", ">memory/n.md", " >> memory/n.md; openclaw config patch", " >> memory/n.md | sh", " | sh", " >> memory/n.md <<'EOF'\nopenclaw config patch\nEOF", " >> memory/n.md <<EOF\n$(openclaw config patch)\nEOF", " <<EOF >> memory/n.md\nopenclaw qr (x)\nEOF\nopenclaw config patch", " >> memory/n.md <<'EOF'\nEOF2\nEOF\n"];
+    let allowed = 0;
+    for (let n = 0; n < 160; n += 1) {
+      const command = pick(heads) + " " + pick(texts) + pick(ops);
+      if (!command.includes("openclaw config patch") || anchorOf(command) !== null) continue;
+      allowed += 1;
+      expect(stubRunsOf(command), command).toEqual([]);
+    }
+    expect(allowed).toBeGreaterThan(10);
+  });
+});
+
+describe("relay guard and read-only lines that name openclaw.json (GST-2940)", () => {
+  it("lets through each read-only line, and no shell runs openclaw or changes a file for any of them", () => {
+    for (const raw of allowedReads()) {
+      const command = expandRoot(raw);
+      expect(textLineOf(command, { rootDir: root }), command).toBe("read");
+      expect(anchorOf(command), command).toBeNull();
+      expect(effectsOf(command), command).toEqual({ ran: [], changed: [] });
+    }
+  });
+
+  it("still refuses every neighbour that writes a file or runs openclaw in bash, zsh or dash", () => {
+    for (const [label, command] of readNeighbours()) {
+      expect(textLineOf(command, { rootDir: root }), label).not.toBe("read");
+      expect(anchorOf(command), label).not.toBeNull();
+      const { ran, changed } = effectsOf(command);
+      expect(ran.length + changed.length, label + " should run the stub or change a file in some shell").toBeGreaterThan(0);
+    }
+  });
+
+  it("never lets through a generated read-only line that runs openclaw or changes a file", () => {
+    let seed = 4;
+    const pick = (list) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return list[seed % list.length];
+    };
+    const heads = ["grep x", "cat", "head -n1", "jq .", "wc -l", "tail", "sed -n p", "tee", "sort -o openclaw.json", "xargs openclaw"];
+    const args = ["openclaw.json", "'openclaw.json'", "notes.txt openclaw.json", "\"$(openclaw config patch)\" openclaw.json", "*.json", "-", "'; openclaw config patch'"];
+    const tails = ["", " 2>/dev/null", " >/dev/null 2>&1", " > openclaw.json", " >> openclaw.json", " | sh", " | grep -c x", " && cat notes.txt", " | xargs openclaw", "; openclaw config patch", " 2> openclaw.json", "\nopenclaw config patch"];
+    let allowed = 0;
+    for (let n = 0; n < 200; n += 1) {
+      const command = pick(heads) + " " + pick(args) + pick(tails);
+      if (anchorOf(command) !== null) continue;
+      if (textLineOf(command, { rootDir: root }) !== "read") continue;
+      allowed += 1;
+      expect(effectsOf(command), command).toEqual({ ran: [], changed: [] });
+    }
+    expect(allowed).toBeGreaterThan(10);
+  });
+});
+
+describe("relay guard and process environments (GST-2910)", () => {
+  it("refuses a read, exec or typed input that reaches /proc/<pid>/environ", () => {
+    for (const [toolName, params] of environReads()) {
+      const hit = classifyKeyRead({ toolName, params, rootDir: root });
+      expect(hit, JSON.stringify(params)).not.toBeNull();
+      expect(hit.environ, JSON.stringify(params)).toBe(true);
+    }
+  });
+
+  it("refuses a symlink in the workspace that lands on a process environment", () => {
+    const link = path.join(workspace, "env-link");
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync("/proc/self/environ", link);
+    try {
+      expect(classifyKeyRead({ toolName: "read", params: { path: "env-link" }, rootDir: root })?.environ).toBe(true);
+      expect(classifyKeyRead({ toolName: "exec", params: { command: "cat env-link" }, rootDir: root })?.environ).toBe(true);
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
+  it("lets through a listing, a note and other /proc files", () => {
+    for (const [toolName, params] of environAllowed()) expect(classifyKeyRead({ toolName, params, rootDir: root }), JSON.stringify(params)).toBeNull();
+  });
+});
+
+describe("relay guard refusals through the plugin (GST-2940, GST-2910)", () => {
+  let ctx;
+  afterEach(() => {
+    ctx?.cleanup();
+    ctx = null;
+  });
+  const pinnedRun = async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    return ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+  };
+
+  it("runs the note and the grep a box agent was refused for", async () => {
+    const run = await pinnedRun();
+    const config = path.join(ctx.rootDir, ".openclaw", "openclaw.json");
+    for (const command of ["grep -n 'gbrain' " + config + " 2>/dev/null | head -20", "echo 'Paired the phone with openclaw qr (gateway config untouched)' >> memory/2026-11-17.md", "cat >> memory/2026-11-17.md <<'EOF'\n- Ran " + BT + "openclaw qr" + BT + " (pairing)\nEOF"]) {
+      expect(await ctx.call(run, "exec", { command }), command).toEqual({});
+    }
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("names a filled-in path under .openclaw and points a shell write at the file-edit tool", async () => {
+    const run = await pinnedRun();
+    const dir = path.join(ctx.rootDir, ".openclaw");
+    const filled = await ctx.call(run, "exec", { command: "cat >> " + dir + "/workspace/memory/$(date +%F).md <<EOF\n$(date): gateway restarted\nEOF" });
+    expect(filled.block).toBe(true);
+    expect(filled.blockReason).toContain("a path the shell fills in under " + dir + " would change what decides relay trust");
+    expect(filled.blockReason).toContain("name the file in full inside the process instead of with a shell substitution, or write it with the file-edit tool");
+    expect(filled.blockReason).not.toContain("openclaw command the shell fills in");
+    const change = await ctx.call(run, "exec", { command: kChange });
+    expect(change.blockReason).toContain("If you were only writing a plain note, write it with the file-edit tool instead of a shell command. Otherwise say so in your answer");
+    const write = await ctx.call(run, "write", { path: path.join(ctx.rootDir, "relay", "x.md"), content: "x" });
+    expect(write.blockReason).toContain("would change what decides relay trust");
+    expect(write.blockReason).not.toContain("file-edit tool");
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("refuses a process environment read with its own reason", async () => {
+    const run = await pinnedRun();
+    const result = await ctx.call(run, "exec", { command: "tr '\\0' '\\n' < /proc/self/environ" });
+    expect(result.block).toBe(true);
+    expect(result.blockReason).toContain("a command that reaches a process's environment (/proc/<pid>/environ) is refused in every relay session");
+    expect((await ctx.call(run, "read", { path: "/proc/1/environ" })).blockReason).toContain("read a process's environment (/proc/<pid>/environ) is refused in every relay session");
+  });
+});
