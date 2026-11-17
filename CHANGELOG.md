@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.308] - 2026-11-17
+
+Removing a pinned OpenClaw build now also puts back the Codex plugin it replaced, and a pinned build that is refused no longer keeps running outside the gateway.
+
+### Fixed
+- Removing `ALPHACLAW_OPENCLAW_PACKAGES`, or only its `@openclaw/codex` entry, puts back the Codex plugin OpenClaw had before the pinned one (reinstalled from npm), or uninstalls it if there was none. A failure is in the notice and the next start retries; the gateway still starts.
+- When a start refuses the pinned package (a missing file, a refused Codex entry), the stock OpenClaw build is swapped back in, so commands outside the gateway run stock as the docs say.
+- With the setting removed, a gateway launch is refused while the stock build could not be restored, so the owner hears about it instead of the pinned build running quietly.
+- A second `alphaclaw start` run by hand against a live install no longer swaps OpenClaw out from under the running gateway: it changes nothing and the running gateway's launch checks still pass.
+- An unreadable `package.json` in the OpenClaw tree no longer makes AlphaClaw forget that a pinned package is applied.
+
 ## [0.10.307] - 2026-11-17
 
 A deployment can now run its own sha-pinned build of the exact OpenClaw version AlphaClaw already runs, kept on the data disk so it survives redeploys and container restarts, and AlphaClaw keeps the gateway down with one notice instead of silently running the stock build when that build is missing or wrong.
