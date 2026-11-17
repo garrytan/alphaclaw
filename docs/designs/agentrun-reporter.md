@@ -75,7 +75,6 @@ Every line starts `[alphaclaw] agentrun-reporter`; none carries a token, a promp
 | `queue_error` | A spool file could not be written to the queue; it is kept and read again next tick. |
 | `late_attempt` | A later model-fallback attempt of a run that is already queued or sent; that attempt is not reported. |
 | `capture_error` | In the gateway log: the plugin could not write its spool, so the turn is not reported. In AlphaClaw's log: a spool file could not be read or converted; it is kept for the next tick (`kept for the next tick`) and dropped after 5 failed ticks (`dropped after 5 tries`). A spool directory or file it cannot read or delete is logged at most once an hour (`dir=` or `file=`); sending continues. |
-| `run_exists` | AgentRun already has a run under a turn's start key with a different start (a source that rebuilt the turn, such as the Capy reporter after a lost state file); booked as sent, no second run. |
 | `content_revoked` | A queued turn carried contents for a cron job that is no longer listed in `ALPHACLAW_AGENTRUN_CONTENT_CRON`; nothing more of it is sent. |
 
 ## Capy reporter
@@ -92,22 +91,22 @@ Each pass reads every project the key can see, every page of each project's thre
 - **Agents.** One AgentRun agent per Captain crew, `capy-captain-<captain thread id>`, and one per project for threads in no crew, `capy-project-<project id>`, all with `learning: false`. The run's session id is the thread id.
 - **Each turn is reported once.** The start key is `alphaclaw:capy:<thread id>:<user entry id>`, and the tool event ids come from that key too. A thread first seen by the reporter reports only turns from the 24 hours before that pass.
 - **Credits.** The change in the thread's credit total since the previous report is written in the metadata line of the last turn a pass reports for that thread as an estimate, never as `cost_usd`.
-- **State.** One JSON file (mode 0600, written whole and renamed) keeps each thread's cursor and the turns not yet sent, including their stored request bodies. Keep it in the automation's Drive location. Losing it only re-sends recent turns under their old keys: AgentRun answers an identical start with the run it already has, and a start that differs (a renamed thread, a changed credit figure) with `idempotency_mismatch`, which the sender books as `run_exists` without making a second run.
+- **State.** One JSON file (mode 0600, written whole and renamed) keeps each thread's cursor and the turns not yet sent, including their stored request bodies. Keep it in the automation's Drive location. Losing it only re-sends recent turns under their old keys: AgentRun answers an identical start with the run it already has, and a start that differs (a renamed thread, a changed credit figure) with `idempotency_mismatch`, which the sender drops (`row_dropped … code=idempotency_mismatch`) without making a second run.
 - **Capy rate limits.** A 429 waits the `retry-after` seconds (at most 2 minutes, 5 times per request) and sends the same request again.
-- **Retries.** The pass runs hourly, which is past AgentRun's one-hour window for a started run, so a turn that meets a passing failure is retried in the same pass, round after round (at most 5 rounds, each waiting at most a minute for the earliest retry), until a round moves nothing. A single turn is retried even when no other turn moved.
+- **Retries.** The pass runs hourly, which is past AgentRun's one-hour window for a started run, so a turn that meets a passing failure is retried in the same pass, round after round while a retry is due, at most 5 rounds and each waiting at most a minute for the earliest retry. A round that moves nothing does not end the retries, and a single turn is retried even when no other turn moved.
 - **Exit code.** 0 after a good pass; 1 when Capy refused the key or failed a read, AgentRun refused the token, or a turn has failed to send 6 times (`rows_waiting`); 2 when a setting is missing. A failed read of one project's threads or of one thread's transcript skips only that project or thread, and the pass goes on. After a failed read, queued metadata-only turns are still sent; turns that carry a title or contents are held (see below).
 
 ### Capy classes
 
 | Class | When | Sent |
 | --- | --- | --- |
-| `private` | The thread's visibility is `private` or missing, or the thread id or its Captain's id is in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Metadata only, without the title. Wins over `automation`. |
-| `automation` | The one turn an automation run started: for a run that is `running`, `completed` or `failed`, the first user entry from 2 minutes before to 10 minutes after its `startedAt`, with no `sender` | The user entry's text, the assistant replies, and one line per tool call (`Tool call: bash (1.2s)`) |
+| `private` | The thread's or its project's visibility is anything but `org` (a private project limits every thread in it), or the thread id or its Captain's id is in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Metadata only, without the title. Wins over `automation`. |
+| `automation` | The one turn an automation run started: for a run of a `threadMode: "new"` automation that is `running`, `completed` or `failed`, the first user entry of the thread the run made, when it falls from 2 minutes before to 10 minutes after the run's `startedAt` and has no `sender`. A `single` thread mixes people's messages with runs that no field tells apart, so its turns are `thread`. | The user entry's text, the assistant replies, and one line per tool call (`Tool call: bash (1.2s)`) |
 | `thread` | Every other turn | Metadata plus the thread title |
 
-Metadata is the class, thread id, start time, duration, status, number of replies and tool calls, the model and each tool's name. Tool inputs and outputs are never read into a turn, for any class. An automation run whose turn may lie before the part of the transcript a pass read is not matched, so that turn fails closed to `thread`. Private wins at send too: a queued turn whose thread is now private, or whose thread or crew is now listed, is dropped before sending (`content_revoked`), title and contents alike.
+Metadata is the class, thread id, start time, duration, status, number of replies and tool calls, the model and each tool's name. Tool inputs and outputs are never read into a turn, for any class. A thread whose first user entry the reporter never read (it was first seen past its start) has no automation turn, so its turns fail closed to `thread`. Private wins at send too: a queued turn whose thread is now private, or whose thread or crew is now listed, is dropped before sending (`content_revoked`), title and contents alike.
 
-A queued turn that carries a title or contents (`thread` or `automation`) is sent only when the same pass listed every thread of its project without an error, the listing showed its thread as not private (`org` visibility, and neither the thread nor its crew in `AGENTRUN_CAPY_PRIVATE_CAPTAINS`), and the thread's transcript read did not fail. A thread missing from the listing (for example one that turned private and is no longer visible to the key), a failed or partial listing, or a failed read leaves the turn held in the queue, neither sent nor dropped (`row_held`). A later pass that proves the thread not private sends it; one that shows it private drops it (`content_revoked`). Metadata-only (`private`) turns are never held. A turn whose thread never comes back stays held until `queue_overflow` drops it.
+A queued turn that carries a title or contents (`thread` or `automation`) is sent only when the same pass listed every thread of its project without an error, the listing showed its thread as not private (thread and project `org` visibility, and neither the thread nor its crew in `AGENTRUN_CAPY_PRIVATE_CAPTAINS`), and the thread's transcript read did not fail. A thread missing from the listing (for example one that turned private and is no longer visible to the key), a failed or partial listing, or a failed read leaves the turn held in the queue, neither sent nor dropped (`row_held`). A later pass that proves the thread not private sends it; one that shows it private drops it (`content_revoked`). Metadata-only (`private`) turns are never held. A turn whose thread never comes back stays held until `queue_overflow` drops it.
 
 ### Capy settings
 
@@ -124,7 +123,7 @@ Set them as the Capy project's environment variables; the key and the token are 
 
 ### Capy log lines
 
-The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source=capy` on the sender's lines (`token_rejected`, `row_dropped`, `run_expired`, `agent_refused`, `run_exists`, `send_error`). Its own codes:
+The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source=capy` on the sender's lines (`token_rejected`, `row_dropped`, `run_expired`, `agent_refused`, `send_error`). Its own codes:
 
 | Code | Meaning |
 | --- | --- |

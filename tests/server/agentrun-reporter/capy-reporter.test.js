@@ -146,7 +146,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     const capy = createFakeCapy({
       threads: [thread("jam_D", { captain: { jamId: "jam_crew1", name: "Crew One", avatar: {} } }), thread("jam_E", { title: "VISIBLE-TITLE" })],
       messages: { jam_D: d, jam_E: e },
-      automations: [{ id: "au1", projectId: "p1" }],
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
       runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(32), startedAt: at(31) }] },
     });
     expect((await run(capy)).code).toBe(0);
@@ -173,7 +173,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     const capy = createFakeCapy({
       threads,
       messages: Object.fromEntries(threads.map((item) => [item.id, turn()])),
-      automations: [{ id: "au1", projectId: "p1" }],
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
       runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_P3", createdAt: at(32), startedAt: at(31) }] },
     });
     expect((await run(capy)).code).toBe(0);
@@ -184,12 +184,41 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(allBodies()).not.toContain("PRIVATE-TITLE");
   });
 
+  it("keeps an org thread in a private project to metadata without a title or contents", async () => {
+    const capy = createFakeCapy({
+      projects: [{ id: "p1", name: "Hidden", visibility: "private" }],
+      threads: [thread("jam_Q", { title: "PRIVATE-TITLE" })],
+      messages: { jam_Q: [user("AUTO-INPUT " + kMarker, 30), reply("AUTO-REPLY " + kMarker, 29)] },
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_Q", createdAt: at(32), startedAt: at(31) }] },
+    });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(1);
+    expect([...fake.runs.values()][0].start.input).toMatch(/^Capy private turn in thread jam_Q; started/);
+    expect(allBodies()).not.toMatch(/PRIVATE-TITLE|Hidden|AUTO-/);
+    expect(allBodies()).not.toContain(kMarker);
+  });
+
+  it("sends no contents for a person's message in a standing automation thread, even inside the run window", async () => {
+    const s = [user("PERSON-TEXT", 32), reply("PERSON-REPLY", 31.5), user("STANDING-PROMPT", 30), reply("STANDING-REPLY", 29)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_S")],
+      messages: { jam_S: s },
+      automations: [{ id: "au1", projectId: "p1", threadMode: "single" }],
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_S", createdAt: at(31), startedAt: at(31) }] },
+    });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(2);
+    for (const item of fake.runs.values()) expect(item.start.input).toMatch(/^Capy thread turn in thread jam_S "Title jam_S"/);
+    expect(allBodies()).not.toMatch(/PERSON-|STANDING-/);
+  });
+
   it("keeps turns while AgentRun is down, and drops a queued automation turn whose crew became private", async () => {
     const d = [user("AUTO-INPUT", 30), reply("AUTO-REPLY", 29)];
     const capy = createFakeCapy({
       threads: [thread("jam_D", { captain: { jamId: "jam_crew1", name: "Crew One", avatar: {} } })],
       messages: { jam_D: d },
-      automations: [{ id: "au1", projectId: "p1" }],
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
       runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(32), startedAt: at(31) }] },
     });
     fake.state.down = true;
@@ -209,7 +238,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     const capy = createFakeCapy({
       threads: [thread("jam_A", { title: "SECRET-TITLE" }), thread("jam_H", { lastActivityAt: at(3) })],
       messages: { jam_A: a, jam_H: h },
-      automations: [{ id: "au1", projectId: "p1" }],
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
       runs: {
         au1: [
           { id: "skipped", automationId: "au1", status: "skipped", jamId: "jam_H", createdAt: at(41), startedAt: null },
@@ -322,6 +351,16 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 
+  it("retries a started turn through two failed rounds within the same pass", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    for (let i = 0; i < 2; i += 1) fake.state.failNext.push({ path: /\/events$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.requests.filter((request) => /\/events$/.test(request.path))).toHaveLength(3);
+    expect(sleeps).toHaveLength(2);
+    expect([...fake.runs.values()][0].completion).toMatchObject({ status: "completed" });
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
   it("retries a single started turn within the same pass when no other turn moves", async () => {
     const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
     fake.state.failNext.push({ path: /\/events$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
@@ -340,7 +379,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(fake.runs.size).toBe(1);
   });
 
-  it("re-sends under the same keys after the state file is lost, and AgentRun answers with the runs it has", async () => {
+  it("re-sends under the same keys after the state file is lost, and drops a rebuilt start AgentRun refuses as a mismatch", async () => {
     const a = [user("a1", 30), reply("r1", 29), user("a2", 20), reply("r2", 19)];
     const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: a } });
     expect((await run(capy)).code).toBe(0);
@@ -351,14 +390,14 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(again.code).toBe(0);
     expect(starts()).toHaveLength(4);
     expect(fake.runs.size).toBe(2);
-    expect(again.lines.join("\n")).not.toMatch(/row_dropped|run_exists/);
+    expect(again.lines.join("\n")).not.toContain("row_dropped");
 
     fs.rmSync(statePath);
     capy.threads[0].title = "Renamed";
     const renamed = await run(capy);
     expect(renamed.code).toBe(0);
     expect(fake.runs.size).toBe(2);
-    expect(renamed.lines.filter((line) => line.includes("run_exists"))).toHaveLength(2);
+    expect(renamed.lines.filter((line) => line.includes("row_dropped op=start source=capy code=idempotency_mismatch"))).toHaveLength(2);
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 

@@ -194,9 +194,11 @@ export const runCapyReporter = async ({
     return { id: `capy-project-${projectId}`, name, description: "A Capy project's thread turns outside any crew, reported by AlphaClaw's Capy reporter." };
   };
 
-  const isPrivate = (thread) => {
+  // A private project limits everything in it (docs.capy.ai/admin/security),
+  // so a thread is shared only when it and its project are both org-visible.
+  const isPrivate = (thread, project) => {
     const captainId = typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId;
-    return thread.visibility !== "org" || privateIds.has(thread.id) || (captainId && privateIds.has(captainId));
+    return thread.visibility !== "org" || project?.visibility !== "org" || privateIds.has(thread.id) || (captainId && privateIds.has(captainId));
   };
 
   const rowOf = ({ thread, turn, last, cls, agent, creditsNote }) => {
@@ -257,14 +259,16 @@ export const runCapyReporter = async ({
     };
   };
 
-  // Automation runs by thread: only a run that started (running, completed or
-  // failed) has a turn, and its turn is the first user entry from 2 minutes
-  // before to 10 minutes after the run's startedAt. Anything else, or a run
-  // whose turn may lie before the part of the transcript read this pass,
-  // fails closed to metadata (docs.capy.ai/api-reference/schemas/AutomationRunEncoded).
+  // Automation runs by thread: only a run of a `threadMode: "new"` automation
+  // that started (running, completed or failed) has a turn, and its turn is
+  // the first user entry of the thread the run made, from 2 minutes before to
+  // 10 minutes after the run's startedAt. A `single` thread mixes people's
+  // messages with runs that no field tells apart, so its turns, and anything
+  // else, fail closed to `thread` (docs.capy.ai/api-reference/schemas/AutomationRunEncoded).
   const readAutomationRuns = async (projectId) => {
     const byThread = new Map();
     for (const automation of await capy.all("/automations", { projectId })) {
+      if (automation.threadMode !== "new") continue;
       const page = await capy.get(`/automations/${encodeURIComponent(automation.id)}/runs`, { limit: kAutomationRunsRead });
       for (const run of page?.items || []) {
         if (!run.jamId || !kAutomationRunStatuses.has(run.status) || !timeOf(run.startedAt)) continue;
@@ -284,12 +288,12 @@ export const runCapyReporter = async ({
     const settled = complete && kClosedStatuses.has(thread.status) && !(timeOf(thread.lastActivityAt) && newest > timeOf(thread.lastActivityAt));
     const open = turns.find((turn, index) => index === turns.length - 1 && !settled) || null;
     const reported = new Set(known.reported);
-    const viewStart = known.after === null ? 0 : timeOf(entries[0]?.createdAt) || Infinity;
+    const first = known.first ?? (known.after === null ? turns[0]?.user.id ?? null : null);
     const automationTurns = new Set();
     for (const runAt of automationRuns.get(thread.id) || []) {
-      if (runAt - kAutomationEarlyMs < viewStart) continue;
-      const turn = turns.find((candidate) => timeOf(candidate.user.createdAt) >= runAt - kAutomationEarlyMs);
-      if (turn && !turn.user.sender && timeOf(turn.user.createdAt) <= runAt + kAutomationLateMs) automationTurns.add(turn.user.id);
+      const turn = turns.find((candidate) => candidate.user.id === first);
+      const at = timeOf(turn?.user.createdAt);
+      if (turn && !turn.user.sender && at >= runAt - kAutomationEarlyMs && at <= runAt + kAutomationLateMs) automationTurns.add(turn.user.id);
     }
     const fresh = [];
     turns.forEach((turn, index) => {
@@ -302,7 +306,7 @@ export const runCapyReporter = async ({
     const delta = Number.isFinite(credits) && Number.isFinite(known.credits) ? credits - known.credits : null;
     const agent = agentOf(thread, project);
     const rows = fresh.map(({ turn, last }, index) => {
-      const cls = isPrivate(thread) ? "private" : automationTurns.has(turn.user.id) ? "automation" : "thread";
+      const cls = isPrivate(thread, project) ? "private" : automationTurns.has(turn.user.id) ? "automation" : "thread";
       const creditsNote =
         index === fresh.length - 1 && delta !== null && delta >= 0 ? ` Thread credits used since the previous report: about ${Math.round(delta * 100) / 100} (an estimate).` : "";
       return rowOf({ thread, turn, last, cls, agent, creditsNote });
@@ -317,6 +321,7 @@ export const runCapyReporter = async ({
       after: nextAfter,
       reported: kept,
       since: known.since,
+      first,
       credits: rows.length || !Number.isFinite(known.credits) ? (Number.isFinite(credits) ? credits : null) : known.credits,
     };
     counts.queued += rows.length;
@@ -356,7 +361,7 @@ export const runCapyReporter = async ({
       seenIds.add(thread.id);
       const captainId = typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId;
       if (captainId) seenIds.add(captainId);
-      if (isPrivate(thread)) privateNow.add(thread.id);
+      if (isPrivate(thread, project)) privateNow.add(thread.id);
     }
     const changed = threads.filter((thread) => {
       const known = state.threads[thread.id];
@@ -367,7 +372,7 @@ export const runCapyReporter = async ({
       return false;
     });
     const automationRuns = changed.length ? await readAutomationRuns(project.id) : null;
-    for (const thread of threads) if (!isPrivate(thread)) listedOpen.add(thread.id);
+    for (const thread of threads) if (!isPrivate(thread, project)) listedOpen.add(thread.id);
     for (const thread of changed) {
       try {
         await processThread(thread, project, automationRuns);
@@ -422,7 +427,7 @@ export const runCapyReporter = async ({
   });
   const sent = await sender.sendDue({ limit: state.rows.length || 1 });
   // The pass runs hourly, past AgentRun's one-hour window, so a turn that met
-  // a passing failure is retried here until a round moves nothing.
+  // a passing failure is retried here, within the round cap and wait limit.
   for (let round = 0, retry = sent.retry; round < kRetryRounds && retry && !sent.paused; round += 1) {
     const waiting = state.rows.filter((row) => row.state === "queued" && row.attempts > 0 && sendable(row)).map((row) => row.next_attempt_at);
     const waitMs = Math.max(0, Math.min(...waiting) - now());
@@ -431,7 +436,6 @@ export const runCapyReporter = async ({
     const again = await sender.sendDue({ limit: state.rows.length || 1 });
     for (const key of Object.keys(sent)) sent[key] = key === "retry" ? again.retry : sent[key] + again[key];
     retry = again.retry;
-    if (again.sent + again.dropped + again.expired === 0) break;
   }
   const held = state.rows.filter((row) => row.state === "queued" && !sendable(row)).length;
   if (held) log(`row_held op=send count=${held} (their threads were not listed as not private this pass; kept for a later pass)`);
