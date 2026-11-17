@@ -392,7 +392,7 @@ every new message, the Oct 18 and Oct 22 incidents). One case is still open
 upstream: a channel session whose interrupted turn is never resumed keeps
 refusing new messages ("This conversation changed before your message could
 start"). After every launch, once the new gateway is ready + 90 s (AlphaClaw
-waits up to 30 minutes for ready, v0.10.288), AlphaClaw checks the sessions that were running when the restart was requested (or,
+waits up to 30 minutes for ready, v0.10.289), AlphaClaw checks the sessions that were running when the restart was requested (or,
 after a crash, sessions active in the 15 minutes before the launch) through
 OpenClaw's own `sessions.list`:
 
