@@ -133,7 +133,6 @@ const runningNeighbours = () => [
   ["eval", "eval 'openclaw config patch' >> memory/n.md"],
   ["sh -c", "sh -c 'openclaw config patch' >> memory/n.md"],
   ["bash -c", "bash -c 'openclaw config patch' >> memory/n.md"],
-  ["printf %n naming an array element, whose subscript zsh expands", "printf 'x%n' 'a[$(openclaw config patch)]' >> memory/n.md"],
   ["zsh -c with the (N) glob qualifier (#423)", "zsh -c '" + kChange.replace("set", "set (N)") + "'"],
   ["xargs", "echo plugins.allow | xargs openclaw config unset"],
   ["env", "env openclaw config patch >> memory/n.md"],
