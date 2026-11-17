@@ -5,12 +5,25 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.300] - 2026-11-17
+## [0.10.301] - 2026-11-17
 
 AlphaClaw can now watch the git checkouts whose pushes matter and tell the owner when one would push with the wrong GitHub credential, cannot reach its remote, or has commits that have not gone out for half an hour.
 
 ### Added
 - `alphaclaw.json` `gitPushChecks.checkouts`: a list of push checkouts, empty (off) by default. Each is checked at boot and every `intervalMinutes` (default 10). When a checkout pins its own credential helper, `git credential fill` for its push URL must give the same credential as that helper alone, compared as a hash and never logged or stored; a helper set outside the checkout that answers first (such as the one `gh auth setup-git` writes into the global gitconfig) is named with the file it comes from and the fix. `git ls-remote` must succeed ("Repository not found" and refused authentication alert at once, other failures on the second check in a row), and commits not on the remote whose oldest is past `stuckMinutes` (default 30) alert with the count. Each problem is announced once and once more when it clears, survives restarts in `.alphaclaw/git-push-checks.json`, and is recorded as a `git_push_check` watchdog event. git runs in the gateway's environment with prompts off and never fetches, writes or pushes.
+
+## [0.10.300] - 2026-11-17
+
+OpenClaw runs that AgentRun can hold open now show up in AgentRun while they run, with their tool calls arriving every 15 seconds.
+
+### Added
+- Live runs: a run whose timeout is under 50 minutes (the cron job's `timeoutSeconds`, else `agents.defaults.timeoutSeconds`), or every run once AgentRun's `/capabilities` advertises `features.sdk_runs`, is started in AgentRun as soon as a hook decides its class (the first tool call, reply or end; never the provisional record of the first model call) or, for a cron run, from its start. Its start shows the title and `Started <time>`, never a status or contents; each tick's new tool calls go out as one more stored batch; the completion follows when the run ends. A listed cron job's message and text go out only after the end. At most 15 live runs are open at once (`live_cap`); the rest are reported when they end. The new deployment setting `ALPHACLAW_AGENTRUN_LIVE=off` reports every run when it ends, as before; any other value than `on` or `off` logs `live_invalid` and keeps it on.
+- Every attempt of a run now lands in one AgentRun run. A model-fallback attempt (or a restart-resumed one that starts within 30 s) appends to the run, which completes after an attempt that succeeded, or 30 s after the last attempt failed. Each attempt is counted once, even when its spool file is read again after a crash. A run that a fallback model rescued now shows as completed, with the usage of every attempt.
+- A live run whose spool file is gone without an end, or that has had no new record for 30 minutes once it is past its own timeout, is completed as cancelled, "ended without a report". A long tool call or a quiet cron script run inside its timeout stays open. A live run AgentRun still expires is reported once more when it ends, under `<key>:final`.
+- With `features.sdk_runs`, a live run sends an empty batch every 10 minutes while open, and every start carries `started_at`, `title` and `labels`; a start an AgentRun without the feature refuses is rebuilt once without them.
+
+### Fixed
+- A run stopped in AgentRun's console was logged as `run_expired`. AgentRun's "This SDK run has ended." answer is now logged `run_ended_elsewhere`, and only "This SDK run expired." counts as `run_expired`.
 
 ## [0.10.299] - 2026-11-17
 
