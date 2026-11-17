@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.299] - 2026-11-17
+
+The relay guard no longer refuses a shell command that only writes a note or only reads a file just because the text mentions OpenClaw, and it now refuses reads of a process's environment.
+
+### Fixed
+- A relay turn that appended a note with a shell command, for example `cd <workspace> && printf '%s\n' '<note>' >> memory/<day>.md && tail -c 200 memory/<day>.md`, was refused as a change to relay trust when the single-quoted note held a backtick pair around `openclaw qr`. The guard read every backtick and `(` as a part the shell fills in, whatever the quotes. It now reads a line as text when every command on it is `cd`, `echo`, `printf`, `cat`, `head`, `tail`, `grep`, `wc`, `ls`, `stat`, `jq`, `pwd` or `true`, quotes are tracked as the shell tracks them (the `'"'"'` apostrophe splice included), nothing outside quotes can expand, and the line writes only note files. Anything else (a shell, `eval`, `xargs`, `env`, a substitution, a subshell, a function, a second line) is judged as before.
+- A read-only line such as `grep -n gbrain <root>/.openclaw/openclaw.json | head` was refused as a config change. A line of only `cat`, `head`, `tail`, `grep`, `wc`, `ls`, `stat`, `jq` and `cd`, with redirects only to `/dev/null`, is now a read, as the read tool's is. Reading the relay's keys and databases stays refused.
+- When a path under the box's `.openclaw` directory held a part the shell fills in, the refusal called it an openclaw command. It now says "a path the shell fills in under <root>/.openclaw" and suggests naming the file in full or using the file-edit tool. Every refusal of a shell command for a trust change now also points a plain note at the file-edit tool.
+
+### Security
+- The relay guard refuses, for every relay session, a read tool call, a shell command or input typed into a process that reaches `/proc/<pid>/environ`, `/proc/self/environ` or `/proc/<pid>/task/<tid>/environ`, followed through `cd`, symlinks and globs. A process's environment holds the box's keys and tokens. This is defense in depth: the box's user separation is the boundary, and the box's own guards already refuse these reads.
+
 ## [0.10.298] - 2026-11-17
 
 Capy turns now reach AgentRun within about a minute of finishing instead of once an hour, and subagent turns are reported too, as metadata only.
@@ -86,7 +98,7 @@ When OpenClaw's own resume pass after a restart fails for some sessions, it trie
 
 ## [0.10.290] - 2026-11-17
 
-A secret link save now refuses to run when AlphaClaw cannot record it on its disk, so a restart can never reopen a link that was already used.
+A secret link save now refuses to run when AlphaClaw cannot record it on its disk, so a restart can no longer reopen a link that was already used.
 
 ### Fixed
 - When the secret link state file can neither be written nor removed (for example a read-only data folder), Save writes nothing and the page shows the error with Retry. Before, the save ran and the spent link could open again after a restart within its 15 minutes.
