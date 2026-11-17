@@ -538,6 +538,24 @@ describe("an error partway through applying or restoring is undone at once", () 
   });
 });
 
+describe("an OpenClaw update copied over an applied package (host installs)", () => {
+  it("drops the old package's marker and keeps the new version instead of reverting to the old stock tree", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) };
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+    writeJson(path.join(install.stock, "package.json"), packageJson({ version: "2026.11.5" }));
+    write(path.join(install.stock, "dist", "index.js"), "export const build = 'new stock';\n");
+    expect(apply(install, env)).toMatchObject({ status: "refused", reason: "no_entry_for_pin" });
+    expect(JSON.parse(fs.readFileSync(path.join(install.stock, "package.json"), "utf8")).version).toBe("2026.11.5");
+    expect(fs.readFileSync(path.join(install.stock, "dist", "index.js"), "utf8")).toContain("new stock");
+    expect(fs.existsSync(path.join(install.stock, override.kPackageMarkerName))).toBe(false);
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+    expect(JSON.parse(fs.readFileSync(path.join(install.stock, "package.json"), "utf8")).version).toBe("2026.11.5");
+    expect(fs.readFileSync(path.join(install.stock, "dist", "index.js"), "utf8")).toContain("new stock");
+  });
+});
+
 describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
   const makeCodex = ({ name = "@openclaw/codex", version = kVersion } = {}) => {
     const src = tmp("codex-src-");
