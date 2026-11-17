@@ -623,6 +623,41 @@ describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
     expect(restore).not.toHaveBeenCalled();
   });
 
+  it("leaves the Codex plugin alone while a gateway runs, and that gateway's launch check still passes", () => {
+    const install = makeInstall();
+    const core = makePackage();
+    const env = codexSetting(core, makeCodex());
+    expect(apply(install, env, { runPluginInstall: fakeInstaller(), readInstalledCodex: () => ({ ok: true, version: kVersion }) })).toMatchObject({ status: "applied" });
+    const restore = vi.fn(() => ({ ok: true }));
+    expect(apply(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(core) }, { runPluginRestore: restore, gatewayRunning: () => true })).toMatchObject({ status: "refused", reason: "deferred", inPlace: { status: "applied" } });
+    expect(restore).not.toHaveBeenCalled();
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+
+    const install2 = makeInstall();
+    const runPluginInstall = fakeInstaller();
+    expect(apply(install2, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(core) })).toMatchObject({ status: "applied" });
+    expect(apply(install2, env, { runPluginInstall, gatewayRunning: () => true })).toMatchObject({ status: "refused", reason: "deferred" });
+    expect(runPluginInstall).not.toHaveBeenCalled();
+  });
+
+  it("asks the OpenClaw it runs for the installed plugin, and reinstalls that version with it", () => {
+    const install = makeInstall();
+    const fakeCli = [
+      'import fs from "node:fs";',
+      'fs.appendFileSync(process.env.OPENCLAW_STATE_DIR + "/calls.log", JSON.stringify(process.argv.slice(2)) + "\\n");',
+      'if (process.argv[3] === "list") console.log("[plugins] loading\\n" + JSON.stringify({ plugins: [{ id: "codex", version: "2026.11.3" }] }));',
+    ].join("\n");
+    write(path.join(install.stock, "openclaw.mjs"), fakeCli);
+    const env = codexSetting(makePackage({ files: { "openclaw.mjs": fakeCli } }), makeCodex());
+    expect(apply(install, env, { runPluginInstall: fakeInstaller(), readInstalledCodex: undefined })).toMatchObject({ status: "applied" });
+    expect(apply(install, {}, { runPluginRestore: undefined })).toMatchObject({ status: "stock", codexRollback: { ok: true, spec: "@openclaw/codex@2026.11.3" } });
+    const calls = fs.readFileSync(path.join(install.openclawDir, "calls.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls).toEqual([
+      ["plugins", "list", "--json"],
+      ["plugins", "install", "@openclaw/codex@2026.11.3", "--force", "--accept-capabilities"],
+    ]);
+  });
+
   it("a refused Codex entry leaves the stock OpenClaw in place, not the freshly applied package", () => {
     const install = makeInstall();
     const env = codexSetting(makePackage(), makeCodex({ name: "@openclaw/discord" }));

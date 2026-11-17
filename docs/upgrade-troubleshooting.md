@@ -785,7 +785,8 @@ the image has not installed yet it says which checks it could not run
 - `deferred`: a gateway was already running from the OpenClaw tree when
   AlphaClaw started (an old gateway still draining, or a second
   `alphaclaw start` run by hand against a live install), so nothing was
-  changed. A gateway already running keeps its own checks. Stop the other
+  changed (the Codex plugin is neither installed nor put back while a
+  gateway runs). A gateway already running keeps its own checks. Stop the other
   AlphaClaw, or restart the container.
 - `restore_failed`: the setting was removed but the stock build could not be
   put back. The gateway stays down until a start restores it; the detail
