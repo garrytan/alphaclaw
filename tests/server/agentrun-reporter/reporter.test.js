@@ -784,3 +784,59 @@ describe("agentrun reporter: revoked content, live directories and unreadable sp
     expect(cut("abc", 3)).toBe("abc");
   });
 });
+
+describe("agentrun reporter: an agent another writer just created", () => {
+  const agentExists = () => new Response(JSON.stringify({ error: { code: "agent_exists", message: "exists" } }), { status: 409 });
+
+  it("reads the agent again after agent_exists and sends the turn on the next pass", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const now = () => clock;
+    const fake = createFakeAgentrun();
+    let raced = false;
+    const racing = async (url, init) => {
+      if (String(url).endsWith("/agents") && init.method === "POST" && !raced) {
+        raced = true;
+        await fake.fetchImpl(url, init);
+        return agentExists();
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const { source, outbox, logs } = makePipeline(rootDir, { fake, now });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: racing }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      random: () => 0.5,
+      now,
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect(await sender.sendDue()).toMatchObject({ retry: 1, dropped: 0 });
+    clock += 60 * 1000;
+    expect((await sender.sendDue()).sent).toBe(1);
+    expect(logs.join("\n")).not.toContain("agent_refused");
+  });
+
+  it("drops the turn when agent_exists comes back but the agent still cannot be read", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const held = async (url, init) => (String(url).endsWith("/agents") && init.method === "POST" ? agentExists() : fake.fetchImpl(url, init));
+    const { source, outbox, logs } = makePipeline(rootDir, { fake });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: held }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect((await sender.sendDue()).dropped).toBe(1);
+    expect(logs.join("\n")).toContain("agent_refused op=agent_create source=openclaw agent=openclaw-agent-main code=agent_exists");
+  });
+});
