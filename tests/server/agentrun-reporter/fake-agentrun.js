@@ -13,12 +13,15 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
   const runs = new Map();
   const startKeys = new Map();
   const requests = [];
-  const state = { down: false, failNext: [] };
+  // loseAnswer: a request on that path is carried out, then the connection
+  // drops before its answer (and stays down until the test lifts it).
+  const state = { down: false, failNext: [], loseAnswer: null };
   const error = (status, code, message = code) => ({ status, body: { error: { code, message, retryable: false } } });
 
   const handle = (method, path, headers, body) => {
     if (state.down) throw new TypeError("fetch failed");
-    const injected = state.failNext.shift();
+    const index = state.failNext.findIndex((item) => !item.path || item.path.test(path));
+    const injected = index < 0 ? null : state.failNext.splice(index, 1)[0];
     if (injected) return injected;
     const auth = String(headers.authorization || "").replace(/^Bearer /, "");
     let match;
@@ -97,6 +100,11 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
     const body = init.body ? JSON.parse(init.body) : undefined;
     requests.push({ method: init.method || "GET", path, body: init.body || "", headers: { ...headers, authorization: headers.authorization ? "<set>" : "" } });
     const answer = handle(init.method || "GET", path, headers, body);
+    if (state.loseAnswer?.test(path) && answer.status < 300) {
+      state.loseAnswer = null;
+      state.down = true;
+      throw new TypeError("fetch failed");
+    }
     return {
       status: answer.status,
       headers: { get: (name) => (name.toLowerCase() === "etag" ? answer.etag || null : null) },
