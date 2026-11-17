@@ -40,7 +40,7 @@ describeLive("live: sessionless clients through AlphaClaw are remote to the gate
   let publicUrl;
   let gatewayUrl;
   let publicOrigin;
-  let cookie = "";
+  let loginJar = "";
 
   const viaPublic = (options) => connectGateway({ url: publicUrl, localAddress: kPublicAddress, ...options });
   const onGatewayHost = (options) => connectGateway({ url: gatewayUrl, ...options });
@@ -94,7 +94,7 @@ describeLive("live: sessionless clients through AlphaClaw are remote to the gate
       body: JSON.stringify({ password: kSetupPassword }),
     });
     expect(login.status).toBe(200);
-    cookie = (login.headers.getSetCookie?.() || []).map((entry) => entry.split(";")[0]).join("; ");
+    loginJar = (login.headers.getSetCookie?.() || []).map((entry) => entry.split(";")[0]).join("; ");
   }, kBootTimeoutMs + 60_000);
 
   afterAll(async () => {
@@ -105,7 +105,7 @@ describeLive("live: sessionless clients through AlphaClaw are remote to the gate
     viaPublic({
       url: `ws://${kPublicAddress}:${install.port}/openclaw`,
       origin: publicOrigin,
-      headers: { cookie, host: `box.example:${install.port}` },
+      headers: { cookie: loginJar, host: `box.example:${install.port}` },
       clientId: "openclaw-control-ui",
       clientMode: "webchat",
       platform: "web",

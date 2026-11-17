@@ -174,6 +174,18 @@ describe("A2A HTTP identity boundary", () => {
     expect(resolveProxyIdentity).not.toHaveBeenCalled();
   });
 
+  it("presents a sessionless /api forward to the gateway by its client address", async () => {
+    requireAuth.mockImplementation((_req, _res, next) => next());
+    resolveProxyIdentity.mockReturnValue(null);
+    const res = await request(app).get("/api/proxy-e2e/echo")
+      .set("Authorization", "Bearer agent-token")
+      .set("X-Forwarded-For", "203.0.113.70")
+      .timeout(3000);
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].headers["x-forwarded-for"]).toBe("203.0.113.70");
+  });
+
   it.each([
     ["get", "/a2a/v1"],
     ["head", "/a2a/v1"],
