@@ -184,8 +184,12 @@ const splitTurns = (entries) => {
 // A change only updates the state in memory (touch renews the lease when
 // due); the pass writes the file once after sending, so a long send phase
 // never rewrites the whole file per row. A row whose send was not yet
-// written goes out again under the same key on the next pass.
-const createStateOutbox = ({ getState, touch, now, sendable = () => true, nameOf = (row) => row.agent_name }) => ({
+// written goes out again under the same key on the next pass. The one
+// exception is a live row's start: it is written (persist) as soon as it is
+// built and before it is posted, once per live turn, so a pass that ends
+// before its write never leaves the turn to be started again under the same
+// key with a finished turn's start, which AgentRun refuses.
+const createStateOutbox = ({ getState, touch, persist, now, sendable = () => true, nameOf = (row) => row.agent_name }) => ({
   due: (limit = 50) =>
     getState().rows
       .filter((row) => row.state === "queued" && row.next_attempt_at <= now() && sendable(row))
@@ -194,7 +198,8 @@ const createStateOutbox = ({ getState, touch, now, sendable = () => true, nameOf
   update: (id, fields) => {
     const row = getState().rows.find((entry) => entry.id === id);
     if (row) Object.assign(row, fields);
-    touch();
+    if (row?.state === "live" && "start_body" in fields) persist();
+    else touch();
   },
   agentOf: (agentKey) => getState().agents[agentKey] || null,
   saveAgent: ({ agentKey, agentId, runtime, definitionHash }) => {
@@ -825,7 +830,7 @@ export const runCapyReporter = async ({
   // or a failed read leaves it held in the queue for a later pass.
   const sendable = (row) => row.class === "private" || listedOpen.has(row.session_label);
   const sender = createSender({
-    outbox: createStateOutbox({ getState: () => state, touch: () => lease.renewIfDue(), now, sendable, nameOf: sendNameOf }),
+    outbox: createStateOutbox({ getState: () => state, touch: () => lease.renewIfDue(), persist: () => save(), now, sendable, nameOf: sendNameOf }),
     client,
     token,
     getRuntime: () => runtime,
@@ -837,12 +842,16 @@ export const runCapyReporter = async ({
 
   // A live turn starts in AgentRun as soon as it is seen working and sends an
   // empty event batch at most every 10 minutes while it works; its events and
-  // completion go with the finished turn. A new heartbeat is written before
-  // it is posted; the rest is written with the pass's write after sending.
+  // completion go with the finished turn. A new start and a new heartbeat
+  // are written before they are posted; the rest is written with the pass's
+  // write after sending. A write merges the file and may replace a row's
+  // object, so the row is looked up again after its start.
   const sendLive = async () => {
-    for (const row of state.rows.filter((entry) => entry.state === "live" && Number(entry.next_attempt_at || 0) <= now() && sendable(entry))) {
-      const started = await sender.startOnly({ ...row, agent_name: sendNameOf(row) });
+    for (const listed of state.rows.filter((entry) => entry.state === "live" && Number(entry.next_attempt_at || 0) <= now() && sendable(entry))) {
+      const started = await sender.startOnly({ ...listed, agent_name: sendNameOf(listed) });
       if (started.outcome !== "started") continue;
+      const row = state.rows.find((entry) => entry.id === listed.id);
+      if (!row) continue;
       if (!row.live_started) {
         Object.assign(row, { live_started: 1, heartbeat_at: now() });
         counts.live += 1;

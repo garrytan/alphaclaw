@@ -1119,6 +1119,41 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(item.completion).toMatchObject({ status: "completed", session_id: "jam_W" });
   });
 
+  it("writes a live turn's start to the state file before posting it, so a crash never loses the turn to a rebuilt start", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const w = [user("w1", 0), reply("rw1", -0.5)];
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: w } });
+    const agentrunFetch = fake.fetchImpl;
+    let startPosted = false;
+    fake.fetchImpl = async (url, init) => {
+      const answer = await agentrunFetch(url, init);
+      if (/\/sdk-runs$/.test(new URL(url).pathname)) startPosted = true;
+      return answer;
+    };
+    const realRename = fs.renameSync;
+    const rename = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (startPosted && to === statePath) throw Object.assign(new Error("EIO: the Drive mount failed"), { code: "EIO" });
+      return realRename(from, to);
+    });
+    try {
+      await expect(run(capy, {}, { watchMinutes: 1 })).rejects.toThrow("EIO");
+    } finally {
+      rename.mockRestore();
+      fake.fetchImpl = agentrunFetch;
+    }
+    expect(fake.runs.size).toBe(1);
+    w.push(user("w2", -2), reply("rw2", -2.5));
+    Object.assign(capy.threads[0], { status: "idle", lastActivityAt: at(-2.5) });
+    fs.rmSync(leasePath(), { force: true });
+    const result = await run(capy);
+    expect(result.code).toBe(0);
+    expect(result.lines.join("\n")).not.toContain("row_dropped");
+    expect(fake.runs.size).toBe(2);
+    const item = runByKey("alphaclaw:capy:jam_W:" + w[0].id);
+    expect(item.start.input).toMatch(/^Title jam_W · working — started /);
+    expect(item.completion).toMatchObject({ status: "completed", session_id: "jam_W" });
+  });
+
   it("exits non-zero with one line naming what is missing, never a value", () => {
     const result = spawnSync(process.execPath, [kScript, "--state", path.join(dir, "state.json")], {
       env: { PATH: process.env.PATH, AGENTRUN_CAPY_REPORTER_TOKEN: "tok-VALUE-123" },

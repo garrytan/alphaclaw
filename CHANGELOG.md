@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.302] - 2026-11-17
+
+The Capy reporter no longer loses a live turn when its pass ends right after the turn was started in AgentRun.
+
+### Fixed
+- A live turn's start is now written to the state file before it is posted to AgentRun (one write per live turn). Before, it was kept only in memory until the pass's write after sending, so a pass that stopped in between (a failed state write, a killed process) left the next pass to start the finished turn again under the same key with a different body; AgentRun refused it with `idempotency_mismatch`, the reporter dropped it (`row_dropped op=start … code=idempotency_mismatch`), and the run stayed open in AgentRun with no events or completion.
+- AGENTS.md and the SQLite outbox's comment now date live runs to v0.10.300, the release that shipped them, instead of v0.10.299.
+
 ## [0.10.301] - 2026-11-17
 
 The Capy reporter's first pass now reads only the last day of each thread it has not seen before instead of its whole history, writes its state file far less often, and logs its progress while it works.
