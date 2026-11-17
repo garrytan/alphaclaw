@@ -1,5 +1,6 @@
 const { execFile, execFileSync } = require("child_process");
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 
@@ -85,12 +86,11 @@ describe("git push checks", () => {
     const ctx = setup();
     const { checks, notify, recordEvent } = createChecks(ctx);
     const first = await checks.check();
-    expect(first.results[0].routing).toMatchObject({ code: "wrong_identity", ownUser: "agents", actualUser: "garry" });
+    expect(first.results[0].routing).toMatchObject({ code: "wrong_identity", answered: true, sameUser: false });
     expect(notify).toHaveBeenCalledTimes(1);
     const [message, options] = notify.mock.calls[0];
     expect(message).toContain(ctx.work);
-    expect(message).toContain("\"agents\"");
-    expect(message).toContain("\"garry\"");
+    expect(message).toContain("answers as a different user");
     expect(message).toContain("global config (" + path.join(ctx.home, ".gitconfig") + ")");
     expect(message).toContain("add an empty \"helper =\" line");
     expect(options).toMatchObject({ eventType: "health" });
@@ -99,6 +99,9 @@ describe("git push checks", () => {
     for (const text of [message, stored, JSON.stringify(first)]) {
       expect(text).not.toContain(kGlobalToken);
       expect(text).not.toContain(kRepoToken);
+      // A username can carry a token (username=<token>, password=x-oauth-basic).
+      expect(text).not.toContain("\"agents\"");
+      expect(text).not.toContain("\"garry\"");
     }
 
     await checks.check();
@@ -199,6 +202,38 @@ describe("git push checks", () => {
     expect(notify).toHaveBeenCalledTimes(2);
     expect(notify.mock.calls[1][0]).toContain("no longer tracks files its ignore rules exclude");
     expect(fs.existsSync(listPath)).toBe(false);
+  });
+
+  it("never makes a helper store or erase a credential when the remote refuses it", async () => {
+    const ctx = setup({ pin: false });
+    const seen = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.headers.authorization || "");
+      res.writeHead(401, { "WWW-Authenticate": "Basic realm=\"git\"" });
+      res.end();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const origin = "http://127.0.0.1:" + server.address().port;
+      const store = path.join(ctx.root, "stored-credentials");
+      const saved = "http://agents:" + kRepoToken + "@127.0.0.1:" + server.address().port + "\n";
+      fs.writeFileSync(store, saved);
+      ctx.git(ctx.work, ["config", "--local", "--add", "credential.helper", "store --file=" + store]);
+      ctx.git(ctx.work, ["remote", "set-url", "origin", origin + "/acme/private.git"]);
+      const checks = createGitPushChecks({
+        openclawDir: ctx.openclawDir,
+        readConfig: () => ({ checkouts: [{ path: ctx.work }] }),
+        getEnv: () => ctx.env,
+        notify: vi.fn(async () => ({ ok: true })),
+        logger: { log() {}, warn() {} },
+      });
+      const { results } = await checks.check();
+      expect(results[0].routing).toMatchObject({ code: "auth_failed" });
+      expect(seen).toContain("Basic " + Buffer.from("agents:" + kRepoToken).toString("base64"));
+      expect(fs.readFileSync(store, "utf8")).toBe(saved);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("runs no git when no checkout is listed", async () => {
