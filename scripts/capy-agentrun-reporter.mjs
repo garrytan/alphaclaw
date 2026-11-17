@@ -249,10 +249,12 @@ export const runCapyReporter = async ({
     }
     const replies = turn.entries.filter((entry) => entry.source === "assistant" && entry.text);
     const title = cls === "private" ? "" : String(thread.title || "").trim();
+    // AgentRun titles an SDK run with the first 80 characters of its input,
+    // whitespace collapsed: what ran, how long and how it ended come first.
     const metadataLine =
-      `Capy ${cls} turn in thread ${thread.id}${title ? ` "${cut(title, 200)}"` : ""}; ` +
-      `started ${startedAt ? new Date(startedAt).toISOString() : "unknown"}, ${describeDuration(endedAt - startedAt)}, status ${status}; ` +
-      `${replies.length} replies, ${tools.length} tool calls.${creditsNote}`;
+      `${title ? cut(title, 60) : "Private Capy thread"} · ${describeDuration(endedAt - startedAt)} · ${status} — ` +
+      `${replies.length} repl${replies.length === 1 ? "y" : "ies"}, ${tools.length} tool call${tools.length === 1 ? "" : "s"}; started ${startedAt ? new Date(startedAt).toISOString() : "unknown"}; ` +
+      `Capy ${cls} turn in thread ${thread.id}.${creditsNote}`;
     const { id: agent_key } = agent;
     return {
       id: crypto.createHash("sha256").update(sourceRunId).digest("hex").slice(0, 16),
@@ -268,7 +270,7 @@ export const runCapyReporter = async ({
       ended_at: endedAt,
       status,
       model: String(turn.user.model || thread.lastModelId || ""),
-      input_text: contents && turn.user.text ? `${turn.user.text}\n\n(${metadataLine})` : metadataLine,
+      input_text: contents && turn.user.text ? `${metadataLine}\n\n${turn.user.text}` : metadataLine,
       texts_json: JSON.stringify(contents ? texts : []),
       answer_text: contents && replies.length ? String(replies[replies.length - 1].text) : "",
       error_text: status === "failed" ? "The thread failed (details withheld)." : "",

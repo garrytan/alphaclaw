@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.296] - 2026-11-17
+
+OpenClaw turns in AgentRun now show their model and token usage, and every reported run, OpenClaw or Capy, gets a short readable title.
+
+### Fixed
+- Most OpenClaw turns reached AgentRun with no model and 0 tokens. OpenClaw 2026.11.4 sends a turn's usage (`llm_output`) just after it reports the turn ended (`agent_end`), and the reporter had already closed the turn by then. The capture plugin now waits for that usage before closing a turn. It also records the model from `model_call_ended`, so a turn that never sends usage still names its model; AlphaClaw reads such a turn once it has been over for 30 s.
+- AgentRun titles a run with the first 80 characters of its input, and the reported input began with a long description, so titles were cut off mid-timestamp. Each run's input now opens with what ran, how long it took and how it ended, for example `Telegram group (main) · 24.5s · completed`, `Cron: Morning brief · 1.2s · failed` or `<thread title> · 180s · completed` (`Private Capy thread` for a private thread), followed by the details. A listed cron job's message and an automation turn's prompt now come after that line instead of before it.
+
 ## [0.10.295] - 2026-11-17
 
 Capy threads can now show up in AgentRun beside OpenClaw's turns. A new script, run once an hour by a Capy automation, reads finished Capy thread turns with a read-only Capy key and reports each one to AgentRun once.

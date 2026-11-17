@@ -129,7 +129,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(capy.requests.some((request) => request.route === "/threads/jam_C/messages")).toBe(false);
     expect(capy.requests.every((request) => request.authorized)).toBe(true);
     const firstRun = runFor("jam_A", a[0]);
-    expect(firstRun.start.input).toMatch(/^Capy thread turn in thread jam_A "Title jam_A"; started 2026-11-17T11:00:00.000Z, 180s, status completed; 2 replies, 1 tool calls\.$/);
+    expect(firstRun.start.input).toMatch(/^Title jam_A · 180s · completed — 2 replies, 1 tool call; started 2026-11-17T11:00:00.000Z; Capy thread turn in thread jam_A\.$/);
     expect(firstRun.batches.flatMap((batch) => batch.events).filter((event) => event.type === "tool").map((event) => event.name)).toEqual(["bash", "bash"]);
     expect(fake.agents.get("capy-project-p1").definition).toMatchObject({ name: "Capy project: Alpha", learning: false, sdk: { runtime: "claude-agent-sdk" } });
 
@@ -156,11 +156,11 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     });
     expect((await run(capy)).code).toBe(0);
     const auto = runFor("jam_D", d[0]);
-    expect(auto.start.input).toMatch(/^AUTO-INPUT\n\n\(Capy automation turn in thread jam_D "Title jam_D"/);
+    expect(auto.start.input).toMatch(/^Title jam_D · [\d.]+s · completed — .*; Capy automation turn in thread jam_D\.\n\nAUTO-INPUT$/);
     expect(auto.batches.flatMap((batch) => batch.events).filter((event) => event.type === "text").map((event) => event.text)).toEqual(["AUTO-REPLY", "Tool call: bash (1.2s)"]);
     expect(auto.completion).toMatchObject({ status: "completed", answer: "AUTO-REPLY", session_id: "jam_D", evidence_complete: false });
-    expect(runFor("jam_D", d[3]).start.input).toMatch(/^Capy thread turn in thread jam_D/);
-    expect(runFor("jam_E", e[0]).start.input).toContain('"VISIBLE-TITLE"');
+    expect(runFor("jam_D", d[3]).start.input).toMatch(/^Title jam_D · .*; Capy thread turn in thread jam_D\.$/);
+    expect(runFor("jam_E", e[0]).start.input).toMatch(/^VISIBLE-TITLE · /);
     expect(fake.agents.get("capy-captain-jam_crew1").definition.name).toBe("Capy crew: Crew One");
     expect(allBodies()).not.toContain(kMarker);
   });
@@ -183,7 +183,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     });
     expect((await run(capy)).code).toBe(0);
     expect(fake.runs.size).toBe(4);
-    for (const item of fake.runs.values()) expect(item.start.input).toMatch(/^Capy private turn in thread jam_P\d; started/);
+    for (const item of fake.runs.values()) expect(item.start.input).toMatch(/^Private Capy thread · .*; Capy private turn in thread jam_P\d\.$/);
     expect(fake.agents.get("capy-captain-jam_privatecrew").definition.name).toBe("Capy crew jam_privatecrew");
     expect(allBodies()).not.toContain(kMarker);
     expect(allBodies()).not.toContain("PRIVATE-TITLE");
@@ -199,7 +199,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     });
     expect((await run(capy)).code).toBe(0);
     expect(fake.runs.size).toBe(1);
-    expect([...fake.runs.values()][0].start.input).toMatch(/^Capy private turn in thread jam_Q; started/);
+    expect([...fake.runs.values()][0].start.input).toMatch(/^Private Capy thread · .*; Capy private turn in thread jam_Q\.$/);
     expect(allBodies()).not.toMatch(/PRIVATE-TITLE|Hidden|AUTO-/);
     expect(allBodies()).not.toContain(kMarker);
   });
@@ -214,7 +214,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     });
     expect((await run(capy)).code).toBe(0);
     expect(fake.runs.size).toBe(2);
-    for (const item of fake.runs.values()) expect(item.start.input).toMatch(/^Capy thread turn in thread jam_S "Title jam_S"/);
+    for (const item of fake.runs.values()) expect(item.start.input).toMatch(/^Title jam_S · .*; Capy thread turn in thread jam_S\.$/);
     expect(allBodies()).not.toMatch(/PERSON-|STANDING-/);
   });
 
