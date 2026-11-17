@@ -11,7 +11,7 @@ const kNow = Date.parse("2026-11-17T12:00:00Z");
 
 const at = (minutesAgo) => new Date(kNow - minutesAgo * 60000).toISOString();
 let seq = 0;
-const entry = (source, text, minutesAgo, extra = {}) => ({ id: "E" + String((seq += 1)).padStart(25, "0"), source, text, createdAt: at(minutesAgo), ...extra });
+const entry = (source, text, minutesAgo, extra = {}) => ({ id: "01" + String((seq += 1)).padStart(24, "0"), source, text, createdAt: at(minutesAgo), ...extra });
 const user = (text, minutesAgo, extra) => entry("user", text, minutesAgo, extra);
 const reply = (text, minutesAgo) => entry("assistant", text, minutesAgo);
 const tool = (name, minutesAgo) => entry("tool", "input " + kMarker + " output " + kMarker, minutesAgo, { tool: name, calls: [{ tool: name, durationMs: 1200 }] });
@@ -85,9 +85,17 @@ const createFakeCapy = ({
     if ((match = /^\/threads\/([^/]+)\/messages$/.exec(route))) {
       const list = messages[match[1]];
       if (!list) return answer(404, { _tag: "capy/ThreadNotFound" });
+      // Pages forward with after or backward with before (event-ID cursors,
+      // exclusive); without either, the oldest page.
+      if (query.before) {
+        const end = list.filter((item) => item.id < query.before).length;
+        const start = Math.max(0, end - pageSize);
+        const items = list.slice(start, end);
+        return answer(200, { items, cursor: end < list.length && items.length ? items[items.length - 1].id : null, beforeCursor: start > 0 ? items[0].id : null });
+      }
       const from = query.after ? list.findIndex((item) => item.id === query.after) + 1 : 0;
       const { items, next } = page(list, from);
-      return answer(200, { items, cursor: next === null ? null : items[items.length - 1].id, beforeCursor: null });
+      return answer(200, { items, cursor: next === null ? null : items[items.length - 1].id, beforeCursor: from > 0 && items.length ? items[0].id : null });
     }
     return answer(404, { _tag: "capy/NotFound" });
   };
@@ -671,7 +679,7 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
       subagentMessages: { sD: [user("SUB-INPUT " + kMarker, 28), reply("SUB-REPLY " + kMarker, 27), tool("bash", 26), user("SUB-AGAIN " + kMarker, 25, fromParent("jam_D")), reply("SUB-LAST " + kMarker, 24)] },
     });
     expect((await run(capy)).code).toBe(0);
-    expect(runByKey(keys().find((key) => /:jam_D:E/.test(key))).start.input).toMatch(/Capy automation turn in thread jam_D\.\n\nAUTO-INPUT$/);
+    expect(runByKey(keys().find((key) => /:jam_D:01/.test(key))).start.input).toMatch(/Capy automation turn in thread jam_D\.\n\nAUTO-INPUT$/);
     const subRuns = keys().filter((key) => key.includes(":sub:sD:")).map(runByKey);
     expect(subRuns).toHaveLength(2);
     for (const item of subRuns) {
@@ -907,6 +915,174 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     clock += 60000;
     expect((await run(capy)).code).toBe(0);
     expect(capy.requests.filter((request) => request.route === "/threads/jam_A/subagents").length).toBe(listings);
+  });
+
+  it("reads a finished subagent's transcript again on the next pass after one transcript read failed", async () => {
+    const s1 = [user("t1", 30), reply("r1", 29)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_A")],
+      messages: { jam_A: [user("a1", 30), reply("ra1", 29)] },
+      subagents: { jam_A: [sub("s1", "jam_A")] },
+      subagentMessages: { s1 },
+    });
+    capy.state.fail = (route) => (route === "/subagents/s1/messages" ? 500 : null);
+    const failed = await run(capy);
+    expect(failed.code).toBe(1);
+    expect(failed.lines.join("\n")).toContain("capy_error op=subagent id=s1 status=500");
+    capy.state.fail = null;
+    clock += 60000;
+    expect((await run(capy)).code).toBe(0);
+    expect(keys().filter((key) => key.includes(":sub:"))).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id]);
+    const reads = capy.requests.filter((request) => request.route === "/subagents/s1/messages").length;
+    clock += 60000;
+    expect((await run(capy)).code).toBe(0);
+    expect(capy.requests.filter((request) => request.route === "/subagents/s1/messages").length).toBe(reads);
+  });
+
+  it("refuses a --watch that is not a whole number of minutes from 1 to 1440, reading nothing", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    for (const value of [0, "0", "", 0.5, "1.5", -1, 1441, "1441", "1e1", " 5"]) {
+      const result = await run(capy, {}, { watchMinutes: value });
+      expect([value, result.code]).toEqual([value, 2]);
+      expect(result.lines.join("\n")).toContain("config_invalid op=capy fix=--watch takes minutes from 1 to 1440");
+    }
+    expect(capy.requests).toHaveLength(0);
+    expect(fs.existsSync(leasePath())).toBe(false);
+  });
+
+  it("reads a first-seen thread backward from its newest message, stops at the 24-hour window and continues forward after", async () => {
+    const list = [];
+    for (let index = 0; index < 20; index += 1) list.push(user("old" + index, 3 * 24 * 60 - index * 10), reply("ro" + index, 3 * 24 * 60 - index * 10 - 1));
+    const edge = [user("EDGE-OPEN", 25 * 60), reply("e1", 24 * 60 + 30), reply("e2", 23 * 60)];
+    const recent = [user("n1", 60), reply("rn1", 59), user("n2", 30), reply("rn2", 29)];
+    list.push(...edge, ...recent);
+    const capy = createFakeCapy({ threads: [thread("jam_L")], messages: { jam_L: list } });
+    expect((await run(capy)).code).toBe(0);
+    const reads = capy.requests.filter((request) => request.route === "/threads/jam_L/messages");
+    expect(reads.every((request) => request.query.before && Number(request.query.limit) > 0 && !request.query.after)).toBe(true);
+    expect(reads).toHaveLength(3);
+    expect(keys()).toEqual([recent[0], recent[2]].map((item) => "alphaclaw:capy:jam_L:" + item.id));
+    expect(allBodies()).not.toContain("EDGE-OPEN");
+    expect(runByKey("alphaclaw:capy:jam_L:" + recent[0].id).start.input).toContain("1 reply, 0 tool calls");
+
+    const added = [user("n3", 2), reply("rn3", 1)];
+    list.push(...added);
+    capy.threads[0].lastActivityAt = at(1);
+    const from = capy.requests.length;
+    expect((await run(capy)).code).toBe(0);
+    const later = capy.requests.slice(from).filter((request) => request.route === "/threads/jam_L/messages");
+    expect(later.length).toBeGreaterThan(0);
+    expect(later.every((request) => request.query.after && !request.query.before)).toBe(true);
+    expect(later.length).toBeLessThanOrEqual(2);
+    expect(keys().slice(2)).toEqual(["alphaclaw:capy:jam_L:" + added[0].id]);
+  });
+
+  it("reads a thread forward from its first message when Capy refuses the backward first read", async () => {
+    const a = [user("a1", 30), reply("r1", 29), user("a2", 20), reply("r2", 19)];
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: a } });
+    capy.state.fail = (route, query) => (query.before ? 400 : null);
+    const result = await run(capy);
+    expect(result.code).toBe(0);
+    expect(result.lines.join("\n")).toContain("first_read_fallback op=capy status=400");
+    expect(keys()).toEqual([a[0], a[2]].map((item) => "alphaclaw:capy:jam_A:" + item.id));
+  });
+
+  it("keeps a first-seen thread's open turn across the backward read and reports it once it closes", async () => {
+    const list = [];
+    for (let index = 0; index < 10; index += 1) list.push(user("old" + index, 3 * 24 * 60 - index * 10), reply("ro" + index, 3 * 24 * 60 - index * 10 - 1));
+    const open = [user("w1", 40), reply("rw1", 39), tool("bash", 38), reply("rw1b", 37), reply("rw1c", 36)];
+    list.push(...open);
+    const capy = createFakeCapy({ threads: [thread("jam_O", { status: "waiting", lastActivityAt: at(36) })], messages: { jam_O: list } });
+    expect((await run(capy)).code).toBe(0);
+    expect(keys()).toEqual([]);
+    list.push(reply("done", 5));
+    Object.assign(capy.threads[0], { status: "idle", lastActivityAt: at(5) });
+    expect((await run(capy)).code).toBe(0);
+    expect(keys()).toEqual(["alphaclaw:capy:jam_O:" + open[0].id]);
+    expect(runByKey(keys()[0]).start.input).toContain("4 replies, 1 tool call");
+  });
+
+  it("writes the state file once per thread read and once after sending, not once per row", async () => {
+    const turns = [];
+    for (let index = 0; index < 10; index += 1) turns.push(user("q" + index, 200 - index * 10), reply("a" + index, 199 - index * 10), tool("bash", 198 - index * 10));
+    const capy = createFakeCapy({ threads: [thread("jam_M"), thread("jam_N")], messages: { jam_M: turns, jam_N: [user("x", 30), reply("y", 29)] } });
+    const rename = vi.spyOn(fs, "renameSync");
+    try {
+      expect((await run(capy)).code).toBe(0);
+      const writes = rename.mock.calls.filter(([, to]) => to === statePath).length;
+      expect(fake.runs.size).toBe(11);
+      expect(writes).toBeLessThanOrEqual(4);
+    } finally {
+      rename.mockRestore();
+    }
+    const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    expect(saved.rows).toEqual([]);
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.runs.size).toBe(11);
+  });
+
+  it("logs a progress line per project as it is read and one before sending, with no titles or names", async () => {
+    const capy = createFakeCapy({
+      projects: [{ id: "p1", name: "Alpha", visibility: "org" }, { id: "p2", name: "Beta", visibility: "org" }],
+      threads: [thread("jam_A", { title: "TITLE-A" }), thread("jam_B", { title: "TITLE-B" }), thread("jam_C", { projectId: "p2", title: "TITLE-C" })],
+      messages: { jam_A: [user("a1", 30), reply("r1", 29)], jam_B: [user("b1", 30), reply("r2", 29)], jam_C: [user("c1", 30), reply("r3", 29)] },
+    });
+    const result = await run(capy);
+    expect(result.code).toBe(0);
+    const progress = result.lines.filter((line) => line.includes("capy_progress"));
+    expect(progress).toHaveLength(3);
+    expect(progress[0]).toMatch(/capy_progress project=p1 threads=2 pages=\d+ elapsed=\d+s$/);
+    expect(progress[1]).toMatch(/capy_progress project=p2 threads=1 pages=\d+ elapsed=\d+s$/);
+    expect(progress[2]).toMatch(/capy_progress op=send waiting=3$/);
+    expect(progress.join("\n")).not.toMatch(/TITLE|Alpha|Beta/);
+    expect(result.lines.findIndex((line) => line.includes("op=send waiting"))).toBeLessThan(result.lines.findIndex((line) => line.includes("capy_pass")));
+  });
+
+  it("never lets a one-shot pass and a watch pass overlap, whichever starts first", async () => {
+    const env = { CAPY_REPORTER_API_KEY: "capy-key", AGENTRUN_BASE_URL: kBase, AGENTRUN_CAPY_REPORTER_TOKEN: fake.token };
+    const reporter = (capy, lines, extra) =>
+      runCapyReporter({
+        env,
+        statePath,
+        fetchImpl: fake.fetchImpl,
+        capyFetchImpl: capy.fetchImpl,
+        now: () => clock,
+        logger: { warn: (line) => lines.push(line), log: (line) => lines.push(line) },
+        ...extra,
+      });
+    const messages = { jam_A: [user("a1", 30), reply("r1", 29)] };
+    const second = createFakeCapy({ threads: [thread("jam_A")], messages });
+    const secondLines = [];
+    let secondCode = null;
+    const watchLines = [];
+    const watchCode = await reporter(createFakeCapy({ threads: [thread("jam_A")], messages }), watchLines, {
+      watchMinutes: 2,
+      sleep: async (ms) => {
+        if (secondCode === null) secondCode = await reporter(second, secondLines, { sleep: async () => {} });
+        clock += ms;
+      },
+    });
+    expect(watchCode).toBe(0);
+    expect(secondCode).toBe(0);
+    expect(secondLines.join("\n")).toContain("watch_skipped");
+    expect(second.requests).toHaveLength(0);
+
+    const oneShot = createFakeCapy({ threads: [thread("jam_A")], messages });
+    oneShot.state.rateLimit = 1;
+    const watcher = createFakeCapy({ threads: [thread("jam_A")], messages });
+    const watcherLines = [];
+    let watcherCode = null;
+    const oneShotCode = await reporter(oneShot, [], {
+      sleep: async (ms) => {
+        if (watcherCode === null) watcherCode = await reporter(watcher, watcherLines, { watchMinutes: 55, sleep: async () => {} });
+        clock += ms;
+      },
+    });
+    expect(oneShotCode).toBe(0);
+    expect(watcherCode).toBe(0);
+    expect(watcherLines.join("\n")).toContain("watch_skipped");
+    expect(watcher.requests).toHaveLength(0);
+    expect(fs.existsSync(leasePath())).toBe(false);
   });
 
   it("exits non-zero with one line naming what is missing, never a value", () => {

@@ -68,6 +68,10 @@ const kLeaseMs = 3 * 60 * 1000;
 const kLeaseRenewMs = 60000;
 const kCapabilitiesMs = 60 * 60 * 1000;
 const kHeartbeatMs = 10 * 60 * 1000;
+// The largest event id there can be: a thread's first read pages backward
+// from before it, so the first page holds the newest messages.
+const kNewestCursor = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ";
+const kFirstReadLimit = 50;
 const kCrewPrefix = "capy-captain-";
 const kCrewDescription = "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter.";
 const kPrivateAgent = { id: "capy-private-threads", name: "Capy private threads", description: "Private Capy threads' turns, metadata only, reported by AlphaClaw's Capy reporter." };
@@ -138,6 +142,28 @@ const readTranscript = async (capy, pathname, after) => {
   }
 };
 
+// A thread's first read (no saved cursor) pages backward from its newest
+// message and stops at the first page that reaches back past since, so a
+// long thread is never read from its start. Each entry gets the after value
+// that reads forward from the start of its page: the forward cursor of the
+// next older page, or for the oldest page read its own before cursor, whose
+// first entry is older than since and so never opens a reported turn.
+// reachedStart says the read went back to the thread's first message.
+const readRecent = async (capy, pathname, since) => {
+  const pages = [];
+  for (let before = kNewestCursor; ; ) {
+    const page = await capy.get(pathname, { before, limit: kFirstReadLimit });
+    const items = page?.items || [];
+    pages.push({ items, cursor: page?.cursor || null, beforeCursor: page?.beforeCursor || null });
+    if (!page?.beforeCursor || page.beforeCursor === before || (items.length && timeOf(items[0].createdAt) < since)) break;
+    before = page.beforeCursor;
+  }
+  const startOf = (index) => (index + 1 < pages.length ? pages[index + 1].cursor || pages[index].beforeCursor : pages[index].beforeCursor);
+  const entries = [];
+  for (let index = pages.length - 1; index >= 0; index -= 1) for (const item of pages[index].items) entries.push({ ...item, pageStart: startOf(index) });
+  return { entries, lastPageStart: startOf(0), complete: !pages[0].cursor, reachedStart: !pages[pages.length - 1].beforeCursor };
+};
+
 // A turn is a user entry and every entry after it up to the next user entry.
 // In a subagent's transcript the user entries are its parent's instructions:
 // the opening task has no sender and later ones carry relation parent, and
@@ -155,7 +181,11 @@ const splitTurns = (entries) => {
 // sees it through the same small interface as the SQLite outbox.
 // nameOf gives the agent name a row goes out with; it lives only on the copy
 // the sender gets, so a resolved crew name never reaches the state file.
-const createStateOutbox = ({ getState, save, now, sendable = () => true, nameOf = (row) => row.agent_name }) => ({
+// A change only updates the state in memory (touch renews the lease when
+// due); the pass writes the file once after sending, so a long send phase
+// never rewrites the whole file per row. A row whose send was not yet
+// written goes out again under the same key on the next pass.
+const createStateOutbox = ({ getState, touch, now, sendable = () => true, nameOf = (row) => row.agent_name }) => ({
   due: (limit = 50) =>
     getState().rows
       .filter((row) => row.state === "queued" && row.next_attempt_at <= now() && sendable(row))
@@ -164,16 +194,16 @@ const createStateOutbox = ({ getState, save, now, sendable = () => true, nameOf 
   update: (id, fields) => {
     const row = getState().rows.find((entry) => entry.id === id);
     if (row) Object.assign(row, fields);
-    save();
+    touch();
   },
   agentOf: (agentKey) => getState().agents[agentKey] || null,
   saveAgent: ({ agentKey, agentId, runtime, definitionHash }) => {
     getState().agents[agentKey] = { agent_id: agentId, runtime, definition_hash: definitionHash };
-    save();
+    touch();
   },
   forgetAgent: (agentKey) => {
     delete getState().agents[agentKey];
-    save();
+    touch();
   },
 });
 
@@ -296,7 +326,7 @@ export const runCapyReporter = async ({
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   logger = console,
-  watchMinutes = 0,
+  watchMinutes,
   holder = `${process.pid}-${crypto.randomBytes(4).toString("hex")}`,
 } = {}) => {
   const log = (line) => logger.warn?.(`[alphaclaw] agentrun-reporter ${line}`);
@@ -306,12 +336,12 @@ export const runCapyReporter = async ({
     log(`config_missing op=capy fix=set ${missing.join(", ")} (nothing read or sent)`);
     return 2;
   }
-  const minutes = Number(watchMinutes ?? 0);
-  if (!Number.isFinite(minutes) || minutes < 0 || minutes > kWatchMaxMinutes) {
+  const watch = watchMinutes !== undefined && watchMinutes !== null;
+  const minutes = watch && /^\d+$/.test(String(watchMinutes)) ? Number(watchMinutes) : 0;
+  if (watch && (minutes < 1 || minutes > kWatchMaxMinutes)) {
     log(`config_invalid op=capy fix=--watch takes minutes from 1 to ${kWatchMaxMinutes} (nothing read or sent)`);
     return 2;
   }
-  const watch = minutes > 0;
   const runtimeSetting = String(env.AGENTRUN_CAPY_RUNTIME || "").trim() || kDefaultRuntime;
   const runtime = kRuntimePattern.test(runtimeSetting) ? runtimeSetting : kDefaultRuntime;
   if (runtime !== runtimeSetting) log("runtime_invalid op=capy fix=AGENTRUN_CAPY_RUNTIME must be a runtime name; using claude-agent-sdk");
@@ -357,6 +387,7 @@ export const runCapyReporter = async ({
   let failed = false;
   let live = false;
   let listedAll = false;
+  let passStartedAt = 0;
 
   // Agent ids are stable. A private thread (it or its project not org, or the
   // thread listed) goes under one shared agent with no crew in its name. A
@@ -490,8 +521,22 @@ export const runCapyReporter = async ({
   // reported and the cursor and reported ids to save. openNew says the open
   // turn was never reported and is inside the window, so it may go live: a
   // thread woken with no new user entry reopens a turn already sent.
-  const followTranscript = async (pathname, known, { closed, lastActivityAt }) => {
-    const { entries, lastPageStart, complete } = await readTranscript(capy, pathname, known.after);
+  // A thread's first read goes backward from its newest message (backward);
+  // a subagent's messages page forward only, so its first read starts at
+  // its first message. A refused backward read falls back to forward.
+  const readFrom = async (pathname, known, backward) => {
+    if (!backward || known.after !== null) return { ...(await readTranscript(capy, pathname, known.after)), reachedStart: known.after === null };
+    try {
+      return await readRecent(capy, pathname, timeOf(known.since));
+    } catch (error) {
+      if (error?.status !== 400) throw error;
+      log("first_read_fallback op=capy status=400 (Capy refused a backward read; this thread is read forward from its first message)");
+      return { ...(await readTranscript(capy, pathname, null)), reachedStart: true };
+    }
+  };
+
+  const followTranscript = async (pathname, known, { closed, lastActivityAt, backward = false }) => {
+    const { entries, lastPageStart, complete, reachedStart } = await readFrom(pathname, known, backward);
     const turns = splitTurns(entries);
     // A transcript that moved after the listing (an entry newer than its
     // lastActivityAt) keeps its last turn open until the next pass.
@@ -510,7 +555,7 @@ export const runCapyReporter = async ({
     const keepFrom = entries.findIndex((entry) => entry.pageStart === nextAfter);
     const kept = keepFrom < 0 ? [] : entries.slice(keepFrom).filter((entry) => entry.source === "user" && reported.has(entry.id)).map((entry) => entry.id);
     const openNew = Boolean(open) && !new Set(known.reported).has(open.user.id) && timeOf(open.user.createdAt) >= timeOf(known.since);
-    return { turns, open, openNew, fresh, nextAfter, kept };
+    return { turns, open, openNew, fresh, nextAfter, kept, reachedStart };
   };
 
   // The credit change since the previous report goes on the last reported
@@ -579,11 +624,12 @@ export const runCapyReporter = async ({
 
   const processThread = async (thread, project, automationRuns) => {
     const known = state.threads[thread.id] || { after: null, reported: [], since: new Date(now() - kFirstSightMs).toISOString(), credits: null };
-    const { turns, open, openNew, fresh, nextAfter, kept } = await followTranscript(`/threads/${encodeURIComponent(thread.id)}/messages`, known, {
+    const { turns, open, openNew, fresh, nextAfter, kept, reachedStart } = await followTranscript(`/threads/${encodeURIComponent(thread.id)}/messages`, known, {
       closed: kClosedStatuses.has(thread.status),
       lastActivityAt: thread.lastActivityAt,
+      backward: true,
     });
-    const first = known.first ?? (known.after === null ? turns[0]?.user.id ?? null : null);
+    const first = known.first ?? (known.after === null && reachedStart ? turns[0]?.user.id ?? null : null);
     const automationTurns = new Set();
     for (const runAt of automationRuns.get(thread.id) || []) {
       const turn = turns.find((candidate) => candidate.user.id === first);
@@ -617,9 +663,12 @@ export const runCapyReporter = async ({
   // split into turns like a thread's, keyed under the thread. A subagent turn
   // is metadata only (class subagent, or private with its thread), with the
   // title only when its thread may send one (F6, F12).
+  // Returns false when a subagent's transcript read failed (anything but a
+  // 404), so the thread stays watched and the next pass reads it again.
   const processSubagents = async (thread, project) => {
     const cls = isPrivate(thread, project) ? "private" : "subagent";
     const agent = agentOf(thread, project);
+    let ok = true;
     for (const subagent of await capy.all(`/threads/${encodeURIComponent(thread.id)}/subagents`, {}, "after")) {
       const activity = subagent.lastActivityAt || subagent.updatedAt || "";
       const known = state.subagents[subagent.id];
@@ -655,9 +704,12 @@ export const runCapyReporter = async ({
         counts.queued += fresh.length;
         save();
       } catch (error) {
-        if (error?.status !== 404) readFailed("subagent", subagent.id, error);
+        if (error?.status === 404) continue;
+        ok = false;
+        readFailed("subagent", subagent.id, error);
       }
     }
+    return ok;
   };
 
   // Every page of a project's threads is compared by lastActivityAt and
@@ -673,12 +725,15 @@ export const runCapyReporter = async ({
     let complete = true;
     listedAll = false;
     for (const project of projects) {
+      const pagesBefore = capy.stats.pages;
+      let listed = 0;
       try {
-        await collectProject(project);
+        listed = await collectProject(project);
       } catch (error) {
         complete = false;
         readFailed("project", project.id, error);
       }
+      logger.log?.(`[alphaclaw] agentrun-reporter capy_progress project=${project.id} threads=${listed} pages=${capy.stats.pages - pagesBefore} elapsed=${Math.round((now() - passStartedAt) / 1000)}s`);
     }
     save();
     if (!complete) return;
@@ -725,8 +780,8 @@ export const runCapyReporter = async ({
       }
     }
     // A thread is watched while one of its subagents was last seen
-    // unfinished, or while its subagent listing failed (subagents_pending)
-    // and has not succeeded since.
+    // unfinished, or while its subagent listing or one of its subagents'
+    // transcript reads failed (subagents_pending) and has not succeeded since.
     const watched = new Set(
       Object.values(state.subagents)
         .filter((known) => !known.archived && !kSubagentClosedStatuses.has(known.status))
@@ -737,14 +792,16 @@ export const runCapyReporter = async ({
     for (const thread of threads) {
       if (!readable.has(thread.id) && (changedIds.has(thread.id) || !watched.has(thread.id))) continue;
       try {
-        await processSubagents(thread, project);
-        if (state.threads[thread.id]) delete state.threads[thread.id].subagents_pending;
+        const ok = await processSubagents(thread, project);
+        if (state.threads[thread.id] && ok) delete state.threads[thread.id].subagents_pending;
+        else if (state.threads[thread.id]) state.threads[thread.id].subagents_pending = true;
       } catch (error) {
         listedOpen.delete(thread.id);
         if (state.threads[thread.id]) state.threads[thread.id].subagents_pending = true;
         if (error?.status !== 404) readFailed("subagents", thread.id, error);
       }
     }
+    return threads.length;
   };
 
   // Live turns need AgentRun's sdk_runs capability (started_at, title and
@@ -768,7 +825,7 @@ export const runCapyReporter = async ({
   // or a failed read leaves it held in the queue for a later pass.
   const sendable = (row) => row.class === "private" || listedOpen.has(row.session_label);
   const sender = createSender({
-    outbox: createStateOutbox({ getState: () => state, save, now, sendable, nameOf: sendNameOf }),
+    outbox: createStateOutbox({ getState: () => state, touch: () => lease.renewIfDue(), now, sendable, nameOf: sendNameOf }),
     client,
     token,
     getRuntime: () => runtime,
@@ -780,7 +837,8 @@ export const runCapyReporter = async ({
 
   // A live turn starts in AgentRun as soon as it is seen working and sends an
   // empty event batch at most every 10 minutes while it works; its events and
-  // completion go with the finished turn.
+  // completion go with the finished turn. Its changes are written with the
+  // pass's one write after sending.
   const sendLive = async () => {
     for (const row of state.rows.filter((entry) => entry.state === "live" && Number(entry.next_attempt_at || 0) <= now() && sendable(entry))) {
       const started = await sender.startOnly({ ...row, agent_name: sendNameOf(row) });
@@ -788,31 +846,29 @@ export const runCapyReporter = async ({
       if (!row.live_started) {
         Object.assign(row, { live_started: 1, heartbeat_at: now() });
         counts.live += 1;
-        save();
         continue;
       }
-      // A beat is stored before it is posted, so one whose answer was lost
-      // is posted again before anything else and the finished turn's events
-      // are numbered after it.
+      // A beat is kept on its row before it is posted, so one whose answer
+      // was lost is posted again before anything else and the finished
+      // turn's events are numbered after it.
       const beats = JSON.parse(row.beats_json || "[]");
       const confirmed = Number(row.batches_sent || 0);
       if (beats.length <= confirmed) {
         if (now() - Number(row.heartbeat_at || 0) < kHeartbeatMs) continue;
         beats.push({ sequence: beats.length + 1, events: [] });
         row.beats_json = JSON.stringify(beats);
-        save();
       }
       const beat = beats[confirmed];
       const result = await client.call({ method: "POST", path: `/sdk-runs/${encodeURIComponent(row.agentrun_run_id)}/events`, token: started.runToken, body: beat });
       if (result.kind !== "ok") continue;
       Object.assign(row, { batches_sent: beat.sequence, heartbeat_at: now() });
-      save();
     }
   };
 
   // One pass: read, then send. Watch mode runs it every loop with in-pass
   // retries off, since the next loop retries within a minute.
   const runPass = async (retryRounds) => {
+    passStartedAt = now();
     ({ state, text: baseText } = loadState(statePath, log));
     Object.assign(capy.stats, { pages: 0, rateLimited: 0, retryAfterMs: 0 });
     counts = { threads: 0, subagents: 0, queued: 0, live: 0 };
@@ -858,6 +914,7 @@ export const runCapyReporter = async ({
       state.rows = state.rows.filter((row) => !drop.has(row.id));
       log(`queue_overflow op=capy count=${drop.size} (oldest unsent turns gone; check that AgentRun is reachable)`);
     }
+    logger.log?.(`[alphaclaw] agentrun-reporter capy_progress op=send waiting=${state.rows.length}`);
     const sent = await sender.sendDue({ limit: state.rows.length || 1 });
     // The one-shot pass runs hourly, past AgentRun's one-hour window, so a
     // turn that met a passing failure is retried here while a started or
