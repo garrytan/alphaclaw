@@ -474,6 +474,70 @@ describe("a start killed in the middle of applying or restoring", () => {
   });
 });
 
+describe("an error partway through applying or restoring is undone at once", () => {
+  const failOnce = (base, when, code = "EIO") => {
+    let fired = false;
+    const fsModule = Object.create(base);
+    for (const key of ["cpSync", "renameSync"]) {
+      fsModule[key] = (...args) => {
+        if (!fired && when(key, args)) {
+          fired = true;
+          throw Object.assign(new Error(code + ": injected"), { code });
+        }
+        return base[key](...args);
+      };
+    }
+    return fsModule;
+  };
+  const journalOf = (install) => path.join(install.installDir, "node_modules", ".openclaw-package-swap.json");
+
+  it("a nested dependency that fails to copy after another one moved puts both back", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const nested = path.join(install.stock, "node_modules", "nested-dep");
+    const fsModule = failOnce(overlayFs(install), (key, args) => key === "cpSync" && args[0] === nested, "ENOSPC");
+    const verdict = apply(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) }, { fsModule });
+    expect(verdict).toMatchObject({ status: "refused" });
+    expectStockIntact(install);
+    expect(fs.existsSync(journalOf(install))).toBe(false);
+  });
+
+  it("a swap that fails moving the package in puts stock back", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const fsModule = failOnce(fs, (key, args) => key === "renameSync" && path.basename(args[0]).startsWith(".openclaw-next-"));
+    const verdict = apply(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) }, { fsModule });
+    expect(verdict).toMatchObject({ status: "refused", reason: "swap_failed" });
+    expectStockIntact(install);
+    expect(fs.existsSync(journalOf(install))).toBe(false);
+  });
+
+  it("a restore that fails moving stock back in still ends on the complete stock tree", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    expect(apply(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) })).toMatchObject({ status: "applied" });
+    const aside = path.join(install.installDir, "node_modules", ".openclaw-stock-" + kVersion);
+    const verdict = apply(install, {}, { fsModule: failOnce(fs, (key, args) => key === "renameSync" && args[0] === aside) });
+    expect(verdict).toMatchObject({ status: "refused", reason: "restore_failed" });
+    expectStockIntact(install);
+    expect(apply(install, {})).toMatchObject({ status: "stock" });
+  });
+
+  it("a start that finds the applied files changed applies the package again", () => {
+    const install = makeInstall();
+    const pkgFile = makePackage();
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) };
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+    write(path.join(install.stock, "dist", "index.js"), "export const build = 'changed';\n");
+    expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason: "tree_changed" }));
+    const verdict = apply(install, env);
+    expect(verdict).toMatchObject({ status: "applied" });
+    expect(verdict.reused).toBeUndefined();
+    expect(fs.readFileSync(path.join(install.stock, "dist", "index.js"), "utf8")).toContain("patched");
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+  });
+});
+
 describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
   const makeCodex = ({ name = "@openclaw/codex", version = kVersion } = {}) => {
     const src = tmp("codex-src-");
