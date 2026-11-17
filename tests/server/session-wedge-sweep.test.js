@@ -267,4 +267,83 @@ describe("session wedge sweep (ALPH-17 PR 6)", () => {
     const never = createSweep(gateway, { probeReadiness: vi.fn(async () => ({ ok: true, kind: "not_ready" })), readyTimeoutMs: 20_000 });
     expect(await never.sweep.onGatewayLaunch({ generation: 9 })).toEqual({ skipped: "not_ready" });
   });
+  describe("slow boots and OpenClaw's one-at-a-time restart recovery (GST-2884)", () => {
+    const completeLine = "[gateway] [main-session-recovery] main-session restart recovery startup complete: started=2 settled=0 failed=0 skipped=0 boot=b pass=p\n";
+    const clocked = (gateway, extra = {}) => {
+      let clock = kLaunchAt;
+      const made = createSweep(gateway, { sleep: vi.fn(async (ms) => { clock += ms; extra.onSleep?.(ms, made); }), now: () => clock, ...extra.overrides });
+      return { ...made, now: () => clock };
+    };
+
+    it("sweeps a boot that took about 8 minutes to become ready, past the 300 s restart budget", async () => {
+      let clock = kLaunchAt;
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }) });
+      const probeReadiness = vi.fn(async () => ({ ok: true, kind: clock - kLaunchAt >= 460_000 ? "ready" : "starting" }));
+      const { sweep, notify } = createSweep(gateway, { probeReadiness, sleep: vi.fn(async (ms) => { clock += ms; }), now: () => clock });
+      expect(await sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [], alerted: ["x"] });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(lines().some((line) => line.includes("reason=not_ready"))).toBe(false);
+    });
+
+    it("waits for OpenClaw's own recovery to finish, and does not report a session it resumed meanwhile", async () => {
+      let resumed = false;
+      let polls = 0;
+      const gateway = createGateway({
+        "sessions.list": async () => ({ body: { sessions: [row("topic-b", resumed ? { hasActiveRun: true } : { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }),
+      });
+      const made = clocked(gateway, {
+        onSleep: (ms, { sweep }) => {
+          if (ms === 5_000 && ++polls === 113) {
+            resumed = true;
+            sweep.observeGatewayOutput(completeLine);
+          }
+        },
+      });
+      const pending = made.sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt });
+      made.sweep.observeGatewayOutput("[gateway] [main-session-recovery] marked 2 startup-orphaned main session(s) for restart recovery\n");
+      expect(await pending).toEqual({ recovered: [], alerted: [] });
+      expect(polls).toBe(113);
+      expect(made.notify).not.toHaveBeenCalled();
+      expect(lines()).toContain("[alphaclaw] wedge-sweep waiting generation=2 for=openclaw_recovery");
+      // The session list reaches back past the launch however long the waits ran.
+      const listed = gateway.calls.find((c) => c.method === "sessions.list").params;
+      expect(listed.activeMinutes).toBeGreaterThanOrEqual(60 + Math.ceil((made.now() - kLaunchAt) / 60_000));
+    });
+
+    it("a restart whose drain marked turns for the next gateway waits even when that gateway never logs a 'started' line; the wait gives up at its cap", async () => {
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }) });
+      const made = clocked(gateway, { overrides: { recoveryWaitCapMs: 60_000 } });
+      made.sweep.observeGatewayOutput("[gateway] [main-session-recovery] marked 1 interrupted main session(s) for restart recovery\n");
+      expect(await made.sweep.onGatewayLaunch({ generation: 2, startedAt: kLaunchAt })).toEqual({ recovered: [], alerted: ["x"] });
+      expect(lines()).toContain("[alphaclaw] wedge-sweep waiting generation=2 for=openclaw_recovery");
+      expect(lines()).toContain("[alphaclaw] wedge-sweep recovery wait capped generation=2");
+      // That drain line belongs to one launch only.
+      log.mockClear();
+      expect(await made.sweep.onGatewayLaunch({ generation: 3, startedAt: made.now() })).toMatchObject({ recovered: [] });
+      expect(lines().some((line) => line.includes("for=openclaw_recovery"))).toBe(false);
+    });
+
+    it("a boot with nothing to resume does not wait, and a sweep superseded by a newer launch alerts nobody", async () => {
+      const gateway = createGateway({ "sessions.list": async () => ({ body: { sessions: [row("x", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } }) });
+      const { sweep, notify } = createSweep(gateway);
+      let supersede;
+      const first = sweep.onGatewayLaunch({ generation: 1, startedAt: kLaunchAt });
+      expect(lines().some((line) => line.includes("for=openclaw_recovery"))).toBe(false);
+      expect((await first).alerted).toEqual(["x"]);
+
+      const slow = createGateway({
+        "sessions.list": async () => {
+          supersede();
+          return { body: { sessions: [row("y", { abortedLastRun: true, updatedAt: kLaunchAt - 40_000 })] } };
+        },
+      });
+      const second = createSweep(slow);
+      let newer = null;
+      supersede = () => { newer ??= second.sweep.onGatewayLaunch({ generation: 9, startedAt: kLaunchAt }); };
+      expect(await second.sweep.onGatewayLaunch({ generation: 8, startedAt: kLaunchAt })).toEqual({ skipped: "superseded" });
+      expect((await newer).alerted).toEqual(["y"]);
+      expect(second.notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -391,8 +391,8 @@ relaunch (2026.10.5+; on 10.4 a killed turn could leave the session refusing
 every new message, the Oct 18 and Oct 22 incidents). One case is still open
 upstream: a channel session whose interrupted turn is never resumed keeps
 refusing new messages ("This conversation changed before your message could
-start"). After every launch, once the new gateway is ready + 90 s, AlphaClaw
-checks the sessions that were running when the restart was requested (or,
+start"). After every launch, once the new gateway is ready + 90 s (AlphaClaw
+waits up to 30 minutes for ready, v0.10.289), AlphaClaw checks the sessions that were running when the restart was requested (or,
 after a crash, sessions active in the 15 minutes before the launch) through
 OpenClaw's own `sessions.list`:
 
@@ -407,6 +407,17 @@ OpenClaw's own `sessions.list`:
 AlphaClaw never resets a session (that drops its context), never reads
 OpenClaw's SQLite files and never posts into the session's own chat; the alert
 goes to the watchdog's admin targets. Each session is alerted once per state.
+
+OpenClaw 2026.11.3 and 2026.11.4 resume interrupted sessions one at a time:
+each resumed turn has to finish before the next session starts, so on a busy
+box the last one can start many minutes after the gateway is ready, and a
+message sent to it in the meantime is dropped (GST-2884). When the gateway
+logs that it is resuming sessions (`marked N startup-orphaned main
+session(s)`, `started interrupted main session`, or the old gateway's
+`marked N interrupted main session(s)` while draining), the check waits for
+`main-session restart recovery startup complete` (up to 30 minutes, log
+`wedge-sweep waiting … for=openclaw_recovery`) so a session still in that
+queue is not reported as stuck.
 
 **What to do:** open the session in the Control UI and send a message (on
 2026.10.5+ a Control UI send reconciles an orphaned claim first). If it still

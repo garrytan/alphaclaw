@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.289] - 2026-11-17
+
+After a pod kill or crash, the gateway can take many minutes to come back. AlphaClaw's check for sessions a restart left stuck now waits for it, instead of giving up after 5 minutes. It also no longer reports a session that OpenClaw is still about to resume.
+
+### Fixed
+- The post-restart session check waits up to 30 minutes for the gateway to be ready. It used to give up 300 s after the gateway started listening. On a box where the boot after a pod kill took 8 minutes (OpenClaw re-checked a 5 GB database), the check never ran.
+- When the gateway reports that it is resuming interrupted sessions, the check waits for OpenClaw's "startup complete" line before it looks, for up to 30 minutes. OpenClaw 2026.11.3 and 2026.11.4 resume those sessions one at a time, so a session still waiting its turn looked stuck.
+
 ## [0.10.288] - 2026-11-16
 
 The secret drop page is now an ordinary form that saves once and shows its status. Pressing Save twice no longer ends on a card telling you to reopen the link, a link you already used shows what it saved, and a link survives an AlphaClaw restart.
