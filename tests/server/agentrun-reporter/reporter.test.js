@@ -6,10 +6,10 @@ const reporterPlugin = require("../../../lib/plugin/agentrun-reporter");
 const { classifySession, isIncognitoSessionKey } = require("../../../lib/plugin/agentrun-reporter/classify");
 const { createAgentrunReporter } = require("../../../lib/server/agentrun-reporter");
 const { openOutbox } = require("../../../lib/server/agentrun-reporter/outbox");
-const { createOpenclawSource } = require("../../../lib/server/agentrun-reporter/openclaw-source");
+const { createOpenclawSource, contentStillAllowed } = require("../../../lib/server/agentrun-reporter/openclaw-source");
 const { createAgentrunClient } = require("../../../lib/server/agentrun-reporter/agentrun-client");
 const { createSender } = require("../../../lib/server/agentrun-reporter/sender");
-const { eventBatches } = require("../../../lib/server/agentrun-reporter/bodies");
+const { eventBatches, cut } = require("../../../lib/server/agentrun-reporter/bodies");
 const {
   applyAgentrunReporterEntry,
   resolveAgentrunReporterConfig,
@@ -93,6 +93,7 @@ const makePipeline = (rootDir, { fake, contentCron = [], cronJobs = [], token, r
     client: createAgentrunClient({ baseUrl: kBase, fetchImpl: fake.fetchImpl }),
     token: token ?? fake.token,
     getRuntime: () => settings.runtime,
+    contentAllowed: (row) => contentStillAllowed(row, new Set(contentCron)),
     random: () => 0.5,
     logger: { warn: (line) => logs.push(line) },
     ...(now ? { now } : {}),
@@ -559,5 +560,283 @@ describe("agentrun reporter: settings and plugin entry", () => {
       expect(admitsGatewayEnvKey(key)).toBe(false);
     }
     expect(kDeploymentSecretEnvKeys).toContain("ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN");
+  });
+});
+
+describe("agentrun reporter: gateway start and refused agents", () => {
+  it("keeps a turn that is running when gateway_start fires as one completed run", async () => {
+    const rootDir = makeRoot();
+    let generation = 1000;
+    const { handlers } = registerPlugin(rootDir, { generationId: () => String((generation += 1)) });
+    const ctx = { runId: "r1", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r1" }, ctx);
+    handlers.gateway_start({ port: 1 }, {});
+    handlers.llm_output({ runId: "r1", model: "claude", assistantTexts: ["hi"], usage: { input: 7, output: 3 } }, ctx);
+    handlers.agent_end({ runId: "r1", success: true, durationMs: 50 }, ctx);
+    const fake = createFakeAgentrun();
+    const { outbox, sender } = makePipeline(rootDir, { fake });
+    const logs = [];
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: (line) => logs.push(line) } });
+    expect(source.ingest().added).toBe(1);
+    expect(logs).toEqual([]);
+    expect((await sender.sendDue()).sent).toBe(1);
+    const [run] = fake.runs.values();
+    expect(run.completion.status).toBe("completed");
+    expect(run.completion.usage).toMatchObject({ input_tokens: 7, output_tokens: 3 });
+  });
+
+  it("drops an agent's turns when AgentRun refuses the agent, with one log line per hour", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    driveTurn(handlers, { runId: "r2", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const now = () => clock;
+    const fake = createFakeAgentrun();
+    const refusing = async (url, init) => {
+      if (String(url).endsWith("/agents") && init.method === "POST") {
+        return new Response(JSON.stringify({ error: { code: "input_invalid", message: "bad definition" } }), { status: 422 });
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const { source, outbox, logs } = makePipeline(rootDir, { fake, now });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: refusing }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      now,
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect(await sender.sendDue()).toMatchObject({ dropped: 2, retry: 0 });
+    expect(outbox.counts()).toEqual({ dropped: 2 });
+    expect(logs.filter((line) => line.includes("agent_refused"))).toHaveLength(1);
+    expect(logs[0]).toContain("agent=openclaw-agent-main code=input_invalid count=1");
+    expect(await sender.sendDue()).toMatchObject({ dropped: 0, retry: 0 });
+    driveTurn(handlers, { runId: "r3", sessionKey: "agent:main:main" });
+    source.ingest();
+    clock += 61 * 60 * 1000;
+    expect((await sender.sendDue()).dropped).toBe(1);
+    expect(logs.filter((line) => line.includes("agent_refused"))).toHaveLength(2);
+    expect(logs[logs.length - 1]).toContain("count=2");
+  });
+
+  it("drops a turn whose start AgentRun refuses for its runtime twice", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const refusing = async (url, init) => {
+      if (String(url).endsWith("/sdk-runs") && init.method === "POST") {
+        return new Response(JSON.stringify({ error: { code: "input_invalid", message: "The SDK runtime must match the registered agent." } }), { status: 422 });
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const { source, outbox, logs } = makePipeline(rootDir, { fake });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: refusing }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect((await sender.sendDue()).dropped).toBe(1);
+    expect(logs.join("\n")).toContain("agent_refused op=start_runtime");
+    expect(fake.runs.size).toBe(0);
+  });
+
+  it("retries an agent edit that lost an If-Match race instead of dropping it", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const first = makePipeline(rootDir, { fake });
+    first.source.ingest();
+    expect((await first.sender.sendDue()).sent).toBe(1);
+    driveTurn(handlers, { runId: "r2", sessionKey: "agent:main:main" });
+    first.source.ingest();
+    const racing = async (url, init) => {
+      if (String(url).endsWith("/definition") && init.method === "PUT") {
+        return new Response(JSON.stringify({ error: { code: "precondition_failed", message: "moved" } }), { status: 412 });
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const sender = createSender({
+      outbox: first.outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: racing }),
+      token: fake.token,
+      getRuntime: () => "openclaw",
+      logger: { warn: () => {} },
+    });
+    expect(await sender.sendDue()).toMatchObject({ retry: 1, dropped: 0 });
+    expect(first.outbox.counts()).toEqual({ sent: 1, queued: 1 });
+  });
+});
+
+describe("agentrun reporter: revoked content, live directories and unreadable spool", () => {
+  it("drops a queued contents turn whose job left the allowlist, sending none of its text", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r-cron", sessionKey: "agent:main:cron:brief", trigger: "cron", jobId: "brief" });
+    const fake = createFakeAgentrun();
+    const queued = makePipeline(rootDir, { fake, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Brief", payload: { message: "Summarize" } }] });
+    expect(queued.source.ingest().added).toBe(1);
+    queued.outbox.close();
+    const revoked = makePipeline(rootDir, { fake, contentCron: [] });
+    expect((await revoked.sender.sendDue()).dropped).toBe(1);
+    expect(revoked.outbox.counts()).toEqual({ dropped: 1 });
+    expect(revoked.logs.join("\n")).toContain("content_revoked op=send source=openclaw agent=openclaw-cron-brief");
+    expect(fake.requests.map((request) => request.body).join("\n")).not.toContain(kMarker);
+    expect(fake.runs.size).toBe(0);
+  });
+
+  it("reads a dead gateway's open files as interrupted and leaves a live one's alone, whatever the clock says", () => {
+    const rootDir = makeRoot();
+    const livePid = 4242;
+    const deadPid = 999999;
+    const dead = registerPlugin(rootDir, { generationId: () => `2000000000000-${deadPid}` });
+    dead.handlers.model_call_started({ runId: "r-dead" }, { runId: "r-dead", sessionKey: "agent:main:main" });
+    const live = registerPlugin(rootDir, { generationId: () => `1000000000000-${livePid}` });
+    live.handlers.model_call_started({ runId: "r-live" }, { runId: "r-live", sessionKey: "agent:main:main" });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, isProcessAlive: (pid) => pid === livePid, logger: { warn: () => {} } });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT source_run_id, status FROM turns").all()).toEqual([{ source_run_id: "r-dead", status: "cancelled" }]);
+    expect(fs.existsSync(path.join(rootDir, "agentrun-spool", `2000000000000-${deadPid}`))).toBe(false);
+    live.handlers.agent_end({ runId: "r-live", success: true }, { runId: "r-live", sessionKey: "agent:main:main" });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT status FROM turns WHERE source_run_id = 'r-live'").get()).toEqual({ status: "completed" });
+  });
+
+  it.runIf(process.platform === "linux")("reads an earlier gateway's open files as interrupted when a later process reuses its pid", () => {
+    const rootDir = makeRoot();
+    registerPlugin(rootDir).handlers.gateway_start({}, {});
+    const [ownName] = fs.readdirSync(path.join(rootDir, "agentrun-spool"));
+    fs.rmSync(path.join(rootDir, "agentrun-spool", ownName), { recursive: true });
+    const [, pid, ticks] = ownName.split("-");
+    expect(Number(pid)).toBe(process.pid);
+    expect(ticks).toMatch(/^\d+$/);
+    const earlier = registerPlugin(rootDir, { generationId: () => `1000000000000-${process.pid}-${Number(ticks) + 1}` });
+    earlier.handlers.model_call_started({ runId: "r-earlier" }, { runId: "r-earlier", sessionKey: "agent:main:main" });
+    const current = registerPlugin(rootDir, { generationId: () => `2000000000000-${process.pid}-${ticks}` });
+    current.handlers.model_call_started({ runId: "r-current" }, { runId: "r-current", sessionKey: "agent:main:main" });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} } });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT source_run_id, status FROM turns").all()).toEqual([{ source_run_id: "r-earlier", status: "cancelled" }]);
+    expect(fs.existsSync(path.join(rootDir, "agentrun-spool", `2000000000000-${process.pid}-${ticks}`))).toBe(true);
+  });
+
+  it("skips a spool directory it cannot read, logs it once an hour, and keeps reading the others", () => {
+    const rootDir = makeRoot();
+    const bad = registerPlugin(rootDir, { generationId: () => "1000-1" });
+    driveTurn(bad.handlers, { runId: "r-bad", sessionKey: "agent:main:main" });
+    const good = registerPlugin(rootDir, { generationId: () => "2000-2" });
+    driveTurn(good.handlers, { runId: "r-good", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const logs = [];
+    const flaky = {
+      ...fs,
+      readdirSync: (dir, ...rest) => {
+        if (String(dir).endsWith("1000-1")) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return fs.readdirSync(dir, ...rest);
+      },
+    };
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, fsModule: flaky, now: () => clock, isProcessAlive: () => true, logger: { warn: (line) => logs.push(line) } });
+    expect(source.ingest().added).toBe(1);
+    expect(source.ingest().added).toBe(0);
+    expect(logs.filter((line) => line.includes("dir=1000-1 EACCES"))).toHaveLength(1);
+    clock += 61 * 60 * 1000;
+    source.ingest();
+    expect(logs.filter((line) => line.includes("dir=1000-1 EACCES"))).toHaveLength(2);
+  });
+
+  it("keeps sending when the spool cannot be read at all", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const first = makePipeline(rootDir, { fake });
+    expect(first.source.ingest().added).toBe(1);
+    first.outbox.close();
+    fs.rmSync(path.join(rootDir, "agentrun-spool"), { recursive: true, force: true });
+    fs.writeFileSync(path.join(rootDir, "agentrun-spool"), "not a directory");
+    const lines = [];
+    const reporter = createAgentrunReporter({
+      env: { ALPHACLAW_AGENTRUN_URL: kBase, ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN: fake.token },
+      rootDir,
+      fetchImpl: fake.fetchImpl,
+      logger: { warn: (line) => lines.push(line), log: () => {} },
+    });
+    const result = await reporter.tick();
+    expect(result.sent.sent).toBe(1);
+    expect(lines.join("\n")).toContain("capture_error op=ingest dir=agentrun-spool ENOTDIR");
+    reporter.stop();
+  });
+
+  it("cuts to the budget even when it is shorter than the cut marker", () => {
+    expect(cut("abcdefghij", 3)).toBe("abc");
+    expect(cut("abcdefghij", 0)).toBe("");
+    expect(cut("abcdefghij", 8)).toBe("ab [cut]");
+    expect(cut("abc", 3)).toBe("abc");
+  });
+});
+
+describe("agentrun reporter: an agent another writer just created", () => {
+  const agentExists = () => new Response(JSON.stringify({ error: { code: "agent_exists", message: "exists" } }), { status: 409 });
+
+  it("reads the agent again after agent_exists and sends the turn on the next pass", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    let clock = Date.now();
+    const now = () => clock;
+    const fake = createFakeAgentrun();
+    let raced = false;
+    const racing = async (url, init) => {
+      if (String(url).endsWith("/agents") && init.method === "POST" && !raced) {
+        raced = true;
+        await fake.fetchImpl(url, init);
+        return agentExists();
+      }
+      return fake.fetchImpl(url, init);
+    };
+    const { source, outbox, logs } = makePipeline(rootDir, { fake, now });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: racing }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      random: () => 0.5,
+      now,
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect(await sender.sendDue()).toMatchObject({ retry: 1, dropped: 0 });
+    clock += 60 * 1000;
+    expect((await sender.sendDue()).sent).toBe(1);
+    expect(logs.join("\n")).not.toContain("agent_refused");
+  });
+
+  it("drops the turn when agent_exists comes back but the agent still cannot be read", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    driveTurn(handlers, { runId: "r1", sessionKey: "agent:main:main" });
+    const fake = createFakeAgentrun();
+    const held = async (url, init) => (String(url).endsWith("/agents") && init.method === "POST" ? agentExists() : fake.fetchImpl(url, init));
+    const { source, outbox, logs } = makePipeline(rootDir, { fake });
+    source.ingest();
+    const sender = createSender({
+      outbox,
+      client: createAgentrunClient({ baseUrl: kBase, fetchImpl: held }),
+      token: fake.token,
+      getRuntime: () => "claude-agent-sdk",
+      logger: { warn: (line) => logs.push(line) },
+    });
+    expect((await sender.sendDue()).dropped).toBe(1);
+    expect(logs.join("\n")).toContain("agent_refused op=agent_create source=openclaw agent=openclaw-agent-main code=agent_exists");
   });
 });
