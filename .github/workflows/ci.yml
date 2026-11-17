@@ -63,6 +63,12 @@ jobs:
 
       - run: npm install --global pnpm@11.15.1
 
+      # tests/server/relay-guard-inert-notes.test.js runs the relay guard's
+      # allowed shell shapes in real bash, zsh and dash; the runner image
+      # may have no zsh.
+      - name: Install zsh
+        run: command -v zsh || (sudo apt-get update -qq && sudo apt-get install -y -qq zsh)
+
       # The JSON report is this run's test inventory (tests/setup-inventory.js
       # adds assertion and retry counts).
       - run: npm test -- --reporter=default --reporter=json --outputFile=test-reports/vitest.json
@@ -130,6 +136,9 @@ jobs:
       - run: npm run build:ui
 
       - run: npm install --global pnpm@11.15.1
+
+      - name: Install zsh
+        run: command -v zsh || (sudo apt-get update -qq && sudo apt-get install -y -qq zsh)
 
       - run: npx vitest run --coverage --coverage.reportOnFailure=true --coverage.reporter=json --coverage.reporter=json-summary --coverage.reporter=text-summary --coverage.reportsDirectory=coverage
 
