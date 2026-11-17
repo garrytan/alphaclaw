@@ -25,10 +25,10 @@ const kBase = "http://agentrun.test/v2";
 const makeRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), "agentrun-reporter-"));
 
 // Registers a fresh plugin instance and returns its hooks.
-const registerPlugin = (rootDir, { fsModule, generationId } = {}) => {
+const registerPlugin = (rootDir, { fsModule, generationId, now } = {}) => {
   const handlers = {};
   const lines = [];
-  const plugin = reporterPlugin.createAgentrunReporterPlugin({ ...(fsModule ? { fsModule } : {}), ...(generationId ? { generationId } : {}) });
+  const plugin = reporterPlugin.createAgentrunReporterPlugin({ ...(fsModule ? { fsModule } : {}), ...(generationId ? { generationId } : {}), ...(now ? { now } : {}) });
   plugin.register({
     pluginConfig: { rootDir },
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
@@ -170,7 +170,7 @@ describe("agentrun reporter: capture plugin", () => {
     expect(spool).toContain('"runId":"r-early"');
     expect(spool).toContain('"status":"cancelled","reason":"stopped"');
     expect(spool).not.toContain("no model");
-    expect(Object.keys(handlers).sort()).toEqual(["after_tool_call", "agent_end", "gateway_start", "llm_output", "model_call_started"]);
+    expect(Object.keys(handlers).sort()).toEqual(["after_tool_call", "agent_end", "gateway_start", "llm_output", "model_call_ended", "model_call_started"]);
   });
 
   it("decides a cron run's class from the first hook that carries its trigger", () => {
@@ -430,11 +430,15 @@ describe("agentrun reporter: queue and sender", () => {
     const { handlers } = registerPlugin(rootDir);
     const sessionKey = "agent:main:cron:brief";
     const ctx = { runId: "r1", sessionKey, trigger: "cron", jobId: "brief" };
-    handlers.llm_output({ runId: "r1", assistantTexts: ["first"], usage: { input: 10, output: 1 } }, ctx);
+    // OpenClaw 2026.11.4's order: each attempt opens with model_call_started
+    // and fires its llm_output after its agent_end.
+    handlers.model_call_started({ runId: "r1" }, { runId: "r1", sessionKey });
     handlers.agent_end({ runId: "r1", success: false, error: "overloaded" }, ctx);
-    handlers.llm_output({ runId: "r1", assistantTexts: ["second"], usage: { input: 20, output: 2 } }, ctx);
+    handlers.llm_output({ runId: "r1", assistantTexts: ["first"], usage: { input: 10, output: 1 } }, ctx);
+    handlers.model_call_started({ runId: "r1" }, { runId: "r1", sessionKey });
     handlers.after_tool_call({ toolName: "read", runId: "r1", durationMs: 1 }, ctx);
     handlers.agent_end({ runId: "r1", success: true }, ctx);
+    handlers.llm_output({ runId: "r1", assistantTexts: ["second"], usage: { input: 20, output: 2 } }, ctx);
     const fake = createFakeAgentrun();
     const spoolFiles = fs
       .readdirSync(path.join(rootDir, "agentrun-spool"), { recursive: true })
@@ -692,6 +696,166 @@ describe("agentrun reporter: revoked content, live directories and unreadable sp
     expect(fake.runs.size).toBe(0);
   });
 
+  it("keeps a turn's model and usage when OpenClaw sends llm_output after agent_end", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const ctx = { runId: "r-late", sessionKey: "agent:main:telegram:group:-100:topic:7", trigger: "user", agentId: "main", channel: "telegram" };
+    handlers.model_call_started({ runId: "r-late" }, { runId: "r-late", sessionKey: ctx.sessionKey, agentId: "main" });
+    handlers.model_call_ended({ runId: "r-late", provider: "anthropic", model: "claude-opus-5-5", durationMs: 900, outcome: "completed" }, ctx);
+    handlers.after_tool_call({ toolName: "message", runId: "r-late", durationMs: 3 }, ctx);
+    handlers.agent_end({ runId: "r-late", success: true, durationMs: 24500 }, ctx);
+    handlers.llm_output({ runId: "r-late", provider: "anthropic", model: "claude-opus-5-5", resolvedRef: "anthropic/claude-opus-5-5", usage: { input: 300, output: 12 } }, ctx);
+    handlers.llm_output({ runId: "r-late", usage: { input: 1, output: 1 } }, ctx);
+    handlers.after_tool_call({ toolName: "late", runId: "r-late", durationMs: 1 }, ctx);
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake });
+    expect(source.ingest().added).toBe(1);
+    expect(readSpool(rootDir)).toBe("");
+    expect((await sender.sendDue()).sent).toBe(1);
+    const [run] = fake.runs.values();
+    expect(run.start.model).toBe("anthropic/claude-opus-5-5");
+    expect(run.completion.usage).toMatchObject({ input_tokens: 300, output_tokens: 12 });
+    expect(run.start.input.replace(/\s+/g, " ").slice(0, 80)).toMatch(/^Telegram group \(main\) · 24\.5s · completed — 1 tool call; started 2026-/);
+  });
+
+  it("reports an ended turn that never gets its llm_output once it has settled, naming the model from model_call_ended", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const ctx = { runId: "r-quiet", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-quiet" }, { runId: "r-quiet", sessionKey: ctx.sessionKey });
+    handlers.model_call_ended({ runId: "r-quiet", provider: "openai", model: "gpt-6.1-sol", durationMs: 5, outcome: "error" }, ctx);
+    handlers.agent_end({ runId: "r-quiet", success: false, error: "refused", durationMs: 40 }, ctx);
+    let clock = Date.now();
+    const fake = createFakeAgentrun();
+    const { outbox, sender } = makePipeline(rootDir, { fake });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    expect(source.ingest().added).toBe(0);
+    clock += 31_000;
+    expect(source.ingest().added).toBe(1);
+    expect((await sender.sendDue()).sent).toBe(1);
+    const [run] = fake.runs.values();
+    expect(run.start.model).toBe("openai/gpt-6.1-sol");
+    expect(run.completion.status).toBe("failed");
+    expect(run.start.input).toMatch(/^Main session \(main\) · 0\.?\d*s · failed — 0 tool calls; started /);
+  });
+
+  it("reports a turn whose agent_end OpenClaw dropped from its last llm_output, and leaves a running turn alone", () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const turn = (runId, stopReason) => {
+      const ctx = { runId, sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+      handlers.model_call_started({ runId }, { runId, sessionKey: ctx.sessionKey });
+      handlers.after_tool_call({ toolName: "read", runId, durationMs: 2 }, ctx);
+      handlers.llm_output({ runId, provider: "anthropic", model: "claude", usage: { input: 7, output: 3 }, lastAssistant: { stopReason, content: kMarker } }, ctx);
+    };
+    turn("r-ok", "stop");
+    turn("r-err", "error");
+    turn("r-abort", "aborted");
+    handlers.model_call_started({ runId: "r-running" }, { runId: "r-running", sessionKey: "agent:main:main" });
+    handlers.after_tool_call({ toolName: "exec", runId: "r-running", durationMs: 2 }, { runId: "r-running", sessionKey: "agent:main:main", trigger: "user" });
+    let clock = Date.now();
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    expect(source.ingest().added).toBe(0);
+    clock += 31_000;
+    expect(source.ingest().added).toBe(3);
+    const rows = outbox.db.prepare("SELECT source_run_id, status, error_text, usage_json, evidence_complete FROM turns ORDER BY source_run_id").all();
+    expect(rows.map((row) => [row.source_run_id, row.status])).toEqual([
+      ["r-abort", "cancelled"],
+      ["r-err", "failed"],
+      ["r-ok", "completed"],
+    ]);
+    expect(rows.find((row) => row.source_run_id === "r-ok").error_text).toBe("end not recorded");
+    expect(JSON.parse(rows[0].usage_json)).toMatchObject({ input_tokens: 7, output_tokens: 3 });
+    expect(rows.every((row) => row.evidence_complete === 0)).toBe(true);
+    expect(readSpool(rootDir)).not.toContain(kMarker);
+    expect(readSpool(rootDir)).toContain('"runId":"r-running"');
+  });
+
+  it("starts no file without an open record for a hook that comes after the server read a settled turn", () => {
+    const rootDir = makeRoot();
+    let clock = Date.now();
+    const { handlers, lines } = registerPlugin(rootDir, { now: () => clock });
+    const ctx = { runId: "r-gone", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-gone" }, { runId: "r-gone", sessionKey: ctx.sessionKey });
+    handlers.agent_end({ runId: "r-gone", success: true, durationMs: 40 }, ctx);
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    clock += 31_000;
+    expect(source.ingest().added).toBe(1);
+    handlers.llm_output({ runId: "r-gone", provider: "anthropic", model: "claude", usage: { input: 7, output: 3 } }, ctx);
+    handlers.after_tool_call({ toolName: "late", runId: "r-gone", durationMs: 1 }, ctx);
+    handlers.agent_end({ runId: "r-gone", success: true, durationMs: 41 }, ctx);
+    expect(readSpool(rootDir)).toBe("");
+    expect(lines.filter((line) => line.includes("capture_error"))).toEqual([]);
+  });
+
+  it("forgets an ended run that waited past its time for llm_output and ignores that llm_output", () => {
+    const rootDir = makeRoot();
+    let clock = Date.now();
+    const { handlers } = registerPlugin(rootDir, { now: () => clock });
+    const ctx = { runId: "r-old", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-old" }, { runId: "r-old", sessionKey: ctx.sessionKey });
+    handlers.agent_end({ runId: "r-old", success: true, durationMs: 40 }, ctx);
+    clock += 61_000;
+    handlers.model_call_started({ runId: "r-new" }, { runId: "r-new", sessionKey: ctx.sessionKey });
+    handlers.llm_output({ runId: "r-old", provider: "anthropic", model: "claude", usage: { input: 7, output: 3 } }, ctx);
+    const records = readSpool(rootDir).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(records.filter((record) => record.t === "llm")).toEqual([]);
+    expect([...new Set(records.filter((record) => record.t === "open").map((record) => record.runId))].sort()).toEqual(["r-new", "r-old"]);
+  });
+
+  it("keeps a run open across a revision pass that sends llm_output without agent_end", () => {
+    const rootDir = makeRoot();
+    let clock = Date.now();
+    const { handlers } = registerPlugin(rootDir, { now: () => clock });
+    const ctx = { runId: "r-revise", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-revise" }, { runId: "r-revise", sessionKey: ctx.sessionKey });
+    handlers.llm_output({ runId: "r-revise", provider: "anthropic", model: "claude", usage: { input: 7, output: 3 }, lastAssistant: { stopReason: "stop" } }, ctx);
+    handlers.model_call_started({ runId: "r-revise" }, { runId: "r-revise", sessionKey: ctx.sessionKey });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    clock += 31_000;
+    expect(source.ingest().added).toBe(0);
+    handlers.agent_end({ runId: "r-revise", success: true, durationMs: 31_500 }, ctx);
+    handlers.llm_output({ runId: "r-revise", provider: "anthropic", model: "claude", usage: { input: 5, output: 2 }, lastAssistant: { stopReason: "stop" } }, ctx);
+    expect(source.ingest().added).toBe(1);
+    const [row] = outbox.db.prepare("SELECT status, error_text, usage_json, evidence_complete FROM turns").all();
+    expect(row).toMatchObject({ status: "completed", error_text: "" });
+    expect(JSON.parse(row.usage_json)).toMatchObject({ input_tokens: 12, output_tokens: 5 });
+  });
+
+  it("titles every class within AgentRun's 80 characters", () => {
+    const rootDir = makeRoot();
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, readCronJobs: () => [{ id: "brief", name: "Morning brief" }], getContentCronJobs: () => new Set(["brief"]) });
+    const cases = [
+      ["agent:main:telegram:direct:42", "user", "", "Telegram DM (main) · 1.2s · completed"],
+      ["agent:main:discord:channel:9", "user", "", "Discord group (main) · 1.2s · completed"],
+      ["agent:main:main", "heartbeat", "", "Heartbeat (main) · 1.2s · completed"],
+      ["agent:main:relay-capy-abc", "user", "", "Relay (main) · 1.2s · completed"],
+      ["agent:main:cron:brief", "cron", "brief", "Cron: Morning brief · 1.2s · completed"],
+      ["agent:main:cron:other", "cron", "other", "Cron job other · 1.2s · completed"],
+      ["agent:main:webchat:x", "user", "", "Turn (main) · 1.2s · completed"],
+    ];
+    const dir = path.join(rootDir, "agentrun-spool", "1000-1");
+    fs.mkdirSync(dir, { recursive: true });
+    cases.forEach(([sessionKey, trigger, jobId], index) => {
+      const cls = classifySession({ sessionKey, trigger, jobId }).class;
+      const lines = [
+        { t: "open", at: 1000, runId: `r${index}`, sessionKey, class: cls, agentId: "main", jobId: cls === "cron" ? jobId : "", trigger },
+        { t: "end", at: 2200, status: "completed", durationMs: 1200 },
+      ];
+      fs.writeFileSync(path.join(dir, `r${index}.done`), lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+    });
+    expect(source.ingest().added).toBe(cases.length);
+    const inputs = outbox.db.prepare("SELECT source_run_id, input_text FROM turns ORDER BY source_run_id").all();
+    cases.forEach(([, , , title], index) => {
+      const { input_text: input } = inputs.find((row) => row.source_run_id === `r${index}`);
+      expect(input.startsWith(`${title} — `)).toBe(true);
+    });
+  });
+
   it("reads a dead gateway's open files as interrupted and leaves a live one's alone, whatever the clock says", () => {
     const rootDir = makeRoot();
     const livePid = 4242;
@@ -701,11 +865,14 @@ describe("agentrun reporter: revoked content, live directories and unreadable sp
     const live = registerPlugin(rootDir, { generationId: () => `1000000000000-${livePid}` });
     live.handlers.model_call_started({ runId: "r-live" }, { runId: "r-live", sessionKey: "agent:main:main" });
     const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
-    const source = createOpenclawSource({ rootDir, outbox, isProcessAlive: (pid) => pid === livePid, logger: { warn: () => {} } });
+    let clock = Date.now();
+    const source = createOpenclawSource({ rootDir, outbox, isProcessAlive: (pid) => pid === livePid, logger: { warn: () => {} }, now: () => clock });
     expect(source.ingest().added).toBe(1);
     expect(outbox.db.prepare("SELECT source_run_id, status FROM turns").all()).toEqual([{ source_run_id: "r-dead", status: "cancelled" }]);
     expect(fs.existsSync(path.join(rootDir, "agentrun-spool", `2000000000000-${deadPid}`))).toBe(false);
     live.handlers.agent_end({ runId: "r-live", success: true }, { runId: "r-live", sessionKey: "agent:main:main" });
+    expect(source.ingest().added).toBe(0);
+    clock += 31_000;
     expect(source.ingest().added).toBe(1);
     expect(outbox.db.prepare("SELECT status FROM turns WHERE source_run_id = 'r-live'").get()).toEqual({ status: "completed" });
   });
