@@ -462,6 +462,28 @@ The built-in watchdog monitors gateway health and recovers from failures automat
 | **Post-relaunch wedge sweep** | After every gateway relaunch (restart, crash or OOM relaunch, boot), once the gateway is ready + 90 s (waiting up to 30 minutes for ready) and OpenClaw's own restart recovery has finished, checks the sessions that were running before the restart through OpenClaw's `sessions.list`. An idle one goes to `sessions.recover` (OpenClaw decides whether it qualifies; the turn resumes in the same session); one whose interrupted turn was not resumed, or whose recovery gave up, is alerted once to the admin targets. A Doctor session whose restarted Doctor turn AlphaClaw stopped is skipped until the session changes again, across later launches and AlphaClaw restarts. Never resets a session. See [docs/upgrade-troubleshooting.md](docs/upgrade-troubleshooting.md#a-session-may-be-stuck-after-the-gateway-restarted) |
 | **Restarted Doctor turn stop** | OpenClaw's restart recovery restarts an interrupted turn on the next gateway, so a Doctor run a restart cut off would run again with nobody waiting for it. After every gateway launch, once it is ready and over the next five minutes, AlphaClaw stops that turn with `chat.abort` naming the exact recovery run, and only when the turn it resumes is the Doctor run's own message (`doctor-run-<n>`). A person's own turn in a Doctor session is never stopped, and neither is the run AlphaClaw is driving. Log line `[alphaclaw] doctor: stopped Doctor run <n>'s turn …`, watchdog event `resumed_turn_stopped` |
 
+### Push checkouts
+
+A checkout that pins its own GitHub token in `.git/config` stops pushing the moment something puts another credential helper ahead of it. `gh auth setup-git`, for one, writes gh's helper into the global gitconfig, git takes the first helper that answers, and GitHub answers "Repository not found" for a private repository the other account cannot see. List the checkouts whose pushes matter in `alphaclaw.json` and AlphaClaw checks each one at boot and every `intervalMinutes` (default 10, 5 to 1440). The list is empty by default, which turns the check off:
+
+```json
+{
+  "gitPushChecks": {
+    "checkouts": [{ "path": "/data/projects/site", "remote": "origin", "name": "site" }],
+    "intervalMinutes": 10,
+    "stuckMinutes": 30
+  }
+}
+```
+
+For each checkout, with git running in the gateway's environment (the one the agent pushes from) and prompts off:
+
+- **Credential routing.** When the checkout sets a helper of its own, `git credential fill` for the remote's push URL must give the same credential as the checkout's own helpers alone. Credentials are compared as a hash of user and password and never logged, stored or sent. On a mismatch the owner hears which checkout, which user each side answers as, which config file's helper answers first, and the fix: an empty `helper =` line right above the checkout's own helper in its `.git/config`, which clears the outside helpers for that checkout only.
+- **Reachability.** `git ls-remote` on the remote must succeed. "Repository not found" and refused authentication are announced at once; a timeout or another failure only when two checks in a row see it.
+- **Stuck pushes.** Commits on the current branch that are not on the remote, the oldest older than `stuckMinutes` (default 30, 5 to 10080), are announced with the count and the push command to try.
+
+Each problem is announced once, with one more line when it clears; what was announced is kept in `.alphaclaw/git-push-checks.json` in the state directory so a restart never repeats it, and each episode also lands in the watchdog's event log (`git_push_check`). The check never fetches, writes or pushes in the checkout. The boot log says `[alphaclaw] git-push-check <name>: …` whenever a checkout's result changes.
+
 ### Log files
 
 Both logs live on the data volume under `ALPHACLAW_ROOT_DIR/logs`:
