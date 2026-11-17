@@ -915,6 +915,30 @@ describe("the launch, watchdog and notification paths", () => {
     expect(classifyRestartFailure({ code: "stop_refused" }).code).toBe("stop_refused");
   });
 
+  it("with the setting unset, requestGatewayLaunch aborts while a pinned package is still in place", async () => {
+    const gateway = require("../../lib/server/gateway");
+    const selfDependency = require("../../lib/server/self-dependency");
+    const original = process.env.ALPHACLAW_OPENCLAW_PACKAGES;
+    delete process.env.ALPHACLAW_OPENCLAW_PACKAGES;
+    const install = makeInstall();
+    expect(apply(install, { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(makePackage()) })).toMatchObject({ status: "applied" });
+    vi.spyOn(selfDependency, "resolveSelfDependency").mockReturnValue({ installDir: install.installDir });
+    const spawn = vi.spyOn(require("child_process"), "spawn").mockImplementation(() => {
+      throw new Error("spawned");
+    });
+    const outcomes = [];
+    gateway.setGatewayPrelaunchHookHandler((outcome) => outcomes.push(outcome));
+    try {
+      const result = await gateway.requestGatewayLaunch({ site: "managed launch", reconcileIncumbent: false });
+      expect(result).toMatchObject({ outcome: "launch_aborted", detail: "openclaw_package" });
+      expect(outcomes).toEqual([expect.objectContaining({ step: "openclaw_package", status: "refused", code: "openclaw_package_restore_failed" })]);
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      gateway.setGatewayPrelaunchHookHandler(null);
+      if (original != null) process.env.ALPHACLAW_OPENCLAW_PACKAGES = original;
+    }
+  });
+
   it("requestGatewayLaunch aborts a launch the package check refuses, before anything is spawned", async () => {
     const gateway = require("../../lib/server/gateway");
     const original = process.env.ALPHACLAW_OPENCLAW_PACKAGES;
