@@ -25,10 +25,10 @@ const kBase = "http://agentrun.test/v2";
 const makeRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), "agentrun-reporter-"));
 
 // Registers a fresh plugin instance and returns its hooks.
-const registerPlugin = (rootDir, { fsModule, generationId } = {}) => {
+const registerPlugin = (rootDir, { fsModule, generationId, now } = {}) => {
   const handlers = {};
   const lines = [];
-  const plugin = reporterPlugin.createAgentrunReporterPlugin({ ...(fsModule ? { fsModule } : {}), ...(generationId ? { generationId } : {}) });
+  const plugin = reporterPlugin.createAgentrunReporterPlugin({ ...(fsModule ? { fsModule } : {}), ...(generationId ? { generationId } : {}), ...(now ? { now } : {}) });
   plugin.register({
     pluginConfig: { rootDir },
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
@@ -770,6 +770,59 @@ describe("agentrun reporter: revoked content, live directories and unreadable sp
     expect(rows.every((row) => row.evidence_complete === 0)).toBe(true);
     expect(readSpool(rootDir)).not.toContain(kMarker);
     expect(readSpool(rootDir)).toContain('"runId":"r-running"');
+  });
+
+  it("starts no file without an open record for a hook that comes after the server read a settled turn", () => {
+    const rootDir = makeRoot();
+    let clock = Date.now();
+    const { handlers, lines } = registerPlugin(rootDir, { now: () => clock });
+    const ctx = { runId: "r-gone", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-gone" }, { runId: "r-gone", sessionKey: ctx.sessionKey });
+    handlers.agent_end({ runId: "r-gone", success: true, durationMs: 40 }, ctx);
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    clock += 31_000;
+    expect(source.ingest().added).toBe(1);
+    handlers.llm_output({ runId: "r-gone", provider: "anthropic", model: "claude", usage: { input: 7, output: 3 } }, ctx);
+    handlers.after_tool_call({ toolName: "late", runId: "r-gone", durationMs: 1 }, ctx);
+    handlers.agent_end({ runId: "r-gone", success: true, durationMs: 41 }, ctx);
+    expect(readSpool(rootDir)).toBe("");
+    expect(lines.filter((line) => line.includes("capture_error"))).toEqual([]);
+  });
+
+  it("forgets an ended run that waited past its time for llm_output and ignores that llm_output", () => {
+    const rootDir = makeRoot();
+    let clock = Date.now();
+    const { handlers } = registerPlugin(rootDir, { now: () => clock });
+    const ctx = { runId: "r-old", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-old" }, { runId: "r-old", sessionKey: ctx.sessionKey });
+    handlers.agent_end({ runId: "r-old", success: true, durationMs: 40 }, ctx);
+    clock += 61_000;
+    handlers.model_call_started({ runId: "r-new" }, { runId: "r-new", sessionKey: ctx.sessionKey });
+    handlers.llm_output({ runId: "r-old", provider: "anthropic", model: "claude", usage: { input: 7, output: 3 } }, ctx);
+    const records = readSpool(rootDir).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(records.filter((record) => record.t === "llm")).toEqual([]);
+    expect([...new Set(records.filter((record) => record.t === "open").map((record) => record.runId))].sort()).toEqual(["r-new", "r-old"]);
+  });
+
+  it("keeps a run open across a revision pass that sends llm_output without agent_end", () => {
+    const rootDir = makeRoot();
+    let clock = Date.now();
+    const { handlers } = registerPlugin(rootDir, { now: () => clock });
+    const ctx = { runId: "r-revise", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-revise" }, { runId: "r-revise", sessionKey: ctx.sessionKey });
+    handlers.llm_output({ runId: "r-revise", provider: "anthropic", model: "claude", usage: { input: 7, output: 3 }, lastAssistant: { stopReason: "stop" } }, ctx);
+    handlers.model_call_started({ runId: "r-revise" }, { runId: "r-revise", sessionKey: ctx.sessionKey });
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    clock += 31_000;
+    expect(source.ingest().added).toBe(0);
+    handlers.agent_end({ runId: "r-revise", success: true, durationMs: 31_500 }, ctx);
+    handlers.llm_output({ runId: "r-revise", provider: "anthropic", model: "claude", usage: { input: 5, output: 2 }, lastAssistant: { stopReason: "stop" } }, ctx);
+    expect(source.ingest().added).toBe(1);
+    const [row] = outbox.db.prepare("SELECT status, error_text, usage_json, evidence_complete FROM turns").all();
+    expect(row).toMatchObject({ status: "completed", error_text: "" });
+    expect(JSON.parse(row.usage_json)).toMatchObject({ input_tokens: 12, output_tokens: 5 });
   });
 
   it("titles every class within AgentRun's 80 characters", () => {
