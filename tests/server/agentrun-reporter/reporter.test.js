@@ -739,6 +739,39 @@ describe("agentrun reporter: revoked content, live directories and unreadable sp
     expect(run.start.input).toMatch(/^Main session \(main\) · 0\.?\d*s · failed — 0 tool calls; started /);
   });
 
+  it("reports a turn whose agent_end OpenClaw dropped from its last llm_output, and leaves a running turn alone", () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const turn = (runId, stopReason) => {
+      const ctx = { runId, sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+      handlers.model_call_started({ runId }, { runId, sessionKey: ctx.sessionKey });
+      handlers.after_tool_call({ toolName: "read", runId, durationMs: 2 }, ctx);
+      handlers.llm_output({ runId, provider: "anthropic", model: "claude", usage: { input: 7, output: 3 }, lastAssistant: { stopReason, content: kMarker } }, ctx);
+    };
+    turn("r-ok", "stop");
+    turn("r-err", "error");
+    turn("r-abort", "aborted");
+    handlers.model_call_started({ runId: "r-running" }, { runId: "r-running", sessionKey: "agent:main:main" });
+    handlers.after_tool_call({ toolName: "exec", runId: "r-running", durationMs: 2 }, { runId: "r-running", sessionKey: "agent:main:main", trigger: "user" });
+    let clock = Date.now();
+    const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });
+    const source = createOpenclawSource({ rootDir, outbox, logger: { warn: () => {} }, now: () => clock });
+    expect(source.ingest().added).toBe(0);
+    clock += 31_000;
+    expect(source.ingest().added).toBe(3);
+    const rows = outbox.db.prepare("SELECT source_run_id, status, error_text, usage_json, evidence_complete FROM turns ORDER BY source_run_id").all();
+    expect(rows.map((row) => [row.source_run_id, row.status])).toEqual([
+      ["r-abort", "cancelled"],
+      ["r-err", "failed"],
+      ["r-ok", "completed"],
+    ]);
+    expect(rows.find((row) => row.source_run_id === "r-ok").error_text).toBe("end not recorded");
+    expect(JSON.parse(rows[0].usage_json)).toMatchObject({ input_tokens: 7, output_tokens: 3 });
+    expect(rows.every((row) => row.evidence_complete === 0)).toBe(true);
+    expect(readSpool(rootDir)).not.toContain(kMarker);
+    expect(readSpool(rootDir)).toContain('"runId":"r-running"');
+  });
+
   it("titles every class within AgentRun's 80 characters", () => {
     const rootDir = makeRoot();
     const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db") });

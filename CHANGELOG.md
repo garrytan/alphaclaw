@@ -11,6 +11,7 @@ OpenClaw turns in AgentRun now show their model and token usage, and every repor
 
 ### Fixed
 - Most OpenClaw turns reached AgentRun with no model and 0 tokens. OpenClaw 2026.11.4 sends a turn's usage (`llm_output`) just after it reports the turn ended (`agent_end`), and the reporter had already closed the turn by then. The capture plugin now waits for that usage before closing a turn. It also records the model from `model_call_ended`, so a turn that never sends usage still names its model; AlphaClaw reads such a turn once it has been over for 30 s.
+- OpenClaw can drop a turn's `agent_end` (the gateway logs `agent_end handler from agentrun-reporter failed: Plugin invocation scope is closed`). Such a turn sat unreported until the next gateway restart, and was then reported as cancelled. It is now reported 30 s after its last reply, with the status that reply's stop reason gives and the note `end not recorded`.
 - AgentRun titles a run with the first 80 characters of its input, and the reported input began with a long description, so titles were cut off mid-timestamp. Each run's input now opens with what ran, how long it took and how it ended, for example `Telegram group (main) · 24.5s · completed`, `Cron: Morning brief · 1.2s · failed` or `<thread title> · 180s · completed` (`Private Capy thread` for a private thread), followed by the details. A listed cron job's message and an automation turn's prompt now come after that line instead of before it.
 
 ## [0.10.295] - 2026-11-17
