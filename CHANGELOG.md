@@ -5,12 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.302] - 2026-11-17
+## [0.10.303] - 2026-11-17
 
 AlphaClaw can now watch the git checkouts whose pushes matter and tell the owner when one would push with the wrong GitHub credential, cannot reach its remote, or has commits that have not gone out for half an hour, or tracks files its ignore rules exclude.
 
 ### Added
 - `alphaclaw.json` `gitPushChecks.checkouts`: a list of push checkouts, empty (off) by default. Each is checked at boot and every `intervalMinutes` (default 10). When a checkout pins its own credential helper, `git credential fill` for its push URL must give the same credential as that helper alone, compared as a hash and never logged or stored; a helper set outside the checkout that answers first (such as the one `gh auth setup-git` writes into the global gitconfig) is named with the file it comes from and the fix. `git ls-remote` must succeed ("Repository not found" and refused authentication alert at once, other failures on the second check in a row), and commits not on the remote whose oldest is past `stuckMinutes` (default 30) alert with the count. Tracked files that match the checkout's ignore rules (`git ls-files -ci --exclude-standard`) alert with the count and at most three paths, with the full list of paths in a 0600 file under `.alphaclaw/git-push-checks/`. Each problem is announced once and once more when it clears, survives restarts in `.alphaclaw/git-push-checks.json`, and is recorded as a `git_push_check` watchdog event. git runs in the gateway's environment with prompts off and never fetches, writes or pushes; credential helpers are only asked for a credential, never told to store or erase one, and usernames never appear in an alert.
+
+## [0.10.302] - 2026-11-17
+
+The Capy reporter no longer loses a live turn when its pass ends right after the turn was started in AgentRun.
+
+### Fixed
+- A live turn's start is now written to the state file before it is posted to AgentRun (one write per live turn). Before, it was kept only in memory until the pass's write after sending, so a pass that stopped in between (a failed state write, a killed process) left the next pass to start the finished turn again under the same key with a different body; AgentRun refused it with `idempotency_mismatch`, the reporter dropped it (`row_dropped op=start … code=idempotency_mismatch`), and the run stayed open in AgentRun with no events or completion.
+- AGENTS.md and the SQLite outbox's comment now date live runs to v0.10.300, the release that shipped them, instead of v0.10.299.
 
 ## [0.10.301] - 2026-11-17
 
