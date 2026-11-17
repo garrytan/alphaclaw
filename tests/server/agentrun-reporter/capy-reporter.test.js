@@ -818,6 +818,48 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
   });
 
+  it("never reopens a reported turn as live when its thread wakes with no new message", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const w = [user("w1", 30), reply("rw1", 29)];
+    const capy = createFakeCapy({ threads: [thread("jam_W")], messages: { jam_W: w } });
+    const watched = onPass(capy, (pass) => {
+      if (pass === 2) Object.assign(capy.threads[0], { status: "working", lastActivityAt: at(-0.5) });
+      if (pass === 3) Object.assign(capy.threads[0], { status: "idle", lastActivityAt: at(-1.5) });
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    expect(result.code).toBe(0);
+    expect(keys()).toEqual(["alphaclaw:capy:jam_W:" + w[0].id]);
+    expect([...fake.runs.values()][0].completion).toMatchObject({ status: "completed" });
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("drops a live turn whose thread turns private before it finishes, and sends nothing more for it", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: [user("w1", 0), reply("rw1", -0.5)] } });
+    const watched = onPass(capy, (pass) => {
+      if (pass === 2) Object.assign(capy.threads[0], { visibility: "private", lastActivityAt: at(-0.7) });
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    expect(result.lines.join("\n")).toContain("content_revoked op=capy count=1");
+    expect(fake.runs.size).toBe(1);
+    const [item] = [...fake.runs.values()];
+    expect(item.batches).toEqual([]);
+    expect(item.completion).toBeNull();
+    expect(starts()).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("drops a live start AgentRun refuses instead of resending it every loop", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    fake.state.failNext.push({ path: /\/sdk-runs$/, status: 422, body: { error: { code: "input_invalid", message: "bad start" } } });
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: [user("w1", 0), reply("rw1", -0.5)] } });
+    const result = await run(capy, {}, { watchMinutes: 3 });
+    expect(result.lines.join("\n")).toContain("row_dropped op=start source=capy code=input_invalid");
+    expect(starts()).toHaveLength(1);
+    expect(fake.runs.size).toBe(0);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
   it("exits non-zero with one line naming what is missing, never a value", () => {
     const result = spawnSync(process.execPath, [kScript, "--state", path.join(dir, "state.json")], {
       env: { PATH: process.env.PATH, AGENTRUN_CAPY_REPORTER_TOKEN: "tok-VALUE-123" },

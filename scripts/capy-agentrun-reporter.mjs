@@ -356,6 +356,7 @@ export const runCapyReporter = async ({
   let captains = new Map();
   let failed = false;
   let live = false;
+  let listedAll = false;
 
   // Agent ids are stable. A private thread (it or its project not org, or the
   // thread listed) goes under one shared agent with no crew in its name. A
@@ -486,7 +487,9 @@ export const runCapyReporter = async ({
 
   // Reads a thread's or subagent's transcript from its saved cursor and
   // returns its turns, the open (last, unfinished) turn, the turns not yet
-  // reported and the cursor and reported ids to save.
+  // reported and the cursor and reported ids to save. openNew says the open
+  // turn was never reported and is inside the window, so it may go live: a
+  // thread woken with no new user entry reopens a turn already sent.
   const followTranscript = async (pathname, known, { closed, lastActivityAt }) => {
     const { entries, lastPageStart, complete } = await readTranscript(capy, pathname, known.after);
     const turns = splitTurns(entries);
@@ -506,7 +509,8 @@ export const runCapyReporter = async ({
     const nextAfter = open ? open.user.pageStart : lastPageStart;
     const keepFrom = entries.findIndex((entry) => entry.pageStart === nextAfter);
     const kept = keepFrom < 0 ? [] : entries.slice(keepFrom).filter((entry) => entry.source === "user" && reported.has(entry.id)).map((entry) => entry.id);
-    return { turns, open, fresh, nextAfter, kept };
+    const openNew = Boolean(open) && !new Set(known.reported).has(open.user.id) && timeOf(open.user.createdAt) >= timeOf(known.since);
+    return { turns, open, openNew, fresh, nextAfter, kept };
   };
 
   // The credit change since the previous report goes on the last reported
@@ -522,9 +526,9 @@ export const runCapyReporter = async ({
   };
 
   // A finished turn joins the queue once. A live row of the same turn whose
-  // start was built (it may have reached AgentRun) keeps that start and its
-  // heartbeats; its events and completion follow them. One never built is
-  // replaced.
+  // start was built (it may have reached AgentRun) keeps that start and every
+  // heartbeat it stored, sent or not; its events and completion follow them.
+  // One never built is replaced.
   const queue = (rows) => {
     for (const row of rows) {
       const index = state.rows.findIndex((entry) => entry.id === row.id);
@@ -538,7 +542,7 @@ export const runCapyReporter = async ({
         state.rows[index] = row;
         continue;
       }
-      const beats = JSON.parse(known.batches_json || "[]").slice(0, Number(known.batches_sent || 0));
+      const beats = JSON.parse(known.beats_json || "[]");
       const contents = row.contents === 1;
       const events = eventBatches({ rowId: `${row.source}-${row.id}`, sessionLabel: row.session_label, texts: contents ? JSON.parse(row.texts_json) : [], tools: JSON.parse(row.tools_json) });
       Object.assign(known, {
@@ -547,7 +551,7 @@ export const runCapyReporter = async ({
         heartbeat_at: known.heartbeat_at,
         start_body: known.start_body,
         agentrun_run_id: known.agentrun_run_id,
-        batches_sent: beats.length,
+        batches_sent: Number(known.batches_sent || 0),
         batches_json: JSON.stringify([...beats, ...events.map((batch, offset) => ({ ...batch, sequence: beats.length + offset + 1 }))]),
         complete_body: JSON.stringify(
           completeBody({ status: row.status, answer: contents ? row.answer_text : "", error: row.error_text, model: row.model, sessionLabel: row.session_label, usage: null, evidenceComplete: false }),
@@ -563,7 +567,7 @@ export const runCapyReporter = async ({
 
   const processThread = async (thread, project, automationRuns) => {
     const known = state.threads[thread.id] || { after: null, reported: [], since: new Date(now() - kFirstSightMs).toISOString(), credits: null };
-    const { turns, open, fresh, nextAfter, kept } = await followTranscript(`/threads/${encodeURIComponent(thread.id)}/messages`, known, {
+    const { turns, open, openNew, fresh, nextAfter, kept } = await followTranscript(`/threads/${encodeURIComponent(thread.id)}/messages`, known, {
       closed: kClosedStatuses.has(thread.status),
       lastActivityAt: thread.lastActivityAt,
     });
@@ -582,7 +586,7 @@ export const runCapyReporter = async ({
         rowOf({ thread, turn, failed: last && thread.status === "failed", cls: classOf(turn), agent, creditsNote: credits.noteAt(index), startFields: live }),
       ),
     );
-    if (live && open && thread.status === "working") queueLive({ thread, turn: open, cls: classOf(open), agent });
+    if (live && openNew && thread.status === "working") queueLive({ thread, turn: open, cls: classOf(open), agent });
     state.threads[thread.id] = {
       activity: thread.lastActivityAt || thread.updatedAt || "",
       status: thread.status,
@@ -614,7 +618,7 @@ export const runCapyReporter = async ({
       }
       const prior = known || { after: null, reported: [], since: new Date(now() - kFirstSightMs).toISOString(), credits: null };
       try {
-        const { open, fresh, nextAfter, kept } = await followTranscript(`/subagents/${encodeURIComponent(subagent.id)}/messages`, prior, {
+        const { open, openNew, fresh, nextAfter, kept } = await followTranscript(`/subagents/${encodeURIComponent(subagent.id)}/messages`, prior, {
           closed: subagent.archived === true || kSubagentClosedStatuses.has(subagent.status),
           lastActivityAt: subagent.lastActivityAt,
         });
@@ -624,7 +628,7 @@ export const runCapyReporter = async ({
             rowOf({ thread, subagent, turn, failed: last && subagent.status === "failed", cls, agent, creditsNote: credits.noteAt(index), startFields: live }),
           ),
         );
-        if (live && open && subagent.status === "working") queueLive({ thread, subagent, turn: open, cls, agent });
+        if (live && openNew && subagent.status === "working") queueLive({ thread, subagent, turn: open, cls, agent });
         state.subagents[subagent.id] = { thread: thread.id, activity, status: subagent.status, after: nextAfter, reported: kept, since: prior.since, credits: credits.next };
         counts.subagents += 1;
         counts.queued += fresh.length;
@@ -646,6 +650,7 @@ export const runCapyReporter = async ({
       readFailed("captains", "all", error);
     }
     let complete = true;
+    listedAll = false;
     for (const project of projects) {
       try {
         await collectProject(project);
@@ -656,6 +661,7 @@ export const runCapyReporter = async ({
     }
     save();
     if (!complete) return;
+    listedAll = true;
     for (const id of privateIds) {
       if (!seenIds.has(id)) log(`private_unmatched op=capy entry=${id} (no thread or Captain id this key can see matches it; list jam_ ids)`);
     }
@@ -748,7 +754,7 @@ export const runCapyReporter = async ({
   // empty event batch at most every 10 minutes while it works; its events and
   // completion go with the finished turn.
   const sendLive = async () => {
-    for (const row of state.rows.filter((entry) => entry.state === "live" && sendable(entry))) {
+    for (const row of state.rows.filter((entry) => entry.state === "live" && Number(entry.next_attempt_at || 0) <= now() && sendable(entry))) {
       const started = await sender.startOnly({ ...row, agent_name: sendNameOf(row) });
       if (started.outcome !== "started") continue;
       if (!row.live_started) {
@@ -757,12 +763,21 @@ export const runCapyReporter = async ({
         save();
         continue;
       }
-      if (now() - Number(row.heartbeat_at || 0) < kHeartbeatMs) continue;
-      const beats = JSON.parse(row.batches_json || "[]").slice(0, Number(row.batches_sent || 0));
-      const beat = { sequence: beats.length + 1, events: [] };
+      // A beat is stored before it is posted, so one whose answer was lost
+      // is posted again before anything else and the finished turn's events
+      // are numbered after it.
+      const beats = JSON.parse(row.beats_json || "[]");
+      const confirmed = Number(row.batches_sent || 0);
+      if (beats.length <= confirmed) {
+        if (now() - Number(row.heartbeat_at || 0) < kHeartbeatMs) continue;
+        beats.push({ sequence: beats.length + 1, events: [] });
+        row.beats_json = JSON.stringify(beats);
+        save();
+      }
+      const beat = beats[confirmed];
       const result = await client.call({ method: "POST", path: `/sdk-runs/${encodeURIComponent(row.agentrun_run_id)}/events`, token: started.runToken, body: beat });
       if (result.kind !== "ok") continue;
-      Object.assign(row, { batches_json: JSON.stringify([...beats, beat]), batches_sent: beats.length + 1, heartbeat_at: now() });
+      Object.assign(row, { batches_sent: beat.sequence, heartbeat_at: now() });
       save();
     }
   };
@@ -779,6 +794,7 @@ export const runCapyReporter = async ({
     projectsById = new Map();
     captains = new Map();
     failed = false;
+    listedAll = false;
     live = watch && (await liveOn());
 
     try {
@@ -800,6 +816,13 @@ export const runCapyReporter = async ({
     if (revoked.length) {
       state.rows = state.rows.filter((row) => !revoked.includes(row));
       log(`content_revoked op=capy count=${revoked.length} (the thread became private before these turns were sent; not sent)`);
+    }
+    // A live turn whose thread a complete listing no longer shows, or that has
+    // been working for 24 hours, is dropped rather than kept beating forever.
+    const stale = state.rows.filter((row) => row.state === "live" && ((listedAll && !seenIds.has(row.session_label)) || now() - Number(row.started_at || 0) > kFirstSightMs));
+    if (stale.length) {
+      state.rows = state.rows.filter((row) => !stale.includes(row));
+      log(`live_dropped op=capy count=${stale.length} (their thread is gone or the turn ran past 24 hours; not completed)`);
     }
     const unsent = state.rows.filter((row) => row.state === "queued");
     if (unsent.length > kMaxUnsentRows) {
