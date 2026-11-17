@@ -77,14 +77,16 @@ const readSpool = (rootDir) => {
     .join("\n");
 };
 
-const makePipeline = (rootDir, { fake, contentCron = [], cronJobs = [], token, runtime = "claude-agent-sdk", now } = {}) => {
+const makePipeline = (rootDir, { fake, contentCron = [], hiddenCron = [], cronJobs = [], token, runtime = "claude-agent-sdk", now } = {}) => {
   const outbox = openOutbox({ dbPath: path.join(rootDir, "db", "agentrun-outbox.db"), ...(now ? { now } : {}) });
   const source = createOpenclawSource({
     rootDir,
     outbox,
     getContentCronJobs: () => new Set(contentCron),
+    getHiddenCronNames: () => new Set(hiddenCron),
     readCronJobs: () => cronJobs,
     logger: { warn: () => {} },
+    ...(now ? { now } : {}),
   });
   const logs = [];
   const settings = { runtime };
@@ -94,6 +96,7 @@ const makePipeline = (rootDir, { fake, contentCron = [], cronJobs = [], token, r
     token: token ?? fake.token,
     getRuntime: () => settings.runtime,
     contentAllowed: (row) => contentStillAllowed(row, new Set(contentCron)),
+    agentNameOf: (row) => source.agentNameOf(row, cronJobs),
     random: () => 0.5,
     logger: { warn: (line) => logs.push(line) },
     ...(now ? { now } : {}),
@@ -170,7 +173,7 @@ describe("agentrun reporter: capture plugin", () => {
     expect(spool).toContain('"runId":"r-early"');
     expect(spool).toContain('"status":"cancelled","reason":"stopped"');
     expect(spool).not.toContain("no model");
-    expect(Object.keys(handlers).sort()).toEqual(["after_tool_call", "agent_end", "gateway_start", "llm_output", "model_call_ended", "model_call_started"]);
+    expect(Object.keys(handlers).sort()).toEqual(["after_tool_call", "agent_end", "cron_changed", "gateway_start", "llm_output", "model_call_ended", "model_call_started", "subagent_spawned"]);
   });
 
   it("decides a cron run's class from the first hook that carries its trigger", () => {
@@ -224,7 +227,7 @@ describe("agentrun reporter: queue and sender", () => {
     expect(wire.split(kMarker).length - 1).toBe(2);
     expect(wire).not.toContain("424242");
     expect(wire).not.toContain("telegram:direct");
-    expect(wire).not.toContain("Inbox digest");
+    expect(wire).toContain("Cron: Inbox digest");
     expect(wire).toContain("Summarize the news");
     expect(wire).toContain("Cron: Morning brief");
     expect([...fake.agents.keys()].sort()).toEqual(["openclaw-agent-main", "openclaw-cron-brief", "openclaw-cron-mail"]);
@@ -1069,5 +1072,227 @@ describe("agentrun reporter: answers from something other than AgentRun", () => 
     clock += 60 * 1000;
     expect((await sender.sendDue()).sent).toBe(1);
     expect(logs.join("\n")).not.toContain("row_dropped");
+  });
+});
+
+describe("agentrun reporter: cron runs", () => {
+  const T0 = 1_800_000_000_000;
+  const recurring = { name: "Morning brief", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
+  // OpenClaw 2026.11.4 stamps both events with the run receipt's start time
+  // (run-queue-execution.ts emits started with runReceipt.startedAtMs and
+  // finalizes with startedAt: runReceipt.startedAtMs, which run-result.ts
+  // publishes as the finish's runAtMs), so one run is one key.
+  const cronEvent = (handlers, action, jobId, job, extra = {}) => handlers.cron_changed({ action, jobId, job, agentId: job.agentId, sessionTarget: job.sessionTarget, ...extra }, {});
+  const isolatedTurn = (handlers, clock, jobId, runId) => {
+    clock.t += 1000;
+    driveTurn(handlers, { runId, sessionKey: "agent:main:cron:" + jobId + ":run:" + runId, trigger: "cron", jobId });
+  };
+  const setup = (options = {}) => {
+    const rootDir = makeRoot();
+    const clock = { t: T0 };
+    const now = () => clock.t;
+    const { handlers } = registerPlugin(rootDir, { now });
+    const fake = createFakeAgentrun({ now });
+    const pipeline = makePipeline(rootDir, { fake, now, ...options });
+    return { rootDir, clock, handlers, fake, ...pipeline };
+  };
+
+  it("reports a cron run once, keyed by job and start time, with its isolated turn folded in", async () => {
+    const { clock, handlers, fake, source, sender, outbox, rootDir } = setup({
+      contentCron: ["brief"],
+      cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the news" } }],
+    });
+    cronEvent(handlers, "started", "brief", recurring, { runAtMs: T0, summary: kMarker });
+    isolatedTurn(handlers, clock, "brief", "r1");
+    clock.t += 1000;
+    cronEvent(handlers, "finished", "brief", recurring, {
+      runAtMs: T0, durationMs: 2500, status: "ok", sessionKey: "agent:main:cron:brief:run:r1", provider: "anthropic", model: "claude",
+      summary: "summary " + kMarker, error: "error " + kMarker,
+    });
+    expect(readSpool(rootDir)).not.toContain("summary " + kMarker);
+    expect(readSpool(rootDir)).not.toContain("error " + kMarker);
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.counts()).toEqual({ queued: 1 });
+    await sender.sendDue();
+    expect(fake.runs.size).toBe(1);
+    const start = fake.requests.find((request) => /sdk-runs$/.test(request.path));
+    expect(start.headers["idempotency-key"]).toBe("alphaclaw:openclaw-cron:brief:" + T0);
+    const [run] = fake.runs.values();
+    expect(run.start.input).toMatch(/^Cron: Morning brief · 2\.5s · completed — 2 tool calls; started /);
+    expect(run.start.input).toContain("Summarize the news");
+    expect(run.completion).toMatchObject({ status: "completed", model: "anthropic/claude", evidence_complete: true });
+    expect(run.completion.usage).toMatchObject({ input_tokens: 10, output_tokens: 5 });
+    expect(run.batches.flatMap((batch) => batch.events).filter((event) => event.type === "tool")).toHaveLength(4);
+    expect(run.completion.answer).toContain("r1");
+    expect(readSpool(rootDir)).toBe("");
+  });
+
+  it("holds a settled turn while its run is still going, and reports both as one run when the run finishes", async () => {
+    const { clock, handlers, fake, source, sender } = setup();
+    cronEvent(handlers, "started", "brief", recurring, { runAtMs: T0 });
+    isolatedTurn(handlers, clock, "brief", "r1");
+    expect(source.ingest().added).toBe(0);
+    clock.t += 60_000;
+    expect(source.ingest().added).toBe(0);
+    cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 62_000, status: "error" });
+    expect(source.ingest().added).toBe(1);
+    await sender.sendDue();
+    const [run] = fake.runs.values();
+    expect(run.completion).toMatchObject({ status: "failed", error: "The cron run failed (details withheld)." });
+    expect(run.completion.answer).toBe("");
+  });
+
+  it("folds a main-session job's heartbeat turn inside the run as metadata only, and leaves a later one alone", async () => {
+    const main = { ...recurring, name: "Check inbox", sessionTarget: "main", payload: { kind: "systemEvent" } };
+    const { clock, handlers, fake, source, sender, outbox } = setup({ contentCron: ["inbox"], cronJobs: [{ id: "inbox", name: "Check inbox", payload: { message: "secret " + kMarker } }] });
+    cronEvent(handlers, "started", "inbox", main, { runAtMs: T0 });
+    clock.t += 500;
+    driveTurn(handlers, { runId: "hb1", sessionKey: "agent:main:main", trigger: "heartbeat" });
+    clock.t += 500;
+    cronEvent(handlers, "finished", "inbox", main, { runAtMs: T0, durationMs: 4000, status: "ok" });
+    clock.t += 60_000;
+    driveTurn(handlers, { runId: "hb2", sessionKey: "agent:main:main", trigger: "heartbeat" });
+    expect(source.ingest().added).toBe(2);
+    const rows = outbox.db.prepare("SELECT source, class, contents, agent_key FROM turns ORDER BY id").all();
+    expect(rows).toEqual([
+      { source: "openclaw-cron", class: "heartbeat", contents: 0, agent_key: "openclaw-cron-inbox" },
+      { source: "openclaw", class: "heartbeat", contents: 0, agent_key: "openclaw-agent-main" },
+    ]);
+    await sender.sendDue();
+    const wire = fake.requests.map((request) => request.body).join("\n");
+    expect(wire).not.toContain(kMarker);
+    expect(wire).toContain("with a heartbeat turn of agent main");
+  });
+
+  it("leaves a heartbeat during an isolated job's run alone, and keeps a cron run's turn when its queue write fails once", async () => {
+    const { clock, handlers, source, outbox } = setup({ contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the news" } }] });
+    cronEvent(handlers, "started", "brief", recurring, { runAtMs: T0 });
+    clock.t += 500;
+    driveTurn(handlers, { runId: "hb1", sessionKey: "agent:main:main", trigger: "heartbeat" });
+    isolatedTurn(handlers, clock, "brief", "r1");
+    clock.t += 1000;
+    cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 4000, status: "ok", sessionKey: "agent:main:cron:brief:run:r1" });
+    const addTurn = outbox.addTurn;
+    let refused = 0;
+    outbox.addTurn = (row) => {
+      if (row.source === "openclaw-cron" && refused++ === 0) throw new Error("SQLITE_BUSY: database is locked");
+      return addTurn.call(outbox, row);
+    };
+    expect(source.ingest().added).toBe(1);
+    expect(source.ingest().added).toBe(1);
+    const rows = outbox.db.prepare("SELECT source, class, contents, agent_key FROM turns ORDER BY id").all();
+    expect(rows).toEqual([
+      { source: "openclaw", class: "heartbeat", contents: 0, agent_key: "openclaw-agent-main" },
+      { source: "openclaw-cron", class: "cron", contents: 1, agent_key: "openclaw-cron-brief" },
+    ]);
+  });
+
+  it("names recurring jobs, hides listed names, and files one-shot jobs and script runs as metadata", async () => {
+    const { clock, handlers, fake, source, sender, outbox } = setup({
+      hiddenCron: ["secretjob-123456"],
+      contentCron: ["oneshot", "script"],
+      cronJobs: [{ id: "secretjob-123456", name: "Pay rent " + kMarker }],
+    });
+    cronEvent(handlers, "started", "secretjob-123456", { ...recurring, name: "Pay rent " + kMarker }, { runAtMs: T0 });
+    cronEvent(handlers, "finished", "secretjob-123456", { ...recurring, name: "Pay rent " + kMarker }, { runAtMs: T0, durationMs: 10, status: "ok" });
+    const oneShot = { ...recurring, name: "Call   mom", schedule: { kind: "at" } };
+    cronEvent(handlers, "started", "oneshot", oneShot, { runAtMs: T0 + 1 });
+    isolatedTurn(handlers, clock, "oneshot", "r-one");
+    cronEvent(handlers, "finished", "oneshot", oneShot, { runAtMs: T0 + 1, durationMs: 5000, status: "ok" });
+    const script = { ...recurring, name: "Backup", payload: { kind: "command" } };
+    cronEvent(handlers, "finished", "script", script, { runAtMs: T0 + 2, durationMs: 300, status: "skipped" });
+    expect(source.ingest().added).toBe(3);
+    await sender.sendDue();
+    expect([...fake.agents.values()].map((agent) => [agent.agent_id, agent.definition.name]).sort()).toEqual([
+      ["openclaw-cron-oneshot-main", "One-shot jobs (main)"],
+      ["openclaw-cron-script", "Cron: Backup"],
+      ["openclaw-cron-secretjob-123456", "Cron job secretjo"],
+    ]);
+    const inputs = [...fake.runs.values()].map((run) => run.start.input);
+    expect(inputs.some((input) => input.startsWith("One-shot: Call mom · 5s · completed"))).toBe(true);
+    expect(inputs.some((input) => input.startsWith("Cron: Backup · 0.3s · cancelled (skipped) — 0 tool calls") && input.includes("cron script run"))).toBe(true);
+    expect(fake.requests.map((request) => request.body).join("\n")).not.toContain("Pay rent");
+    expect(outbox.db.prepare("SELECT job_id, contents FROM turns ORDER BY job_id").all()).toEqual([
+      { job_id: "oneshot", contents: 1 },
+      { job_id: "script", contents: 0 },
+      { job_id: "secretjob-123456", contents: 0 },
+    ]);
+  });
+
+  it("reports a dead gateway's unfinished run as cancelled and lets a start a later start replaced go", async () => {
+    const rootDir = makeRoot();
+    let generation = 1000;
+    const first = registerPlugin(rootDir, { generationId: () => String(generation) });
+    cronEvent(first.handlers, "started", "brief", recurring, { runAtMs: T0 });
+    cronEvent(first.handlers, "started", "brief", recurring, { runAtMs: T0 + 60_000 });
+    generation = 2000;
+    registerPlugin(rootDir, { generationId: () => String(generation) }).handlers.gateway_start({ port: 1 }, {});
+    const fake = createFakeAgentrun();
+    const { source, sender, outbox } = makePipeline(rootDir, { fake });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT source_run_id FROM turns").all()).toEqual([{ source_run_id: "brief:" + (T0 + 60_000) }]);
+    await sender.sendDue();
+    const [run] = fake.runs.values();
+    expect(run.completion).toMatchObject({ status: "cancelled", error: "interrupted by gateway restart" });
+    expect(readSpool(rootDir)).toBe("");
+  });
+
+  it("archives a removed job's agent only after its queued runs are sent, and unarchives it for a late run", async () => {
+    const { handlers, fake, source, sender, outbox, logs } = setup();
+    cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 10, status: "ok" });
+    cronEvent(handlers, "removed", "brief", recurring);
+    cronEvent(handlers, "removed", "once", { ...recurring, schedule: { kind: "at" } });
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT agent_key FROM agent_archives").all()).toEqual([{ agent_key: "openclaw-cron-brief" }]);
+    expect(await sender.archiveDue()).toBe(0);
+    await sender.sendDue();
+    expect(await sender.archiveDue()).toBe(1);
+    expect(fake.agents.get("openclaw-cron-brief").archived).toBe(true);
+    cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0 + 5, durationMs: 10, status: "ok" });
+    expect(source.ingest().added).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    expect(fake.agents.get("openclaw-cron-brief").archived).toBe(false);
+    expect(logs.some((line) => line.includes("agent_unarchived"))).toBe(true);
+    fake.state.failNext.push({ path: /\/archive$/, status: 503, body: { error: { code: "unavailable" } } });
+    outbox.requestArchive("openclaw-cron-brief");
+    expect(await sender.archiveDue()).toBe(0);
+    expect(logs.some((line) => line.includes("agent_archive_failed") && line.includes("fix="))).toBe(true);
+  });
+
+  it("opens a queue written by v0.10.296 and sends the turns waiting in it", async () => {
+    const rootDir = makeRoot();
+    const dbPath = path.join(rootDir, "db", "agentrun-outbox.db");
+    const old = openOutbox({ dbPath });
+    old.db.exec("DROP TABLE agent_archives; ALTER TABLE turns DROP COLUMN job_id; PRAGMA user_version = 0;");
+    old.db
+      .prepare("INSERT INTO turns (source, source_run_id, agent_key, agent_name, class, status, input_text, created_at, updated_at) VALUES ('openclaw', 'old-1', 'openclaw-cron-brief', 'Cron job brief', 'cron', 'completed', 'old turn', 1, 1)")
+      .run();
+    old.close();
+    const fake = createFakeAgentrun();
+    const { sender, outbox } = makePipeline(rootDir, { fake, cronJobs: [{ id: "brief", name: "Morning brief" }] });
+    expect(outbox.db.prepare("PRAGMA user_version").get().user_version).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    expect(fake.agents.get("openclaw-cron-brief").definition.name).toBe("Cron: Morning brief");
+  });
+
+  it("names a subagent's parent session by its label, never its key", async () => {
+    const { handlers, fake, source, sender } = setup();
+    handlers.subagent_spawned({ childSessionKey: "agent:main:subagent:abc", agentId: "main", mode: "run", runId: "x" }, { requesterSessionKey: "agent:main:telegram:direct:424242" });
+    driveTurn(handlers, { runId: "r-sub", sessionKey: "agent:main:subagent:abc" });
+    expect(source.ingest().added).toBe(1);
+    await sender.sendDue();
+    const [run] = fake.runs.values();
+    expect(run.start.input).toMatch(/spawned by openclaw:dm:telegram:[0-9a-f]{12}\./);
+    expect(fake.requests.map((request) => request.body).join("\n")).not.toContain("424242");
+  });
+
+  it("reads an unknown stop reason as completed, never as an inherited property", () => {
+    const { handlers, clock, source, outbox } = setup();
+    const ctx = { runId: "r-odd", sessionKey: "agent:main:main", trigger: "user", agentId: "main" };
+    handlers.model_call_started({ runId: "r-odd" }, { runId: "r-odd", sessionKey: ctx.sessionKey });
+    handlers.llm_output({ runId: "r-odd", provider: "anthropic", model: "claude", usage: { input: 1 }, lastAssistant: { stopReason: "constructor" } }, ctx);
+    clock.t += 31_000;
+    expect(source.ingest().added).toBe(1);
+    expect(outbox.db.prepare("SELECT status FROM turns").get().status).toBe("completed");
   });
 });
