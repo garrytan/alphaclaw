@@ -17,6 +17,19 @@ Capy turns now reach AgentRun within about a minute of finishing instead of once
 ### Changed
 - Only one reporter run works at a time: a run holds a 3-minute lease file beside its state file, renewed every minute. A run that finds another's live lease exits 0 with `watch_skipped`; an expired lease is taken over (`watch_takeover`). Every write of the state file now merges with what is on disk, so a second writer's cursors and queued turns are kept instead of overwritten.
 
+## [0.10.297] - 2026-11-17
+
+Every OpenClaw cron run now shows up in AgentRun once, under a readable name, with the agent turn it ran folded in.
+
+### Added
+- Cron runs: the capture plugin listens to OpenClaw's `cron_changed` events and AlphaClaw reports each run once, keyed by job and start time (`alphaclaw:openclaw-cron:<job>:<runAtMs>`). An isolated job's turn is folded into its run, so the run shows the turn's tools, model and token usage and the turn is not listed twice. A main-session job's heartbeat turn is folded only when the job wakes it now and it starts inside the run; it keeps its session's class and carries no contents. Script runs and runs whose turn never came are reported too, metadata only. Only the job's id, name, schedule kind, target and wake mode and the run's status, duration, model and session are recorded, never the run's summary, error text or payload.
+- Names: a recurring job's agent is called `Cron: <job name>`, looked up when each run is sent, so a renamed job renames its agent. List job ids (or `*`) in the new deployment setting `ALPHACLAW_AGENTRUN_HIDE_CRON_NAMES` to show `Cron job <short id>` instead. One-shot jobs (schedule `at` or delete after run) share one `One-shot jobs (<agent>)` agent per OpenClaw agent, with the job's name in each run's title.
+- A removed recurring job's AgentRun agent is archived once its queued runs are sent; a run that still arrives for it unarchives the agent first. A subagent's run names the session that spawned it by its hashed label.
+- The reporter's queue database now carries a schema version, so an existing queue keeps its waiting rows when it gains the new column and table.
+
+### Fixed
+- A stop reason such as `constructor` is no longer read as an inherited property of the status table, a settled live spool file that cannot be converted is dropped after 5 tries instead of being read every tick forever, and a capture state with no hook time now expires like the others.
+
 ## [0.10.296] - 2026-11-17
 
 OpenClaw turns in AgentRun now show their model and token usage, and every reported run, OpenClaw or Capy, gets a short readable title.

@@ -64,12 +64,19 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
         const run = runs.get(known.runId);
         return { status: 201, body: { run_id: run.id, agent_id: agent.agent_id, token: run.token } };
       }
+      if (agent.archived) return error(409, "agent_archived", "This SDK agent is archived.");
       if (body.runtime !== agent.definition.sdk.runtime) return error(422, "input_invalid", "The SDK runtime must match the registered agent.");
       const id = crypto.randomUUID();
       const run = { id, agentId: agent.agent_id, start: body, token: "ar_sdk_" + crypto.randomBytes(8).toString("hex"), batches: [], completion: null, startedAt: now() };
       runs.set(id, run);
       startKeys.set(key, { fingerprint, runId: id });
       return { status: 201, body: { run_id: id, agent_id: agent.agent_id, token: run.token } };
+    }
+    if ((match = /^\/agents\/([^/]+)\/(archive|unarchive)$/.exec(path)) && method === "POST") {
+      const agent = agents.get(decodeURIComponent(match[1]));
+      if (!agent) return error(404, "not_found");
+      agent.archived = match[2] === "archive";
+      return { status: 200, body: agent };
     }
     if ((match = /^\/agents\/([^/]+)\/definition$/.exec(path)) && method === "PUT") {
       const agent = agents.get(decodeURIComponent(match[1]));
