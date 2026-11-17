@@ -191,7 +191,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
         "- Commit only the paths you changed (`git commit -- <paths>`), then push.",
         "- If the fast-forward or your push is refused because the histories diverged, stop. Do not merge or rebase to reconcile them: tell the user the repository has diverged and leave it to them.",
         "- If you find a merge or rebase already in progress, leave it alone and tell the user.",
-        "- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`): it overrides per-repo helpers. Use `git -c credential.helper=...` per command or repo-local config.",
+        "- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`). Pass one per command, reset first: `git -c credential.helper= -c credential.helper=...`.",
       ].join("\n"),
     );
   });
@@ -207,7 +207,7 @@ describe("server/onboarding/workspace bootstrap prompt sync", () => {
         '- If `git pull --ff-only` fails, run `alphaclaw git-sync -m "<message>"` instead of stopping.',
         "- If the writer refuses, stop and tell the user. Never fall back to raw git, a merge, a rebase or a force push.",
         "- If you find a merge or rebase already in progress, leave it alone and tell the user.",
-        "- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`): it overrides per-repo helpers. Use `git -c credential.helper=...` per command or repo-local config.",
+        "- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`). Pass one per command, reset first: `git -c credential.helper= -c credential.helper=...`.",
       ].join("\n"),
     );
     expect(merged).not.toContain("{{");

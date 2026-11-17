@@ -75,7 +75,7 @@ const kAnchors = [
     text: () =>
       "- Never write a global or system git credential helper (`gh auth setup-git`, `git config --global credential.*`)",
   },
-  { id: "P14", text: () => "Use `git -c credential.helper=...` per command or repo-local config." },
+  { id: "P14", text: () => "Pass one per command, reset first: `git -c credential.helper= -c credential.helper=...`." },
   { id: "P5", text: () => "end your message with a **Changes committed** summary. Use workspace-relative paths for local files." },
   { id: "P5", text: () => "Changes committed ([abc1234](commit url)): <-- linked abbreviated hash, no backticks" },
   {
