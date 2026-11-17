@@ -158,6 +158,49 @@ describe("git push checks", () => {
     expect(fresh.notify.mock.calls[0][0]).toContain("over the 30-minute limit");
   });
 
+  it("alerts once on tracked files that match an ignore rule, with paths only and the full list in a private file", async () => {
+    const ctx = setup({ reset: true });
+    const logged = [];
+    const notify = vi.fn(async () => ({ ok: true }));
+    const checks = createGitPushChecks({
+      openclawDir: ctx.openclawDir,
+      readConfig: () => ({ checkouts: [{ path: ctx.work, name: "brain" }] }),
+      getEnv: () => ctx.env,
+      notify,
+      execFileImpl: makeExecFile(ctx.bare),
+      logger: { log: (line) => logged.push(line), warn: (line) => logged.push(line) },
+    });
+    fs.mkdirSync(path.join(ctx.work, "exports"));
+    for (const name of ["a.xml", "b.xml", "c.xml", "d.xml"]) fs.writeFileSync(path.join(ctx.work, "exports", name), "secret health data");
+    ctx.git(ctx.work, ["add", "exports"]);
+    ctx.git(ctx.work, ["commit", "-q", "-m", "exports"]);
+    ctx.git(ctx.work, ["push", "-q", ctx.bare, "HEAD:main"]);
+    expect((await checks.check()).results[0].ignored).toBeNull();
+    fs.writeFileSync(path.join(ctx.work, ".gitignore"), "exports/\n");
+
+    const { results } = await checks.check();
+    expect(results[0].ignored).toEqual({ code: "tracked_ignored", count: 4 });
+    expect(notify).toHaveBeenCalledTimes(1);
+    const message = notify.mock.calls[0][0];
+    expect(message).toContain("tracks 4 file(s) that its ignore rules exclude");
+    expect(message).toContain("exports/a.xml, exports/b.xml, exports/c.xml and 1 more");
+    expect(message).not.toContain("health data");
+    const listPath = message.match(/Full list: (\S+)\.\n/)[1];
+    expect(listPath.startsWith(path.join(ctx.openclawDir, ".alphaclaw"))).toBe(true);
+    expect(fs.statSync(listPath).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(listPath, "utf8")).toContain("exports/d.xml");
+    expect(logged.join("\n")).not.toContain("exports/");
+
+    await checks.check();
+    expect(notify).toHaveBeenCalledTimes(1);
+    ctx.git(ctx.work, ["rm", "-q", "-r", "--cached", "exports"]);
+    ctx.git(ctx.work, ["commit", "-q", "-m", "untrack"]);
+    await checks.check();
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify.mock.calls[1][0]).toContain("no longer tracks files its ignore rules exclude");
+    expect(fs.existsSync(listPath)).toBe(false);
+  });
+
   it("runs no git when no checkout is listed", async () => {
     const ctx = setup();
     const calls = [];
