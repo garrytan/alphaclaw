@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.295] - 2026-11-17
+
+Capy threads can now show up in AgentRun beside OpenClaw's turns. A new script, run once an hour by a Capy automation, reads finished Capy thread turns with a read-only Capy key and reports each one to AgentRun once.
+
+### Added
+- `scripts/capy-agentrun-reporter.mjs`: reports each finished Capy thread turn as an AgentRun run, under one AgentRun agent per Captain crew and one per project for threads in no crew. A turn sends metadata (when, how long, status, model, tool names) and its thread title; the turn an automation started also sends its prompt, replies and one line per tool call. Threads that are private, have no visibility, or belong to a crew listed in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` send metadata only, with no title. Tool inputs and outputs are never sent.
+- The script keeps its cursors and unsent turns in one JSON state file. A lost state file re-sends recent turns under their old keys, and AgentRun answers with the runs it already has. Settings: `CAPY_REPORTER_API_KEY`, `AGENTRUN_BASE_URL`, `AGENTRUN_CAPY_REPORTER_TOKEN`, `AGENTRUN_CAPY_PRIVATE_CAPTAINS`, `AGENTRUN_CAPY_RUNTIME`. See "Capy reporter" in docs/designs/agentrun-reporter.md.
+
+### Changed
+- The AgentRun sender books a start that AgentRun refuses as `idempotency_mismatch` as already reported (`run_exists`) instead of dropping it: the key already names a run for that turn, so nothing is sent twice.
+
 ## [0.10.293] - 2026-11-17
 
 Fixes to the AgentRun reporter before anyone turns it on: taking a cron job off the contents list now stops its queued turns from sending their text, and the reporter no longer misreports turns around a gateway start or retries agents AgentRun has refused for good.

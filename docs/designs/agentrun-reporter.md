@@ -75,4 +75,61 @@ Every line starts `[alphaclaw] agentrun-reporter`; none carries a token, a promp
 | `queue_error` | A spool file could not be written to the queue; it is kept and read again next tick. |
 | `late_attempt` | A later model-fallback attempt of a run that is already queued or sent; that attempt is not reported. |
 | `capture_error` | In the gateway log: the plugin could not write its spool, so the turn is not reported. In AlphaClaw's log: a spool file could not be read or converted; it is kept for the next tick (`kept for the next tick`) and dropped after 5 failed ticks (`dropped after 5 tries`). A spool directory or file it cannot read or delete is logged at most once an hour (`dir=` or `file=`); sending continues. |
+| `run_exists` | AgentRun already has a run under a turn's start key with a different start (a source that rebuilt the turn, such as the Capy reporter after a lost state file); booked as sent, no second run. |
 | `content_revoked` | A queued turn carried contents for a cron job that is no longer listed in `ALPHACLAW_AGENTRUN_CONTENT_CRON`; nothing more of it is sent. |
+
+## Capy reporter
+
+`scripts/capy-agentrun-reporter.mjs` copies finished Capy thread turns into the same AgentRun server. It does not run inside AlphaClaw: it is a one-shot script for a Capy automation (hourly, in a Capy project of its own that alone holds the Capy key), and it uses the same body builder, AgentRun client and sender as the OpenClaw reporter.
+
+```sh
+node scripts/capy-agentrun-reporter.mjs --state <path to state.json>
+```
+
+Each pass reads every project the key can see, every page of each project's threads (a thread is read again only when its `lastActivityAt` or status changed; list order is never trusted), each changed thread's messages from its saved cursor, and the project's automations and their latest 100 runs. Then it sends every queued turn and exits.
+
+- **A turn** is one user entry and everything after it until the next user entry. It is reported only once it is closed: the next user entry exists, or the thread is `idle`, `failed` or `archived`. A `waiting` or `working` thread's last turn waits for a later pass. The last turn of a `failed` thread is reported as `failed`, every other turn as `completed`.
+- **Agents.** One AgentRun agent per Captain crew, `capy-captain-<captain thread id>`, and one per project for threads in no crew, `capy-project-<project id>`, all with `learning: false`. The run's session id is the thread id.
+- **Each turn is reported once.** The start key is `alphaclaw:capy:<thread id>:<user entry id>`, and the tool event ids come from that key too. A thread first seen by the reporter reports only turns from the 24 hours before that pass.
+- **Credits.** The change in the thread's credit total since the previous report is written in the metadata line of the last turn a pass reports for that thread as an estimate, never as `cost_usd`.
+- **State.** One JSON file (mode 0600, written whole and renamed) keeps each thread's cursor and the turns not yet sent, including their stored request bodies. Keep it in the automation's Drive location. Losing it only re-sends recent turns under their old keys: AgentRun answers an identical start with the run it already has, and a start that differs (a renamed thread, a changed credit figure) with `idempotency_mismatch`, which the sender books as `run_exists` without making a second run.
+- **Capy rate limits.** A 429 waits the `retry-after` seconds (at most 2 minutes, 5 times per request) and sends the same request again.
+- **Exit code.** 0 after a good pass; 1 when Capy refused the key or failed a read, AgentRun refused the token, or a turn has failed to send on 6 passes (`rows_waiting`); 2 when a setting is missing. Queued turns are still sent after a failed read.
+
+### Capy classes
+
+| Class | When | Sent |
+| --- | --- | --- |
+| `private` | The thread's visibility is `private` or missing, or the thread id or its Captain's id is in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Metadata only, without the title. Wins over `automation`. |
+| `automation` | The one turn an automation run started: the first user entry at or after the run was created | The user entry's text, the assistant replies, and one line per tool call (`Tool call: bash (1.2s)`) |
+| `thread` | Every other turn | Metadata plus the thread title |
+
+Metadata is the class, thread id, start time, duration, status, number of replies and tool calls, the model and each tool's name. Tool inputs and outputs are never read into a turn, for any class. An automation run whose turn may lie before the part of the transcript a pass read is not matched, so that turn fails closed to `thread`. Contents are checked again at send: a queued `automation` turn whose thread or crew has since been listed as private is dropped (`content_revoked`).
+
+### Capy settings
+
+Set them as the Capy project's environment variables; the key and the token are secrets.
+
+| Variable | Meaning |
+| --- | --- |
+| `CAPY_REPORTER_API_KEY` | A Capy API key of a `read_only` service user (Settings → API). Required. |
+| `AGENTRUN_BASE_URL` | AgentRun's API base, ending in `/v2`. Required. |
+| `AGENTRUN_CAPY_REPORTER_TOKEN` | An AgentRun API token for this reporter. Required. |
+| `AGENTRUN_CAPY_PRIVATE_CAPTAINS` | Comma-separated thread or Captain ids whose threads are always `private`. Empty by default. |
+| `AGENTRUN_CAPY_RUNTIME` | SDK runtime for the agents and runs, default `claude-agent-sdk`. |
+| `AGENTRUN_CAPY_STATE` | The state file, when `--state` is not given. |
+
+### Capy log lines
+
+The script logs with the same `[alphaclaw] agentrun-reporter` prefix and `source=capy` on the sender's lines (`token_rejected`, `row_dropped`, `run_expired`, `agent_refused`, `content_revoked`, `run_exists`, `send_error`). Its own codes:
+
+| Code | Meaning |
+| --- | --- |
+| `config_missing` | A required setting is not set; names the setting, never a value. Nothing is read or sent; exit 2. |
+| `capy_rejected` | Capy answered 401 or 403; check `CAPY_REPORTER_API_KEY` and the service user's project access. |
+| `capy_error` | Another Capy read failed; the next pass reads again from the saved cursors. |
+| `state_reset` | The state file could not be read; the pass starts empty and re-sends under the old keys. |
+| `rows_waiting` | Turns that have failed to send on 6 or more passes; check `AGENTRUN_BASE_URL`. |
+| `queue_overflow` | More than 20,000 unsent turns; the oldest were dropped. |
+| `runtime_invalid` | `AGENTRUN_CAPY_RUNTIME` is not a runtime name; using `claude-agent-sdk`. |
+| `capy_pass` | One summary line per pass: threads read, turns queued, sent, retried, dropped, expired, still waiting. |

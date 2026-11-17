@@ -1,0 +1,380 @@
+#!/usr/bin/env node
+// Capy reporter for AgentRun (GST-2907, PR 2): reads finished Capy thread
+// turns with a read-only Capy API key and posts each one to AgentRun as an SDK
+// run, through the same body builder, client and sender as AlphaClaw's
+// OpenClaw reporter. Meant to run once an hour from a Capy automation:
+//
+//   node scripts/capy-agentrun-reporter.mjs --state <path to state.json>
+//
+// Env: CAPY_REPORTER_API_KEY (read-only Capy service user), AGENTRUN_BASE_URL
+// (AgentRun's API base ending /v2), AGENTRUN_CAPY_REPORTER_TOKEN,
+// AGENTRUN_CAPY_PRIVATE_CAPTAINS (comma-separated thread or Captain ids whose
+// threads are always private), AGENTRUN_CAPY_RUNTIME (default
+// claude-agent-sdk), AGENTRUN_CAPY_STATE (instead of --state).
+//
+// Privacy: a private thread (visibility private or missing, or the thread or
+// its Captain listed) sends metadata without its title; the one turn an
+// automation run started sends its input, replies and one-line tool
+// summaries; every other turn sends metadata plus the thread title. Tool
+// inputs and outputs are never read into a row. Values of keys and tokens are
+// never printed. Exit 0 on success, 1 on a failed pass, 2 on a usage error.
+// Contract and log codes: docs/designs/agentrun-reporter.md, "Capy reporter".
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
+
+const require = createRequire(import.meta.url);
+const { createAgentrunClient } = require("../lib/server/agentrun-reporter/agentrun-client.js");
+const { createSender } = require("../lib/server/agentrun-reporter/sender.js");
+const { cut } = require("../lib/server/agentrun-reporter/bodies.js");
+
+const kCapyBaseUrl = "https://api.capy.ai/api/v1";
+const kDefaultRuntime = "claude-agent-sdk";
+const kRuntimePattern = /^[a-z][a-z0-9-]{1,63}$/;
+const kClosedStatuses = new Set(["idle", "failed", "archived"]);
+const kFirstSightMs = 24 * 60 * 60 * 1000;
+const kMaxRateLimitWaits = 5;
+const kMaxRetryAfterMs = 120000;
+const kMaxUnsentRows = 20000;
+const kStuckAttempts = 6;
+const kAutomationRunsRead = 100;
+
+const listOf = (value) =>
+  String(value || "")
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+const describeDuration = (ms) => (Number.isFinite(ms) && ms > 0 ? `${Math.round(ms / 100) / 10}s` : "unknown duration");
+const timeOf = (value) => Date.parse(String(value || "")) || 0;
+
+// A GET against Capy's public API. A 429 waits retry-after seconds and sends
+// the same request again (docs.capy.ai/api-reference/overview, "Rate limits").
+const createCapyClient = ({ apiKey, fetchImpl, sleep, baseUrl = kCapyBaseUrl }) => {
+  const get = async (pathname, query = {}) => {
+    const url = new URL(baseUrl + pathname);
+    for (const [name, value] of Object.entries(query)) if (value !== undefined && value !== null && value !== "") url.searchParams.set(name, String(value));
+    for (let waits = 0; ; waits += 1) {
+      const response = await fetchImpl(url.toString(), { headers: { accept: "application/json", authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(30000) });
+      if (response.status === 429 && waits < kMaxRateLimitWaits) {
+        const seconds = Number(response.headers.get("retry-after"));
+        await sleep(Math.min(kMaxRetryAfterMs, (Number.isFinite(seconds) && seconds >= 0 ? seconds : 5) * 1000));
+        continue;
+      }
+      const body = await response.json().catch(() => null);
+      if (response.status >= 200 && response.status < 300) return body;
+      throw Object.assign(new Error(`capy ${response.status} ${body?._tag || ""} on ${pathname.split("/").slice(0, 2).join("/")}`), { status: response.status, tag: String(body?._tag || "") });
+    }
+  };
+  const all = async (pathname, query) => {
+    const items = [];
+    let cursor = null;
+    do {
+      const page = await get(pathname, { ...query, cursor });
+      items.push(...(page?.items || []));
+      cursor = page?.cursor || null;
+    } while (cursor);
+    return items;
+  };
+  return { get, all };
+};
+
+// A thread's transcript from an after cursor. Each entry remembers the after
+// value of the page it came from, so the next pass can start at the page that
+// holds the first unfinished turn. Messages page forward with after and end at
+// a null cursor; an unchanged cursor means unsettled messages block the rest
+// (docs.capy.ai/api-reference/schemas/TranscriptPageEncoded).
+const readTranscript = async (capy, threadId, after) => {
+  const entries = [];
+  let pageStart = after || null;
+  for (;;) {
+    const page = await capy.get(`/threads/${encodeURIComponent(threadId)}/messages`, { after: pageStart });
+    for (const item of page?.items || []) entries.push({ ...item, pageStart });
+    if (!page?.cursor) return { entries, lastPageStart: pageStart, complete: true };
+    if (page.cursor === pageStart) return { entries, lastPageStart: pageStart, complete: false };
+    pageStart = page.cursor;
+  }
+};
+
+// A turn is a user entry and every entry after it up to the next user entry.
+const splitTurns = (entries) => {
+  const turns = [];
+  for (const entry of entries) {
+    if (entry.source === "user") turns.push({ user: entry, entries: [entry] });
+    else if (turns.length) turns[turns.length - 1].entries.push(entry);
+  }
+  return turns;
+};
+
+// The state file is the queue: rows wait in it until sent, and the sender
+// sees it through the same small interface as the SQLite outbox.
+const createStateOutbox = ({ state, save, now }) => ({
+  due: (limit = 50) =>
+    state.rows
+      .filter((row) => row.state === "queued" && row.next_attempt_at <= now())
+      .slice(0, limit)
+      .map((row) => ({ ...row })),
+  update: (id, fields) => {
+    const row = state.rows.find((entry) => entry.id === id);
+    if (row) Object.assign(row, fields);
+    save();
+  },
+  agentOf: (agentKey) => state.agents[agentKey] || null,
+  saveAgent: ({ agentKey, agentId, runtime, definitionHash }) => {
+    state.agents[agentKey] = { agent_id: agentId, runtime, definition_hash: definitionHash };
+    save();
+  },
+  forgetAgent: (agentKey) => {
+    delete state.agents[agentKey];
+    save();
+  },
+});
+
+const loadState = (statePath, log) => {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.rows)) return { threads: {}, agents: {}, ...parsed };
+    log("state_reset op=load (not a reporter state file; starting empty, turns re-send under their old keys)");
+  } catch (error) {
+    if (error?.code !== "ENOENT") log("state_reset op=load (unreadable; starting empty, turns re-send under their old keys)");
+  }
+  return { version: 1, threads: {}, agents: {}, rows: [] };
+};
+
+export const runCapyReporter = async ({
+  env = process.env,
+  statePath = env.AGENTRUN_CAPY_STATE,
+  fetchImpl = globalThis.fetch,
+  capyFetchImpl = fetchImpl,
+  capyBaseUrl = kCapyBaseUrl,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  logger = console,
+} = {}) => {
+  const log = (line) => logger.warn?.(`[alphaclaw] agentrun-reporter ${line}`);
+  const missing = ["CAPY_REPORTER_API_KEY", "AGENTRUN_BASE_URL", "AGENTRUN_CAPY_REPORTER_TOKEN"].filter((name) => !String(env[name] || "").trim());
+  if (!statePath) missing.push("--state (or AGENTRUN_CAPY_STATE)");
+  if (missing.length) {
+    log(`config_missing op=capy fix=set ${missing.join(", ")} (nothing read or sent)`);
+    return 2;
+  }
+  const runtimeSetting = String(env.AGENTRUN_CAPY_RUNTIME || "").trim() || kDefaultRuntime;
+  const runtime = kRuntimePattern.test(runtimeSetting) ? runtimeSetting : kDefaultRuntime;
+  if (runtime !== runtimeSetting) log("runtime_invalid op=capy fix=AGENTRUN_CAPY_RUNTIME must be a runtime name; using claude-agent-sdk");
+  const privateIds = new Set(listOf(env.AGENTRUN_CAPY_PRIVATE_CAPTAINS));
+  const state = loadState(statePath, log);
+  const save = () => {
+    fs.mkdirSync(path.dirname(path.resolve(statePath)), { recursive: true });
+    const temp = `${statePath}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
+    fs.renameSync(temp, statePath);
+  };
+  const capy = createCapyClient({ apiKey: String(env.CAPY_REPORTER_API_KEY).trim(), fetchImpl: capyFetchImpl, sleep, baseUrl: capyBaseUrl });
+  const counts = { threads: 0, queued: 0 };
+  let failed = false;
+
+  const agentOf = (thread, project) => {
+    const captainId = String((typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId) || "");
+    if (captainId) {
+      const name = privateIds.has(captainId) ? `Capy crew ${captainId} (private)` : `Capy crew: ${thread.captain?.name || captainId}`;
+      return { key: `capy-captain-${captainId}`, name, description: "A Capy Captain crew's thread turns, reported by AlphaClaw's Capy reporter." };
+    }
+    const projectId = String(thread.projectId || project.id || "none");
+    const name = project.visibility === "org" && project.name ? `Capy project: ${project.name}` : `Capy project ${projectId}`;
+    return { key: `capy-project-${projectId}`, name, description: "A Capy project's thread turns outside any crew, reported by AlphaClaw's Capy reporter." };
+  };
+
+  const isPrivate = (thread) => {
+    const captainId = typeof thread.captain === "string" ? thread.captain : thread.captain?.jamId;
+    return thread.visibility !== "org" || privateIds.has(thread.id) || (captainId && privateIds.has(captainId));
+  };
+
+  const rowOf = ({ thread, turn, last, cls, agent, creditsNote }) => {
+    const sourceRunId = `${thread.id}:${turn.user.id}`;
+    const startedAt = timeOf(turn.user.createdAt) || null;
+    const endedAt = timeOf(turn.entries[turn.entries.length - 1].createdAt) || startedAt;
+    const status = last && thread.status === "failed" ? "failed" : "completed";
+    const contents = cls === "automation";
+    const texts = [];
+    const tools = [];
+    for (const entry of turn.entries) {
+      if (entry.source === "assistant" && entry.text) texts.push(String(entry.text));
+      if (entry.source !== "tool") continue;
+      const calls = Array.isArray(entry.calls) && entry.calls.length ? entry.calls : [{ tool: entry.tool, durationMs: null }];
+      for (const call of calls) {
+        const name = String(call.tool || "tool");
+        tools.push({ name, ok: true });
+        texts.push(`Tool call: ${name}${Number(call.durationMs) > 0 ? ` (${describeDuration(Number(call.durationMs))})` : ""}`);
+      }
+    }
+    const replies = turn.entries.filter((entry) => entry.source === "assistant" && entry.text);
+    const title = cls === "private" ? "" : String(thread.title || "").trim();
+    const metadataLine =
+      `Capy ${cls} turn in thread ${thread.id}${title ? ` "${cut(title, 200)}"` : ""}; ` +
+      `started ${startedAt ? new Date(startedAt).toISOString() : "unknown"}, ${describeDuration(endedAt - startedAt)}, status ${status}; ` +
+      `${replies.length} replies, ${tools.length} tool calls.${creditsNote}`;
+    return {
+      id: crypto.createHash("sha256").update(sourceRunId).digest("hex").slice(0, 16),
+      source: "capy",
+      source_run_id: sourceRunId,
+      agent_key: agent.key,
+      agent_name: agent.name,
+      agent_description: agent.description,
+      class: cls,
+      contents: contents ? 1 : 0,
+      session_label: thread.id,
+      started_at: startedAt,
+      ended_at: endedAt,
+      status,
+      model: String(turn.user.model || thread.lastModelId || ""),
+      input_text: contents && turn.user.text ? `${turn.user.text}\n\n(${metadataLine})` : metadataLine,
+      texts_json: JSON.stringify(contents ? texts : []),
+      answer_text: contents && replies.length ? String(replies[replies.length - 1].text) : "",
+      error_text: status === "failed" ? "The thread failed (details withheld)." : "",
+      tools_json: JSON.stringify(tools),
+      usage_json: "null",
+      evidence_complete: 0,
+      state: "queued",
+      start_body: null,
+      batches_json: null,
+      complete_body: null,
+      batches_sent: 0,
+      agentrun_run_id: null,
+      attempts: 0,
+      next_attempt_at: 0,
+      last_error: "",
+    };
+  };
+
+  // Automation runs by thread: the run's turn is the first user entry at or
+  // after the run was created. A run whose turn may lie before the part of
+  // the transcript read this pass is not matched, so it fails closed to
+  // metadata (docs.capy.ai/api-reference/schemas/AutomationRunEncoded).
+  const readAutomationRuns = async (projectId) => {
+    const byThread = new Map();
+    for (const automation of await capy.all("/automations", { projectId })) {
+      const page = await capy.get(`/automations/${encodeURIComponent(automation.id)}/runs`, { limit: kAutomationRunsRead });
+      for (const run of page?.items || []) {
+        if (!run.jamId) continue;
+        byThread.set(run.jamId, [...(byThread.get(run.jamId) || []), timeOf(run.createdAt)]);
+      }
+    }
+    return byThread;
+  };
+
+  const processThread = async (thread, project, automationRuns) => {
+    const known = state.threads[thread.id] || { after: null, reported: [], since: new Date(now() - kFirstSightMs).toISOString(), credits: null };
+    const { entries, lastPageStart, complete } = await readTranscript(capy, thread.id, known.after);
+    const turns = splitTurns(entries);
+    const settled = complete && kClosedStatuses.has(thread.status);
+    const open = turns.find((turn, index) => index === turns.length - 1 && !settled) || null;
+    const reported = new Set(known.reported);
+    const viewStart = known.after === null ? 0 : timeOf(entries[0]?.createdAt) || Infinity;
+    const automationTurns = new Set();
+    for (const runAt of automationRuns.get(thread.id) || []) {
+      if (runAt < viewStart) continue;
+      const turn = turns.find((candidate) => timeOf(candidate.user.createdAt) >= runAt && !candidate.user.sender);
+      if (turn) automationTurns.add(turn.user.id);
+    }
+    const fresh = [];
+    turns.forEach((turn, index) => {
+      if (turn === open || reported.has(turn.user.id)) return;
+      reported.add(turn.user.id);
+      if (timeOf(turn.user.createdAt) < timeOf(known.since)) return;
+      fresh.push({ turn, last: index === turns.length - 1 });
+    });
+    const credits = Number(thread.usage?.totalCredits);
+    const delta = Number.isFinite(credits) && Number.isFinite(known.credits) ? credits - known.credits : null;
+    const agent = agentOf(thread, project);
+    const rows = fresh.map(({ turn, last }, index) => {
+      const cls = isPrivate(thread) ? "private" : automationTurns.has(turn.user.id) ? "automation" : "thread";
+      const creditsNote =
+        index === fresh.length - 1 && delta !== null && delta >= 0 ? ` Thread credits used since the previous report: about ${Math.round(delta * 100) / 100} (an estimate).` : "";
+      return rowOf({ thread, turn, last, cls, agent, creditsNote });
+    });
+    for (const row of rows) if (!state.rows.some((entry) => entry.id === row.id)) state.rows.push(row);
+    const nextAfter = open ? open.user.pageStart : lastPageStart;
+    const keepFrom = entries.findIndex((entry) => entry.pageStart === nextAfter);
+    const kept = keepFrom < 0 ? [] : entries.slice(keepFrom).filter((entry) => entry.source === "user" && reported.has(entry.id)).map((entry) => entry.id);
+    state.threads[thread.id] = {
+      activity: thread.lastActivityAt || thread.updatedAt || "",
+      status: thread.status,
+      after: nextAfter,
+      reported: kept,
+      since: known.since,
+      credits: rows.length || !Number.isFinite(known.credits) ? (Number.isFinite(credits) ? credits : null) : known.credits,
+    };
+    counts.queued += rows.length;
+    save();
+  };
+
+  // Every page of a project's threads is compared by lastActivityAt and
+  // status; list order is never trusted to stop early.
+  const collect = async () => {
+    const projects = (await capy.get("/projects"))?.items || [];
+    for (const project of projects) {
+      const threads = await capy.all("/threads", { projectId: project.id });
+      const changed = threads.filter((thread) => {
+        const known = state.threads[thread.id];
+        const activity = thread.lastActivityAt || thread.updatedAt || "";
+        if (known) return known.activity !== activity || known.status !== thread.status;
+        if (timeOf(activity) >= now() - kFirstSightMs) return true;
+        state.threads[thread.id] = { activity, status: thread.status, after: null, reported: [], since: new Date(now()).toISOString(), credits: null };
+        return false;
+      });
+      if (!changed.length) continue;
+      const automationRuns = await readAutomationRuns(project.id);
+      for (const thread of changed) {
+        try {
+          await processThread(thread, project, automationRuns);
+          counts.threads += 1;
+        } catch (error) {
+          if (error?.status !== 404) throw error;
+        }
+      }
+    }
+    save();
+  };
+
+  try {
+    await collect();
+  } catch (error) {
+    failed = true;
+    if (error?.status === 401 || error?.status === 403) log(`capy_rejected op=read status=${error.status} fix=check CAPY_REPORTER_API_KEY and the service user's project access (queued turns are still sent)`);
+    else log(`capy_error op=read ${String(error?.message || error).slice(0, 200)} (the next pass reads again from the saved cursors)`);
+  }
+
+  const unsent = state.rows.filter((row) => row.state === "queued");
+  if (unsent.length > kMaxUnsentRows) {
+    const drop = new Set(unsent.slice(0, unsent.length - kMaxUnsentRows).map((row) => row.id));
+    state.rows = state.rows.filter((row) => !drop.has(row.id));
+    log(`queue_overflow op=capy count=${drop.size} (oldest unsent turns gone; check that AgentRun is reachable)`);
+  }
+  const sender = createSender({
+    outbox: createStateOutbox({ state, save, now }),
+    client: createAgentrunClient({ baseUrl: String(env.AGENTRUN_BASE_URL).trim().replace(/\/+$/, ""), fetchImpl }),
+    token: String(env.AGENTRUN_CAPY_REPORTER_TOKEN).trim(),
+    getRuntime: () => runtime,
+    contentAllowed: (row) =>
+      row.class === "automation" && !privateIds.has(row.session_label) && !privateIds.has(row.agent_key.replace(/^capy-captain-/, "")),
+    now,
+    logger,
+    source: "capy",
+  });
+  const sent = await sender.sendDue({ limit: state.rows.length || 1 });
+  state.rows = state.rows.filter((row) => row.state === "queued");
+  save();
+  const stuck = state.rows.filter((row) => row.attempts >= kStuckAttempts).length;
+  if (stuck) log(`rows_waiting op=send count=${stuck} (AgentRun has refused or missed these for ${kStuckAttempts}+ passes; check AGENTRUN_BASE_URL)`);
+  logger.log?.(
+    `[alphaclaw] agentrun-reporter capy_pass threads=${counts.threads} queued=${counts.queued} sent=${sent.sent} retry=${sent.retry} dropped=${sent.dropped} expired=${sent.expired} waiting=${state.rows.length}`,
+  );
+  return failed || sent.paused || stuck ? 1 : 0;
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const { values } = parseArgs({ options: { state: { type: "string" } }, strict: true });
+  process.exitCode = await runCapyReporter({ statePath: values.state || process.env.AGENTRUN_CAPY_STATE });
+}
