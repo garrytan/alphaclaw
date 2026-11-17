@@ -5,12 +5,26 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.301] - 2026-11-17
+## [0.10.302] - 2026-11-17
 
 AlphaClaw can now watch the git checkouts whose pushes matter and tell the owner when one would push with the wrong GitHub credential, cannot reach its remote, or has commits that have not gone out for half an hour.
 
 ### Added
 - `alphaclaw.json` `gitPushChecks.checkouts`: a list of push checkouts, empty (off) by default. Each is checked at boot and every `intervalMinutes` (default 10). When a checkout pins its own credential helper, `git credential fill` for its push URL must give the same credential as that helper alone, compared as a hash and never logged or stored; a helper set outside the checkout that answers first (such as the one `gh auth setup-git` writes into the global gitconfig) is named with the file it comes from and the fix. `git ls-remote` must succeed ("Repository not found" and refused authentication alert at once, other failures on the second check in a row), and commits not on the remote whose oldest is past `stuckMinutes` (default 30) alert with the count. Each problem is announced once and once more when it clears, survives restarts in `.alphaclaw/git-push-checks.json`, and is recorded as a `git_push_check` watchdog event. git runs in the gateway's environment with prompts off and never fetches, writes or pushes.
+
+## [0.10.301] - 2026-11-17
+
+The Capy reporter's first pass now reads only the last day of each thread it has not seen before instead of its whole history, writes its state file far less often, and logs its progress while it works.
+
+### Fixed
+- A thread the reporter sees for the first time is read backward from its newest message (`before`, 50 at a time) and only until its pages reach past the 24-hour window, instead of from its first message. A turn whose opening message is older than the window is still not reported. Later passes read forward from the saved cursor as before. If Capy refuses the backward read with a 400, that thread is read forward once (`first_read_fallback`).
+- The state file is written once per thread or subagent read, once after the listing, once after sending and before each live heartbeat is posted, instead of once for every change to a queued turn, which rewrote a multi-megabyte file on the Drive mount for each turn sent. The lease is still renewed every minute while sending.
+- A failed read of one subagent's messages (anything but a 404) now keeps its thread watched, so the next pass reads that subagent again; before, a finished subagent whose thread did not change again was never re-read and its turns were never reported.
+- `--watch` takes only a whole number of minutes from 1 to 1440, as the design doc says; 0, an empty value and fractions now exit 2 with `config_invalid` instead of running one pass or a part-minute watch.
+
+### Added
+- Progress lines: `capy_progress project=<id> threads=<n> pages=<n> elapsed=<s>s` after each project is read and `capy_progress op=send waiting=<n>` before sending, with no titles or names, so a long pass no longer looks like a hang.
+- The automation prompt in docs/designs/agentrun-reporter.md now ends by archiving the run's own thread, `watch_skipped` runs included, so each hourly run uses a fresh thread and cleans it up.
 
 ## [0.10.300] - 2026-11-17
 
