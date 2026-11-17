@@ -163,8 +163,13 @@ describe("A2A HTTP identity boundary", () => {
     expect(seen[0].headers.authorization).toBe("Bearer peer-token");
     expect(seen[0].headers.cookie).toBe("preference=dark");
     for (const key of [...kStrippedIdentityHeaders, ...kForwardedEvidenceHeaders]) {
+      if (key === "x-forwarded-for") continue;
       expect(seen[0].headers[key], key).toBeUndefined();
     }
+    // A loopback peer that sends forwarded headers is a proxy hop, never a
+    // local client; one that names no usable client is presented as itself,
+    // which the gateway refuses as an unattributable proxy (proxy-identity.js).
+    expect(seen[0].headers["x-forwarded-for"]).toMatch(/^(127\.0\.0\.1|::1)$/);
     expect(requireAuth).not.toHaveBeenCalled();
     expect(resolveProxyIdentity).not.toHaveBeenCalled();
   });

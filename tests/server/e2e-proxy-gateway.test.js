@@ -154,6 +154,7 @@ const gatewayState = {
   wsConnections: 0,
   wsMessages: [],
   wsSockets: [],
+  wsUpgradeHeaders: [],
 };
 const resetGatewayState = () => {
   gatewayState.requests = [];
@@ -161,6 +162,7 @@ const resetGatewayState = () => {
   gatewayState.wsConnections = 0;
   gatewayState.wsMessages = [];
   gatewayState.wsSockets = [];
+  gatewayState.wsUpgradeHeaders = [];
 };
 
 const pathnameOf = (url) => String(url).split(/[?#]/)[0];
@@ -303,6 +305,7 @@ const startFakeGateway = () =>
       // Counted so the traversal case can prove the upgrade never arrived —
       // a rejected handshake and "no connection" are different facts.
       gatewayState.wsConnections += 1;
+      gatewayState.wsUpgradeHeaders.push(req.headers);
       const record = { url: req.url, closed: false };
       gatewayState.wsSockets.push(record);
       socket.on("close", () => {
@@ -814,9 +817,13 @@ describe("gateway proxy real-process e2e", () => {
       expect(seen.headers.authorization).toBe("Bearer peer-credential");
       expect(seen.headers.cookie).toBe("preference=dark");
       expect(seen.headers["content-encoding"]).toBe(headers["content-encoding"]);
-      for (const name of ["x-alphaclaw-user", "x-openclaw-scopes", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]) {
+      for (const name of ["x-alphaclaw-user", "x-openclaw-scopes", "x-forwarded-host", "x-forwarded-proto"]) {
         expect(seen.headers[name], name).toBeUndefined();
       }
+      // A loopback peer that sends X-Forwarded-For is a proxy hop on this
+      // host, so the gateway gets the one client address it named and treats
+      // the peer as remote instead of as a local client (proxy-identity.js).
+      expect(seen.headers["x-forwarded-for"]).toBe("203.0.113.1");
     },
   );
 
@@ -1087,6 +1094,87 @@ describe("gateway proxy real-process e2e", () => {
     expect(echoed).toBe("echo:hello-ws:path=/openclaw/ws-echo");
     // Also proves the connection counter the traversal case relies on.
     expect(gatewayState.wsConnections).toBe(1);
+  });
+
+  // OpenClaw counts a loopback socket with no forwarded headers as a local
+  // client (pairing, scope and rate-limit exemptions). AlphaClaw reaches the
+  // gateway from loopback, so a forward no session opened carries the client's
+  // address in X-Forwarded-For; only a client on this host stays local.
+  describe("sessionless forwards carry the client's address to the gateway", () => {
+    const upgradeHeadersFor = async (url, headers = {}, localAddress = undefined) => {
+      await new Promise((resolve, reject) => {
+        const ws = new WebSocket(url, { headers, ...(localAddress ? { localAddress } : {}) });
+        const guard = setTimeout(() => reject(new Error("no ws open within 10s")), 10000);
+        ws.on("open", () => {
+          clearTimeout(guard);
+          ws.close();
+          resolve();
+        });
+        ws.on("unexpected-response", (_req, res) => {
+          clearTimeout(guard);
+          reject(new Error(`upgrade answered ${res.statusCode}`));
+        });
+        ws.on("error", (err) => {
+          clearTimeout(guard);
+          reject(err);
+        });
+      });
+      for (let i = 0; i < 100 && gatewayState.wsUpgradeHeaders.length === 0; i += 1) await sleep(20);
+      expect(gatewayState.wsUpgradeHeaders).toHaveLength(1);
+      return gatewayState.wsUpgradeHeaders[0];
+    };
+    const kPublicInterfaceAddress =
+      Object.values(os.networkInterfaces())
+        .flat()
+        .find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address || "";
+
+    it("leaves a loopback client with no forwarded headers local", async () => {
+      const seen = await upgradeHeadersFor(`ws://127.0.0.1:${serverPort}/`);
+      expect(seen["x-forwarded-for"]).toBeUndefined();
+    });
+
+    it("presents a client behind a proxy on this host by the address the proxy named", async () => {
+      const seen = await upgradeHeadersFor(`ws://127.0.0.1:${serverPort}/`, {
+        "x-forwarded-for": "203.0.113.60",
+        "x-forwarded-proto": "https",
+      });
+      expect(seen["x-forwarded-for"]).toBe("203.0.113.60");
+      expect(seen["x-forwarded-proto"]).toBeUndefined();
+    });
+
+    it.skipIf(!kPublicInterfaceAddress)("presents a client on another address as that address", async () => {
+      const seen = await upgradeHeadersFor(
+        `ws://${kPublicInterfaceAddress}:${serverPort}/__openclaw__/probe`,
+        {},
+        kPublicInterfaceAddress,
+      );
+      expect(seen["x-forwarded-for"]).toBe(kPublicInterfaceAddress);
+    });
+
+    it("keeps a signed-in session's upgrade local, as the Control UI needs", async () => {
+      const seen = await upgradeHeadersFor(`ws://127.0.0.1:${serverPort}/openclaw/ws-echo`, {
+        cookie,
+        "x-forwarded-for": "203.0.113.61",
+      });
+      expect(seen["x-forwarded-for"]).toBeUndefined();
+    });
+
+    it("does the same for a sessionless HTTP forward and leaves a session's alone", async () => {
+      const a2a = (headers) =>
+        httpRequest(serverPort, { path: "/a2a/v1", method: "POST", headers: { "content-type": "application/json", ...headers } }, "{}");
+      expect((await a2a({ "x-forwarded-for": "203.0.113.62" })).status).toBe(200);
+      expect((await a2a({})).status).toBe(200);
+      const withSession = await httpRequest(serverPort, {
+        path: "/api/proxy-e2e/echo",
+        headers: { cookie, "x-forwarded-for": "203.0.113.63" },
+      });
+      expect(withSession.status).toBe(200);
+      expect(gatewayState.requests.map((entry) => entry.headers["x-forwarded-for"])).toEqual([
+        "203.0.113.62",
+        undefined,
+        undefined,
+      ]);
+    });
   });
 
   it("rejects an unauthenticated WebSocket upgrade on /openclaw paths without touching the gateway", async () => {

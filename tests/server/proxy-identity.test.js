@@ -219,6 +219,79 @@ describe("server/proxy-identity", () => {
     });
   });
 
+  describe("resolveGatewayClientAddress (OpenClaw's direct-local rule)", () => {
+    const { resolveGatewayClientAddress } = require("../../lib/server/proxy-identity");
+
+    it("leaves a loopback peer with no forwarded headers local", () => {
+      for (const remoteAddress of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "127.8.9.10"]) {
+        expect(resolveGatewayClientAddress({ remoteAddress, headers: { host: "localhost" } }), remoteAddress).toBe("");
+      }
+    });
+
+    it("presents a public peer as itself, whatever it claims", () => {
+      expect(
+        resolveGatewayClientAddress({
+          remoteAddress: "::ffff:198.51.100.7",
+          headers: { "x-forwarded-for": "127.0.0.1" },
+          clientIp: "127.0.0.1",
+          trustProxyHopsDeclared: false,
+        }),
+      ).toBe("198.51.100.7");
+    });
+
+    it("takes the trust-proxy-resolved client behind a proxy hop", () => {
+      expect(
+        resolveGatewayClientAddress({
+          remoteAddress: "10.0.0.5",
+          headers: { "x-forwarded-for": "203.0.113.7" },
+          clientIp: "203.0.113.7",
+          trustProxyHopsDeclared: false,
+        }),
+      ).toBe("203.0.113.7");
+    });
+
+    it("reads a same-host proxy's own entry when the hop count left loopback", () => {
+      expect(
+        resolveGatewayClientAddress({
+          remoteAddress: "127.0.0.1",
+          headers: { "x-forwarded-for": "203.0.113.8, 127.0.0.1" },
+          clientIp: "127.0.0.1",
+          trustProxyHopsDeclared: true,
+        }),
+      ).toBe("203.0.113.8");
+    });
+
+    it("counts any forwarded header as a proxy hop, never as local", () => {
+      for (const headers of [{ "x-forwarded-proto": "https" }, { "x-real-ip": "203.0.113.9" }, { forwarded: "for=x" }]) {
+        expect(resolveGatewayClientAddress({ remoteAddress: "127.0.0.1", headers, clientIp: "127.0.0.1" })).toBe("127.0.0.1");
+      }
+    });
+
+    it("presents a private peer as itself when it names no client", () => {
+      expect(resolveGatewayClientAddress({ remoteAddress: "172.17.0.1", headers: {}, clientIp: "172.17.0.1" })).toBe("172.17.0.1");
+    });
+  });
+
+  describe("applyProxyIdentity sessionless forwards", () => {
+    it("sets X-Forwarded-For to the client for a sessionless forward from a public peer", () => {
+      const req = { socket: { remoteAddress: "198.51.100.20" }, headers: { "x-forwarded-for": "6.6.6.6" } };
+      applyProxyIdentity(req, null, "198.51.100.20", { sessionless: true });
+      expect(req.headers["x-forwarded-for"]).toBe("198.51.100.20");
+    });
+
+    it("adds nothing for a loopback client with no forwarded headers", () => {
+      const req = { socket: { remoteAddress: "127.0.0.1" }, headers: { host: "127.0.0.1:3000" } };
+      applyProxyIdentity(req, null, "127.0.0.1", { sessionless: true });
+      expect(req.headers["x-forwarded-for"]).toBeUndefined();
+    });
+
+    it("keeps a member's resolved address ahead of the sessionless rule", () => {
+      const req = { socket: { remoteAddress: "10.0.0.2" }, headers: { "x-forwarded-for": "203.0.113.30" } };
+      applyProxyIdentity(req, { email: "m@example.com" }, "203.0.113.31", { sessionless: true });
+      expect(req.headers["x-forwarded-for"]).toBe("203.0.113.31");
+    });
+  });
+
   describe("resolveWsClientIp", () => {
     const { resolveWsClientIp } = require("../../lib/server/proxy-identity");
 

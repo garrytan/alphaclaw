@@ -49,7 +49,7 @@ jobs:
             timeout: 75
           - leg: leg3
             browser: true
-            timeout: 42
+            timeout: 47
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v4
