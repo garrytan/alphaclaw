@@ -4,7 +4,14 @@
 // and token before any other check; a different body under a key is
 // idempotency_mismatch; a runtime other than the agent's is input_invalid;
 // event batches are contiguous from 1, exact retries accepted; completion is
-// immutable; evidence more than an hour after the start is not_continuable.
+// immutable; evidence more than an hour after the start is not_continuable
+// "This SDK run expired.", and evidence for a run that ended (completed, or
+// stopped in the console: stop()) is not_continuable "This SDK run has
+// ended.". GET /capabilities advertises features.sdk_runs only when a test
+// sets state.sdkRuns; only then does a start take started_at, title and
+// labels (otherwise input_invalid "Unknown SDK request field."), and the
+// hour counts from the run's last start or batch instead of its start (this
+// fake's model of the upstream change; empty batches keep a run alive).
 const crypto = require("crypto");
 
 const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } = {}) => {
@@ -15,7 +22,9 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
   const requests = [];
   // loseAnswer: a request on that path is carried out, then the connection
   // drops before its answer (and stays down until the test lifts it).
-  const state = { down: false, failNext: [], loseAnswer: null };
+  const state = { down: false, failNext: [], loseAnswer: null, sdkRuns: false };
+  const kStartFields = ["started_at", "title", "labels"];
+  const expired = (run) => now() > (state.sdkRuns ? run.activeAt : run.startedAt) + 3600000;
   const error = (status, code, message = code) => ({ status, body: { error: { code, message, retryable: false } } });
 
   const handle = (method, path, headers, body) => {
@@ -32,7 +41,8 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
       if (match[2] === "events") {
         const known = run.batches.find((batch) => batch.sequence === body.sequence);
         if (known) return JSON.stringify(known) === JSON.stringify(body) ? { status: 200, body: { accepted: true } } : error(409, "idempotency_mismatch");
-        if (run.completion || now() > run.startedAt + 3600000) return error(409, "not_continuable");
+        if (run.completion || run.stopped) return error(409, "not_continuable", "This SDK run has ended.");
+        if (expired(run)) return error(409, "not_continuable", "This SDK run expired.");
         if (body.sequence !== run.batches.length + 1) return error(409, "idempotency_mismatch");
         const ids = new Set();
         for (const event of [...run.batches.flatMap((batch) => batch.events), ...body.events]) {
@@ -42,13 +52,16 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
           }
         }
         run.batches.push(body);
+        run.activeAt = now();
         return { status: 200, body: { accepted: true } };
       }
       if (run.completion) return JSON.stringify(run.completion) === JSON.stringify(body) ? { status: 200, body: { accepted: true } } : error(409, "idempotency_mismatch");
-      if (now() > run.startedAt + 3600000) return error(409, "not_continuable");
+      if (run.stopped) return error(409, "not_continuable", "This SDK run has ended.");
+      if (expired(run)) return error(409, "not_continuable", "This SDK run expired.");
       run.completion = body;
       return { status: 200, body: { accepted: true } };
     }
+    if (path === "/capabilities" && method === "GET") return { status: 200, body: { features: state.sdkRuns ? { sdk_runs: true } : {} } };
     if (auth !== token) return error(401, "unauthenticated");
     if ((match = /^\/agents\/([^/]+)\/sdk-runs$/.exec(path)) && method === "POST") {
       const agent = agents.get(decodeURIComponent(match[1]));
@@ -62,9 +75,12 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
         return { status: 201, body: { run_id: run.id, agent_id: agent.agent_id, token: run.token } };
       }
       if (agent.archived) return error(409, "agent_archived", "This SDK agent is archived.");
+      if (kStartFields.some((field) => field in body) && !state.sdkRuns) return error(422, "input_invalid", "Unknown SDK request field.");
+      if (body.title !== undefined && (typeof body.title !== "string" || body.title.length > 200)) return error(422, "input_invalid", "title");
+      if (body.started_at !== undefined && Number.isNaN(Date.parse(body.started_at))) return error(422, "input_invalid", "started_at");
       if (body.runtime !== agent.definition.sdk.runtime) return error(422, "input_invalid", "The SDK runtime must match the registered agent.");
       const id = crypto.randomUUID();
-      const run = { id, agentId: agent.agent_id, start: body, token: "ar_sdk_" + crypto.randomBytes(8).toString("hex"), batches: [], completion: null, startedAt: now() };
+      const run = { id, agentId: agent.agent_id, start: body, token: "ar_sdk_" + crypto.randomBytes(8).toString("hex"), batches: [], completion: null, startedAt: now(), activeAt: now(), stopped: false };
       runs.set(id, run);
       startKeys.set(key, { fingerprint, runId: id });
       return { status: 201, body: { run_id: id, agent_id: agent.agent_id, token: run.token } };
@@ -119,7 +135,12 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
     };
   };
 
-  return { fetchImpl, agents, runs, requests, state, token };
+  // Stops a run as AgentRun's console does.
+  const stop = (runId) => {
+    runs.get(runId).stopped = true;
+  };
+
+  return { fetchImpl, agents, runs, requests, state, token, stop };
 };
 
 module.exports = { createFakeAgentrun };
