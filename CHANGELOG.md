@@ -10,9 +10,16 @@ Versions follow this repository's `package.json` release counter.
 Capy threads can now show up in AgentRun beside OpenClaw's turns. A new script, run once an hour by a Capy automation, reads finished Capy thread turns with a read-only Capy key and reports each one to AgentRun once.
 
 ### Added
-- `scripts/capy-agentrun-reporter.mjs`: reports each finished Capy thread turn as an AgentRun run, under one AgentRun agent per Captain crew and one per project for threads in no crew. A turn sends metadata (when, how long, status, model, tool names) and its thread title; the turn an automation run started in a thread of its own also sends its prompt, replies and one line per tool call; a standing (`single`) automation thread's turns send no contents. Threads that are private, have no visibility, sit in a private project, or belong to a crew listed in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` send metadata only, with no title. Tool inputs and outputs are never sent.
+- `scripts/capy-agentrun-reporter.mjs`: reports each finished Capy thread turn as an AgentRun run, under one AgentRun agent per Captain crew (named by the Captain's thread id, never its name) and one per project for threads in no crew. A turn sends metadata (when, how long, status, model, tool names) and its thread title; the turn an automation run started in a thread of its own also sends its prompt, replies and one line per tool call; a standing (`single`) automation thread's turns send no contents. Threads that are private, have no visibility, sit in a private project, or belong to a crew listed in `AGENTRUN_CAPY_PRIVATE_CAPTAINS` send metadata only, with no title. Tool inputs and outputs are never sent.
 - A queued turn that carries a title or contents is sent only when the same pass's complete listing showed its thread as not private. A thread missing from the listing, a failed or partial listing, or a failed read holds the turn unsent (`row_held`); metadata-only turns still go. One failing project or thread read skips only that project or thread, and a turn that meets a passing AgentRun failure is retried in the same pass (at most 5 rounds, each waiting at most a minute).
 - The script keeps its cursors and unsent turns in one JSON state file. A lost state file re-sends recent turns under their old keys: AgentRun answers an identical start with the run it already has, and drops a rebuilt start that differs (`row_dropped … code=idempotency_mismatch`). Settings: `CAPY_REPORTER_API_KEY`, `AGENTRUN_BASE_URL`, `AGENTRUN_CAPY_REPORTER_TOKEN`, `AGENTRUN_CAPY_PRIVATE_CAPTAINS`, `AGENTRUN_CAPY_RUNTIME`. See "Capy reporter" in docs/designs/agentrun-reporter.md.
+
+## [0.10.294] - 2026-11-17
+
+The AgentRun reporter no longer drops a queued turn when something between it and AgentRun answers with an error, such as a proxy's request timeout.
+
+### Fixed
+- A 408, or any 4xx that carries no AgentRun error code (a proxy or a wrong base URL answered, not AgentRun), is now retried with the usual backoff. Since 0.10.293 such an answer to an agent read, update or create counted as a refusal and dropped the turn for good. Only AgentRun's own error code now proves a refusal.
 
 ## [0.10.293] - 2026-11-17
 
