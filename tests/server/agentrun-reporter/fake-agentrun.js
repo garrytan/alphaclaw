@@ -15,7 +15,9 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
   const requests = [];
   // loseAnswer: a request on that path is carried out, then the connection
   // drops before its answer (and stays down until the test lifts it).
-  const state = { down: false, failNext: [], loseAnswer: null };
+  // capabilities: the body GET /capabilities answers, or null for a server
+  // that does not advertise sdk_runs (answered 404 like an unknown route).
+  const state = { down: false, failNext: [], loseAnswer: null, capabilities: null };
   const error = (status, code, message = code) => ({ status, body: { error: { code, message, retryable: false } } });
 
   const handle = (method, path, headers, body) => {
@@ -23,6 +25,7 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
     const index = state.failNext.findIndex((item) => !item.path || item.path.test(path));
     const injected = index < 0 ? null : state.failNext.splice(index, 1)[0];
     if (injected) return injected;
+    if (path === "/capabilities" && method === "GET") return state.capabilities ? { status: 200, body: state.capabilities } : error(404, "not_found");
     const auth = String(headers.authorization || "").replace(/^Bearer /, "");
     let match;
     if ((match = /^\/sdk-runs\/([^/]+)\/(events|complete)$/.exec(path)) && method === "POST") {

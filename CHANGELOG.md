@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.298] - 2026-11-17
+
+Capy turns now reach AgentRun within about a minute of finishing instead of once an hour, and subagent turns are reported too, as metadata only.
+
+### Added
+- `scripts/capy-agentrun-reporter.mjs --watch <minutes>` checks Capy every 60 seconds until the minutes are up. The hourly automation runs it with `--watch 55` as a background command it waits on (the prompt is in "Capy automation prompt" in docs/designs/agentrun-reporter.md). Each check's `capy_pass` line now counts its Capy requests (`pages=`) and rate-limit answers (`rate_limited=`); a check that meets a Capy rate limit waits as long as Capy asks and spaces the next checks out (`watch_slowed`, at most 5 minutes apart).
+- Subagent turns: each subagent's own messages are split into turns like a thread's (every instruction from its parent starts one) and sent under the thread's AgentRun agent, with the thread as the session, keyed `alphaclaw:capy:<thread>:sub:<subagent>:<message>`. A subagent turn always sends metadata only, never its instructions, replies or answer, even in a thread an automation started; its title (`Subagent <path> of <thread title>: <subagent title>`) goes only when the thread may send its own title. The change in a subagent's credits goes in the metadata as an estimate, never as `cost_usd`.
+- Live turns, off until AgentRun advertises `features.sdk_runs` (Parcha-ai/agentrun#3086): a working thread's or subagent's turn then starts in AgentRun as soon as it is seen, with `started_at`, `title` and `labels`, sends an empty event batch at most every 10 minutes while it works, and finishes in the same run. AgentRun's `/capabilities` is read at most once an hour.
+
+### Changed
+- Only one reporter run works at a time: a run holds a 3-minute lease file beside its state file, renewed every minute. A run that finds another's live lease exits 0 with `watch_skipped`; an expired lease is taken over (`watch_takeover`). Every write of the state file now merges with what is on disk, so a second writer's cursors and queued turns are kept instead of overwritten.
+
 ## [0.10.297] - 2026-11-17
 
 Every OpenClaw cron run now shows up in AgentRun once, under a readable name, with the agent turn it ran folded in.

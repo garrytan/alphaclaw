@@ -29,9 +29,19 @@ const thread = (id, fields = {}) => ({
 });
 
 // Capy's public API as documented (docs.capy.ai/api-reference): bearer auth,
-// keyset cursors for threads and automations, after cursors for messages
-// that end in null, 429 with retry-after.
-const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "org" }], threads = [], messages = {}, automations = [], runs = {}, captains = [], pageSize = 2 } = {}) => {
+// keyset cursors for threads and automations, after cursors for messages,
+// subagents and subagent messages that end in null, 429 with retry-after.
+const createFakeCapy = ({
+  projects = [{ id: "p1", name: "Alpha", visibility: "org" }],
+  threads = [],
+  messages = {},
+  automations = [],
+  runs = {},
+  captains = [],
+  subagents = {},
+  subagentMessages = {},
+  pageSize = 2,
+} = {}) => {
   const requests = [];
   const state = { rateLimit: 0, fail: null };
   const answer = (status, body, headers = {}) => ({ status, headers: { get: (name) => headers[name.toLowerCase()] ?? null }, json: async () => body });
@@ -59,6 +69,19 @@ const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "or
     }
     let match;
     if ((match = /^\/automations\/([^/]+)\/runs$/.exec(route))) return answer(200, { items: runs[match[1]] || [] });
+    if ((match = /^\/threads\/([^/]+)\/subagents$/.exec(route))) {
+      const list = subagents[match[1]] || [];
+      const from = query.after ? list.findIndex((item) => item.id === query.after) + 1 : 0;
+      const { items, next } = page(list, from);
+      return answer(200, { items, cursor: next === null ? null : items[items.length - 1].id });
+    }
+    if ((match = /^\/subagents\/([^/]+)\/messages$/.exec(route))) {
+      const list = subagentMessages[match[1]];
+      if (!list) return answer(404, { _tag: "capy/SubagentNotFound" });
+      const from = query.after ? list.findIndex((item) => item.id === query.after) + 1 : 0;
+      const { items, next } = page(list, from);
+      return answer(200, { items, cursor: next === null ? null : items[items.length - 1].id });
+    }
     if ((match = /^\/threads\/([^/]+)\/messages$/.exec(route))) {
       const list = messages[match[1]];
       if (!list) return answer(404, { _tag: "capy/ThreadNotFound" });
@@ -68,7 +91,7 @@ const createFakeCapy = ({ projects = [{ id: "p1", name: "Alpha", visibility: "or
     }
     return answer(404, { _tag: "capy/NotFound" });
   };
-  return { fetchImpl, requests, state, threads, messages, captains };
+  return { fetchImpl, requests, state, threads, messages, captains, subagents, subagentMessages };
 };
 
 describe("scripts/capy-agentrun-reporter.mjs", () => {
@@ -93,9 +116,10 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
 
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  const run = async (capy, env = {}) => {
+  const run = async (capy, env = {}, options = {}) => {
     const lines = [];
     const code = await runCapyReporter({
+      ...options,
       env: { CAPY_REPORTER_API_KEY: "capy-key", AGENTRUN_BASE_URL: kBase, AGENTRUN_CAPY_REPORTER_TOKEN: fake.token, AGENTRUN_CAPY_PRIVATE_CAPTAINS: "jam_privatecrew, jam_P4", ...env },
       statePath,
       fetchImpl: fake.fetchImpl,
@@ -549,6 +573,340 @@ describe("scripts/capy-agentrun-reporter.mjs", () => {
     expect(fake.runs.size).toBe(2);
     expect(renamed.lines.filter((line) => line.includes("row_dropped op=start source=capy code=idempotency_mismatch"))).toHaveLength(2);
     expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  const sub = (id, threadId, fields = {}) => ({
+    id,
+    threadId,
+    parentId: threadId,
+    subagentPath: "1",
+    taskPath: "1",
+    projectId: "p1",
+    title: "Sub " + id,
+    status: "idle",
+    archived: false,
+    usage: { llmCredits: 0, imageCredits: 0, vmCredits: 0, totalCredits: 4 },
+    createdAt: at(60),
+    updatedAt: at(5),
+    lastActivityAt: at(5),
+    ...fields,
+  });
+  const fromParent = (threadId) => ({ sender: { id: threadId, relation: "parent" } });
+  const keys = () => starts().map((request) => request.headers["idempotency-key"]);
+  const leasePath = () => path.join(dir, "capy-reporter.lease.json");
+  const eventsOf = (item) => item.batches.flatMap((batch) => batch.events);
+  const runByKey = (key) => {
+    const request = starts().find((item) => item.headers["idempotency-key"] === key);
+    return request && [...fake.runs.values()].find((item) => JSON.stringify(item.start) === request.body);
+  };
+  // Calls hook(n) before the nth /projects read, the start of each pass.
+  const onPass = (capy, hook) => {
+    let passes = 0;
+    return { ...capy, fetchImpl: async (url, init) => (new URL(url).pathname.endsWith("/projects") && hook((passes += 1)), capy.fetchImpl(url, init)) };
+  };
+
+  it("reports each subagent turn from paged subagents and transcripts as metadata with a title, under its thread's agent", async () => {
+    const s1 = [
+      user("TASK-1 " + kMarker, 30),
+      reply("SUB-REPLY " + kMarker, 29),
+      tool("bash", 28),
+      user("FOLLOW-UP " + kMarker, 25, fromParent("jam_A")),
+      reply("SUB-REPLY-2 " + kMarker, 24),
+    ];
+    const s2 = [user("TASK-2", 30), reply("done", 29)];
+    const s3 = [user("TASK-3", 30), reply("done", 29)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_A")],
+      messages: { jam_A: [user("a1", 40), reply("r1", 39)] },
+      subagents: { jam_A: [sub("s1", "jam_A"), sub("s2", "jam_A", { subagentPath: "2" }), sub("s3", "jam_A", { subagentPath: "2.1", title: null })] },
+      subagentMessages: { s1, s2, s3 },
+    });
+    expect((await run(capy)).code).toBe(0);
+    expect(capy.requests.some((request) => request.route === "/threads/jam_A/subagents" && request.query.after === "s2")).toBe(true);
+    expect(capy.requests.filter((request) => request.route === "/subagents/s1/messages").length).toBe(3);
+    const subKeys = keys().filter((key) => key.includes(":sub:"));
+    expect(subKeys).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id, "alphaclaw:capy:jam_A:sub:s1:" + s1[3].id, "alphaclaw:capy:jam_A:sub:s2:" + s2[0].id, "alphaclaw:capy:jam_A:sub:s3:" + s3[0].id]);
+    const first = runByKey("alphaclaw:capy:jam_A:sub:s1:" + s1[0].id);
+    expect(first.start.input).toMatch(/^Subagent 1 of Title jam_A: Sub s1 · 120s · completed — 1 reply, 1 tool call; started .*; Capy subagent turn of subagent s1 in thread jam_A\.$/);
+    expect(eventsOf(first).filter((event) => event.type === "text")).toEqual([]);
+    expect(eventsOf(first).filter((event) => event.type === "tool").map((event) => event.name)).toEqual(["bash", "bash"]);
+    expect(first.completion).toMatchObject({ status: "completed", answer: "", session_id: "jam_A" });
+    expect([...fake.runs.values()].find((item) => item.start.input.includes("subagent s3")).start.input).toMatch(/^Subagent 2\.1 of Title jam_A: s3 · /);
+    expect(starts().every((request) => request.path === "/agents/capy-project-p1/sdk-runs")).toBe(true);
+
+    s1.push(user("THIRD " + kMarker, 10, fromParent("jam_A")), reply("SUB-REPLY-3 " + kMarker, 9));
+    Object.assign(capy.threads[0], { lastActivityAt: at(9) });
+    Object.assign(capy.subagents.jam_A[0], { lastActivityAt: at(9), usage: { totalCredits: 6.5 } });
+    clock += 60 * 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(runByKey("alphaclaw:capy:jam_A:sub:s1:" + s1[5].id).start.input).toContain("Subagent credits used since the previous report: about 2.5 (an estimate).");
+    expect(fake.runs.size).toBe(6);
+    expect(allBodies()).not.toContain(kMarker);
+    expect(allBodies()).not.toContain("cost_usd");
+  });
+
+  it("keeps a private thread's subagent to metadata without its thread's or its own title", async () => {
+    const capy = createFakeCapy({
+      threads: [thread("jam_P", { visibility: "private", title: "PRIVATE-TITLE" })],
+      messages: { jam_P: [user("p1 " + kMarker, 40), reply("rp1 " + kMarker, 39)] },
+      subagents: { jam_P: [sub("sP", "jam_P", { title: "SUB-SECRET" })] },
+      subagentMessages: { sP: [user("TASK " + kMarker, 30), reply("REPLY " + kMarker, 29)] },
+    });
+    expect((await run(capy)).code).toBe(0);
+    const subRun = runByKey(keys().find((key) => key.includes(":sub:sP:")));
+    expect(subRun.start.input).toMatch(/^Private Capy subagent · .*; Capy private turn of subagent sP in thread jam_P\.$/);
+    expect(starts().every((request) => request.path === "/agents/capy-private-threads/sdk-runs")).toBe(true);
+    expect(allBodies()).not.toMatch(/PRIVATE-TITLE|SUB-SECRET/);
+    expect(allBodies()).not.toContain(kMarker);
+  });
+
+  it("sends no contents for an automation thread's subagent: no text event, no input text and no answer", async () => {
+    const capy = createFakeCapy({
+      threads: [thread("jam_D", { captain: { jamId: "jam_crew1", name: "Crew One", avatar: {} } })],
+      captains: [{ id: "jam_crew1", projectId: "p1", visibility: "org", name: "Crew One" }],
+      messages: { jam_D: [user("AUTO-INPUT", 30), reply("AUTO-REPLY", 29)] },
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "completed", jamId: "jam_D", createdAt: at(32), startedAt: at(31) }] },
+      subagents: { jam_D: [sub("sD", "jam_D")] },
+      subagentMessages: { sD: [user("SUB-INPUT " + kMarker, 28), reply("SUB-REPLY " + kMarker, 27), tool("bash", 26), user("SUB-AGAIN " + kMarker, 25, fromParent("jam_D")), reply("SUB-LAST " + kMarker, 24)] },
+    });
+    expect((await run(capy)).code).toBe(0);
+    expect(runByKey(keys().find((key) => /:jam_D:E/.test(key))).start.input).toMatch(/Capy automation turn in thread jam_D\.\n\nAUTO-INPUT$/);
+    const subRuns = keys().filter((key) => key.includes(":sub:sD:")).map(runByKey);
+    expect(subRuns).toHaveLength(2);
+    for (const item of subRuns) {
+      expect(item.start.input).toMatch(/^Subagent 1 of Title jam_D: Sub sD · .*; Capy subagent turn of subagent sD in thread jam_D\.$/);
+      expect(eventsOf(item).filter((event) => event.type === "text")).toEqual([]);
+      expect(item.completion.answer).toBe("");
+    }
+    expect(fake.agents.get("capy-captain-jam_crew1").definition.name).toBe("Capy crew: Crew One");
+    expect(allBodies()).not.toMatch(/SUB-(INPUT|REPLY|AGAIN|LAST)/);
+    expect(allBodies()).not.toContain(kMarker);
+  });
+
+  it("keys a subagent turn the same way across processes and after a lost state file", async () => {
+    const s1 = [user("t1", 30), reply("r1", 29), user("t2", 20, fromParent("jam_A")), reply("r2", 19)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_A", { status: "waiting" })],
+      messages: { jam_A: [user("a1", 40)] },
+      subagents: { jam_A: [sub("s1", "jam_A", { status: "working", usage: {} })] },
+      subagentMessages: { s1 },
+    });
+    expect((await run(capy)).code).toBe(0);
+    expect(keys()).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id]);
+    Object.assign(capy.subagents.jam_A[0], { status: "done", lastActivityAt: at(4) });
+    clock += 60 * 1000;
+    expect((await run(capy)).code).toBe(0);
+    expect(keys()).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id, "alphaclaw:capy:jam_A:sub:s1:" + s1[2].id]);
+    fs.rmSync(statePath);
+    const again = await run(capy);
+    expect(again.code).toBe(0);
+    expect(keys().slice(2)).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id, "alphaclaw:capy:jam_A:sub:s1:" + s1[2].id]);
+    expect(fake.runs.size).toBe(2);
+    expect(again.lines.join("\n")).not.toContain("row_dropped");
+  });
+
+  it("watches with a pass every 60 s until its minutes are up, sends a turn within a minute of its end and releases the lease", async () => {
+    const a = [user("a1", 30), reply("r1", 29)];
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: a } });
+    const watched = onPass(capy, (pass) => {
+      if (pass !== 2) return;
+      a.push(user("a2", -0.5), reply("r2", -0.9));
+      capy.threads[0].lastActivityAt = new Date(clock - 100).toISOString();
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    expect(result.code).toBe(0);
+    expect(capy.requests.filter((request) => request.route === "/projects")).toHaveLength(3);
+    expect(sleeps).toEqual([60000, 60000]);
+    expect(result.lines.filter((line) => /capy_pass .* pages=\d+ rate_limited=0$/.test(line))).toHaveLength(3);
+    expect(keys()).toEqual(["alphaclaw:capy:jam_A:" + a[0].id, "alphaclaw:capy:jam_A:" + a[2].id]);
+    expect(runByKey("alphaclaw:capy:jam_A:" + a[2].id).startedAt).toBe(kNow + 60000);
+    expect(fs.existsSync(leasePath())).toBe(false);
+    expect(fake.requests.filter((request) => request.path === "/capabilities")).toHaveLength(1);
+  });
+
+  it("exits 0 with watch_skipped and reads nothing while another run's lease is live", async () => {
+    const lease = { holder: "other-run", renewed_at: at(1), expires_at: at(-2) };
+    fs.writeFileSync(leasePath(), JSON.stringify(lease));
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    const result = await run(capy, {}, { watchMinutes: 55 });
+    expect(result.code).toBe(0);
+    expect(result.lines.join("\n")).toContain("watch_skipped holder=other-run age=60s");
+    expect(capy.requests).toHaveLength(0);
+    expect(fake.requests).toHaveLength(0);
+    expect(JSON.parse(fs.readFileSync(leasePath(), "utf8"))).toEqual(lease);
+    expect((await run(capy)).code).toBe(0);
+    expect(capy.requests).toHaveLength(0);
+  });
+
+  it("refuses a --watch that is not a number of minutes, reading nothing", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    const result = await run(capy, {}, { watchMinutes: "abc" });
+    expect(result.code).toBe(2);
+    expect(result.lines.join("\n")).toContain("config_invalid op=capy fix=--watch takes minutes from 1 to 1440");
+    expect(capy.requests).toHaveLength(0);
+    expect(fs.existsSync(leasePath())).toBe(false);
+  });
+
+  it("takes over a lease past its expiry with watch_takeover", async () => {
+    fs.writeFileSync(leasePath(), JSON.stringify({ holder: "other-run", renewed_at: at(4), expires_at: at(1) }));
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    const result = await run(capy, {}, { watchMinutes: 1 });
+    expect(result.code).toBe(0);
+    expect(result.lines.join("\n")).toContain("watch_takeover holder=other-run age=240s");
+    expect(fake.runs.size).toBe(1);
+    expect(fs.existsSync(leasePath())).toBe(false);
+  });
+
+  it("merges the state file on write, keeping another writer's cursors", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    const other = { activity: at(50), status: "idle", after: "E-OTHER", reported: [], since: at(60), credits: null };
+    const writer = {
+      ...capy,
+      fetchImpl: async (url, init) => {
+        if (new URL(url).pathname.endsWith("/threads") && !fs.existsSync(statePath)) fs.writeFileSync(statePath, JSON.stringify({ version: 1, threads: { jam_OTHER: other }, agents: {}, rows: [] }));
+        return capy.fetchImpl(url, init);
+      },
+    };
+    expect((await run(writer)).code).toBe(0);
+    const saved = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    expect(saved.threads.jam_OTHER).toEqual(other);
+    expect(saved.threads.jam_A.status).toBe("idle");
+    expect(fake.runs.size).toBe(1);
+  });
+
+  it("honours a Capy 429's retry-after in watch mode and stretches the next interval", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_A")], messages: { jam_A: [user("a1", 30), reply("r1", 29)] } });
+    capy.state.rateLimit = 1;
+    const result = await run(capy, {}, { watchMinutes: 3 });
+    expect(result.code).toBe(0);
+    expect(sleeps).toEqual([3000, 60000, 57000]);
+    expect(result.lines.join("\n")).toContain("watch_slowed op=capy interval=120s rate_limited=1");
+    expect(result.lines.filter((line) => line.includes("capy_pass"))).toHaveLength(2);
+    expect(result.lines.find((line) => line.includes("capy_pass"))).toContain("rate_limited=1");
+    expect(fake.runs.size).toBe(1);
+  });
+
+  it("starts no working turn early while AgentRun does not advertise sdk_runs", async () => {
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working" })], messages: { jam_W: [user("w1", 30), reply("rw1", 29)] } });
+    expect((await run(capy, {}, { watchMinutes: 3 })).code).toBe(0);
+    expect(fake.requests.filter((request) => request.path === "/capabilities")).toHaveLength(1);
+    expect(starts()).toHaveLength(0);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+    expect((await run(capy)).code).toBe(0);
+    expect(fake.requests.filter((request) => request.path === "/capabilities")).toHaveLength(1);
+  });
+
+  it("starts a working turn at once when AgentRun advertises sdk_runs, sends a heartbeat every 10 minutes and finishes the same run", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const w = [user("w1", 0), reply("rw1", -0.5), tool("bash", -0.6)];
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: w } });
+    const watched = onPass(capy, (pass) => {
+      if (pass === 12) Object.assign(capy.threads[0], { status: "idle", lastActivityAt: at(-10.5) });
+    });
+    expect((await run(watched, {}, { watchMinutes: 12 })).code).toBe(0);
+    expect(fake.runs.size).toBe(1);
+    const [item] = [...fake.runs.values()];
+    expect(item.startedAt).toBe(kNow);
+    expect(item.start).toMatchObject({ started_at: at(0), title: "Title jam_W", labels: ["source:capy", "class:thread"] });
+    expect(item.start.input).toMatch(/^Title jam_W · working — started .*; Capy thread turn in thread jam_W\.$/);
+    expect(item.batches[0]).toEqual({ sequence: 1, events: [] });
+    expect(item.batches.slice(1).flatMap((batch) => batch.events).map((event) => event.type)).toEqual(["session", "tool", "tool"]);
+    expect(item.completion).toMatchObject({ status: "completed", session_id: "jam_W" });
+    expect(fake.requests.filter((request) => request.path === "/capabilities")).toHaveLength(1);
+    expect(keys().every((key) => key === "alphaclaw:capy:jam_W:" + w[0].id)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("never reopens a reported turn as live when its thread wakes with no new message", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const w = [user("w1", 30), reply("rw1", 29)];
+    const capy = createFakeCapy({ threads: [thread("jam_W")], messages: { jam_W: w } });
+    const watched = onPass(capy, (pass) => {
+      if (pass === 2) Object.assign(capy.threads[0], { status: "working", lastActivityAt: at(-0.5) });
+      if (pass === 3) Object.assign(capy.threads[0], { status: "idle", lastActivityAt: at(-1.5) });
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    expect(result.code).toBe(0);
+    expect(keys()).toEqual(["alphaclaw:capy:jam_W:" + w[0].id]);
+    expect([...fake.runs.values()][0].completion).toMatchObject({ status: "completed" });
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("drops a live turn whose thread turns private before it finishes, and sends nothing more for it", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: [user("w1", 0), reply("rw1", -0.5)] } });
+    const watched = onPass(capy, (pass) => {
+      if (pass === 2) Object.assign(capy.threads[0], { visibility: "private", lastActivityAt: at(-0.7) });
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    expect(result.lines.join("\n")).toContain("content_revoked op=capy count=1");
+    expect(fake.runs.size).toBe(1);
+    const [item] = [...fake.runs.values()];
+    expect(item.batches).toEqual([]);
+    expect(item.completion).toBeNull();
+    expect(starts()).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("drops a live start AgentRun refuses instead of resending it every loop", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    fake.state.failNext.push({ path: /\/sdk-runs$/, status: 422, body: { error: { code: "input_invalid", message: "bad start" } } });
+    const capy = createFakeCapy({ threads: [thread("jam_W", { status: "working", lastActivityAt: at(0) })], messages: { jam_W: [user("w1", 0), reply("rw1", -0.5)] } });
+    const result = await run(capy, {}, { watchMinutes: 3 });
+    expect(result.lines.join("\n")).toContain("row_dropped op=start source=capy code=input_invalid");
+    expect(starts()).toHaveLength(1);
+    expect(fake.runs.size).toBe(0);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("drops a live automation turn whose thread turns private before its start reached AgentRun, and never sends its prompt", async () => {
+    fake.state.capabilities = { features: { sdk_runs: true } };
+    const capy = createFakeCapy({
+      threads: [thread("jam_D", { status: "working", lastActivityAt: at(0), title: "PUBLIC-TITLE" })],
+      messages: { jam_D: [user("AUTO-PROMPT " + kMarker, 0), reply("AUTO-REPLY " + kMarker, -0.2)] },
+      automations: [{ id: "au1", projectId: "p1", threadMode: "new" }],
+      runs: { au1: [{ id: "run1", automationId: "au1", status: "running", jamId: "jam_D", createdAt: at(1), startedAt: at(1) }] },
+    });
+    fake.state.failNext.push({ path: /\/sdk-runs$/, status: 503, body: { error: { code: "unavailable", message: "busy" } } });
+    let privateFrom = null;
+    const watched = onPass(capy, (pass) => {
+      if (pass !== 2) return;
+      privateFrom = fake.requests.length;
+      Object.assign(capy.threads[0], { visibility: "private", status: "idle", lastActivityAt: at(-0.5) });
+    });
+    const result = await run(watched, {}, { watchMinutes: 3 });
+    const later = fake.requests.slice(privateFrom).map((request) => request.body).join("\n");
+    expect(later).not.toContain(kMarker);
+    expect(later).not.toContain("PUBLIC-TITLE");
+    expect(result.lines.join("\n")).toContain("content_revoked op=capy count=1");
+    expect(fake.runs.size).toBe(0);
+    expect(JSON.parse(fs.readFileSync(statePath, "utf8")).rows).toEqual([]);
+  });
+
+  it("reads a thread's subagents again on later passes after its subagent listing failed", async () => {
+    const s1 = [user("t1", 30), reply("r1", 29)];
+    const capy = createFakeCapy({
+      threads: [thread("jam_A")],
+      messages: { jam_A: [user("a1", 30), reply("r1", 29)] },
+      subagents: { jam_A: [sub("s1", "jam_A")] },
+      subagentMessages: { s1 },
+    });
+    capy.state.fail = (route) => (route === "/threads/jam_A/subagents" ? 500 : null);
+    const failed = await run(capy);
+    expect(failed.code).toBe(1);
+    expect(failed.lines.join("\n")).toContain("capy_error op=subagents id=jam_A status=500");
+    clock += 60000;
+    const again = await run(capy);
+    expect(again.code).toBe(1);
+    capy.state.fail = null;
+    clock += 60000;
+    expect((await run(capy)).code).toBe(0);
+    expect(keys().filter((key) => key.includes(":sub:"))).toEqual(["alphaclaw:capy:jam_A:sub:s1:" + s1[0].id]);
+    const listings = capy.requests.filter((request) => request.route === "/threads/jam_A/subagents").length;
+    clock += 60000;
+    expect((await run(capy)).code).toBe(0);
+    expect(capy.requests.filter((request) => request.route === "/threads/jam_A/subagents").length).toBe(listings);
   });
 
   it("exits non-zero with one line naming what is missing, never a value", () => {
