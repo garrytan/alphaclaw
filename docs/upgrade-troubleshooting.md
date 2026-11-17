@@ -694,6 +694,80 @@ script, then restart the gateway from the Health page. Unset the variable
 to turn the hook off — there is no in-tree fallback path. Full reference:
 README "Gateway prelaunch hook".
 
+## OpenClaw from a pinned package
+
+**What it is:** `ALPHACLAW_OPENCLAW_PACKAGES` (deployment env only, never
+read from `.env`) lets a deployment run its own build of the exact OpenClaw
+version AlphaClaw already runs, for example a build with a fix that is not
+released yet. Each entry is `<version>:<absolute path to the .tgz>:<sha256>`,
+and entries are separated by commas or newlines:
+
+```
+ALPHACLAW_OPENCLAW_PACKAGES=2026.11.4:/data/openclaw-packages/openclaw-2026.11.4-fix.tgz:<64 hex sha256>
+```
+
+Keep the file on the data disk, outside the OpenClaw state directory, and not
+writable by group or others (`chmod 600`). Entries for other versions are
+ignored, so you can stage the build for the next pin before the pin moves.
+It never picks a version: the version still comes from `package.json`.
+
+**What AlphaClaw does with it:** at every start, after the "updating" page
+holds the port and before anything runs `openclaw`, AlphaClaw checks the
+file's sha256, unpacks it beside the image's stock build, and refuses it
+unless it has the same version, the same dependencies (extra bundled copies
+of declared dependencies are allowed), the same declared database schemas
+and a Node.js range that includes the running Node. It then runs the
+package's own postinstall and swaps it into `node_modules/openclaw`. On a
+restart in the same container it re-checks the file and reuses the tree.
+Before **every** gateway launch it checks that each file the package shipped
+is still there and unchanged. Files OpenClaw adds at run time (plugin
+installs under `dist/extensions`) don't count.
+
+**When something is wrong it refuses, it never falls back.** The stock build
+stays in place, the gateway is not started, the Watchdog shows
+`openclaw_package_refused`, and one important notification per reason and
+day names the reason, the file and the two ways out. Commands that run
+outside the gateway (the boot migration's `doctor --fix`, cron's CLI calls,
+the Health page terminal) keep running the stock build while it is refused.
+
+**Check a setting before you deploy it:**
+
+```
+alphaclaw openclaw-package check                 # the version this AlphaClaw runs
+alphaclaw openclaw-package check --pin 2026.11.5 # an entry staged for the next pin
+alphaclaw openclaw-package check --json
+```
+
+It reads the file and the archive and changes nothing. It exits 0 when the
+entry verifies, 1 when it is refused and 2 on a usage error. For a version
+the image has not installed yet it says which checks it could not run
+(dependencies and schemas need that version's stock package).
+
+**Next steps by reason:**
+
+- `missing`, `sha_mismatch`, `unsafe_mode`, `not_regular_file`,
+  `too_large`: put the right file back at the named path (`chmod 600`).
+  AlphaClaw checks the path every minute and restarts itself once the file
+  verifies, so no redeploy is needed.
+- `no_entry_for_pin`: the pin moved and no entry names the new version.
+  Add a build for it, or remove the setting to run the stock build.
+- `dependencies_differ`, `schema_differs`, `version_mismatch`,
+  `node_unsupported`: the build does not match this image. Rebuild it from
+  the same OpenClaw version.
+- `postinstall_failed`, `lifecycle_pending`: the package's own postinstall
+  failed. Its output is in the AlphaClaw process log.
+- `tree_changed`: something changed a file the package shipped after it
+  was applied. Restart AlphaClaw (a redeploy or a container restart) to
+  apply it again.
+- `deferred`: a gateway was already running from the OpenClaw tree when
+  AlphaClaw started. Restart the container.
+
+To go back to the stock build on purpose, remove
+`ALPHACLAW_OPENCLAW_PACKAGES` and redeploy. AlphaClaw puts the image's
+build back at the next start and sends one notice saying so. `alphaclaw
+diagnose` shows the setting's entries, the last verdict and the build that
+is running (`<version>+<sha prefix>` for a pinned package).
+
 ## `alphaclaw diagnose`
 
 The first move on a sick box. `alphaclaw diagnose` (run in the container,

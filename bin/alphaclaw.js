@@ -194,6 +194,7 @@ Commands:
   telegram topic create  Create a Telegram forum topic and register it
   telegram topics list  List registered, discovered, and stale Telegram topics
   diagnose  Print a read-only diagnostic bundle from the data volume (boot reports, channel state, pidfile, state DB schema, incidents, backups, log tail)
+  openclaw-package check [--pin <version>] [--json]  Verify the pinned OpenClaw package setting (ALPHACLAW_OPENCLAW_PACKAGES) without applying it
   guest-notes sweep [--apply]  List (and with --apply, delete) guest notes AlphaClaw can no longer reach
   admin <METHOD> <path>  Administer AlphaClaw via the local API (requires features.agentAdmin)
   admin manifest  Print the agent-admin operation catalog
@@ -365,6 +366,35 @@ if (command === "diagnose") {
   return;
 }
 
+// 1a''. `alphaclaw openclaw-package check [--pin <version>] [--json]`: read-only.
+// Verifies the pinned OpenClaw package setting the way a start would, without
+// unpacking it into place. Exit 0 verified (or not set), 1 refused, 2 usage.
+if (command === "openclaw-package") {
+  const asJson = commandArgs.includes("--json");
+  const pinIndex = commandArgs.indexOf("--pin");
+  const pin = pinIndex >= 0 ? commandArgs[pinIndex + 1] || "" : null;
+  if (commandScope !== "check" || (pinIndex >= 0 && !pin)) {
+    console.error("Usage: alphaclaw openclaw-package check [--pin <version>] [--json]");
+    process.exit(2);
+  }
+  const { checkOpenclawPackageSetting } = require("../lib/server/openclaw-package-override");
+  const result = checkOpenclawPackageSetting({
+    installDir: resolveSelfDependency({ fsImpl: fs }).installDir,
+    openclawDir: path.join(rootDir, ".openclaw"),
+    pin,
+  });
+  if (asJson) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } else if (result.ok) {
+    process.stdout.write(`ok: ${result.message}\n`);
+  } else {
+    process.stdout.write(
+      `refused (${result.reason}): ${result.message}${result.detail ? ` (${result.detail})` : ""}\nSee docs/upgrade-troubleshooting.md "OpenClaw from a pinned package".\n`,
+    );
+  }
+  process.exit(result.ok ? 0 : result.usage ? 2 : 1);
+}
+
 // ---------------------------------------------------------------------------
 // 1b. Boot placeholder server
 // ---------------------------------------------------------------------------
@@ -471,6 +501,23 @@ if (fs.existsSync(pendingUpdateMarker)) {
       console.log(`[alphaclaw] Update install failed: ${e.message}`);
       fs.unlinkSync(pendingUpdateMarker);
     }
+  }
+}
+
+// OpenClaw from a sha-pinned package (ALPHACLAW_OPENCLAW_PACKAGES, deployment
+// env only): applied here, after the placeholder holds the port and after a
+// pending self-update install, before anything runs openclaw. It never
+// throws; a refusal is recorded and the gateway launch check refuses.
+if (command === "start") {
+  try {
+    const { applyOpenclawPackageAtBoot } = require("../lib/server/openclaw-package-override");
+    applyOpenclawPackageAtBoot({
+      installDir: resolveSelfDependency({ fsImpl: fs }).installDir,
+      managedDir: path.join(openclawDir, ".alphaclaw"),
+      openclawDir,
+    });
+  } catch (e) {
+    console.error(`[alphaclaw] openclaw package step failed: ${e.message}`);
   }
 }
 
