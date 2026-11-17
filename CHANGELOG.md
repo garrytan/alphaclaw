@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.290] - 2026-11-17
+
+A secret link save now refuses to run when AlphaClaw cannot record it on its disk, so a restart can never reopen a link that was already used.
+
+### Fixed
+- When the secret link state file can neither be written nor removed (for example a read-only data folder), Save writes nothing and the page shows the error with Retry. Before, the save ran and the spent link could open again after a restart within its 15 minutes.
+
 ## [0.10.289] - 2026-11-17
 
 After a pod kill or crash, the gateway can take many minutes to come back. AlphaClaw's check for sessions a restart left stuck now waits for it, instead of giving up after 5 minutes. It also no longer reports a session that OpenClaw is still about to resume.

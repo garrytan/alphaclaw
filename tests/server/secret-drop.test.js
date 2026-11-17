@@ -689,6 +689,31 @@ it("a restart in the middle of a save reopens the link as interrupted, and savin
     expect(status.body.link.interrupted).toBeUndefined();
   });
 
+it("refuses a save it cannot record on disk, so a restart can never reopen it", async () => {
+    const stuck = fs.mkdtempSync(path.join(os.tmpdir(), "secret-drop-stuck-"));
+    fs.writeFileSync(path.join(stuck, "keep"), "x");
+    let failWrites = false;
+    const store = createStateStore();
+    const flaky = { path: stuck, read: () => store.read(), write: (state) => {
+      if (failWrites) throw Object.assign(new Error("read-only"), { code: "EROFS" });
+      return store.write(state);
+    } };
+    const h = createHarness({ store: flaky });
+    const { token, id } = await askForLink(h);
+    const { csrf } = await openPage(h, token);
+    failWrites = true;
+    const refused = await save(h, token, { csrf, value: kCanary });
+    expect(refused.status).toBe(503);
+    expect(refused.body).toMatchObject({ ok: false, code: "state_unwritable", link: { status: "pending", csrf } });
+    expect(h.envWrites).toEqual([]);
+    expect(h.cli.calls.filter((call) => call.args[2] === "set")).toEqual([]);
+    expect(h.lines.join("\n")).toContain(`save refused id=${id}: the links file cannot be written or removed`);
+    failWrites = false;
+    const retried = await save(h, token, { csrf, value: kCanary });
+    expect(retried.body.link.status).toBe("stored");
+    expectNoCanary(h, [refused, retried]);
+  });
+
   it("ignores records in the state file that are not well formed", () => {
     const store = createStateStore();
     store.write({ requests: [{ id: "sd_nothex", name: "GITHUB_TOKEN", status: "pending" }, { id: "sd_" + "a".repeat(18), name: "bad name", status: "pending", createdAt: 1, expiresAt: 2, tokenHash: "f".repeat(64), csrf: "c" }, "junk"] });
