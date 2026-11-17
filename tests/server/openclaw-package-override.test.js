@@ -818,19 +818,28 @@ describe("owner notices and a gateway OpenClaw renamed with process.title", () =
       });
     const other = path.join(tmp("other-install-"), "node_modules", "openclaw");
     const script = 'if (process.argv[1] === "title") process.title = "openclaw-gateway"; console.log("ready"); setInterval(() => {}, 1000);';
+    const ours = [];
+    const onlyOurs = Object.assign(Object.create(fs), {
+      readdirSync: (dir, ...rest) => (dir === "/proc" ? ours.map(String) : fs.readdirSync(dir, ...rest)),
+    });
+    const running = (packageDir) => override.isGatewayRunningFrom({ packageDir, fsModule: onlyOurs });
     const foreign = await start(["-e", script, "plain", path.join(other, "openclaw.mjs"), "gateway", "run"]);
+    const lookalike = await start(["-e", script, "plain", "openclaw-gateway"]);
+    ours.push(foreign.pid, lookalike.pid);
     try {
-      expect(override.isGatewayRunningFrom({ packageDir: install.stock })).toBe(false);
-      expect(override.isGatewayRunningFrom({ packageDir: other })).toBe(true);
+      expect(running(install.stock)).toBe(false);
+      expect(running(other)).toBe(true);
       const titled = await start(["-e", script, "title", path.join(install.stock, "openclaw.mjs"), "gateway", "run"]);
+      ours.push(titled.pid);
       try {
         expect(fs.readFileSync(`/proc/${titled.pid}/cmdline`, "utf8")).not.toContain(install.stock);
-        expect(override.isGatewayRunningFrom({ packageDir: install.stock })).toBe(true);
+        expect(running(install.stock)).toBe(true);
       } finally {
         titled.kill("SIGKILL");
       }
     } finally {
       foreign.kill("SIGKILL");
+      lookalike.kill("SIGKILL");
     }
   });
 
