@@ -8,7 +8,7 @@
 // "This SDK run expired.", and evidence for a run that ended (completed, or
 // stopped in the console: stop()) is not_continuable "This SDK run has
 // ended.". GET /capabilities advertises features.sdk_runs only when a test
-// sets state.sdkRuns; only then does a start take started_at, title and
+// sets state.sdkRuns or state.capabilities with it; only then does a start take started_at, title and
 // labels (otherwise input_invalid "Unknown SDK request field."), and the
 // hour counts from the run's last start or batch instead of its start (this
 // fake's model of the upstream change; empty batches keep a run alive).
@@ -22,9 +22,13 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
   const requests = [];
   // loseAnswer: a request on that path is carried out, then the connection
   // drops before its answer (and stays down until the test lifts it).
-  const state = { down: false, failNext: [], loseAnswer: null, sdkRuns: false };
+  // capabilities: the body GET /capabilities answers; sdkRuns: shorthand
+  // for { features: { sdk_runs: true } }. With neither set the route answers
+  // 404, like a server that does not advertise sdk_runs.
+  const state = { down: false, failNext: [], loseAnswer: null, capabilities: null, sdkRuns: false };
+  const sdkRunsOn = () => state.sdkRuns || Boolean(state.capabilities?.features?.sdk_runs);
   const kStartFields = ["started_at", "title", "labels"];
-  const expired = (run) => now() > (state.sdkRuns ? run.activeAt : run.startedAt) + 3600000;
+  const expired = (run) => now() > (sdkRunsOn() ? run.activeAt : run.startedAt) + 3600000;
   const error = (status, code, message = code) => ({ status, body: { error: { code, message, retryable: false } } });
 
   const handle = (method, path, headers, body) => {
@@ -32,6 +36,10 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
     const index = state.failNext.findIndex((item) => !item.path || item.path.test(path));
     const injected = index < 0 ? null : state.failNext.splice(index, 1)[0];
     if (injected) return injected;
+    if (path === "/capabilities" && method === "GET") {
+      if (state.capabilities) return { status: 200, body: state.capabilities };
+      return state.sdkRuns ? { status: 200, body: { features: { sdk_runs: true } } } : error(404, "not_found");
+    }
     const auth = String(headers.authorization || "").replace(/^Bearer /, "");
     let match;
     if ((match = /^\/sdk-runs\/([^/]+)\/(events|complete)$/.exec(path)) && method === "POST") {
@@ -61,7 +69,6 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
       run.completion = body;
       return { status: 200, body: { accepted: true } };
     }
-    if (path === "/capabilities" && method === "GET") return { status: 200, body: { features: state.sdkRuns ? { sdk_runs: true } : {} } };
     if (auth !== token) return error(401, "unauthenticated");
     if ((match = /^\/agents\/([^/]+)\/sdk-runs$/.exec(path)) && method === "POST") {
       const agent = agents.get(decodeURIComponent(match[1]));
@@ -75,7 +82,7 @@ const createFakeAgentrun = ({ token = "t".repeat(40), now = () => Date.now() } =
         return { status: 201, body: { run_id: run.id, agent_id: agent.agent_id, token: run.token } };
       }
       if (agent.archived) return error(409, "agent_archived", "This SDK agent is archived.");
-      if (kStartFields.some((field) => field in body) && !state.sdkRuns) return error(422, "input_invalid", "Unknown SDK request field.");
+      if (kStartFields.some((field) => field in body) && !sdkRunsOn()) return error(422, "input_invalid", "Unknown SDK request field.");
       if (body.title !== undefined && (typeof body.title !== "string" || body.title.length > 200)) return error(422, "input_invalid", "title");
       if (body.started_at !== undefined && Number.isNaN(Date.parse(body.started_at))) return error(422, "input_invalid", "started_at");
       if (body.runtime !== agent.definition.sdk.runtime) return error(422, "input_invalid", "The SDK runtime must match the registered agent.");
