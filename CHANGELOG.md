@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.292] - 2026-11-17
+
+AlphaClaw can now copy each finished OpenClaw turn into an AgentRun server, so the agent's work shows up in AgentRun's console. It is off unless you set `ALPHACLAW_AGENTRUN_URL`, and it sends metadata only unless you list a cron job whose contents may go too.
+
+### Added
+- An AgentRun reporter: an OpenClaw plugin records each turn's agent, session kind, timing, outcome, model, token usage and tool names on the box, and AlphaClaw sends them to AgentRun as SDK runs (one AgentRun agent per OpenClaw agent and per cron job). Messages, answers, tool inputs and tool outputs are not sent. A cron job listed in `ALPHACLAW_AGENTRUN_CONTENT_CRON` also sends its configured prompt and the agent's answer; private chats, groups and other sessions never do.
+- Turns wait in a local queue (up to 20,000) while AgentRun is down or the token is missing, and each is reported once, also across restarts. A rejected token pauses sending for an hour without losing turns.
+- New deployment-only settings `ALPHACLAW_AGENTRUN_URL`, `ALPHACLAW_AGENTRUN_OPENCLAW_TOKEN` (masked as a deployment secret), `ALPHACLAW_AGENTRUN_RUNTIME` and `ALPHACLAW_AGENTRUN_CONTENT_CRON`. See docs/designs/agentrun-reporter.md.
+
 ## [0.10.291] - 2026-11-17
 
 When OpenClaw's own resume pass after a restart fails for some sessions, it tries again twice. AlphaClaw's check for stuck sessions now waits for those retries instead of reporting sessions OpenClaw is still working on.
