@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.310] - 2026-11-18
+
+When OpenClaw holds an owner's Telegram message behind a long agent run, AlphaClaw now says so in that chat instead of leaving it silent.
+
+### Fixed
+- An owner's message that OpenClaw queues behind a run that started a minute or more earlier (for example a subagent's completion report, which can hold a topic for many minutes) now gets one short line in the same chat or topic: "Got it — I'm finishing another task in this topic, your message is next." It is sent at most once per run per chat, never quotes the message, and only when the queued message is an owner's. AlphaClaw's Telegram group guard now logs one content-free line per owner message so the notice can tell whose message was queued.
+
 ## [0.10.309] - 2026-11-17
 
 AlphaClaw now sees a running OpenClaw gateway before it changes the pinned build, and removing a pinned Codex plugin works on boxes pinned by v0.10.307 too.

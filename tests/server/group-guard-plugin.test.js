@@ -91,6 +91,25 @@ describe("group guard plugin", () => {
     expect(stalePluginConfig.dispatch(...groupTurn("111111", kAlfredGroup))).toEqual({ handled: true });
   });
 
+  it("marks each owner turn with a hash of its session key and nothing else, and no one else's", () => {
+    rootDir = makeRoot(kRules);
+    const { dispatch, lines } = register(rootDir, {}, { config: { commands: { ownerAllowFrom: ["telegram:222333444"] } } });
+    lines.length = 0;
+    const [event, ctx] = groupTurn(kGarry, kAlfredGroup, ":topic:42");
+    dispatch(event, ctx);
+    expect(lines).toEqual(["[group-guard] owner inbound chat=" + groupGuard.ownerInboundKey(event.sessionKey)]);
+    expect(lines[0]).toMatch(/chat=[0-9a-f]{16}$/);
+    expect(lines[0]).not.toContain(kGarry);
+    expect(lines[0]).not.toContain(kAlfredGroup.slice(1));
+    expect(groupGuard.ownerInboundKey(" AGENT:main:Telegram:group:" + kAlfredGroup + ":topic:42 ")).toBe(groupGuard.ownerInboundKey(event.sessionKey));
+    lines.length = 0;
+    dispatch(...groupTurn("999888777", kAlfredGroup));
+    dispatch({ channel: "discord", senderId: kGarry, sessionKey: "agent:main:discord:x" }, { channelId: "discord", senderId: kGarry });
+    expect(lines).toEqual([]);
+    dispatch(...groupTurn("222333444", kAlfredGroup));
+    expect(lines).toEqual(["[group-guard] owner inbound chat=" + groupGuard.ownerInboundKey("agent:main:telegram:group:" + kAlfredGroup)]);
+  });
+
   it("lets everyone else through, and ignores other channels", () => {
     rootDir = makeRoot(kRules);
     const { dispatch } = register(rootDir);
