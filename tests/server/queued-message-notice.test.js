@@ -23,8 +23,7 @@ const kDmKey = "agent:main:main";
 const ownerLine = (sessionKey = kTopicKey) =>
   "\u001b[90m2026-11-18T00:49:48.010+00:00\u001b[39m \u001b[36m[plugins]\u001b[39m \u001b[36m[group-guard] owner inbound chat=" + ownerInboundKey(sessionKey) + "\u001b[39m\n";
 
-const topicRow = (overrides = {}) => ({
-  key: kTopicKey,
+const topicRow = (overrides = {}) => ({ key: kTopicKey,
   sessionId: "sess-topic",
   hasActiveRun: true,
   activeRunIds: ["announce:v1:agent:main:subagent:child:run-1"],
