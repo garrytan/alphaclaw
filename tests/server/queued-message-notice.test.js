@@ -102,7 +102,7 @@ describe("server/queued-message-notice", () => {
     expect(sendTelegram).not.toHaveBeenCalled();
   });
 
-  it("ignores an owner mark for another chat and one older than two minutes", async () => {
+  it("ignores an owner mark for another chat and one older than 30 seconds", async () => {
     notice.observeGatewayOutput(ownerLine("agent:main:telegram:group:-100999:topic:5") + queuedLine());
     await notice.settled();
     notice.observeGatewayOutput(ownerLine());
@@ -110,6 +110,36 @@ describe("server/queued-message-notice", () => {
     notice.observeGatewayOutput(queuedLine());
     await notice.settled();
     expect(sendTelegram).not.toHaveBeenCalled();
+  });
+
+  it("does not let a stranger spend an owner mark left by a message OpenClaw steered 30 s earlier", async () => {
+    notice.observeGatewayOutput(ownerLine());
+    clock += 31_000;
+    notice.observeGatewayOutput(queuedLine({ runId: "stranger" }));
+    await notice.settled();
+    expect(sendTelegram).not.toHaveBeenCalled();
+  });
+
+  it("only counts an owner mark logged before the queued line, and only the group guard's own", async () => {
+    notice.observeGatewayOutput(queuedLine({ runId: "stranger" }));
+    clock += 1_000;
+    notice.observeGatewayOutput(ownerLine());
+    await notice.settled();
+    clock += 31_000;
+    notice.observeGatewayOutput(ownerLine().replace("[group-guard] ", "[someone-else] ") + queuedLine({ runId: "stranger-2" }));
+    await notice.settled();
+    expect(sendTelegram).not.toHaveBeenCalled();
+  });
+
+  it("never tells the owner their message is next once it is already running", async () => {
+    rows = [topicRow({ activeRunIds: ["inbound-run-1"], startedAt: clock + 2_000 })];
+    ownerQueued();
+    await notice.settled();
+    rows = [topicRow({ activeRunIds: ["inbound-run-2"], startedAt: clock - 5 * 60_000 })];
+    ownerQueued({ runId: "inbound-run-2" });
+    await notice.settled();
+    expect(sendTelegram).not.toHaveBeenCalled();
+    expect(timers).toHaveLength(0);
   });
 
   it("sends at most one notice per run per chat, however many owner messages queue behind it", async () => {
