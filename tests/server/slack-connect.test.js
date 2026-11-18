@@ -22,7 +22,7 @@ const kReadScopes = [...kReadUserScopes, "identify"].join(",");
 
 // Slack's API, answered from a script; records each call (never asserted on
 // the token beyond where it must go).
-const createFakeSlack = ({ scope = kReadScopes, botToken = "", teamId = "T02A11S1M", teamName = "YC", url = "https://ycombinator.slack.com/", exchangeOk = true } = {}) => {
+const createFakeSlack = ({ scope = kReadScopes, botToken = "", teamId = "T02A11S1M", teamName = "YC", url = "https://ycombinator.slack.com/", exchangeOk = true, revokeOk = true } = {}) => {
   const calls = [];
   const fetchImpl = vi.fn(async (target, init) => {
     const method = String(target).split("/api/")[1];
@@ -39,7 +39,7 @@ const createFakeSlack = ({ scope = kReadScopes, botToken = "", teamId = "T02A11S
       });
     }
     if (method === "auth.test") return json(url ? { ok: true, url, team: teamName, user: "garry" } : { ok: false, error: "invalid_auth" });
-    if (method === "auth.revoke") return json({ ok: true, revoked: true });
+    if (method === "auth.revoke") return json(revokeOk ? { ok: true, revoked: true } : { ok: false, error: "internal_error" });
     return json({ ok: false, error: "unknown_method" });
   });
   return { fetchImpl, calls };
@@ -274,6 +274,31 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
     const { state } = await startFlow(h);
     expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?connected=SLACK_USER_TOKEN_YCX26");
     expect(h.envWrites.map((w) => w.key)).toEqual(["SLACK_USER_TOKEN_YCX26"]);
+  });
+
+  it("refuses a workspace whose name another workspace holds, and revokes its token", async () => {
+    const h = createHarness({ slack: { teamId: "T0BBB222", teamName: "Overton", url: "https://overton.slack.com/" } });
+    const { state } = await startFlow(h);
+    expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=name_taken");
+    expect(h.envWrites).toEqual([]);
+    expect(h.fake.calls.find((c) => c.method === "auth.revoke")?.auth).toBe("Bearer " + kToken);
+
+    const first = createHarness({ slack: { teamId: "T0CCC333", teamName: "Acme", url: "https://acme.slack.com/" } });
+    await callback(first, { code: "c", state: (await startFlow(first)).state });
+    expect(first.envWrites.map((w) => w.key)).toEqual(["SLACK_USER_TOKEN_ACME"]);
+    const fakeOther = createFakeSlack({ teamId: "T0DDD444", teamName: "Acme Two", url: "https://acme.slack.com/" });
+    first.fake.fetchImpl.mockImplementation(fakeOther.fetchImpl);
+    const res = await callback(first, { code: "c", state: (await startFlow(first)).state });
+    expect(res.headers.location).toBe("/slack/connect?error=name_taken");
+    expect(first.envWrites.map((w) => w.key)).toEqual(["SLACK_USER_TOKEN_ACME"]);
+    expect(first.installsStore.read().installs.map((row) => row.teamId)).toEqual(["T0CCC333"]);
+  });
+
+  it("logs revoked=false when Slack refuses the revoke", async () => {
+    const h = createHarness({ slack: { scope: kReadScopes + ",chat:write", revokeOk: false } });
+    const { state } = await startFlow(h);
+    expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=extra_scopes");
+    expect(h.lines.some((l) => l.includes("grant refused") && l.includes("revoked=false"))).toBe(true);
   });
 
   it("revokes the token and records nothing when the stores refuse it", async () => {
