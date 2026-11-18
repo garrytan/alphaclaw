@@ -1244,11 +1244,12 @@ describe("agentrun reporter: cron runs", () => {
     const rootDir = makeRoot();
     let generation = 1000;
     const first = registerPlugin(rootDir, { generationId: () => String(generation) });
-    cronEvent(first.handlers, "started", "notify", { ...recurring, trigger: { script: "exit 1" } }, { runAtMs: T0 });
+    cronEvent(first.handlers, "started", "notify", recurring, { runAtMs: T0 });
     cronEvent(first.handlers, "started", "watch", { ...recurring, schedule: { kind: "stream" } }, { runAtMs: T0 });
     generation = 2000;
     registerPlugin(rootDir, { generationId: () => String(generation) }).handlers.gateway_start({ port: 1 }, {});
-    const { source, outbox } = makePipeline(rootDir, { fake: createFakeAgentrun() });
+    const cronJobs = [{ id: "notify", name: "Notify", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, trigger: { script: "exit 1" } }];
+    const { source, outbox } = makePipeline(rootDir, { fake: createFakeAgentrun(), cronJobs });
     expect(source.ingest().added).toBe(0);
     expect(outbox.db.prepare("SELECT COUNT(*) AS n FROM turns").get().n).toBe(0);
     expect(readSpool(rootDir)).toBe("");
@@ -1258,11 +1259,12 @@ describe("agentrun reporter: cron runs", () => {
     const rootDir = makeRoot();
     let generation = 1000;
     const first = registerPlugin(rootDir, { generationId: () => String(generation) });
-    cronEvent(first.handlers, "started", "backup", { ...recurring, name: "Backup", payload: { kind: "command" }, trigger: { script: "exit 0" } }, { runAtMs: T0 });
+    cronEvent(first.handlers, "started", "backup", { ...recurring, name: "Backup", payload: { kind: "command" } }, { runAtMs: T0 });
     generation = 2000;
     registerPlugin(rootDir, { generationId: () => String(generation) }).handlers.gateway_start({ port: 1 }, {});
     const fake = createFakeAgentrun();
-    const { source, sender } = makePipeline(rootDir, { fake });
+    const cronJobs = [{ id: "backup", name: "Backup", schedule: { kind: "cron" }, payload: { kind: "command" }, trigger: { script: "exit 0" } }];
+    const { source, sender } = makePipeline(rootDir, { fake, cronJobs });
     expect(source.ingest().added).toBe(1);
     await sender.sendDue();
     const [run] = fake.runs.values();
@@ -1667,18 +1669,16 @@ describe("agentrun reporter: live runs", () => {
     const s = setup({
       timeoutSeconds: 0,
       cronJobs: [
-        { id: "notify", name: "Notify", payload: { kind: "agentTurn", timeoutSeconds: 600 } },
+        { id: "notify", name: "Notify", schedule: { kind: "cron" }, payload: { kind: "agentTurn", timeoutSeconds: 600 }, trigger: { script: "exit 1" } },
         { id: "watch", name: "Watch", payload: { kind: "agentTurn", timeoutSeconds: 600 } },
       ],
     });
-    const notify = { name: "Notify", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main", trigger: { script: "exit 1" } };
+    const notify = { name: "Notify", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
     const watch = { name: "Watch", schedule: { kind: "stream" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
     const start = (jobId, job, runAtMs) => s.handlers.cron_changed({ action: "started", jobId, job, agentId: "main", sessionTarget: "isolated", runAtMs }, {});
     start("notify", notify, T0);
     start("watch", watch, T0);
     await s.tick();
-    expect(readSpool(s.rootDir)).toContain('"hasTrigger":true');
-    expect(readSpool(s.rootDir)).not.toContain("exit 1");
     s.at(60_000);
     start("notify", notify, T0 + 60_000);
     start("watch", watch, T0 + 60_000);

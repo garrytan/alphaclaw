@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.314] - 2026-11-18
+
+AgentRun no longer gets a cancelled run every few minutes for a cron job whose trigger checked and did not fire, on any schedule.
+
+### Fixed
+- 0.10.312 looked for a job's trigger in OpenClaw's cron hook, but OpenClaw leaves the trigger out of the job it hands plugins, so only jobs on a stream schedule were covered and a job like toolchain-notify (every 10 minutes, with a trigger) still got a junk cancelled run each check. The reporter now reads the trigger from the cron job list.
+
 ## [0.10.313] - 2026-11-18
 
 An admin can now connect a Slack workspace to the box with one click, giving the box's own scripts a read-only Slack token without pasting anything.
