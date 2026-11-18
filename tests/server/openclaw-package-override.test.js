@@ -614,13 +614,17 @@ describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
     const missing = apply(install3, env3, { runPluginInstall: fakeInstaller() });
     expect(missing).toMatchObject({ status: "refused", reason: "missing", pluginFile: "codex.tgz" });
   });
-  it("leaves no rollback record when OpenClaw cannot list its plugins", () => {
+  it("with no rollback record (OpenClaw could not list its plugins, or v0.10.307 pinned it), removal puts back npm's release of the pinned version", () => {
     const install = makeInstall();
     const core = makePackage();
     expect(apply(install, codexSetting(core, makeCodex()), { runPluginInstall: fakeInstaller(), readInstalledCodex: () => ({ ok: false, detail: "exit 1" }) })).toMatchObject({ status: "applied" });
+    expect(fs.existsSync(path.join(install.managedDir, "codex-before.json"))).toBe(false);
     const restore = vi.fn(() => ({ ok: true }));
-    expect(apply(install, {}, { runPluginRestore: restore })).toMatchObject({ status: "stock", restored: true });
-    expect(restore).not.toHaveBeenCalled();
+    expect(apply(install, {}, { runPluginRestore: restore })).toMatchObject({ status: "stock", restored: true, codexRollback: { ok: true, spec: "@openclaw/codex@" + kVersion } });
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ spec: "@openclaw/codex@" + kVersion }));
+    const again = vi.fn(() => ({ ok: true }));
+    apply(install, {}, { runPluginRestore: again });
+    expect(again).not.toHaveBeenCalled();
   });
 
   it("leaves the Codex plugin alone while a gateway runs, and that gateway's launch check still passes", () => {
@@ -645,7 +649,7 @@ describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
     const fakeCli = [
       'import fs from "node:fs";',
       'fs.appendFileSync(process.env.OPENCLAW_STATE_DIR + "/calls.log", JSON.stringify(process.argv.slice(2)) + "\\n");',
-      'if (process.argv[3] === "list") console.log("[plugins] loading\\n" + JSON.stringify({ plugins: [{ id: "codex", version: "2026.11.3" }] }));',
+      'if (process.argv[3] === "list") console.log("[plugins] loading {cache: warm}\\n" + JSON.stringify({ plugins: [{ id: "codex", version: "2026.11.3" }] }));',
     ].join("\n");
     write(path.join(install.stock, "openclaw.mjs"), fakeCli);
     const env = codexSetting(makePackage({ files: { "openclaw.mjs": fakeCli } }), makeCodex());
@@ -656,6 +660,52 @@ describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
       ["plugins", "list", "--json"],
       ["plugins", "install", "@openclaw/codex@2026.11.3", "--force", "--accept-capabilities"],
     ]);
+  });
+
+  it("uses OpenClaw's own uninstall when nothing was installed before, and writes no record when the plugin list is unreadable", () => {
+    const cli = (listOutput) => [
+      'import fs from "node:fs";',
+      'fs.appendFileSync(process.env.OPENCLAW_STATE_DIR + "/calls.log", JSON.stringify(process.argv.slice(2)) + "\\n");',
+      `if (process.argv[3] === "list") console.log(${JSON.stringify(listOutput)});`,
+    ].join("\n");
+    const install = makeInstall();
+    const empty = cli(JSON.stringify({ plugins: [] }));
+    write(path.join(install.stock, "openclaw.mjs"), empty);
+    const env = codexSetting(makePackage({ files: { "openclaw.mjs": empty } }), makeCodex());
+    expect(apply(install, env, { runPluginInstall: fakeInstaller(), readInstalledCodex: undefined })).toMatchObject({ status: "applied" });
+    expect(apply(install, {}, { runPluginRestore: undefined })).toMatchObject({ status: "stock", codexRollback: { ok: true, spec: null } });
+    const calls = fs.readFileSync(path.join(install.openclawDir, "calls.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(calls).toEqual([
+      ["plugins", "list", "--json"],
+      ["plugins", "uninstall", "codex", "--force"],
+    ]);
+
+    const install2 = makeInstall();
+    const noise = cli("loading plugins, no json today");
+    const env2 = codexSetting(makePackage({ files: { "openclaw.mjs": noise } }), makeCodex());
+    expect(apply(install2, env2, { runPluginInstall: fakeInstaller(), readInstalledCodex: undefined })).toMatchObject({ status: "applied" });
+    expect(fs.existsSync(path.join(install2.managedDir, "codex-before.json"))).toBe(false);
+  });
+
+  it("never turns a malformed recorded version into an npm spec", () => {
+    const install = makeInstall();
+    const env = codexSetting(makePackage(), makeCodex());
+    expect(apply(install, env, { runPluginInstall: fakeInstaller(), readInstalledCodex: () => ({ ok: true, version: kVersion }) })).toMatchObject({ status: "applied" });
+    writeJson(path.join(install.managedDir, "codex-before.json"), { version: "1.0.0 --registry=http://evil" });
+    const restore = vi.fn(() => ({ ok: true }));
+    expect(apply(install, {}, { runPluginRestore: restore })).toMatchObject({ status: "stock", codexRollback: { ok: false, spec: null, detail: "codex-before.json names no valid version" } });
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("a start with the setting removed defers the Codex rollback while a gateway runs on the stock build", () => {
+    const install = makeInstall();
+    const env = codexSetting(makePackage(), makeCodex());
+    expect(apply(install, env, { runPluginInstall: fakeInstaller(), readInstalledCodex: () => ({ ok: true, version: kVersion }) })).toMatchObject({ status: "applied" });
+    expect(apply(install, {}, { runPluginRestore: () => ({ ok: false, detail: "offline" }) })).toMatchObject({ status: "stock", restored: true, codexRollback: { ok: false } });
+    const restore = vi.fn(() => ({ ok: true }));
+    expect(apply(install, {}, { runPluginRestore: restore, gatewayRunning: () => true, nowFn: () => Date.now() + 31 * 60 * 1000 })).toMatchObject({ status: "refused", reason: "deferred" });
+    expect(restore).not.toHaveBeenCalled();
+    expectStockIntact(install);
   });
 
   it("a refused Codex entry leaves the stock OpenClaw in place, not the freshly applied package", () => {
@@ -678,8 +728,13 @@ describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
     expectStockIntact(install);
     expect(launchCheck(install, {})).toBe(null);
 
+    const soon = vi.fn(() => ({ ok: true }));
+    expect(apply(install, {}, { runPluginRestore: soon })).toMatchObject({ status: "stock", codexRollback: { ok: false, spec: "@openclaw/codex@" + kVersion } });
+    expect(soon).not.toHaveBeenCalled();
+
     const restore = vi.fn(() => ({ ok: true }));
-    expect(apply(install, {}, { runPluginRestore: restore })).toMatchObject({ status: "stock", codexRollback: { ok: true, spec: "@openclaw/codex@" + kVersion } });
+    const later = () => Date.now() + 31 * 60 * 1000;
+    expect(apply(install, {}, { runPluginRestore: restore, nowFn: later })).toMatchObject({ status: "stock", codexRollback: { ok: true, spec: "@openclaw/codex@" + kVersion } });
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ spec: "@openclaw/codex@" + kVersion, openclawDir: install.openclawDir }));
     const again = vi.fn(() => ({ ok: true }));
     apply(install, {}, { runPluginRestore: again });
@@ -737,6 +792,67 @@ describe("a second start, a failed restore and an unreadable package.json", () =
     expectStockIntact(install);
     fs.renameSync(pkgFile.file + ".gone", pkgFile.file);
     expect(apply(install, env)).toMatchObject({ status: "applied" });
+  });
+});
+
+describe("owner notices and a gateway OpenClaw renamed with process.title", () => {
+  it("one notice for the removed setting (naming a failed Codex rollback), one for a failed Codex-only rollback, none otherwise", () => {
+    const removed = override.describeOpenclawPackageNotices({ status: "stock", previous: { file: "p.tgz", sha256: "0f1e2d3c4b5a69788796a5b4" }, codexRollback: { ok: false, spec: "@openclaw/codex@2026.11.4", detail: "offline" } });
+    expect(removed).toHaveLength(1);
+    expect(removed[0].id).toBe("openclaw-package-removed-0f1e2d3c4b5a");
+    expect(removed[0].message).toContain("ALPHACLAW_OPENCLAW_PACKAGES was removed, so the pinned package p.tgz (0f1e2d3c4b5a…)");
+    expect(removed[0].message).toContain("The pinned @openclaw/codex is still installed: putting back @openclaw/codex@2026.11.4 failed (offline)");
+    const codexOnly = override.describeOpenclawPackageNotices({ status: "applied", sha256: "a".repeat(64), codexRollback: { ok: false, spec: null, detail: "exit 1" } });
+    expect(codexOnly).toEqual([{ id: "openclaw-package-codex-rollback-none", message: expect.stringContaining("The Codex entry was removed from ALPHACLAW_OPENCLAW_PACKAGES, but the pinned @openclaw/codex is still installed: putting back the state without it failed (exit 1)") }]);
+    expect(override.describeOpenclawPackageNotices({ status: "stock", previous: null, codexRollback: { ok: true, spec: null } })).toEqual([]);
+    expect(override.describeOpenclawPackageNotices(null)).toEqual([]);
+  });
+
+  it("counts a gateway whose argv OpenClaw replaced with its title, and ignores one running from another install", async () => {
+    const { spawn } = require("child_process");
+    const install = makeInstall();
+    const start = (args) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "ignore"] });
+        child.stdout.once("data", () => resolve(child));
+      });
+    const other = path.join(tmp("other-install-"), "node_modules", "openclaw");
+    const script = 'if (process.argv[1] === "title") process.title = "openclaw-gateway"; console.log("ready"); setInterval(() => {}, 1000);';
+    const ours = [];
+    const onlyOurs = Object.assign(Object.create(fs), {
+      readdirSync: (dir, ...rest) => (dir === "/proc" ? ours.map(String) : fs.readdirSync(dir, ...rest)),
+    });
+    const running = (packageDir) => override.isGatewayRunningFrom({ packageDir, fsModule: onlyOurs });
+    const foreign = await start(["-e", script, "plain", path.join(other, "openclaw.mjs"), "gateway", "run"]);
+    const lookalike = await start(["-e", script, "plain", "openclaw-gateway"]);
+    ours.push(foreign.pid, lookalike.pid);
+    try {
+      expect(running(install.stock)).toBe(false);
+      expect(running(other)).toBe(true);
+      const titled = await start(["-e", script, "title", path.join(install.stock, "openclaw.mjs"), "gateway", "run"]);
+      ours.push(titled.pid);
+      try {
+        expect(fs.readFileSync(`/proc/${titled.pid}/cmdline`, "utf8")).not.toContain(install.stock);
+        expect(running(install.stock)).toBe(true);
+      } finally {
+        titled.kill("SIGKILL");
+      }
+    } finally {
+      foreign.kill("SIGKILL");
+      lookalike.kill("SIGKILL");
+    }
+  });
+
+  it("a refusal whose stock restore fails still records the refusal", () => {
+    const install = makeInstall();
+    const dir = tmp("pkg-file-");
+    const pkgFile = makePackage({ dir });
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkgFile) };
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+    fs.rmSync(path.join(install.installDir, "node_modules", ".openclaw-stock-" + kVersion), { recursive: true });
+    fs.rmSync(pkgFile.file);
+    expect(apply(install, env)).toMatchObject({ status: "refused", reason: "missing" });
+    expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason: "missing" }));
   });
 });
 

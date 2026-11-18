@@ -778,19 +778,23 @@ the image has not installed yet it says which checks it could not run
 - `plugin_install_failed`, `plugin_mismatch`: the `@openclaw/codex` entry
   could not be installed (its output tail is in the detail; the install needs
   npm to reach the registry), or its file is not `@openclaw/codex` at that
-  version.
+  version. Each start retries, which also re-applies the OpenClaw package and
+  then swaps it back out, a few seconds of work, until the plugin installs.
 - `tree_changed`: something changed a file the package shipped after it
   was applied. Restart AlphaClaw (a redeploy or a container restart) to
   apply it again.
 - `deferred`: a gateway was already running from the OpenClaw tree when
   AlphaClaw started (an old gateway still draining, or a second
   `alphaclaw start` run by hand against a live install), so nothing was
-  changed (the Codex plugin is neither installed nor put back while a
+  changed. OpenClaw renames its gateway process to `openclaw-gateway`, so any
+  process with exactly that name counts, whichever install it came from (the Codex plugin is neither installed nor put back while a
   gateway runs). A gateway already running keeps its own checks. Stop the other
   AlphaClaw, or restart the container.
 - `restore_failed`: the setting was removed but the stock build could not be
   put back. The gateway stays down until a start restores it; the detail
-  names the cause.
+  names the cause. If the set-aside stock copy is gone, redeploy (a fresh
+  image), or on a host install reinstall that OpenClaw version with npm and
+  restart AlphaClaw.
 
 To go back to the stock build on purpose, remove
 `ALPHACLAW_OPENCLAW_PACKAGES` and redeploy. AlphaClaw puts the image's
@@ -798,8 +802,14 @@ build back at the next start and sends one notice saying so. If AlphaClaw
 installed a pinned `@openclaw/codex`, it also puts back the version OpenClaw
 had before (`openclaw plugins install @openclaw/codex@<version>` from npm), or
 uninstalls the plugin if there was none; dropping only the Codex entry does
-the same. If that fails, the notice says so and the next start tries again;
-the gateway still starts. `alphaclaw
+the same. When it never recorded what was there before (a pin made by
+v0.10.307, or OpenClaw could not list its plugins), it reinstalls npm's
+release of the pinned version, as long as the last start applied that pin;
+otherwise the pinned plugin stays until you run `openclaw plugins install
+@openclaw/codex@<version> --force`. If that fails, the notice says so and a start
+at least 30 minutes later tries again (each try waits at most 2 minutes for
+npm); the gateway still starts. The reinstall trusts npm's own integrity
+check for the release; there is no sha pin for it. `alphaclaw
 diagnose` shows the setting's entries, the last verdict and the build that
 is running (`<version>+<sha prefix>` for a pinned package).
 
