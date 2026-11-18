@@ -9,6 +9,7 @@ const { createSecretDropApplier } = require("../../lib/server/secret-drop/apply"
 const { createSlackOauth, resolveTokenEnvKey, kReadUserScopes, kStateTtlMs, kInstallsFileName } = require("../../lib/server/slack-oauth");
 const { registerSlackConnectRoutes } = require("../../lib/server/routes/slack-connect");
 const { createTerminalErrorHandler } = require("../../lib/server/terminal-error-handler");
+const { isAgentProtectedEnvKey } = require("../../lib/server/utils/env-keys");
 const { blankDeniedGatewayEnvKeys } = require("../../lib/server/gateway-env-policy");
 
 const kOrigin = "https://box.example.com";
@@ -70,6 +71,7 @@ const createHarness = ({ slack = {}, configured = true, applierOverride = null, 
   let now = 1_800_000_000_000;
   const slackOauth = createSlackOauth({
     readEnv: (key) => (configured ? { SLACK_OAUTH_CLIENT_ID: "123.456", SLACK_OAUTH_CLIENT_SECRET: kClientSecret, ...env }[key] : ""),
+    readEnvValues: () => Object.values(env),
     applier: usedApplier,
     installsStore,
     fetchImpl: fake.fetchImpl,
@@ -209,7 +211,7 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
     const { state } = await startFlow(h);
     expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=extra_scopes");
     expect(h.envWrites).toEqual([]);
-    expect(h.fake.calls.filter((c) => c.method === "auth.revoke").map((c) => c.auth)).toEqual(["Bearer " + kToken, "Bearer " + kBotToken]);
+    expect(h.fake.calls.filter((c) => c.method === "auth.revoke").map((c) => c.auth)).toEqual(["Bearer " + kToken]);
     expect(h.lines.join("\n")).not.toContain("cnryB0tT0k3n");
   });
 
@@ -326,6 +328,43 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
     expect(everythingSeen(h, [res])).not.toContain(kCanary);
   });
 
+  it("never revokes a refused token the box already holds, nor any bot token", async () => {
+    const h = createHarness({ env: { SLACK_BOT_TOKEN: kBotToken, SLACK_USER_TOKEN_YC: kToken }, slack: { botToken: kBotToken, scope: kReadScopes + ",chat:write" } });
+    const { state } = await startFlow(h);
+    expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=extra_scopes");
+    expect(h.fake.calls.some((c) => c.method === "auth.revoke")).toBe(false);
+    expect(h.lines.some((l) => l.includes("revoked=skipped_existing") && l.includes("bot_token=dropped"))).toBe(true);
+  });
+
+  it("keeps a token saved only in OpenClaw's store when a reconnect of that team fails to save", async () => {
+    const stored = createHarness({ applierOverride: { apply: async () => ({ status: "partial", stores: { env: false, store: true }, reach: { env: null } }) } });
+    await callback(stored, { code: "c", state: (await startFlow(stored)).state });
+    expect(stored.installsStore.read().installs.map((row) => row.stores)).toEqual([{ env: false, store: true }]);
+    const again = createHarness({ applierOverride: { apply: async () => ({ status: "failed", code: "store_refused" }) } });
+    again.installsStore.update(() => stored.installsStore.read());
+    const res = await callback(again, { code: "c", state: (await startFlow(again)).state });
+    expect(res.headers.location).toBe("/slack/connect?error=store_failed");
+    expect(again.fake.calls.some((c) => c.method === "auth.revoke")).toBe(false);
+  });
+
+  it("refuses the connect when auth.test fails, unless the team id names the workspace", async () => {
+    const h = createHarness({ slack: { teamId: "T0AAA111", teamName: "YC P2026", url: "" } });
+    const res = await callback(h, { code: "c", state: (await startFlow(h)).state });
+    expect(res.headers.location).toBe("/slack/connect?error=lookup_failed");
+    expect(h.envWrites).toEqual([]);
+    expect(h.fake.calls.find((c) => c.method === "auth.revoke")?.auth).toBe("Bearer " + kToken);
+    const page = await admin(request(h.app).get(res.headers.location));
+    expect(page.text).toContain("didn&#39;t say which workspace");
+
+    const yc = createHarness({ slack: { url: "" } });
+    expect((await callback(yc, { code: "c", state: (await startFlow(yc)).state })).headers.location).toBe("/slack/connect?connected=SLACK_USER_TOKEN_YC");
+  });
+
+  it("keeps the agent from repointing Connect Slack at another Slack app", () => {
+    expect(isAgentProtectedEnvKey("SLACK_OAUTH_CLIENT_ID")).toBe(true);
+    expect(isAgentProtectedEnvKey("SLACK_OAUTH_CLIENT_SECRET")).toBe(true);
+  });
+
   it("says which store holds a partly saved token", async () => {
     const h = createHarness({ applierOverride: { apply: async () => ({ status: "partial", stores: { env: false, store: true }, reach: { env: null } }) } });
     const { state } = await startFlow(h);
@@ -343,7 +382,7 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
   });
 
   it("revokes a token for a workspace it can't name", async () => {
-    const h = createHarness({ slack: { teamId: "bad", url: "" } });
+    const h = createHarness({ slack: { teamId: "bad", url: "https://example.com/" } });
     const { state } = await startFlow(h);
     expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=unnamed_workspace");
     expect(h.fake.calls.find((c) => c.method === "auth.revoke")?.auth).toBe("Bearer " + kToken);
