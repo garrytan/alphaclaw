@@ -9,6 +9,9 @@
     "scripts/build-ui.mjs": [
       "tests/frontend/secret-drop-bundle.test.js"
     ],
+    "lib/server/openclaw-package-reapply-child.js": [
+      "tests/server/openclaw-package-override.test.js"
+    ],
     "tests/live/**": [],
     "tests/container/**": []
   },
