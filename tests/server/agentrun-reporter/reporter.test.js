@@ -1254,6 +1254,21 @@ describe("agentrun reporter: cron runs", () => {
     expect(readSpool(rootDir)).toBe("");
   });
 
+  it("still reports a dead gateway's unfinished trigger run with a command payload, which never folds a turn, as interrupted", async () => {
+    const rootDir = makeRoot();
+    let generation = 1000;
+    const first = registerPlugin(rootDir, { generationId: () => String(generation) });
+    cronEvent(first.handlers, "started", "backup", { ...recurring, name: "Backup", payload: { kind: "command" }, trigger: { script: "exit 0" } }, { runAtMs: T0 });
+    generation = 2000;
+    registerPlugin(rootDir, { generationId: () => String(generation) }).handlers.gateway_start({ port: 1 }, {});
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake });
+    expect(source.ingest().added).toBe(1);
+    await sender.sendDue();
+    const [run] = fake.runs.values();
+    expect(run.completion).toMatchObject({ status: "cancelled", error: "interrupted by gateway restart" });
+  });
+
   it("archives a removed job's agent only after its queued runs are sent, and unarchives it for a late run", async () => {
     const { handlers, fake, source, sender, outbox, logs } = setup();
     cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 10, status: "ok" });
@@ -1690,6 +1705,23 @@ describe("agentrun reporter: live runs", () => {
     await s.tick();
     expect(onlyRun(s.fake)).toBe(run);
     expect(s.lines.join("\n")).not.toContain("late_attempt");
+  });
+
+  it("starts a stream-schedule cron run live once its turn runs", async () => {
+    const s = setup({ timeoutSeconds: 0, cronJobs: [{ id: "watch", name: "Watch", payload: { kind: "agentTurn", timeoutSeconds: 600 } }] });
+    const watch = { name: "Watch", schedule: { kind: "stream" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
+    s.handlers.cron_changed({ action: "started", jobId: "watch", job: watch, agentId: "main", sessionTarget: "isolated", runAtMs: T0 }, {});
+    await s.tick();
+    expect(s.fake.runs.size).toBe(0);
+    s.at(1_000);
+    const sessionKey = "agent:main:cron:watch:run:r1";
+    const ctx = { runId: "r1", sessionKey, trigger: "cron", jobId: "watch", agentId: "main" };
+    s.handlers.model_call_started({ runId: "r1" }, { runId: "r1", sessionKey, agentId: "main" });
+    s.handlers.after_tool_call({ toolName: "search", runId: "r1", durationMs: 5 }, ctx);
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start.input).toBe(`Cron: Watch\nStarted ${iso(T0)}`);
+    expect(run.completion).toBe(null);
   });
 
   it("keeps finished-only reporting with ALPHACLAW_AGENTRUN_LIVE=off, and keeps live on with live_invalid for any other value", async () => {

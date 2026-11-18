@@ -10,7 +10,7 @@ Versions follow this repository's `package.json` release counter.
 AgentRun no longer fills up with cancelled runs for cron jobs whose trigger checked and did not fire.
 
 ### Fixed
-- OpenClaw announces a cron run before it runs the job's trigger script, and says nothing more when the trigger does not fire. The reporter started a live AgentRun run from that announcement, so every trigger check (every minute for some jobs) became a run that was cancelled when the job's next check came. A job with a trigger or a stream schedule now goes live only once its agent turn starts, and a check that did not fire is never sent, also when the gateway restarted before the next check. The gateway plugin now records whether a job has a trigger script, never the script itself.
+- OpenClaw announces a cron run before it runs the job's trigger script, and says nothing more when the trigger does not fire. The reporter started a live AgentRun run from that announcement, so every trigger check (every minute for some jobs) became a run that was cancelled when the job's next check came. A job with a trigger or a stream schedule now goes live only once its agent turn starts, and a check that did not fire is never sent, also when the gateway restarted before the next check (a job whose payload is a command never runs an agent turn, so its unfinished run is still reported as interrupted then). The gateway plugin now records whether a job has a trigger script, never the script itself.
 
 ## [0.10.311] - 2026-11-18
 
