@@ -1240,6 +1240,35 @@ describe("agentrun reporter: cron runs", () => {
     expect(readSpool(rootDir)).toBe("");
   });
 
+  it("drops a dead gateway's trigger check that ran no turn instead of reporting it as interrupted", async () => {
+    const rootDir = makeRoot();
+    let generation = 1000;
+    const first = registerPlugin(rootDir, { generationId: () => String(generation) });
+    cronEvent(first.handlers, "started", "notify", { ...recurring, trigger: { script: "exit 1" } }, { runAtMs: T0 });
+    cronEvent(first.handlers, "started", "watch", { ...recurring, schedule: { kind: "stream" } }, { runAtMs: T0 });
+    generation = 2000;
+    registerPlugin(rootDir, { generationId: () => String(generation) }).handlers.gateway_start({ port: 1 }, {});
+    const { source, outbox } = makePipeline(rootDir, { fake: createFakeAgentrun() });
+    expect(source.ingest().added).toBe(0);
+    expect(outbox.db.prepare("SELECT COUNT(*) AS n FROM turns").get().n).toBe(0);
+    expect(readSpool(rootDir)).toBe("");
+  });
+
+  it("still reports a dead gateway's unfinished trigger run with a command payload, which never folds a turn, as interrupted", async () => {
+    const rootDir = makeRoot();
+    let generation = 1000;
+    const first = registerPlugin(rootDir, { generationId: () => String(generation) });
+    cronEvent(first.handlers, "started", "backup", { ...recurring, name: "Backup", payload: { kind: "command" }, trigger: { script: "exit 0" } }, { runAtMs: T0 });
+    generation = 2000;
+    registerPlugin(rootDir, { generationId: () => String(generation) }).handlers.gateway_start({ port: 1 }, {});
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake });
+    expect(source.ingest().added).toBe(1);
+    await sender.sendDue();
+    const [run] = fake.runs.values();
+    expect(run.completion).toMatchObject({ status: "cancelled", error: "interrupted by gateway restart" });
+  });
+
   it("archives a removed job's agent only after its queued runs are sent, and unarchives it for a late run", async () => {
     const { handlers, fake, source, sender, outbox, logs } = setup();
     cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 10, status: "ok" });
@@ -1632,6 +1661,67 @@ describe("agentrun reporter: live runs", () => {
     expect(texts).toEqual([`Job message: Summarize ${kMarker}`, `answer ${kMarker}`]);
     expect(run.batches[run.batches.length - 1].sequence).toBe(2);
     expect(run.completion).toMatchObject({ status: "completed", answer: `answer ${kMarker}`, usage: { input_tokens: 3, output_tokens: 4 } });
+  });
+
+  it("starts a cron run with a trigger or a stream schedule live only once its turn runs, and never sends a trigger check that did not fire", async () => {
+    const s = setup({
+      timeoutSeconds: 0,
+      cronJobs: [
+        { id: "notify", name: "Notify", payload: { kind: "agentTurn", timeoutSeconds: 600 } },
+        { id: "watch", name: "Watch", payload: { kind: "agentTurn", timeoutSeconds: 600 } },
+      ],
+    });
+    const notify = { name: "Notify", schedule: { kind: "cron" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main", trigger: { script: "exit 1" } };
+    const watch = { name: "Watch", schedule: { kind: "stream" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
+    const start = (jobId, job, runAtMs) => s.handlers.cron_changed({ action: "started", jobId, job, agentId: "main", sessionTarget: "isolated", runAtMs }, {});
+    start("notify", notify, T0);
+    start("watch", watch, T0);
+    await s.tick();
+    expect(readSpool(s.rootDir)).toContain('"hasTrigger":true');
+    expect(readSpool(s.rootDir)).not.toContain("exit 1");
+    s.at(60_000);
+    start("notify", notify, T0 + 60_000);
+    start("watch", watch, T0 + 60_000);
+    await s.tick();
+    expect(s.fake.runs.size).toBe(0);
+    s.at(1_000);
+
+    const sessionKey = "agent:main:cron:notify:run:r1";
+    const ctx = { runId: "r1", sessionKey, trigger: "cron", jobId: "notify", agentId: "main" };
+    s.handlers.model_call_started({ runId: "r1" }, { runId: "r1", sessionKey, agentId: "main" });
+    s.handlers.after_tool_call({ toolName: "search", runId: "r1", durationMs: 5 }, ctx);
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start.input).toBe(`Cron: Notify\nStarted ${iso(T0 + 60_000)}`);
+    expect(run.completion).toBe(null);
+    s.handlers.agent_end({ runId: "r1", success: true, durationMs: 5_000 }, ctx);
+    s.handlers.llm_output({ runId: "r1", provider: "anthropic", model: "claude", usage: { input: 3, output: 4 } }, ctx);
+    s.handlers.cron_changed({ action: "finished", jobId: "notify", job: notify, runAtMs: T0 + 60_000, durationMs: 6_000, status: "ok", sessionKey }, {});
+    s.at(15_000);
+    await s.tick();
+    expect(onlyRun(s.fake)).toBe(run);
+    expect(run.completion).toMatchObject({ status: "completed", usage: { input_tokens: 3, output_tokens: 4 } });
+    s.at(31 * 60_000);
+    await s.tick();
+    expect(onlyRun(s.fake)).toBe(run);
+    expect(s.lines.join("\n")).not.toContain("late_attempt");
+  });
+
+  it("starts a stream-schedule cron run live once its turn runs", async () => {
+    const s = setup({ timeoutSeconds: 0, cronJobs: [{ id: "watch", name: "Watch", payload: { kind: "agentTurn", timeoutSeconds: 600 } }] });
+    const watch = { name: "Watch", schedule: { kind: "stream" }, payload: { kind: "agentTurn" }, sessionTarget: "isolated", wakeMode: "now", agentId: "main" };
+    s.handlers.cron_changed({ action: "started", jobId: "watch", job: watch, agentId: "main", sessionTarget: "isolated", runAtMs: T0 }, {});
+    await s.tick();
+    expect(s.fake.runs.size).toBe(0);
+    s.at(1_000);
+    const sessionKey = "agent:main:cron:watch:run:r1";
+    const ctx = { runId: "r1", sessionKey, trigger: "cron", jobId: "watch", agentId: "main" };
+    s.handlers.model_call_started({ runId: "r1" }, { runId: "r1", sessionKey, agentId: "main" });
+    s.handlers.after_tool_call({ toolName: "search", runId: "r1", durationMs: 5 }, ctx);
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.start.input).toBe(`Cron: Watch\nStarted ${iso(T0)}`);
+    expect(run.completion).toBe(null);
   });
 
   it("keeps finished-only reporting with ALPHACLAW_AGENTRUN_LIVE=off, and keeps live on with live_invalid for any other value", async () => {
