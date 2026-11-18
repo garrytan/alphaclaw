@@ -884,6 +884,158 @@ describe("checkOpenclawPackageBeforeLaunch", () => {
   });
 });
 
+describe("a launch after something edited the applied files (GST-3061)", () => {
+  const kRepo = path.resolve(__dirname, "../..");
+  // gateway.js reads its state dir from ALPHACLAW_ROOT_DIR at load, so each
+  // launch runs in its own node process rooted at the install's root dir.
+  const prepareLaunch = (install, env, args) => {
+    const script = [
+      `require(${JSON.stringify(path.join(kRepo, "lib/server/self-dependency"))}).resolveSelfDependency = () => ({ installDir: ${JSON.stringify(install.installDir)} });`,
+      `const gateway = require(${JSON.stringify(path.join(kRepo, "lib/server/gateway"))});`,
+      "const outcomes = [];",
+      "gateway.setGatewayPrelaunchHookHandler((outcome) => outcomes.push(outcome));",
+      "const done = (body) => { process.stdout.write('\\nRESULT ' + JSON.stringify({ ...body, outcomes }) + '\\n'); process.exit(0); };",
+      `gateway.prepareGatewayLaunch(${JSON.stringify(args)}).then((result) => done({ result }), (error) => done({ error: { name: error.name, reason: error.reason, message: error.message } }));`,
+    ].join("\n");
+    const run = require("child_process").spawnSync(process.execPath, ["-e", script], {
+      env: { ...process.env, ...env, ALPHACLAW_ROOT_DIR: install.rootDir, HOME: install.rootDir, ALPHACLAW_GATEWAY_PRELAUNCH_HOOK: "" },
+      encoding: "utf8",
+      timeout: 120000,
+    });
+    const line = String(run.stdout || "").split("\n").find((text) => text.startsWith("RESULT "));
+    if (!line) throw new Error(`launch process printed no result (exit ${run.status}): ${String(run.stderr || "").slice(-2000)}`);
+    return JSON.parse(line.slice("RESULT ".length));
+  };
+  const appliedInstall = () => {
+    const install = makeInstall();
+    const pkg = makePackage();
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: settingOf(pkg) };
+    expect(apply(install, env)).toMatchObject({ status: "applied" });
+    return { install, pkg, env };
+  };
+  const editShipped = (install, rel = "dist/index.js") => {
+    const file = path.join(install.stock, rel);
+    const stat = fs.statSync(file);
+    fs.appendFileSync(file, "import './abort-signal-any-shim.js';\n");
+    fs.utimesSync(file, stat.atime, new Date(stat.mtimeMs + 5000));
+  };
+  const startGatewayFrom = (packageDir) =>
+    new Promise((resolve) => {
+      const child = require("child_process").spawn(process.execPath, ["-e", 'console.log("ready"); setInterval(() => {}, 1000);', path.join(packageDir, "openclaw.mjs"), "gateway", "run"], { stdio: ["ignore", "pipe", "ignore"] });
+      child.stdout.once("data", () => resolve(child));
+    });
+
+  it("applies the package again from the verified file and the launch proceeds, naming the edited file", () => {
+    const { install, pkg, env } = appliedInstall();
+    editShipped(install);
+    expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason: "tree_changed" }));
+    const { result, error, outcomes } = prepareLaunch(install, env, { site: "managed launch" });
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ hookRan: false, reapplyOpenclawPackageAfterStop: false });
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        step: "openclaw_package",
+        status: "ran",
+        site: "managed launch",
+        packageFile: path.basename(pkg.file),
+        packageSha256: pkg.sha256,
+        reappliedFiles: ["dist/index.js (modified)"],
+        reappliedFileCount: 1,
+      }),
+    ]);
+    expect(fs.readFileSync(path.join(install.stock, "dist", "index.js"), "utf8")).toBe("export const build = 'patched';\n");
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied", sha256: pkg.sha256, editedFiles: ["dist/index.js (modified)"], editedCount: 1 });
+    expect(fs.existsSync(path.join(install.stock, "node_modules", "nested-dep", "package.json"))).toBe(true);
+    expect(fs.readdirSync(path.join(install.installDir, "node_modules")).filter((name) => name.startsWith(".openclaw-next-"))).toEqual([]);
+  });
+
+  it("refuses the launch when applying again fails, and leaves the stock build in place", () => {
+    for (const breakFile of [(pkg) => fs.rmSync(pkg.file), (pkg) => fs.writeFileSync(pkg.file, "not the package")]) {
+      const { install, pkg, env } = appliedInstall();
+      editShipped(install);
+      breakFile(pkg);
+      const { result, error, outcomes } = prepareLaunch(install, env, { site: "managed launch" });
+      expect(result).toBeUndefined();
+      const reason = fs.existsSync(pkg.file) ? "sha_mismatch" : "missing";
+      expect(error).toMatchObject({ name: "GatewayOpenclawPackageError", reason });
+      expect(outcomes).toEqual([expect.objectContaining({ step: "openclaw_package", status: "refused", code: `openclaw_package_${reason}` })]);
+      expectStockIntact(install);
+      expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason }));
+    }
+  });
+
+  it("a restart verifies the file before its stop and applies again after it; a gateway that keeps running from the tree still refuses", async () => {
+    const { install, pkg, env } = appliedInstall();
+    editShipped(install);
+    let serving = await startGatewayFrom(install.stock);
+    try {
+      const beforeStop = prepareLaunch(install, env, { site: "restart", beforeStop: true });
+      expect(beforeStop).toMatchObject({ result: { reapplyOpenclawPackageAfterStop: true }, outcomes: [] });
+      expect(fs.readFileSync(path.join(install.stock, "dist", "index.js"), "utf8")).toContain("abort-signal-any-shim");
+      const stillRunning = prepareLaunch(install, env, { site: "restart" });
+      expect(stillRunning.error).toMatchObject({ name: "GatewayOpenclawPackageError", reason: "tree_changed" });
+    } finally {
+      serving.kill("SIGKILL");
+    }
+    await new Promise((resolve) => serving.once("exit", resolve));
+    const afterStop = prepareLaunch(install, env, { site: "restart" });
+    expect(afterStop.error).toBeUndefined();
+    expect(afterStop.outcomes).toEqual([expect.objectContaining({ status: "ran", reappliedFiles: ["dist/index.js (modified)"] })]);
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+
+    editShipped(install);
+    fs.rmSync(pkg.file);
+    serving = await startGatewayFrom(install.stock);
+    try {
+      const refused = prepareLaunch(install, env, { site: "restart", beforeStop: true });
+      expect(refused.error).toMatchObject({ name: "GatewayOpenclawPackageError", reason: "missing" });
+      expect(fs.existsSync(path.join(install.stock, override.kPackageMarkerName))).toBe(true);
+    } finally {
+      serving.kill("SIGKILL");
+    }
+  });
+
+  it("the owner hears once a day which files were edited, from a launch or a start", () => {
+    const watchdog = { recordOperationEvent: vi.fn(), onPrelaunchHook: vi.fn() };
+    const notify = vi.fn(async () => ({ ok: true }));
+    let now = Date.parse("2026-11-17T20:00:00Z");
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify, nowFn: () => now });
+    const sha256 = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    const outcome = {
+      step: "openclaw_package",
+      status: "ran",
+      code: null,
+      site: "managed launch",
+      packageFile: "openclaw-2026.11.4-patched.tgz",
+      packageSha256: sha256,
+      reappliedFiles: ["dist/entry.js (modified)"],
+      reappliedFileCount: 1,
+    };
+    handler({ ...outcome, reappliedFiles: undefined, reappliedFileCount: undefined });
+    expect(notify).not.toHaveBeenCalled();
+    handler(outcome);
+    handler(outcome);
+    now = Date.parse("2026-11-18T00:30:00Z");
+    handler(outcome);
+    expect(notify.mock.calls.map(([, opts]) => opts)).toEqual([
+      { eventType: "openclaw_package", id: "openclaw-package-edited-0f1e2d3c4b5a-2026-11-17" },
+      { eventType: "openclaw_package", id: "openclaw-package-edited-0f1e2d3c4b5a-2026-11-17" },
+      { eventType: "openclaw_package", id: "openclaw-package-edited-0f1e2d3c4b5a-2026-11-18" },
+    ]);
+    const [message] = notify.mock.calls[0];
+    expect(message).toContain("Something edited the pinned OpenClaw files");
+    expect(message).toContain("Changed: dist/entry.js (modified)");
+    expect(message).toContain("Package: openclaw-2026.11.4-patched.tgz (0f1e2d3c4b5a…)");
+    expect(watchdog.recordOperationEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "openclaw_package", status: "ran", details: expect.objectContaining({ reappliedFiles: ["dist/entry.js (modified)"] }) }));
+
+    const many = override.describeEditedPackageNotice({ files: Array.from({ length: 20 }, (_, i) => `dist/f${i}.js (modified)`), fileCount: 31, sha256, atMs: now });
+    expect(many.message).toContain("dist/f4.js (modified), and 26 more");
+    const fromStart = override.describeOpenclawPackageNotices({ status: "applied", at: "2026-11-17T21:00:00.000Z", file: "openclaw-2026.11.4-patched.tgz", sha256, editedFiles: ["dist/entry.js (modified)"], editedCount: 1 });
+    expect(fromStart).toEqual([{ message: notify.mock.calls[0][0], id: "openclaw-package-edited-0f1e2d3c4b5a-2026-11-17" }]);
+    expect(override.describeOpenclawPackageNotices({ status: "applied", at: "2026-11-17T21:00:00.000Z", sha256 })).toEqual([]);
+  });
+});
+
 describe("watchForPackageRestore", () => {
   it("after a file refusal, runs onRestorable once when the file at the path verifies again", () => {
     const install = makeInstall();
