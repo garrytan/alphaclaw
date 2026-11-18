@@ -95,6 +95,13 @@ describe("server/queued-message-notice", () => {
     expect(sendTelegram).toHaveBeenCalledTimes(1);
   });
 
+  it("does not read sessions for a queued message when no owner mark is waiting", async () => {
+    notice.observeGatewayOutput(queuedLine() + queuedLine({ runId: "stranger-2" }));
+    await notice.settled();
+    expect(listSessions).not.toHaveBeenCalled();
+    expect(sendTelegram).not.toHaveBeenCalled();
+  });
+
   it("ignores an owner mark for another chat and one older than two minutes", async () => {
     notice.observeGatewayOutput(ownerLine("agent:main:telegram:group:-100999:topic:5") + queuedLine());
     await notice.settled();

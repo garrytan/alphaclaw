@@ -157,5 +157,8 @@ describe("server/telegram-api", () => {
       parse_mode: "Markdown",
       disable_web_page_preview: true,
     });
+
+    await api.sendMessage("-1001", "in topic", { messageThreadId: 12 });
+    expect(lastRequest().body).toEqual({ chat_id: "-1001", text: "in topic", message_thread_id: 12 });
   });
 });
