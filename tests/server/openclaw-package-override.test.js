@@ -1033,6 +1033,49 @@ describe("a launch after something edited the applied files (GST-3061)", () => {
     const fromStart = override.describeOpenclawPackageNotices({ status: "applied", at: "2026-11-17T21:00:00.000Z", file: "openclaw-2026.11.4-patched.tgz", sha256, editedFiles: ["dist/entry.js (modified)"], editedCount: 1 });
     expect(fromStart).toEqual([{ message: notify.mock.calls[0][0], id: "openclaw-package-edited-0f1e2d3c4b5a-2026-11-17" }]);
     expect(override.describeOpenclawPackageNotices({ status: "applied", at: "2026-11-17T21:00:00.000Z", sha256 })).toEqual([]);
+    const withRollback = override.describeOpenclawPackageNotices({
+      status: "applied",
+      at: "2026-11-17T21:00:00.000Z",
+      sha256,
+      editedFiles: ["dist/entry.js (modified)"],
+      codexRollback: { ok: false, spec: "@openclaw/codex@2026.11.4", detail: "npm unreachable" },
+    });
+    expect(withRollback.map((notice) => notice.id)).toEqual(["openclaw-package-edited-0f1e2d3c4b5a-2026-11-17", "openclaw-package-codex-rollback-@openclaw/codex@2026.11.4"]);
+  });
+
+  it("a second launch while a re-apply runs waits for it instead of starting another", async () => {
+    const install = makeInstall();
+    writeJson(path.join(install.managedDir, "openclaw-package.json"), { status: "refused", reason: "missing", detail: "p.tgz" });
+    let release;
+    const runReapply = vi.fn(() => new Promise((resolve) => {
+      release = resolve;
+    }));
+    const gatewayRunning = vi.fn(() => false);
+    const refusal = Object.assign(new override.OpenclawPackageRefusal("tree_changed", "1 file(s)"), { files: ["dist/index.js (modified)"], fileCount: 1 });
+    const args = { installDir: install.installDir, managedDir: install.managedDir, openclawDir: install.openclawDir, refusal, env: {}, runReapply, gatewayRunning, logger: { warn: () => {} } };
+    const first = override.reapplyOpenclawPackageForLaunch(args);
+    const second = override.reapplyOpenclawPackageForLaunch(args);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(runReapply).toHaveBeenCalledTimes(1);
+    expect(gatewayRunning).toHaveBeenCalledTimes(1);
+    release({ ok: true });
+    for (const settled of await Promise.allSettled([first, second])) {
+      expect(settled.reason).toMatchObject({ reason: "missing", detail: "p.tgz" });
+    }
+    runReapply.mockResolvedValueOnce({ ok: false, detail: "timed out after 600 s" });
+    await expect(override.reapplyOpenclawPackageForLaunch(args)).rejects.toMatchObject({ reason: "reapply_failed", detail: "timed out after 600 s" });
+    expect(runReapply).toHaveBeenCalledTimes(2);
+  });
+
+  it("a refused package check asks the server to re-arm the file watch; a passing one does not", () => {
+    const watchdog = { recordOperationEvent: vi.fn(), onPrelaunchHook: vi.fn() };
+    const onOpenclawPackageRefused = vi.fn();
+    const handler = createGatewayPrelaunchHookHandler({ watchdog, notify: vi.fn(async () => ({ ok: true })), onOpenclawPackageRefused });
+    handler({ step: "openclaw_package", status: "ran", site: "restart" });
+    handler({ status: "refused", code: "not_root_owned", site: "restart" });
+    expect(onOpenclawPackageRefused).not.toHaveBeenCalled();
+    handler({ step: "openclaw_package", status: "refused", code: "openclaw_package_missing", reason: "missing", site: "restart" });
+    expect(onOpenclawPackageRefused).toHaveBeenCalledWith(expect.objectContaining({ reason: "missing" }));
   });
 });
 

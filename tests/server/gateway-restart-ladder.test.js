@@ -596,10 +596,15 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
         events.push(["reapply", world.alive(launcherPid), runs()]);
         return { verdict: { status: "applied", file: "p.tgz", sha256: kSha }, files: refusal.files, fileCount: refusal.fileCount };
       });
-      const { value, error } = await runRestart({}, 5000);
+      const onStep = vi.fn();
+      const { value, error } = await runRestart({ onStep }, 5000);
       expect(error).toBeNull();
       expect(value).toMatchObject({ ok: true });
       expect(events).toEqual([["verify", true], ["reapply", false, 1]]);
+      const steps = onStep.mock.calls.map(([step]) => step);
+      const afterPackage = steps.findIndex((step) => step.step === "preparing_plugins" && step.detail?.phase === "after_package");
+      expect(afterPackage).toBeGreaterThan(steps.findIndex((step) => step.step === "stopping" && step.status === "done"));
+      expect(afterPackage).toBeLessThan(steps.findIndex((step) => step.step === "launching"));
       expect(runs()).toBe(2);
       expect(outcomes).toEqual([
         expect.objectContaining({ step: "openclaw_package", status: "ran", site: "restart", packageFile: "p.tgz", reappliedFiles: ["dist/entry.js (modified)"], reappliedFileCount: 1 }),
