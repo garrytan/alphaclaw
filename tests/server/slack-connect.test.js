@@ -45,7 +45,7 @@ const createFakeSlack = ({ scope = kReadScopes, botToken = "", teamId = "T02A11S
   return { fetchImpl, calls };
 };
 
-const createHarness = ({ slack = {}, configured = true, applierOverride = null } = {}) => {
+const createHarness = ({ slack = {}, configured = true, applierOverride = null, env = {} } = {}) => {
   const fake = createFakeSlack(slack);
   const lines = [];
   const logger = { log: (l) => lines.push(String(l)), warn: (l) => lines.push(String(l)), error: (l) => lines.push(String(l)) };
@@ -69,7 +69,7 @@ const createHarness = ({ slack = {}, configured = true, applierOverride = null }
   const usedApplier = applierOverride || applier;
   let now = 1_800_000_000_000;
   const slackOauth = createSlackOauth({
-    readEnv: (key) => (configured ? { SLACK_OAUTH_CLIENT_ID: "123.456", SLACK_OAUTH_CLIENT_SECRET: kClientSecret }[key] : ""),
+    readEnv: (key) => (configured ? { SLACK_OAUTH_CLIENT_ID: "123.456", SLACK_OAUTH_CLIENT_SECRET: kClientSecret, ...env }[key] : ""),
     applier: usedApplier,
     installsStore,
     fetchImpl: fake.fetchImpl,
@@ -286,6 +286,19 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
     const page = await admin(request(h.app).get(res.headers.location));
     expect(page.text).toContain("couldn&#39;t save the token");
     expect(everythingSeen(h, [res, page])).not.toContain(kCanary);
+  });
+
+  it("keeps a reconnected workspace's live token when the stores refuse the same token again", async () => {
+    const h = createHarness({
+      env: { SLACK_USER_TOKEN_YC: kToken },
+      applierOverride: { apply: async () => ({ status: "failed", code: "store_refused" }) },
+    });
+    const { state } = await startFlow(h);
+    const res = await callback(h, { code: "c", state });
+    expect(res.headers.location).toBe("/slack/connect?error=store_failed");
+    expect(h.fake.calls.some((c) => c.method === "auth.revoke")).toBe(false);
+    expect(h.lines.some((l) => l.includes("store failed") && l.includes("revoked=skipped_existing"))).toBe(true);
+    expect(everythingSeen(h, [res])).not.toContain(kCanary);
   });
 
   it("says which store holds a partly saved token", async () => {
