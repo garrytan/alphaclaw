@@ -9,6 +9,7 @@ const { createSecretDropApplier } = require("../../lib/server/secret-drop/apply"
 const { createSlackOauth, resolveTokenEnvKey, kReadUserScopes, kStateTtlMs, kInstallsFileName } = require("../../lib/server/slack-oauth");
 const { registerSlackConnectRoutes } = require("../../lib/server/routes/slack-connect");
 const { createTerminalErrorHandler } = require("../../lib/server/terminal-error-handler");
+const { blankDeniedGatewayEnvKeys } = require("../../lib/server/gateway-env-policy");
 
 const kOrigin = "https://box.example.com";
 // Built at runtime so no token-shaped literal sits in the source.
@@ -37,14 +38,14 @@ const createFakeSlack = ({ scope = kReadScopes, botToken = "", teamId = "T02A11S
         team: { id: teamId, name: teamName },
       });
     }
-    if (method === "auth.test") return json({ ok: true, url, team: teamName, user: "garry" });
+    if (method === "auth.test") return json(url ? { ok: true, url, team: teamName, user: "garry" } : { ok: false, error: "invalid_auth" });
     if (method === "auth.revoke") return json({ ok: true, revoked: true });
     return json({ ok: false, error: "unknown_method" });
   });
   return { fetchImpl, calls };
 };
 
-const createHarness = ({ slack = {}, configured = true } = {}) => {
+const createHarness = ({ slack = {}, configured = true, applierOverride = null } = {}) => {
   const fake = createFakeSlack(slack);
   const lines = [];
   const logger = { log: (l) => lines.push(String(l)), warn: (l) => lines.push(String(l)), error: (l) => lines.push(String(l)) };
@@ -65,10 +66,11 @@ const createHarness = ({ slack = {}, configured = true } = {}) => {
   });
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "slack-oauth-"));
   const installsStore = createTeamStateStore({ rootDir, fileName: kInstallsFileName });
+  const usedApplier = applierOverride || applier;
   let now = 1_800_000_000_000;
   const slackOauth = createSlackOauth({
     readEnv: (key) => (configured ? { SLACK_OAUTH_CLIENT_ID: "123.456", SLACK_OAUTH_CLIENT_SECRET: kClientSecret }[key] : ""),
-    applier,
+    applier: usedApplier,
     installsStore,
     fetchImpl: fake.fetchImpl,
     nowFn: () => now,
@@ -134,6 +136,7 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
     expect(exchange.body).toEqual({ client_id: "123.456", client_secret: kClientSecret, code: "code-1", redirect_uri: kOrigin + "/slack/oauth/callback" });
     const page = await admin(request(h.app).get(res.headers.location));
     expect(page.text).toContain("YC is connected");
+    expect(page.text).toContain("The gateway sees it after its next start");
     const seen = everythingSeen(h, [res, page]);
     expect(seen).not.toContain(kToken);
     expect(seen).not.toContain(kCanary);
@@ -271,5 +274,45 @@ describe("Connect Slack (read-only OAuth v2 user token)", () => {
     const { state } = await startFlow(h);
     expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?connected=SLACK_USER_TOKEN_YCX26");
     expect(h.envWrites.map((w) => w.key)).toEqual(["SLACK_USER_TOKEN_YCX26"]);
+  });
+
+  it("revokes the token and records nothing when the stores refuse it", async () => {
+    const h = createHarness({ applierOverride: { apply: async () => ({ status: "failed", code: "store_refused" }) } });
+    const { state } = await startFlow(h);
+    const res = await callback(h, { code: "c", state });
+    expect(res.headers.location).toBe("/slack/connect?error=store_failed");
+    expect(h.fake.calls.find((c) => c.method === "auth.revoke")?.auth).toBe("Bearer " + kToken);
+    expect(fs.existsSync(h.installsStore.path)).toBe(false);
+    const page = await admin(request(h.app).get(res.headers.location));
+    expect(page.text).toContain("couldn&#39;t save the token");
+    expect(everythingSeen(h, [res, page])).not.toContain(kCanary);
+  });
+
+  it("says which store holds a partly saved token", async () => {
+    const h = createHarness({ applierOverride: { apply: async () => ({ status: "partial", stores: { env: false, store: true }, reach: { env: null } }) } });
+    const { state } = await startFlow(h);
+    const res = await callback(h, { code: "c", state });
+    const page = await admin(request(h.app).get(res.headers.location));
+    expect(page.text).toContain("saved only in OpenClaw&#39;s secret store");
+  });
+
+  it("stores nothing when Slack refuses the code exchange", async () => {
+    const h = createHarness({ slack: { exchangeOk: false } });
+    const { state } = await startFlow(h);
+    expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=exchange_refused");
+    expect(h.fake.calls.map((c) => c.method)).toEqual(["oauth.v2.access"]);
+    expect(h.envWrites).toEqual([]);
+  });
+
+  it("revokes a token for a workspace it can't name", async () => {
+    const h = createHarness({ slack: { teamId: "bad", url: "" } });
+    const { state } = await startFlow(h);
+    expect((await callback(h, { code: "c", state })).headers.location).toBe("/slack/connect?error=unnamed_workspace");
+    expect(h.fake.calls.find((c) => c.method === "auth.revoke")?.auth).toBe("Bearer " + kToken);
+    expect(h.envWrites).toEqual([]);
+  });
+
+  it("keeps the app's client secret out of the gateway's environment", () => {
+    expect(blankDeniedGatewayEnvKeys({ SLACK_OAUTH_CLIENT_SECRET: kClientSecret }).SLACK_OAUTH_CLIENT_SECRET).toBe("");
   });
 });
