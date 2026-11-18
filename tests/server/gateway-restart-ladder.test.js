@@ -561,6 +561,81 @@ describe("stop ladder + cold restart (v0.10.0)", () => {
     fs.readdirSync = require("fs").readdirSync;
   });
 
+  describe("a pinned OpenClaw package something edited (GST-3061)", () => {
+    const override = require("../../lib/server/openclaw-package-override");
+    const kSha = "a".repeat(64);
+    let originalPackages;
+    let launcherPid;
+    let events;
+    let outcomes;
+    beforeEach(async () => {
+      ({ launcherPid } = await bootManaged(gateway, world));
+      originalPackages = process.env.ALPHACLAW_OPENCLAW_PACKAGES;
+      process.env.ALPHACLAW_OPENCLAW_PACKAGES = `2026.11.4:/data/openclaw-packages/p.tgz:${kSha}`;
+      events = [];
+      outcomes = [];
+      gateway.setGatewayPrelaunchHookHandler((outcome) => outcomes.push(outcome));
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(override, "checkOpenclawPackageBeforeLaunch").mockImplementation(() => {
+        throw Object.assign(new override.OpenclawPackageRefusal("tree_changed", "1 file(s), first dist/entry.js (modified)"), { files: ["dist/entry.js (modified)"], fileCount: 1 });
+      });
+      vi.spyOn(override, "isGatewayRunningFrom").mockImplementation(() => world.alive(launcherPid));
+      vi.spyOn(override, "verifyOpenclawPackageFiles").mockImplementation(() => {
+        events.push(["verify", world.alive(launcherPid)]);
+      });
+    });
+    afterEach(() => {
+      gateway.setGatewayPrelaunchHookHandler(null);
+      if (originalPackages === undefined) delete process.env.ALPHACLAW_OPENCLAW_PACKAGES;
+      else process.env.ALPHACLAW_OPENCLAW_PACKAGES = originalPackages;
+    });
+    const runs = () => world.spawned.filter((spawned) => spawned.kind === "run").length;
+
+    it("a restart verifies the package file while the old gateway serves, applies the package again once it stopped, then launches", async () => {
+      vi.spyOn(override, "reapplyOpenclawPackageForLaunch").mockImplementation(async ({ refusal }) => {
+        events.push(["reapply", world.alive(launcherPid), runs()]);
+        return { verdict: { status: "applied", file: "p.tgz", sha256: kSha }, files: refusal.files, fileCount: refusal.fileCount };
+      });
+      const onStep = vi.fn();
+      const { value, error } = await runRestart({ onStep }, 5000);
+      expect(error).toBeNull();
+      expect(value).toMatchObject({ ok: true });
+      expect(events).toEqual([["verify", true], ["reapply", false, 1]]);
+      const steps = onStep.mock.calls.map(([step]) => step);
+      const afterPackage = steps.findIndex((step) => step.step === "preparing_plugins" && step.detail?.phase === "after_package");
+      expect(afterPackage).toBeGreaterThan(steps.findIndex((step) => step.step === "stopping" && step.status === "done"));
+      expect(afterPackage).toBeLessThan(steps.findIndex((step) => step.step === "launching"));
+      expect(runs()).toBe(2);
+      expect(outcomes).toEqual([
+        expect.objectContaining({ step: "openclaw_package", status: "ran", site: "restart", packageFile: "p.tgz", reappliedFiles: ["dist/entry.js (modified)"], reappliedFileCount: 1 }),
+      ]);
+    });
+
+    it("a re-apply that fails after the stop is launch_failed with nothing spawned", async () => {
+      vi.spyOn(override, "reapplyOpenclawPackageForLaunch").mockImplementation(async () => {
+        throw new override.OpenclawPackageRefusal("unpack_failed", "TAR_BAD_ARCHIVE");
+      });
+      const { error } = await runRestart({}, 5000);
+      expect(error).toMatchObject({ name: "GatewayRestartError", evidence: expect.objectContaining({ code: "launch_failed", signalled: true }) });
+      expect(error.message).toContain("the pinned OpenClaw package check refused the relaunch");
+      expect(world.alive(launcherPid)).toBe(false);
+      expect(runs()).toBe(1);
+      expect(outcomes).toEqual([expect.objectContaining({ step: "openclaw_package", status: "refused", code: "openclaw_package_unpack_failed", site: "restart" })]);
+    });
+
+    it("a package file that no longer verifies refuses the restart before anything is stopped", async () => {
+      override.verifyOpenclawPackageFiles.mockImplementation(() => {
+        throw new override.OpenclawPackageRefusal("missing", "p.tgz");
+      });
+      const reapply = vi.spyOn(override, "reapplyOpenclawPackageForLaunch");
+      const { error } = await runRestart({}, 5000);
+      expect(error).toMatchObject({ name: "GatewayOpenclawPackageError", reason: "missing" });
+      expect(world.alive(launcherPid)).toBe(true);
+      expect(reapply).not.toHaveBeenCalled();
+      expect(runs()).toBe(1);
+    });
+  });
+
   it("a launcher the kernel reports gone before Node has reaped it is waited for, not retained: the graceful stop relaunches instead of failing as child_retained (ALPH-19)", async () => {
     const { launcherPid } = await bootManaged(gateway, world);
     world.slowReap.add(launcherPid);

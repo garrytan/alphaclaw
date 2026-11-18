@@ -164,7 +164,27 @@ describeLive("live: the gateway boots from a sha-pinned OpenClaw package", () =>
       const stat = fs.statSync(shipped);
       fs.appendFileSync(shipped, "\n");
       fs.utimesSync(shipped, stat.atime, new Date(stat.mtimeMs + 5000));
-      expect(() => override.checkOpenclawPackageBeforeLaunch({ installDir, managedDir, env })).toThrow(expect.objectContaining({ reason: "tree_changed" }));
+      let refusal = null;
+      try {
+        override.checkOpenclawPackageBeforeLaunch({ installDir, managedDir, env });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toMatchObject({ reason: "tree_changed", files: ["openclaw.mjs (modified)"] });
+
+      // GST-3061: the launch applies the package again (in its own process)
+      // and the real gateway boots from the verified build.
+      const reapplied = await override.reapplyOpenclawPackageForLaunch({ installDir, managedDir, openclawDir, refusal, env: { ...env, PATH: process.env.PATH, HOME: rootDir } });
+      expect(reapplied).toMatchObject({ verdict: { status: "applied", sha256: standIn.sha256, editedFiles: ["openclaw.mjs (modified)"] }, files: ["openclaw.mjs (modified)"] });
+      expect(fs.readFileSync(shipped, "utf8").endsWith("\n\n")).toBe(false);
+      const runsBefore = fs.readFileSync(probeFile, "utf8").split("\n").filter(Boolean).length;
+      const reboot = await bootGateway({ rootDir, installDir, openclawDir });
+      try {
+        expect(reboot.build).toMatchObject({ build: "pinned_package", packageSha256: standIn.sha256 });
+        expect(fs.readFileSync(probeFile, "utf8").split("\n").filter(Boolean).length).toBeGreaterThan(runsBefore);
+      } finally {
+        await reboot.stop();
+      }
 
       const restored = override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: { PATH: process.env.PATH, HOME: rootDir } });
       expect(restored).toMatchObject({ status: "stock", restored: true });

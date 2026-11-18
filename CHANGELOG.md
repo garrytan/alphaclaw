@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.311] - 2026-11-18
+
+A gateway that runs a pinned OpenClaw build no longer stays down after something edits that build's files; AlphaClaw puts the verified build back and launches.
+
+### Fixed
+- When a cron job, startup script or hand edit changes a file of the pinned OpenClaw build (`ALPHACLAW_OPENCLAW_PACKAGES`), the next gateway launch (a restart, a watchdog repair or memory restart, a crash relaunch) checks the package file's sha256 again, applies it the same way a start does and launches, instead of refusing every launch until a redeploy. The apply runs in its own process, so AlphaClaw's web page keeps answering during the few seconds it takes.
+- One important notification a day names the edited files, so the owner can find what makes the edit.
+- A restart checks the package file before it stops the running gateway, so a missing or wrong file still refuses the restart with the old gateway serving. Only a re-apply that fails (missing or wrong file, an archive that does not unpack, a failed postinstall) keeps the gateway down.
+
 ## [0.10.310] - 2026-11-18
 
 When OpenClaw holds an owner's Telegram message behind a long agent run, AlphaClaw now says so in that chat instead of leaving it silent.

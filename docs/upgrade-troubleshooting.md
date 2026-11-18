@@ -741,6 +741,23 @@ Before **every** gateway launch it checks that each file the package (and the
 pinned `@openclaw/codex`, if any) shipped is still there and unchanged. Files OpenClaw adds at run time (plugin
 installs under `dist/extensions`) don't count.
 
+**When something edits the applied files** (a cron job or startup script
+that patches `node_modules/openclaw`, a hand edit), the next launch puts the
+verified package back instead of refusing: it checks the file's sha256
+again and applies it the same way a start does (same checks, same swap and
+crash recovery), in a separate process so the web page keeps answering,
+then launches. That takes a few seconds (about 6 s for OpenClaw 2026.11.4's
+17,000 files). One important notification a day names the edited files, so
+you can find and stop whatever makes the edit; until you do, every launch
+undoes it again. A restart checks the package file while the old gateway
+still serves and applies the package once that gateway has stopped, so a
+missing or wrong file refuses the restart with the old gateway still up.
+Only a failed re-apply (the file is missing or wrong, the archive does not
+unpack, the postinstall fails) keeps the gateway down, with the reasons
+below. While a gateway that will not be stopped still runs from the tree,
+the launch refuses with `tree_changed` as before. If you need a local
+patch to OpenClaw, put it in the pinned package itself.
+
 **When something is wrong it refuses, it never falls back.** The stock build
 is in place (a package applied at an earlier start is swapped back out), the
 gateway is not started, the Watchdog shows
@@ -781,8 +798,12 @@ the image has not installed yet it says which checks it could not run
   version. Each start retries, which also re-applies the OpenClaw package and
   then swaps it back out, a few seconds of work, until the plugin installs.
 - `tree_changed`: something changed a file the package shipped after it
-  was applied. Restart AlphaClaw (a redeploy or a container restart) to
-  apply it again.
+  was applied, and a gateway was still running from the tree, so the launch
+  could not put the package back. Stop that gateway (or restart the
+  container); the next launch applies the package again.
+- `reapply_failed`: the launch tried to apply the package again and the
+  process doing it failed or ran out of its 10 minutes. Its output is in the
+  AlphaClaw process log; the next launch tries again.
 - `deferred`: a gateway was already running from the OpenClaw tree when
   AlphaClaw started (an old gateway still draining, or a second
   `alphaclaw start` run by hand against a live install), so nothing was
