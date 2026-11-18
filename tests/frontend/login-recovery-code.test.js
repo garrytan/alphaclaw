@@ -87,6 +87,12 @@ describe("login page: where a sign-in returns", () => {
     expect(await signInFrom(confirmPage)).toBe(confirmPage);
   });
 
+  it("returns a signed-out admin to the Connect Slack page, and nowhere under it", async () => {
+    expect(await signInFrom("/slack/connect")).toBe("/slack/connect");
+    expect(await signInFrom("/slack/connect?error=x")).toBe("/");
+    expect(await signInFrom("/slack/oauth/callback")).toBe("/");
+  });
+
   it("sends any other relay confirm path Home", async () => {
     expect(await signInFrom("/relay/confirm/rcl_" + "a1".repeat(23))).toBe("/");
     expect(await signInFrom("/relay/confirm/rcl_" + "a1".repeat(24) + "?x=1")).toBe("/");

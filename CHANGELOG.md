@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.313] - 2026-11-18
+
+An admin can now connect a Slack workspace to the box with one click, giving the box's own scripts a read-only Slack token without pasting anything.
+
+### Added
+- A "Connect Slack" page at `/slack/connect`, for an AlphaClaw admin only. Connect sends you to Slack's consent page for a read-only user token (search, channels, direct messages and people, with no write scope and no bot), and Slack's answer comes straight back to the box. AlphaClaw saves the token as `SLACK_USER_TOKEN_<WORKSPACE>` in its .env and OpenClaw's secret store, the same way the secret drop does, and the page lists the connected workspaces. Connecting a workspace again replaces its token.
+- The sign-in is tied to the admin session that started it, works once and expires after 10 minutes. A grant with any scope beyond the read list, or with a bot token, is refused, and so is a workspace whose name another workspace holds or that Slack can't name. A refused or unsaved token is handed back to Slack unless the box already holds a copy of it (Slack returns the same token when the same person connects again); a bot token is dropped, never revoked. The token is never logged, shown or returned, and the page says when the gateway will see it.
+- Needs `SLACK_OAUTH_CLIENT_ID` and `SLACK_OAUTH_CLIENT_SECRET` (a Slack app with the box's `/slack/oauth/callback` as a redirect URL); the page says so when they're missing. The client secret is kept out of the gateway's environment. Set both in the deployment environment. A value in AlphaClaw's .env also works, but the agent can read and write that file.
+
 ## [0.10.312] - 2026-11-18
 
 AgentRun no longer fills up with cancelled runs for cron jobs whose trigger checked and did not fire.
