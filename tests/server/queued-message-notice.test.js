@@ -53,6 +53,7 @@ describe("server/queued-message-notice", () => {
     notice = createQueuedMessageNotice({
       listSessions,
       sendTelegram,
+      readOwnerIds: () => ["111222333"],
       insertEvent,
       now: () => clock,
       setTimer: (fn, ms) => timers.push({ fn, ms }),
@@ -214,6 +215,36 @@ describe("server/queued-message-notice", () => {
     ownerQueued({ sessionId: "sess-dm" }, kDmKey);
     await notice.settled();
     expect(sendTelegram).toHaveBeenCalledWith({ accountId: "default", chatId: "111222333", threadId: "", text: kNoticeText });
+  });
+
+  const dmRow = (to, overrides = {}) => ({
+    key: kDmKey,
+    sessionId: "sess-dm",
+    hasActiveRun: true,
+    activeRunIds: ["cron-run-1"],
+    startedAt: clock - 20_000,
+    deliveryContext: { channel: "telegram", to: "telegram:" + to, accountId: "default" },
+    ...overrides,
+  });
+
+  it("never posts into a DM that is not an owner's, even on the shared main session", async () => {
+    rows = [dmRow("444555666", { startedAt: clock - 120_000 })];
+    ownerQueued({ sessionId: "sess-dm" }, kDmKey);
+    await notice.settled();
+    expect(sendTelegram).not.toHaveBeenCalled();
+  });
+
+  it("posts to the DM the owner's message was queued in, even after another sender moved the shared session's route", async () => {
+    rows = [dmRow("111222333")];
+    ownerQueued({ sessionId: "sess-dm" }, kDmKey);
+    await notice.settled();
+    expect(timers).toHaveLength(1);
+    rows = [dmRow("444555666", { startedAt: clock - 20_000 })];
+    clock += 40_000;
+    timers[0].fn();
+    await notice.settled();
+    expect(sendTelegram).toHaveBeenCalledTimes(1);
+    expect(sendTelegram).toHaveBeenCalledWith(expect.objectContaining({ chatId: "111222333", text: kNoticeText }));
   });
 
   it("posts to a forum's General topic without a thread id, which Telegram refuses for id 1", async () => {
