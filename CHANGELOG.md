@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.312] - 2026-11-18
+
+AgentRun no longer fills up with cancelled runs for cron jobs whose trigger checked and did not fire.
+
+### Fixed
+- OpenClaw announces a cron run before it runs the job's trigger script, and says nothing more when the trigger does not fire. The reporter started a live AgentRun run from that announcement, so every trigger check (every minute for some jobs) became a run that was cancelled when the job's next check came. A job with a trigger or a stream schedule now goes live only once its agent turn starts, and a check that did not fire is never sent, also when the gateway restarted before the next check. The gateway plugin now records whether a job has a trigger script, never the script itself.
+
 ## [0.10.311] - 2026-11-18
 
 A gateway that runs a pinned OpenClaw build no longer stays down after something edits that build's files; AlphaClaw puts the verified build back and launches.
