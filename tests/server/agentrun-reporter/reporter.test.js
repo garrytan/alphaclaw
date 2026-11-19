@@ -1235,6 +1235,9 @@ describe("agentrun reporter: cron runs", () => {
     expect(source.ingest().added).toBe(1);
     await sender.sendDue();
     expect([...fake.agents.keys()]).toEqual(["openclaw-cron-brief"]);
+    const [brief] = fake.runs.values();
+    expect(brief.start.input).toMatch(/^Cron: Morning brief · .* · cancelled \(skipped\)/);
+    expect(brief.completion.status).toBe("cancelled");
     expect(outbox.db.prepare("SELECT job_id FROM turns").all()).toEqual([{ job_id: "brief" }]);
     expect(source.ingest().added).toBe(0);
     expect(fs.readdirSync(path.join(rootDir, "agentrun-spool"), { recursive: true }).filter((name) => String(name).includes("beat"))).toEqual([]);
