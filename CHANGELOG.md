@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.316] - 2026-11-19
+
+AgentRun no longer gets a cancelled run for each cron check OpenClaw skips, such as a heartbeat job's check with nothing to do.
+
+### Fixed
+- A cron run OpenClaw finishes as skipped, with no agent turn behind it, ran nothing and now creates no AgentRun run. One that had already started live in AgentRun ends as completed (skipped) instead of cancelled. A skipped run that did run an agent turn is still reported.
+
 ## [0.10.315] - 2026-11-19
 
 Guest notes name the group that may read them as a gbrain group, so turning them on for a group changes nothing else about who can read the owner's brain.

@@ -1203,7 +1203,7 @@ describe("agentrun reporter: cron runs", () => {
     isolatedTurn(handlers, clock, "oneshot", "r-one");
     cronEvent(handlers, "finished", "oneshot", oneShot, { runAtMs: T0 + 1, durationMs: 5000, status: "ok" });
     const script = { ...recurring, name: "Backup", payload: { kind: "command" } };
-    cronEvent(handlers, "finished", "script", script, { runAtMs: T0 + 2, durationMs: 300, status: "skipped" });
+    cronEvent(handlers, "finished", "script", script, { runAtMs: T0 + 2, durationMs: 300, status: "ok" });
     expect(source.ingest().added).toBe(3);
     await sender.sendDue();
     expect([...fake.agents.values()].map((agent) => [agent.agent_id, agent.definition.name]).sort()).toEqual([
@@ -1213,13 +1213,31 @@ describe("agentrun reporter: cron runs", () => {
     ]);
     const inputs = [...fake.runs.values()].map((run) => run.start.input);
     expect(inputs.some((input) => input.startsWith("One-shot: Call mom · 5s · completed"))).toBe(true);
-    expect(inputs.some((input) => input.startsWith("Cron: Backup · 0.3s · cancelled (skipped) — 0 tool calls") && input.includes("cron script run"))).toBe(true);
+    expect(inputs.some((input) => input.startsWith("Cron: Backup · 0.3s · completed — 0 tool calls") && input.includes("cron script run"))).toBe(true);
     expect(fake.requests.map((request) => request.body).join("\n")).not.toContain("Pay rent");
     expect(outbox.db.prepare("SELECT job_id, contents FROM turns ORDER BY job_id").all()).toEqual([
       { job_id: "oneshot", contents: 1 },
       { job_id: "script", contents: 0 },
       { job_id: "secretjob-123456", contents: 0 },
     ]);
+  });
+
+  it("sends no run for a cron check OpenClaw skipped without a turn, and keeps a skipped run that ran a turn", async () => {
+    const { clock, handlers, fake, source, sender, outbox, rootDir } = setup({ cronJobs: [{ id: "beat", name: "Heartbeat" }, { id: "brief", name: "Morning brief" }] });
+    const beat = { ...recurring, name: "Heartbeat", sessionTarget: "main", payload: { kind: "systemEvent" } };
+    for (const runAtMs of [T0, T0 + 30 * 60_000, T0 + 60 * 60_000]) {
+      cronEvent(handlers, "started", "beat", beat, { runAtMs });
+      cronEvent(handlers, "finished", "beat", beat, { runAtMs, durationMs: 400, status: "skipped" });
+    }
+    cronEvent(handlers, "started", "brief", recurring, { runAtMs: T0 });
+    isolatedTurn(handlers, clock, "brief", "r1");
+    cronEvent(handlers, "finished", "brief", recurring, { runAtMs: T0, durationMs: 2500, status: "skipped", sessionKey: "agent:main:cron:brief:run:r1" });
+    expect(source.ingest().added).toBe(1);
+    await sender.sendDue();
+    expect([...fake.agents.keys()]).toEqual(["openclaw-cron-brief"]);
+    expect(outbox.db.prepare("SELECT job_id FROM turns").all()).toEqual([{ job_id: "brief" }]);
+    expect(source.ingest().added).toBe(0);
+    expect(fs.readdirSync(path.join(rootDir, "agentrun-spool"), { recursive: true }).filter((name) => String(name).includes("beat"))).toEqual([]);
   });
 
   it("reports a dead gateway's unfinished run as cancelled and lets a start a later start replaced go", async () => {
@@ -1722,6 +1740,21 @@ describe("agentrun reporter: live runs", () => {
     const run = onlyRun(s.fake);
     expect(run.start.input).toBe(`Cron: Watch\nStarted ${iso(T0)}`);
     expect(run.completion).toBe(null);
+  });
+
+  it("ends a live cron run that OpenClaw then skipped as completed, never cancelled", async () => {
+    const s = setup({ timeoutSeconds: 0, cronJobs: [{ id: "beat", name: "Heartbeat", payload: { kind: "systemEvent", timeoutSeconds: 600 } }] });
+    const beat = { name: "Heartbeat", schedule: { kind: "cron" }, payload: { kind: "systemEvent" }, sessionTarget: "main", wakeMode: "now", agentId: "main" };
+    s.handlers.cron_changed({ action: "started", jobId: "beat", job: beat, agentId: "main", sessionTarget: "main", runAtMs: T0 }, {});
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.completion).toBe(null);
+    s.handlers.cron_changed({ action: "finished", jobId: "beat", job: beat, runAtMs: T0, durationMs: 400, status: "skipped" }, {});
+    s.at(15_000);
+    await s.tick();
+    expect(onlyRun(s.fake)).toBe(run);
+    expect(run.completion).toMatchObject({ status: "completed" });
+    expect(run.completion.error).toBeUndefined();
   });
 
   it("keeps finished-only reporting with ALPHACLAW_AGENTRUN_LIVE=off, and keeps live on with live_invalid for any other value", async () => {
