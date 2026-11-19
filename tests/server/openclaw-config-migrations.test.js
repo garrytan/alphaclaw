@@ -242,7 +242,7 @@ describe("server/openclaw-config-migrations canonical 2026.10 roster", () => {
     expect(out.agents).toEqual({
       entries: { main: {}, ops: {} },
       ownership: "explicit",
-      defaults: { systemAgent: { agentId: "main" }, heartbeat: { agentId: "main" } },
+      defaults: { systemAgent: { agentId: "main" } },
     });
     expect(out.talk).toEqual({ agentId: "main" });
     expect(out.bindings).toBeUndefined();
@@ -287,7 +287,6 @@ describe("server/openclaw-config-migrations canonical 2026.10 roster", () => {
     );
     expect(out.agents.defaults).toEqual({
       systemAgent: { agentId: "alex" },
-      heartbeat: { agentId: "alex" },
       authInheritance: { agentId: "alex" },
     });
   });
