@@ -53,7 +53,7 @@ const kCaseTimeoutMs = 12 * 60 * 1000;
 const kExecSleepSeconds = 300;
 // 2026.10.6: "…interrupted by a gateway restart while OpenClaw was waiting on
 // tool/model work"; 2026.10.7 dropped "by a gateway restart" from the note.
-const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work/i;
+const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work|The Gateway restarted while you were working/i;
 const kNothingToRecoverPattern = /requires a restart-tombstoned session|Session is not recoverable/i;
 
 const textOf = (content) =>
