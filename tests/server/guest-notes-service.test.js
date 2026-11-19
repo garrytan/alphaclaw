@@ -94,12 +94,12 @@ describe("guest notes broker", () => {
     expect(ctx.service.claim({ ...kClaim, audience_member: "" }).ok).toBe(false);
   });
 
-  it("saves a note on behalf of the audience member, with guest metadata and the owner plus member as readers", async () => {
+  it("saves a note on behalf of the audience group, with guest metadata and the owner plus that group as readers", async () => {
     ctx = await setup();
     const result = await ctx.service.save({ kind: "note", title: "Trip plan", text: "Leave at 9.\r\n", claim_ref: claimRef(ctx.service) });
     expect(result).toMatchObject({ status: "saved", slug: "guests/g0123456789abcdef/mfedcba9876543210/2026-11-14-trip-plan" });
     const put = ctx.brain.calls.find((call) => call.name === "put_page");
-    expect(put.headers.onBehalfOf).toBe("member:groupmember1");
+    expect(put.headers.onBehalfOf).toBe("group:groupmember1");
     expect(put.headers.agentLabel).toBe("alphaclaw-guest-broker");
     expect(put.headers.authorization).toBe("Bearer tok-1");
     expect(put.meta).toEqual({ guest: { sender_label: "Ada guest", group: "g0123456789abcdef" } });
@@ -108,7 +108,7 @@ describe("guest notes broker", () => {
     expect(put.args).toMatchObject({ source_id: "guests", content_origin: "tool_output" });
     expect(put.args.expected_revision).toBeUndefined();
     expect(put.args.force).toBeUndefined();
-    expect(put.args.content).toContain('readable_by: ["member:owner1", "member:groupmember1"]');
+    expect(put.args.content).toContain('readable_by: ["member:owner1", "group:groupmember1"]');
     expect(put.args.content.replace('\nguest_sender: "Ada guest"\n', "\n")).not.toContain("Ada");
     expect(ctx.brain.tokenRequests[0]).toMatchObject({ grant_type: "client_credentials", client_id: "guest-broker" });
     expect(ctx.logs.join("\n")).not.toContain("Leave at 9");
@@ -216,8 +216,25 @@ describe("guest notes broker", () => {
     const result = await ctx.service.save({ kind: "note", title: "t", text: "x", claim_ref: claimRef(ctx.service) });
     expect(result.status).toBe("pending");
     const read = ctx.brain.calls.find((call) => call.name === "get_write_request");
-    expect(read.headers.onBehalfOf).toBe("member:groupmember1");
+    expect(read.headers.onBehalfOf).toBe("group:groupmember1");
     expect(ctx.brain.calls.filter((call) => call.name === "put_page").at(-1).args.request_id).toBe([...ids][0]);
+  });
+
+  it("never names the audience as a gbrain member, in a header or in the readers", async () => {
+    ctx = await setup({
+      handlers: {
+        get_page: (args) => ({ slug: args.slug, revision: "rev:" + args.slug, guest: { promoted: false } }),
+        delete_page: (args) => ({ state: "committed", slug: args.slug }),
+      },
+    });
+    await ctx.service.save({ kind: "note", title: "a", text: "one", claim_ref: claimRef(ctx.service) });
+    ctx.clock.now += 91 * 24 * 60 * 60 * 1000;
+    await ctx.service.sweep();
+    const named = ctx.brain.calls.filter((call) => call.headers.onBehalfOf);
+    expect(new Set(named.map((call) => call.name))).toEqual(new Set(["put_page", "get_page", "delete_page"]));
+    for (const call of named) expect(call.headers.onBehalfOf).toBe("group:groupmember1");
+    const put = ctx.brain.calls.find((call) => call.name === "put_page");
+    expect(put.args.content).not.toContain("member:groupmember1");
   });
 
   it("retention reads and deletes on behalf of the page's member, skips promoted notes and marks a member who left may_act_for orphaned", async () => {
@@ -242,7 +259,7 @@ describe("guest notes broker", () => {
     expect(out).toMatchObject({ deleted: 1, promoted: 1, orphaned: 1 });
     const deletes = ctx.brain.calls.filter((call) => call.name === "delete_page");
     expect(deletes.map((call) => call.args.slug)).toEqual([a.slug]);
-    expect(deletes[0].headers.onBehalfOf).toBe("member:groupmember1");
+    expect(deletes[0].headers.onBehalfOf).toBe("group:groupmember1");
     expect(deletes[0].args.expected_revision).toBe("rev:" + a.slug);
     for (const call of ctx.brain.calls) expect(call.name === "get_brain_identity" || Boolean(call.headers.onBehalfOf)).toBe(true);
     const status = await ctx.service.status();

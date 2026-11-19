@@ -658,7 +658,7 @@ When someone other than you asks your agent to write something down in a group c
 - **Turn it on per group** in the Groups page's Guest notes section. It's off everywhere by default, and it can't be turned on until your brain (gbrain) supports guest notes (it advertises `guest_marker_v1`), so no guest note is ever saved without its warning.
 - **Limits:** 20 saves a day and 200 kept notes per person in each group, 64 KiB per note and 10 MiB per file. Notes are deleted after 90 days unless you keep one ("keep that note" in your own chat), which promotes it in your brain.
 - **What it needs on the box:** the guard plugin that tells AlphaClaw which member is speaking, and a gbrain OAuth client for AlphaClaw's writer in `<root>/guest-writes/broker-client.json` (0600). The agent's `guest_save` tool appears only while that file exists.
-- **Cleanup:** if a member is removed from the writer's allowed members, AlphaClaw can no longer reach their notes. `alphaclaw guest-notes sweep` lists those notes and `--apply` deletes them through gbrain on the box.
+- **Cleanup:** if a group is removed from the groups the writer may act for (its gbrain `may_act_for`), AlphaClaw can no longer reach that group's notes. `alphaclaw guest-notes sweep` lists those notes and `--apply` deletes them through gbrain on the box.
 
 How it works and what it guarantees: `docs/designs/guest-notes.md`.
 
