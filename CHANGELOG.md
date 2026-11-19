@@ -18,6 +18,7 @@ AlphaClaw now runs OpenClaw 2026.11.6. Its first boot migrates OpenClaw's data o
 - The shared auth store (sign-ins and model keys) was refused as too new on 2026.11.6's state schema 36. AlphaClaw now reads schemas 12 to 36; the auth rows themselves did not change.
 - Cron run history answered "unavailable" on 2026.11.6, which replaced the task-run index AlphaClaw required with a partial index on cron runs. Both shapes are accepted.
 - Doctor's renamed "Pre-repair recovery copy was unavailable" line is recognized, so a missing pre-repair copy is recorded and shown as before.
+- Adding a second agent no longer leaves openclaw.json invalid. When a roster grew past one agent, AlphaClaw handed the first agent the heartbeat (`agents.defaults.heartbeat`), as OpenClaw's Doctor did up to 2026.11.4; 2026.11.5 retired that key into automations and refuses it. AlphaClaw now hands over the system agent, Talk, the session store, channel bindings and the inherited sign-ins, as 2026.11.5's Doctor does.
 - The relay guard's list of tools a delegate may use follows 2026.11.6's tool catalog, which dropped `structured_output`; the name stays allowed for a deployment that holds 2026.11.4.
 
 ## [0.10.316] - 2026-11-19
