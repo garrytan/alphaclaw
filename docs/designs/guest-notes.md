@@ -20,7 +20,7 @@ sequenceDiagram
   B-->>G: claim_ref (10 minutes)
   G->>T: call with claim_ref set by the guard
   T->>B: POST /internal/guest-writes/save
-  B->>K: put_page on behalf of member:<audience>, _meta.guest
+  B->>K: put_page on behalf of group:<audience>, _meta.guest
   K-->>B: receipt (committed or pending)
   B-->>T: status, slug, what to say
 ```
@@ -53,7 +53,7 @@ The setting lives in `alphaclaw.json`: `guestNotes.groups["<channel>:<chat id>"]
 
 1. **The internal routes answer like no route** unless the caller is on loopback, sent no `x-forwarded-for`, `forwarded` or `x-real-ip`, and carries the internal secret (compared timing-safe).
 2. **Identity comes from the claim only.** The guard computes `group_slug` and `member_slug` with a key only it holds and sends the member's uid; the broker format-checks them and never stores the sender id. A claim lives 10 minutes and is spent only by an accepted save. The shared fallback uid (10097) never gets a claim.
-3. **Every gbrain call acts for the page's audience member** (`X-Gbrain-On-Behalf-Of: member:<id>`): writes, reads, reconciliation and retention deletes. `readable_by` names the owner and that member, never the broker, so an unbound call reads nothing. `get_brain_identity` is the one call without it.
+3. **Every gbrain call acts for the page's audience group** (`X-Gbrain-On-Behalf-Of: group:<id>`): writes, reads, reconciliation and retention deletes. `readable_by` names the owner (`member:<owner>`) and that group, never the broker, so an unbound call reads nothing. `get_brain_identity` is the one call without it. The audience is a gbrain group with no members (`gbrain access group add <audience>`), never a member: a second member makes gbrain count the brain as shared, which re-scopes its conversation archive, and a member reads every unlabelled page once anything names it.
 4. **Writes are create-only.** No `expected_revision`, no `force`. A taken slug (`revision_required`, or `guest_page_immutable` when an earlier note on that slug was deleted: gbrain never reuses a deleted guest slug) moves to `-n` with a new request id; a busy gbrain is retried with the same request id; an answer never received is read back by request id (`get_write_request`) before anything is sent again. An accepted write is never resubmitted.
 5. **Who the guest is travels as request metadata** (`_meta.guest = { sender_label, group }`), never as page text the model could forge. gbrain also requires the page's `guest_sender` and `guest_group` to repeat that label and group exactly, so the broker writes both from the same values; the warning a reader sees comes from gbrain's own records, not from the page. The label keeps to what gbrain accepts: 1 to 64 characters, no control, format or line-separator characters, none of `·`, `[`, `]`, `<`, `>` or `"`.
 6. **No guest note without the warning.** Saves answer `guest_saves_unavailable` and the Groups page can't turn a group on until `get_brain_identity` lists `guest_marker_v1`.

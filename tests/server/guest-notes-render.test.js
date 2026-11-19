@@ -19,7 +19,7 @@ describe("guest note page and slugs", () => {
       "---",
       "type: guest-note",
       'title: "x\\" y"',
-      'readable_by: ["member:o", "member:a"]',
+      'readable_by: ["member:o", "group:a"]',
       "guest_group: g0123456789abcdef",
       'guest_sender: "Ada guest"',
       'saved_at: "2026-11-14T00:00:00.000Z"',

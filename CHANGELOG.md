@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.315] - 2026-11-19
+
+Guest notes name the group that may read them as a gbrain group, so turning them on for a group changes nothing else about who can read the owner's brain.
+
+### Changed
+- The guest notes broker now acts for, and lists as a reader, `group:<audience>` instead of `member:<audience>`; the owner stays `member:<owner>`. A gbrain member for the audience would have made gbrain treat the brain as shared, which re-scopes its conversation archive to owner-only, and would let that member read every unlabelled page once anything named it. The audience is now created with `gbrain access group add <audience>` (no members) and the broker's client is registered with `--may-act-for group:<audience>`.
+
 ## [0.10.314] - 2026-11-18
 
 AgentRun no longer gets a cancelled run every few minutes for a cron job whose trigger checked and did not fire, on any schedule.
