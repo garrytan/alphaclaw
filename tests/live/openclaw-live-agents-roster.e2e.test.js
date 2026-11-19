@@ -84,11 +84,12 @@ describeLive("live: AlphaClaw's roster writes against the pinned validator", () 
       expect(box.readConfig()).toMatchObject({
         agents: {
           ownership: "explicit",
-          defaults: { systemAgent: { agentId: "main" }, heartbeat: { agentId: "main" } },
+          defaults: { systemAgent: { agentId: "main" } },
         },
         talk: { agentId: "main" },
         bindings: [{ agentId: "main", match: { channel: "telegram", accountId: "*" } }],
       });
+      expect(box.readConfig().agents.defaults.heartbeat).toBeUndefined();
 
       box.service.setDefaultAgent("ops");
       box.expectValid("setDefaultAgent ops");
