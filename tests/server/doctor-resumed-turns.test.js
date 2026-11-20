@@ -223,12 +223,11 @@ describe("resumed Doctor turns after a gateway restart", () => {
       logger: { log: vi.fn() },
     });
     await second.onGatewayLaunch({ generation: 1 });
-    const sweepRows = (updatedAt) => [{ key, agentId: "main", hasActiveRun: false, abortedLastRun: true, updatedAt }];
+    const sweepRows = (updatedAt) => [{ key, agentId: "main", hasActiveRun: false, startedAt: updatedAt - 1_000, updatedAt }];
     const runSweep = async (rows) => {
       const notify = vi.fn(async () => ({ ok: true }));
       const gateway = gatewayFor({
         "sessions.list": () => ({ sessions: rows }),
-        "sessions.recover": () => { throw new Error("must not resume the stopped Doctor session"); },
       });
       const sweep = createSessionWedgeSweep({
         clawCmd: gateway,
@@ -243,7 +242,7 @@ describe("resumed Doctor turns after a gateway restart", () => {
     };
 
     const quiet = await runSweep(sweepRows(stoppedAt + 1_000));
-    expect(quiet.result).toEqual({ recovered: [], alerted: [] });
+    expect(quiet.result).toEqual({ alerted: [] });
     expect(quiet.notify).not.toHaveBeenCalled();
 
     const later = await runSweep(sweepRows(stoppedAt + 4 * 60_000));
