@@ -12,9 +12,11 @@
 // the turn. The shutdown record and the deploy history are written.
 //
 // With the floor budget (10 s, about the old fixed 6 s slice for the gateway)
-// there is no room for a drain: OpenClaw's plain stop drains for a fixed 20 s,
-// so the same load is SIGKILLed — what every deploy with a running turn got
-// before v0.10.140.
+// there is no room for the ask, so AlphaClaw signals the gateway directly.
+// Through 2026.10.x a plain stop drained for a fixed 20 s and the same load
+// was SIGKILLed (what every deploy with a running turn got before v0.10.140);
+// 2026.11.5+ cuts the turn short for restart resume and exits within a second
+// or two of SIGTERM.
 // Requires: Node 24.22.1+/26.12.1+ first on PATH and the pinned OpenClaw in
 // node_modules.
 
@@ -40,7 +42,7 @@ const kSetupPassword = "live-shutdown-drain-pw-1";
 const kGatewayToken = "live-shutdown-drain-token-000000000000";
 const kExecSleepSeconds = 300;
 // 2026.10.6 says "interrupted by a gateway restart"; 2026.10.7 dropped it.
-const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work/i;
+const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work|The Gateway restarted while you were working/i;
 
 // The model fixture runs in its own process so the synchronous CLI reads
 // below never stall it. On OpenClaw's restart-recovery note it re-issues the
@@ -303,7 +305,7 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
     model?.kill("SIGKILL");
   });
 
-  it("the floor budget (10 s) has no room for a drain: the same load is SIGKILLed, like the old 6 s slice", async () => {
+  it("the floor budget (10 s) has no room for the ask: AlphaClaw signals the gateway directly and still exits inside the budget", async () => {
     const log = [];
     await boot({ ALPHACLAW_SHUTDOWN_GRACE_SECONDS: "10" }, log);
     await startTurn("floor");
@@ -312,7 +314,10 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
     console.log(`[live] floor budget: exit ${JSON.stringify(exit)}; ${text.match(/restart op=\S+ stopped how=\S+ ms=\d+/)?.[0]}`);
     expect(text).toContain("[alphaclaw] Shutting down: SIGTERM (budget 10 s)");
     expect(text).toMatch(/restart op=\S+ asking status=skipped reason=no_budget/);
-    expect(text).toMatch(/restart op=\S+ stopped how=sigkill /);
+    // 2026.10.x drained a plain SIGTERM for a fixed 20 s, so the floor ended
+    // in SIGKILL; 2026.11.5+ cuts the turn short for restart resume and exits
+    // within a second or two of SIGTERM.
+    expect(text).toMatch(/restart op=\S+ stopped how=(sigterm|sigkill) /);
     expect(exit.ms).toBeLessThan(10_000 + 2_000);
   }, kCaseTimeoutMs);
 
@@ -332,7 +337,9 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
     expect(text, tail).toMatch(/restart op=\S+ stopped how=graceful /);
     expect(text).not.toMatch(/restart op=\S+ forcing signal=SIGKILL/);
     expect(text).not.toContain("Shutdown deadline exceeded");
-    expect(text, tail).toMatch(/marked 1 interrupted main session\(s\) for restart recovery/);
+    // 2026.11.5+ marks the running session for restart resume without a log
+    // line of its own; the cut-short turn shows as aborted for restart.
+    expect(text, tail).toMatch(/agent run aborted for restart/);
     const drain = Number(text.match(/restart op=\S+ asking status=running graceMs=(\d+)/)[1]);
     // OpenClaw's drain filled most of the budget, not a fixed sliver of it.
     expect(drain).toBeGreaterThanOrEqual(5_000);
@@ -382,7 +389,9 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
     expect(text, tail).toMatch(/restart op=\S+ stopped how=graceful /);
     expect(text).not.toMatch(/restart op=\S+ forcing signal=SIGKILL/);
     expect(text).not.toContain("Shutdown deadline exceeded");
-    expect(text, tail).toMatch(/marked 1 interrupted main session\(s\) for restart recovery/);
+    // 2026.11.5+ marks the running session for restart resume without a log
+    // line of its own; the cut-short turn shows as aborted for restart.
+    expect(text, tail).toMatch(/agent run aborted for restart/);
     // OpenClaw closed the child itself, after its stdin closed.
     for (const pid of running) {
       const events = mcpEvents().filter((event) => event.pid === pid).map((event) => event.event);

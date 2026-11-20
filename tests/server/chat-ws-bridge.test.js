@@ -369,6 +369,27 @@ describe("server/chat-ws bridge", () => {
       expect(harness.requests.filter((f) => f.method === "chat.history")).toHaveLength(2);
     });
 
+    it("retries once a history read refused while session storage is not ready (2026.11.6, sent with retryable:false)", async () => {
+      const harness = await startGatewayHarness();
+      let refusals = 0;
+      harness.onRequest = (frame) => {
+        if (refusals === 0) {
+          refusals += 1;
+          harness.fail(frame.id, {
+            code: "UNAVAILABLE",
+            message: "SessionMutationFactsUnavailableError: Session access facts are unavailable; retry after session storage is ready.",
+            retryable: false,
+          });
+          return;
+        }
+        harness.respond(frame.id, { messages: [{ role: "user", content: "ok" }] });
+      };
+      const service = createService(harness);
+      const history = await service.fetchHistory("x");
+      expect(history.messages).toEqual([expect.objectContaining({ role: "user", content: "ok" })]);
+      expect(harness.requests.filter((f) => f.method === "chat.history")).toHaveLength(2);
+    });
+
     it("does not retry a non-retryable refusal or a long retryAfterMs", async () => {
       const harness = await startGatewayHarness();
       let error = { code: "UNAVAILABLE", message: "inspection failed" };

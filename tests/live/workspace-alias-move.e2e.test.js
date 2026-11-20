@@ -98,10 +98,10 @@ describeLive("live: OpenClaw's workspace-alias stop and the confirmed move", () 
       .map((name) => name.replace(/-[A-Za-z0-9_-]{8}\.mjs$/, ""))
       .sort();
     // doctor-prompter / doctor-repair-mode define the flag; doctor-workspace-alias
-    // (the move), doctor-ui (stale Control UI rebuild, needs <package>/ui sources)
-    // and doctor-gateway-services (a note only under --yes; AlphaClaw installs no
-    // gateway service) consume it.
-    expect(consumers).toEqual(["doctor-gateway-services", "doctor-prompter", "doctor-repair-mode", "doctor-ui", "doctor-workspace-alias"]);
+    // (the move) and doctor-ui (stale Control UI rebuild, needs <package>/ui
+    // sources) consume it. doctor-gateway-services (a note only under --yes;
+    // AlphaClaw installs no gateway service) stopped reading it in 2026.11.5.
+    expect(consumers).toEqual(["doctor-prompter", "doctor-repair-mode", "doctor-ui", "doctor-workspace-alias"]);
     expect(fs.existsSync(path.join(kPackageDir, "ui", "package.json"))).toBe(false);
   });
 });

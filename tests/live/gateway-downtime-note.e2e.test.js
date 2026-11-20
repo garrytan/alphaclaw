@@ -28,13 +28,20 @@ const { kLiveEnabled, waitFor, readDeclaredPin } = liveHelpers;
 const describeLive = kLiveEnabled ? describe : describe.skip;
 const kTestTimeoutMs = 8 * 60 * 1000;
 
+// The user messages of the turn a request carries: everything after the last
+// assistant message. 2026.11.6 sends a turn's runtime context as a user
+// message of its own beside the inbound text.
 const lastUserText = (body) => {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
-  const user = [...messages].reverse().find((message) => message?.role === "user");
-  if (!user) return "";
-  return typeof user.content === "string"
-    ? user.content
-    : (Array.isArray(user.content) ? user.content : []).map((part) => part?.text || "").join("\n");
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]?.role !== "assistant") start -= 1;
+  return messages
+    .slice(start)
+    .filter((message) => message?.role === "user")
+    .map((user) => (typeof user.content === "string"
+      ? user.content
+      : (Array.isArray(user.content) ? user.content : []).map((part) => part?.text || "").join("\n")))
+    .join("\n");
 };
 
 describeLive(`LIVE downtime note against the ${kCandidateBinDir ? "candidate" : readDeclaredPin()} pin`, () => {
@@ -98,12 +105,18 @@ describeLive(`LIVE downtime note against the ${kCandidateBinDir ? "candidate" : 
   });
 
   let clawCmd;
-  // A heartbeat turn on the main session: OpenClaw's own `--mode now` wake
-  // with a probe event of the test's own. It drains every queued system event
-  // of that session into the prompt, the downtime note included.
+  // A turn on the main session: a chat.send of the test's own probe. Its
+  // prompt drains every queued system event of that session, the downtime
+  // note included. (Through 2026.11.4 this was OpenClaw's `system event --mode
+  // now` heartbeat wake; 2026.11.5 refuses that on a main session no
+  // authorized work started: "Session event origin is missing".)
+  let probes = 0;
   const heartbeatNow = async (probe) => {
-    const result = await clawCmd(`system event --text ${shellEscapeArg(probe)} --mode now --json`, { quiet: true, timeoutMs: 60_000 });
-    expect(result.ok, result.stderr).toBe(true);
+    probes += 1;
+    const params = JSON.stringify({ sessionKey: "agent:main:main", message: probe, idempotencyKey: `downtime-live-${probes}`, deliver: false });
+    const result = await clawCmd(`gateway call chat.send --params ${shellEscapeArg(params)} --json`, { quiet: true, timeoutMs: 60_000 });
+    expect(result.ok, result.stderr || result.stdout).toBe(true);
+    console.log(`[live] ${probe} chat.send: ${String(result.stdout).replace(/\s+/g, " ").slice(0, 300)}`);
     await waitFor(async () => requests.some((body) => JSON.stringify(body).includes(probe)), 180_000, `turn with "${probe}" reached the model`);
     return requests.find((body) => JSON.stringify(body).includes(probe));
   };

@@ -75,7 +75,10 @@ describeLive("live: OpenClaw's archive read cache through AlphaClaw's data-volum
     const sessions = path.join(scratch, "sessions");
     fs.mkdirSync(sessions, { recursive: true });
     const line = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "x".repeat(900) }] } });
-    const plain = Array.from({ length: 3000 }, () => line).join("\n") + "\n";
+    // About 0.9 MB: 2026.11.6 reads a .zst archive only up to its compressed
+    // size plus 1 MiB (readSessionArchiveContentSync's expansion budget), and
+    // this text compresses to almost nothing.
+    const plain = Array.from({ length: 1000 }, () => line).join("\n") + "\n";
     const archive = path.join(sessions, "0d5a1f3c-9a1b-4c2d-8e3f-1234567890ab.jsonl.reset.2026-11-09T08-50-00.000Z.zst");
     fs.writeFileSync(archive, zlib.zstdCompressSync(Buffer.from(plain)));
 

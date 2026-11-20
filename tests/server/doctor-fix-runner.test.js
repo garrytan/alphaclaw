@@ -624,6 +624,17 @@ describe("server/doctor-fix-runner heartbeat", () => {
       expect(record.lastOutcome).toMatchObject({ status: "ok", class: null, captureState: "available", source: "repair" });
     });
 
+    it("reads the recovery copy's manifest from 2026.11.5's debug wording when it is printed", async () => {
+      const managedDir = mkOpenclawDir();
+      const run = makeRunner({
+        managedDir,
+        exit: 0,
+        chunks: [["Recovery copy saved before repair. No action needed. For manual recovery: /data/x.update-captures/doctor-2/manifest.json.\nDoctor complete\n", "stdout"]],
+      });
+      await run();
+      expect(readRecord(managedDir).lastOutcome).toMatchObject({ status: "ok", captureState: "available" });
+    });
+
     it("an unknown capture stays unknown, and a failed run never marks the pin completed", async () => {
       const managedDir = mkOpenclawDir();
       const run = makeRunner({ managedDir, exit: 1, chunks: [["Something odd happened\n", "stdout"]] });
