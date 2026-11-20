@@ -742,15 +742,21 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       // post-401 reload sends the tab to login), and a reload issued during
       // that navigation fails with "Not attached to an active page" — let the
       // in-flight navigation settle, then reload once more if the first
-      // attempt raced it (ISSUE-002, 2 of 6 CI runs on 2026.9.5).
+      // attempt raced it (ISSUE-002, 2 of 6 CI runs on 2026.9.5). 2026.11.6's
+      // recovery can navigate more than once, so keep settling for a few tries.
+      const settled = async (action) => {
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            return await action();
+          } catch (error) {
+            if (attempt >= 5 || !/Not attached|destroyed|navigation/i.test(String(error?.message || error))) throw error;
+            await page.waitForLoadState("load").catch(() => {});
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+      };
       await page.waitForLoadState("load").catch(() => {});
-      try {
-        await page.reload({ waitUntil: "load" });
-      } catch (error) {
-        if (!/Not attached|destroyed|navigation/i.test(String(error?.message || error))) throw error;
-        await page.waitForLoadState("load").catch(() => {});
-        await page.reload({ waitUntil: "load" });
-      }
+      await settled(() => page.reload({ waitUntil: "load" }));
       await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, {
         timeout: kWorkerControlTimeoutMs,
       });
@@ -804,17 +810,8 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
       // The Cache API is origin-scoped, so this reads correctly whether the
       // tab is still on the UI or the UI's recovery already sent it to login —
       // but the read must not straddle that recovery navigation ("Execution
-      // context was destroyed"): retry once after the navigation lands.
-      const readCacheEntriesSettled = async () => {
-        try {
-          return await readResourceCacheEntries(page);
-        } catch (error) {
-          if (!/destroyed|navigation|Not attached/i.test(String(error?.message || error))) throw error;
-          await page.waitForLoadState("load").catch(() => {});
-          return readResourceCacheEntries(page);
-        }
-      };
-      const entries = await readCacheEntriesSettled();
+      // context was destroyed"): retry after the navigation lands.
+      const entries = await settled(() => readResourceCacheEntries(page));
       expect(
         entries.length,
         `no /openclaw/assets|fonts entries in any worker cache — the worker did not serve this page (log tail: ${logTail()})`,
@@ -834,20 +831,30 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
 
   // ── Step 5: canary — the detector can still fire ─────────────────────────
   itLive(
-    "5. canary: with the entry stylesheet blocked (workers off) the banner DOES appear, so a green step 3 means fixed, not detector-never-ran",
+    "5. canary: with the entry stylesheet's sentinel removed (workers off) the banner DOES appear, so a green step 3 means fixed, not detector-never-ran",
     async (ctx) => {
       if (!requireBrowser(ctx)) return;
       // serviceWorkers: "block" — a worker would fetch the stylesheet itself
       // and bypass page.route, turning the canary green for the wrong reason.
-      // 2026.11.6's detector reads only the entry stylesheet's sentinel and
-      // ignores failed fonts, themes and plugins, so the canary blocks it.
+      // 2026.11.6's detector reads only the entry stylesheet's
+      // --openclaw-css-ok sentinel and ignores failed fonts, themes and
+      // plugins. A failed entry stylesheet sends the page into the mount
+      // recovery's reloads instead, so the canary serves the sheet without
+      // its sentinel, which is what a broken mount looks like to the detector.
       const canaryContext = await browser.newContext({ serviceWorkers: "block" });
       try {
         await installPageProbes(canaryContext);
         await canaryContext.addCookies([browserCookie(cookieValue), attachMarkerCookie(attachMarkerValue)]);
         const canaryPage = await canaryContext.newPage();
         const canaryObserved = observePage(canaryPage);
-        await canaryPage.route(`**${kMountPath}/assets/*.css`, (route) => route.abort());
+        let sentinelsRemoved = 0;
+        await canaryPage.route(`**${kMountPath}/assets/*.css`, async (route) => {
+          const response = await route.fetch();
+          const css = await response.text();
+          const stripped = css.replace(/--openclaw-css-ok\s*:\s*1\s*;?/g, "");
+          if (stripped !== css) sentinelsRemoved += 1;
+          await route.fulfill({ response, body: stripped });
+        });
         await canaryPage.goto(`${baseUrl}${launchLocation}`, { waitUntil: "load" });
         // The UI first HEAD-probes and reloads itself once per build id, THEN
         // shows the banner on the reloaded page — hence the generous wait.
@@ -860,12 +867,7 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
           );
         });
         expect(await banner.isVisible()).toBe(true);
-        expect(
-          canaryObserved.failed.some(
-            (f) => f.resourceType === "stylesheet" && pathnameOf(f.url).startsWith(`${kMountPath}/assets/`),
-          ),
-          "the canary did not actually block the entry stylesheet",
-        ).toBe(true);
+        expect(sentinelsRemoved, "the canary did not actually remove the entry stylesheet's sentinel").toBeGreaterThan(0);
       } finally {
         await canaryContext.close().catch(() => {});
       }
