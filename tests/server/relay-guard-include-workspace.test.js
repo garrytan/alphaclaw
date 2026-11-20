@@ -56,6 +56,11 @@ describe("relay guard: relative paths and an included workspace (GST-3258)", () 
     for (const [toolName, params] of relativeCalls) expect(classifyAnchor({ toolName, params, rootDir, agentId: "main" }), toolName).toBeNull();
   });
 
+  it("still judges the inline workspace when an unrelated $include is broken", () => {
+    writeJson(openclawJson(), { agents: { list: [{ id: "main", workspace: path.join(rootDir, "relay") }] }, plugins: { $include: "missing.json" } });
+    expect(classifyAnchor({ toolName: "write", params: { path: "tool.js", content: "x" }, rootDir, agentId: "main" })).toMatchObject({ action: "write tool.js" });
+  });
+
   it("refuses the owner's attested thread a relative write into an included workspace inside the anchor", async () => {
     const ctx = setup();
     try {
