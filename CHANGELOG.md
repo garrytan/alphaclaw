@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.317] - 2026-11-19
+## [0.10.319] - 2026-11-19
 
 AlphaClaw now runs OpenClaw 2026.11.6. Its first boot migrates OpenClaw's data one way (state schema 22 to 36, agent schema 27 to 38), and AlphaClaw handles what changed with it so the box keeps starting by itself.
 
@@ -26,6 +26,13 @@ AlphaClaw now runs OpenClaw 2026.11.6. Its first boot migrates OpenClaw's data o
 - Opening a chat right after its first message no longer shows an error: 2026.11.6 answers that history read with "Session access facts are unavailable; retry after session storage is ready" and marks it not retryable, so the chat bridge retries it once like other refusals that ran nothing.
 - The model check knows 2026.11.6's new built-in provider `requesty`, so a `requesty` entry without a base URL is reported as not checked instead of as missing its URL.
 - Doctor's recovery-copy manifest is still read when 2026.11.6 prints it; a default 2026.11.6 run logs it at debug level only, so the copy's size goes unmeasured there.
+
+## [0.10.318] - 2026-11-19
+
+The owner's own Capy thread can now edit the box's learned skills over Agent Relay, as the owner can.
+
+### Fixed
+- A relay turn from the owner's own thread (an attested owner thread or a pinned binding) was refused OpenClaw's `skill_workshop` tool, so it could not fix a learned skill from the relay. It now gets every `skill_workshop` action OpenClaw 2026.11.4 has. A skill write that would land in the relay's trust anchor (an agent directory configured inside it, also when that setting comes from an included config file, a skill named after the relay guard, or a script naming a relay trust setting) is still refused, and so is any skill write while a live OpenClaw config file cannot be read. Other delegates and peers are still refused the tool.
 
 ## [0.10.316] - 2026-11-19
 

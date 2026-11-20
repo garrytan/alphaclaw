@@ -382,7 +382,7 @@ View logs for the `stop_failed survivors=` line — a survivor with
 **What it means:** after a gateway relaunch the watchdog sent "⚠️ The gateway
 stopped without a clean shutdown, so a turn it was running was lost:" with the
 session names, and the Health page has a `session_wedge` event with status
-`alerted` and reason `lost` (v0.10.317). The log line is
+`alerted` and reason `lost` (v0.10.319). The log line is
 `[alphaclaw] wedge-sweep alerted session=<key> reason=lost generation=<n>`.
 
 **Why it happens:** OpenClaw 2026.11.5 and later resume running turns
