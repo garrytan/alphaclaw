@@ -333,8 +333,10 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
         console.log("[live] delegate exec of the openclaw CLI: " + cliAnswer.slice(0, 200));
         expect(cliAnswer).toContain("[relay-guard] exec is not available to a delegate relay session");
       }
-      const wrappedExec = await runTurn(relay, "dispatch_action", { id: "exec", args: { command: "touch " + execMarker } });
-      console.log("[live] delegate dispatch_action exec: " + wrappedExec.slice(0, 200));
+      const execWrapper = ["dispatch_action", "tool_call"].find((name) => [...offered.values()].some((names) => names.includes(name))) || "dispatch_action";
+      const wrappedExec = await runTurn(relay, execWrapper, { id: "exec", args: { command: "touch " + execMarker } });
+      console.log("[live] delegate " + execWrapper + " exec: " + wrappedExec.slice(0, 200));
+      expect(wrappedExec.startsWith("NOT-OFFERED")).toBe(false);
       expect(wrappedExec).toContain("[relay-guard]");
       expect(fs.existsSync(execMarker)).toBe(false);
 
