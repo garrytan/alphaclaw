@@ -78,12 +78,26 @@ describe("post-relaunch lost-turn check (OpenClaw 2026.11.5+)", () => {
     expect(message).toContain("The gateway stopped without a clean shutdown, so a turn it was running was lost:");
     expect(message).toContain("• Garry DM");
     expect(message).toContain("Send a message in that session to pick the work up again.");
-    expect(opts).toEqual({ eventType: "session_wedge", id: "session-lost-2" });
+    expect(opts).toEqual({ eventType: "session_wedge", id: expect.stringMatching(/^session-lost-[0-9a-f]{16}$/) });
     expect(insertEvent.mock.calls.map(([event]) => [event.status, event.details.sessionKey, event.details.reason])).toEqual([["alerted", "agent:main:telegram:direct:1", "lost"]]);
     expect(lines()).toEqual([
       "[alphaclaw] wedge-sweep alerted session=agent:main:telegram:direct:1 reason=lost generation=2",
       "[alphaclaw] wedge-sweep done generation=2 checked=2 lost=1",
     ]);
+  });
+
+  it("names the notice after its lost turns, so a later AlphaClaw process (generation 0 again) never reuses a delivered id, and the same turns keep theirs", async () => {
+    const idOf = async (sessions) => {
+      const { sweep, notify } = createSweep(createGateway({ "sessions.list": () => ({ body: { sessions } }) }));
+      await sweep.onGatewayLaunch({ generation: 0, startedAt: kLaunchAt });
+      return notify.mock.calls[0][1].id;
+    };
+    const first = await idOf([lostRow("agent:main:a")]);
+    expect(first).toMatch(/^session-lost-[0-9a-f]{16}$/);
+    expect(await idOf([lostRow("agent:main:b")])).not.toBe(first);
+    expect(await idOf([lostRow("agent:main:a", { startedAt: kLaunchAt - 180_000 })])).not.toBe(first);
+    expect(await idOf([lostRow("agent:main:a")])).toBe(first);
+    expect(await idOf([lostRow("agent:ops:c"), lostRow("agent:main:d")])).toBe(await idOf([lostRow("agent:main:d"), lostRow("agent:ops:c")]));
   });
 
   it("names every lost turn of one relaunch in a single notice", async () => {
