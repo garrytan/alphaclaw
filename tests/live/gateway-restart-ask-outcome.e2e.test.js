@@ -3,8 +3,10 @@
 // agent turn in flight (a local streaming model fixture holds the turn open):
 //   1. the request lands but the ask CLI dies (SIGKILL right after the
 //      gateway closes admission — the OOM-killer shape): the ladder probes,
-//      sees the gateway draining, waits, and the stop is graceful; the turn
-//      that was in flight finishes inside the drain;
+//      sees the gateway draining, waits, and the stop is graceful (through
+//      2026.11.4 the turn in flight finished inside the drain; 2026.11.5+
+//      cuts it short and resumes it on the next gateway, so the agent CLI
+//      waiting on that run may exit 1);
 //   2. the incident's exact failure: the gateway worker stalls for 11 s right
 //      after it closed admission (SIGSTOP — a stand-in for load average 37),
 //      so the CLI's hard 10 s gateway.restart.request ack timeout fires and it
@@ -201,7 +203,7 @@ describeLive(`LIVE ask outcome against the ${kCandidateBinDir ? "candidate" : re
         expect(oneLines.some((line) => /asking status=exited attempt=1 .*class=unknown/.test(line))).toBe(true);
         expect(oneLines.some((line) => /asking status=probe attempt=1 gateway=(draining|closed)/.test(line))).toBe(true);
         expect(oneLines.some((line) => /stopping signal=SIGTERM/.test(line))).toBe(false);
-        expect(await first.exited).toBe(0);
+        expect([0, 1]).toContain(await first.exited);
         await waitFor(readyzOk, 180_000, "relaunched gateway /readyz 200");
 
         // 2. The incident: ack timeout under a stalled worker.

@@ -124,7 +124,7 @@ describe("server/gateway-downtime-note", () => {
     expect(opts).toEqual({ quiet: true, timeoutMs: 20_000 });
     const text = buildDowntimeNoteText({ downAtMs: crashedAt, readyAtMs: ctx.clock.value, cause: "crash" });
     expect(text).toMatch(/^The gateway was down for 10 min \(13:5\d–14:0\d UTC\) after a crash; messages queued during that time may be stale, and their timestamps show when they were sent\.$/);
-    expect(decodeShellWords(cmd)).toEqual(["system", "event", "--text", text, "--mode", "next-heartbeat", "--json"]);
+    expect(decodeShellWords(cmd)).toEqual(["gateway", "call", "system-event", "--params", JSON.stringify({ text }), "--json"]);
     expect(logs).toEqual([`[alphaclaw] downtime-note sent down_ms=${downMs} cause=crash restarts=0 launches=1 doctor=no generation=2`]);
     expect(ctx.insertEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: "downtime_note",
@@ -157,14 +157,14 @@ describe("server/gateway-downtime-note", () => {
     ctx.clock.value += 3 * 60_000;
     const restart = await ctx.note.onGatewayLaunch({ generation: 2 });
     expect(restart).toEqual({ sent: true, downMs: ctx.clock.value - requestedAt, cause: "restart" });
-    expect(decodeShellWords(ctx.clawCmd.mock.calls[0][0])[3]).toMatch(/^The gateway was down for 3 min \(.+ UTC\) during a restart; .+ AlphaClaw ran during it: 1 restart \(api:restart\)\.$/);
+    expect(JSON.parse(decodeShellWords(ctx.clawCmd.mock.calls[0][0])[4]).text).toMatch(/^The gateway was down for 3 min \(.+ UTC\) during a restart; .+ AlphaClaw ran during it: 1 restart \(api:restart\)\.$/);
 
     await ctx.note.tick();
     ctx.note.onRestartRequested({ source: "watchdog:repair_replace" });
     ctx.clock.value += 5 * 60_000;
     const repair = await ctx.note.onGatewayLaunch({ generation: 3 });
     expect(repair.cause).toBe("repair");
-    expect(decodeShellWords(ctx.clawCmd.mock.calls[1][0])[3]).toContain(" during a watchdog repair; ");
+    expect(JSON.parse(decodeShellWords(ctx.clawCmd.mock.calls[1][0])[4]).text).toContain(" during a watchdog repair; ");
   });
 
   it("measures from the last serving probe when the gateway stopped answering before the repair", async () => {
@@ -277,7 +277,7 @@ describe("server/gateway-downtime-note", () => {
     const second = makeNote({ stampPath, clock: { value: crashedAt + 15 * 60_000 } });
     const result = await second.note.onGatewayLaunch({ generation: 1 });
     expect(result).toEqual({ sent: true, downMs: 15 * 60_000, cause: "crash" });
-    expect(decodeShellWords(second.clawCmd.mock.calls[0][0])[3]).toContain("down for 15 min (13:52–14:07 UTC) after a crash;");
+    expect(JSON.parse(decodeShellWords(second.clawCmd.mock.calls[0][0])[4]).text).toContain("down for 15 min (13:52–14:07 UTC) after a crash;");
 
     const third = makeNote({ stampPath, clock: { value: second.clock.value + 30_000 } });
     expect(await third.note.onGatewayLaunch({ generation: 1 })).toEqual({ sent: false, downMs: 30_000 });
@@ -312,7 +312,7 @@ describe("server/gateway-downtime-note", () => {
     const second = makeNote({ stampPath, clock, readLastDoctorRun: () => doctorRuns[doctorRuns.length - 1] });
     const result = await second.note.onGatewayLaunch({ generation: 1 });
     expect(result).toEqual(expect.objectContaining({ sent: true, cause: "crash" }));
-    expect(decodeShellWords(second.clawCmd.mock.calls[0][0])[3]).toMatch(
+    expect(JSON.parse(decodeShellWords(second.clawCmd.mock.calls[0][0])[4]).text).toMatch(
       / after a crash; .+ AlphaClaw ran during it: 1 restart \(watchdog:repair_replace\), 3 gateway launches, Doctor --fix \(medic, ok\)\.$/,
     );
     expect(second.insertEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -323,7 +323,7 @@ describe("server/gateway-downtime-note", () => {
     second.note.onGatewayExit({ expectedExit: false, generation: 1 });
     second.clock.value += 5 * 60_000;
     await second.note.onGatewayLaunch({ generation: 2 });
-    expect(decodeShellWords(second.clawCmd.mock.calls[1][0])[3]).not.toContain("AlphaClaw ran during it");
+    expect(JSON.parse(decodeShellWords(second.clawCmd.mock.calls[1][0])[4]).text).not.toContain("AlphaClaw ran during it");
   });
 
   it("a server restart with no recorded cause says how long without a cause, and a fresh install says nothing", async () => {
@@ -335,7 +335,7 @@ describe("server/gateway-downtime-note", () => {
 
     const second = makeNote({ stampPath, clock: { value: lastServing + 4 * 60_000 } });
     await second.note.onGatewayLaunch({ generation: 1 });
-    expect(decodeShellWords(second.clawCmd.mock.calls[0][0])[3]).toBe(
+    expect(JSON.parse(decodeShellWords(second.clawCmd.mock.calls[0][0])[4]).text).toBe(
       "The gateway was down for 4 min (13:52–13:56 UTC); messages queued during that time may be stale, and their timestamps show when they were sent.",
     );
 
@@ -356,7 +356,7 @@ describe("server/gateway-downtime-note", () => {
 
     const second = makeNote({ stampPath, bootCause: "unclean_exit", clock: { value: lastServing + 47 * 60_000 } });
     expect(await second.note.onGatewayLaunch({ generation: 1 })).toEqual({ sent: true, downMs: 47 * 60_000, cause: "unclean_exit" });
-    expect(decodeShellWords(second.clawCmd.mock.calls[0][0])[3]).toContain(" after an unclean exit (platform replacement or crash); ");
+    expect(JSON.parse(decodeShellWords(second.clawCmd.mock.calls[0][0])[4]).text).toContain(" after an unclean exit (platform replacement or crash); ");
     expect(logs.at(-1)).toContain("cause=unclean_exit");
 
     const crashed = makeNote({ stampPath, clock: { value: second.clock.value + 30_000 } });

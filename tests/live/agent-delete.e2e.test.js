@@ -303,6 +303,7 @@ describeLive(`LIVE Delete Agent against the ${readDeclaredPin()} pin`, () => {
     const doctor = cliRaw(["doctor", "--fix", "--non-interactive"]);
     const output = doctor.stdout + doctor.stderr;
     expect(doctor.status, output.slice(-2000)).toBe(0);
-    expect(output).not.toMatch(/not a configured target|unavailable while agent|deletion journal|ops2/i);
+    const at = output.search(/not a configured target|unavailable while agent|deletion journal|ops2/i);
+    expect(at, output.slice(Math.max(0, at - 1500), at + 1500)).toBe(-1);
   }, kTestTimeoutMs);
 });

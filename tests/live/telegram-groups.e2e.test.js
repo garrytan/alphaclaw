@@ -206,10 +206,12 @@ describeLive("LIVE Telegram group rules against the " + readDeclaredPin() + " pi
     const { applyGroupGuardEntry } = require("../../lib/server/telegram-group-guard-entry");
     const { config } = ensureManagedOpenclawExecDefaults({
       gateway: { mode: "local", bind: "loopback", port, auth: { mode: "token", token } },
-      // heartbeat.target "none": OpenClaw's first heartbeat alert DMs the
-      // owner (Garry here) at a moment no case controls, and a case that
-      // expects no sends then counts it.
-      agents: { defaults: { workspace, model: { primary: "fixture/fixture" }, heartbeat: { target: "none" } } },
+      // No heartbeat: through 2026.11.4 this set heartbeat.target "none", since
+      // OpenClaw's first heartbeat alert DMs the owner at a moment no case
+      // controls. 2026.11.5 retired the key (its validator refuses it); its
+      // heartbeat is an automation that only explicit setup provisions, and a
+      // gateway start never creates one.
+      agents: { defaults: { workspace, model: { primary: "fixture/fixture" } } },
       models: { providers: { fixture: {
         baseUrl: "http://127.0.0.1:" + model.address().port + "/v1",
         api: "openai-completions",

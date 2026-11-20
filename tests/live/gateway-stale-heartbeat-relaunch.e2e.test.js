@@ -1,21 +1,19 @@
 // LIVE TIER — a gateway that was SIGKILLed in another container (a killed
 // deploy, an OOM kill, a SIGKILL from the stop ladder under tini) leaves
-// OpenClaw's state-ownership heartbeat fresh for up to 90 s. On 2026.10.7 the
-// next container's `gateway run` refuses at once with GatewayLockNamespaceError
-// ("Cannot read shared state for discovery: … cannot verify Gateway ownership
-// from this process (different PID namespace) … wait N s and retry") and exits
-// 1, and before v0.10.137 the watchdog held the relaunch for the gateway-owner
-// lease's recorded expiry (up to 300 s; a GitHub runner saw the gateway stay
-// down for more than 3 minutes). This test kills a real AlphaClaw + gateway
-// running in their own PID namespace (the container stand-in: `unshare -p`,
-// killing its init kills everything in it), immediately boots a fresh
-// AlphaClaw on the same root in this namespace, and requires: the refusal
-// happened, the boot showed the lock_wait step instead of failing, the
-// watchdog relaunched once, no earlier than the heartbeat's lapse and within a
-// few seconds of it, and /readyz answered ready within the heartbeat window
-// plus a cold-boot margin. The heartbeat's lapse is taken from upstream's
-// own refusal ("last renewed S s ago"); OpenClaw's lock files are never read
-// or touched.
+// OpenClaw's state-ownership heartbeat fresh for up to 90 s. Through
+// 2026.11.4 the next container's `gateway run` refused with
+// GatewayLockNamespaceError until the heartbeat lapsed and the watchdog
+// relaunched it; 2026.11.5+ never retires a holder in another PID namespace
+// by itself, so AlphaClaw's lock recovery (openclaw-lock-recovery.js) waits
+// out the heartbeat before the launch and has OpenClaw's own recover-lock
+// remove the dead gateway's records. This test kills a real AlphaClaw +
+// gateway running in their own PID namespace (the container stand-in:
+// `unshare -p`, killing its init kills everything in it), immediately boots
+// a fresh AlphaClaw on the same root in this namespace, and requires: the
+// recovery waited for the heartbeat to lapse and removed the records within a
+// few seconds of it, the first launch got through with no watchdog relaunch,
+// and /readyz answered ready within the heartbeat window plus a cold-boot
+// margin.
 // Requires: Node 24.22.1+/26.12.1+ first on PATH, the pinned OpenClaw in
 // node_modules, and unprivileged user + PID namespaces (`unshare -U
 // --map-current-user -pf --mount-proc`, util-linux 2.38+). Without them the
@@ -44,6 +42,8 @@ const kHeartbeatStaleMs = 90_000;
 // The watchdog relaunches at upstream's countdown plus a 2 s margin; allow a
 // little scheduling slack on a loaded runner.
 const kRelaunchSlackMs = 8_000;
+// The recovery runs two recover-lock CLI calls after the wait.
+const kRecoverySlackMs = 20_000;
 // A cold `gateway run` to /readyz ready after the relaunch (about 20 s on a
 // 4-core machine).
 const kColdBootMarginMs = 60_000;
@@ -92,7 +92,8 @@ const portOpen = (port) =>
 
 // Upstream's own statement of the heartbeat it judged, in the refusal:
 // "last renewed S s ago. wait N s and retry" (describeGatewayLockHolder).
-const kRefusalHeartbeatPattern = /last renewed (\d+) s ago\. wait \d+ s and retry/;
+const kLockWaitPattern = /gateway lock recovery \(managed launch\): a gateway from another container holds the state locks; waiting (\d+) s for its heartbeat to lapse/;
+const kLockRemovedPattern = /gateway lock recovery \(managed launch\): removed \d+ record\(s\) of a stopped gateway from another container \(holder [^)]*?last renewed (\d+) s ago/;
 
 // sink: { at, text } per output chunk, so a line's arrival time is known.
 // OpenClaw's state-owner lock is present (existence only; never opened or
@@ -250,32 +251,31 @@ describeLive(`LIVE relaunch after a SIGKILLed gateway in another PID namespace (
     const nextText = logText(nextLog);
     const tail = nextText.slice(-2_000);
 
-    // The scenario really ran: upstream refused the fresh gateway on the fresh heartbeat.
-    expect(nextText, tail).toMatch(/GatewayLockNamespaceError: cannot verify Gateway ownership from this process \(different PID namespace\)/);
-    const refusal = nextLog.find((chunk) => kRefusalHeartbeatPattern.test(chunk.text));
-    expect(refusal, tail).toBeTruthy();
-    // S is floored: the last beat was between S and S + 1 seconds before the line arrived.
-    const renewedAgoMs = Number(refusal.text.match(kRefusalHeartbeatPattern)[1]) * 1000;
-    const lapseAt = refusal.at - renewedAgoMs + kHeartbeatStaleMs;
+    // The scenario really ran: the fresh container found the dead gateway's
+    // locks with a fresh heartbeat. OpenClaw 2026.11.5+ never retires a holder
+    // in another PID namespace by itself, so AlphaClaw's lock recovery waits
+    // out the heartbeat before the launch, then has OpenClaw remove the
+    // records (openclaw-lock-recovery.js).
+    const waiting = nextLog.find((chunk) => kLockWaitPattern.test(chunk.text));
+    expect(waiting, tail).toBeTruthy();
+    const lapseAt = waiting.at + Number(waiting.text.match(kLockWaitPattern)[1]) * 1000;
+    const removed = nextLog.find((chunk) => kLockRemovedPattern.test(chunk.text));
+    expect(removed, tail).toBeTruthy();
+    expect(Number(removed.text.match(kLockRemovedPattern)[1]) * 1000).toBeGreaterThanOrEqual(kHeartbeatStaleMs);
+    expect(removed.at).toBeGreaterThanOrEqual(lapseAt - 1_000);
+    expect(removed.at - lapseAt).toBeLessThanOrEqual(kRecoverySlackMs);
+    expect(nextText).not.toMatch(/GatewayLockNamespaceError/);
     expect(readyAt, `no /readyz ready within ${Math.round((deadline + 30_000 - killedAt) / 1000)} s of the kill; log tail: ${tail}`).not.toBeNull();
     expect(readyAt - killedAt, tail).toBeLessThanOrEqual(kHeartbeatStaleMs + kColdBootMarginMs);
-    // The waiting step was visible while the watchdog waited.
-    expect(lockWaits.length, tail).toBeGreaterThan(0);
-    expect(lockWaits[0].lockWait).toMatchObject({ kind: "owner_lease_held" });
-    expect(Math.abs(lockWaits[0].lockWait.untilMs - lapseAt)).toBeLessThanOrEqual(kRelaunchSlackMs);
     expect(nextText).not.toMatch(/boot timeline ended: failed/);
 
-    // Exactly one relaunch, never before the heartbeat lapsed (no forcing past
-    // OpenClaw's lock), and promptly after it (not at the lease's expiry).
+    // The first launch got through: the watchdog never had to relaunch.
     const db = new DatabaseSync(path.join(rootDir, "db", "watchdog.db"), { readOnly: true });
     const relaunches = db
       .prepare("SELECT created_at FROM watchdog_events WHERE event_type = 'restart' AND source = 'owner_lease_held' AND status = 'requested' ORDER BY id")
       .all();
     db.close();
-    expect(relaunches).toHaveLength(1);
-    const relaunchAt = Date.parse(relaunches[0].created_at);
-    expect(relaunchAt).toBeGreaterThanOrEqual(lapseAt - 1_000);
-    expect(relaunchAt - lapseAt).toBeLessThanOrEqual(kRelaunchSlackMs);
+    expect(relaunches).toHaveLength(0);
 
     await waitFor(() => /boot timeline ended: ready/.test(logText(nextLog)), 60_000, "the boot timeline to end ready");
   }, 12 * 60_000);

@@ -1,6 +1,6 @@
 {
   "name": "alphaclaw",
-  "version": "0.10.319",
+  "version": "0.10.320",
   "publishConfig": {
     "access": "public"
   },
@@ -46,7 +46,7 @@
     "express": "^4.22.3",
     "http-proxy-3": "1.20.10",
     "lil-http-terminator": "1.2.3",
-    "openclaw": "2026.11.4",
+    "openclaw": "2026.11.6",
     "tar": "7.5.22",
     "ws": "^8.19.0"
   },

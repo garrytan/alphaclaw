@@ -63,6 +63,7 @@
         "tests/live/control-ui-hostnames.e2e.test.js",
         "tests/live/control-ui-styles.e2e.test.js",
         "tests/live/doctor-report-contract.e2e.test.js",
+        "tests/live/doctor-resumed-turn.e2e.test.js",
         "tests/live/gateway-public-client-locality.e2e.test.js",
         "tests/live/gateway-restart-ask-outcome.e2e.test.js",
         "tests/live/gateway-stale-heartbeat-relaunch.e2e.test.js",

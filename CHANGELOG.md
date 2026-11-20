@@ -5,6 +5,30 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.320] - 2026-11-20
+
+AlphaClaw now runs OpenClaw 2026.11.6. Its first boot migrates OpenClaw's data one way (state schema 22 to 36, agent schema 27 to 38), and AlphaClaw handles what changed with it so the box keeps starting by itself.
+
+### Changed
+- The OpenClaw pin moves from 2026.11.4 to 2026.11.6. Its first boot's Doctor migrates the state database from schema 22 to 36 and each agent database from 27 to 38, and 2026.11.4 cannot read the result. The README's OpenClaw Version section has the backup advice and the way back (the `*.pre-startup-migration-*.bak` databases plus `.alphaclaw/openclaw.json.pre-2026.11.5`).
+
+### Fixed
+- After a container exits uncleanly (killed, out of memory, host lost), OpenClaw 2026.11.6 no longer lets the next container take over the dead gateway's state locks after 90 seconds as 2026.11.4 did: its gateway waited 95 seconds and exited 1 on every start, and Doctor could not run, until someone ran `openclaw gateway recover-lock` by hand. Before each gateway launch and each Doctor run, AlphaClaw now waits until every lock holder from another host or PID namespace has missed 90 seconds of heartbeats, then runs OpenClaw's own `recover-lock` inspection and confirms the exact fingerprint it printed. A holder in AlphaClaw's own container is left to OpenClaw, and a launch with no lock files runs no extra command.
+- OpenClaw 2026.11.6's Doctor stops before migrating anything when the state directory carries the setgid bit, as a fresh one under a 2775 `/data` does ("Failed migrating daemon runtime pins: FsSafeError: created directory admission failed"). AlphaClaw clears only that bit on the state directory before each Doctor run; 2026.11.4's Doctor cleared it by tightening the directory to 0700.
+- The shared auth store (sign-ins and model keys) was refused as too new on 2026.11.6's state schema 36. AlphaClaw now reads schemas 12 to 36; the auth rows themselves did not change.
+- Cron run history answered "unavailable" on 2026.11.6, which replaced the task-run index AlphaClaw required with a partial index on cron runs. Both shapes are accepted.
+- Doctor's renamed "Pre-repair recovery copy was unavailable" line is recognized, so a missing pre-repair copy is recorded and shown as before.
+- Adding a second agent no longer leaves openclaw.json invalid. When a roster grew past one agent, AlphaClaw handed the first agent the heartbeat (`agents.defaults.heartbeat`), as OpenClaw's Doctor did up to 2026.11.4; 2026.11.5 retired that key into automations and refuses it. AlphaClaw now hands over the system agent, Talk, the session store, channel bindings and the inherited sign-ins, as 2026.11.5's Doctor does.
+- The relay guard's list of tools a delegate may use follows 2026.11.6's tool catalog, which dropped `structured_output`; the name stays allowed for a deployment that holds 2026.11.4.
+- After a crash or a SIGKILL (an out-of-memory kill, the restart ladder's last step), the owner gets one notice per relaunch naming the sessions whose running turn was lost. OpenClaw 2026.11.5+ resumes running turns by itself after a clean restart, retired `sessions.recover`, and drops a turn by design when the gateway is killed. The post-relaunch check now only reads `sessions.list` for turns that started before the launch and never ended; it no longer records sessions before a restart, waits on OpenClaw's recovery log lines or calls `sessions.recover`.
+- The two background-command notices ("The gateway restart stopped N commands…", "…finished while the gateway was restarting, but OpenClaw refused to deliver the result") are gone: on 2026.11.5+ OpenClaw resumes such a session itself and tells the agent the background command was stopped.
+- The downtime note reaches the agent again on 2026.11.6. It went through `openclaw system event --mode next-heartbeat`, which 2026.11.5 turned into a hand-off to the next scheduled main-session automation and refuses when there is none ("No enabled ordinary scheduled session job can receive this wake"); it now uses the gateway's `system-event` call without a wake, which queues the note for the next main-session turn as before.
+- Opening a chat right after its first message no longer shows an error: 2026.11.6 answers that history read with "Session access facts are unavailable; retry after session storage is ready" and marks it not retryable, so the chat bridge retries it once like other refusals that ran nothing.
+- Reloading the Control UI or opening it in a new tab works again on 2026.11.6. Its service worker now fetches every page load itself, so AlphaClaw saw an ordinary request instead of a page load. The tab never picked up its gateway token, and a signed-out tab showed an error instead of the login page. AlphaClaw now recognizes the worker's page load by its full set of request headers; a script's own request and every asset are treated as before.
+- The model check knows 2026.11.6's new built-in provider `requesty`, so a `requesty` entry without a base URL is reported as not checked instead of as missing its URL.
+- A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
+- Doctor's recovery-copy manifest is still read when 2026.11.6 prints it; a default 2026.11.6 run logs it at debug level only, so the copy's size goes unmeasured there.
+
 ## [0.10.319] - 2026-11-20
 
 The relay guard now finds an agent's workspace the way OpenClaw does when the config pulls it in from another file.
