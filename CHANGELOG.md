@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.319] - 2026-11-20
+
+The relay guard now finds an agent's workspace the way OpenClaw does when the config pulls it in from another file.
+
+### Fixed
+- A relative path in a relay turn's write, edit or patch lands in the agent's workspace. The relay guard read that workspace from `openclaw.json` as written, so a workspace set in a file the config pulls in with `$include` was missed, and a relative write there was judged against the wrong folder. The guard now resolves each live config's `$include` graph, as it already does for the agent folder behind learned skills, and still reads the workspace the file sets inline, so a broken include elsewhere never hides it. A relative write into an included workspace inside the relay's trust anchor is now refused.
+
 ## [0.10.318] - 2026-11-19
 
 The owner's own Capy thread can now edit the box's learned skills over Agent Relay, as the owner can.
