@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.319] - 2026-11-19
+## [0.10.320] - 2026-11-20
 
 AlphaClaw now runs OpenClaw 2026.11.6. Its first boot migrates OpenClaw's data one way (state schema 22 to 36, agent schema 27 to 38), and AlphaClaw handles what changed with it so the box keeps starting by itself.
 
@@ -27,6 +27,13 @@ AlphaClaw now runs OpenClaw 2026.11.6. Its first boot migrates OpenClaw's data o
 - Reloading the Control UI or opening it in a new tab works again on 2026.11.6. Its service worker now fetches every page load itself, so AlphaClaw saw an ordinary request instead of a page load: the tab never picked up its gateway token, and a signed-out tab showed an error instead of the login page. AlphaClaw now recognizes the worker's page load by its full set of request headers; a script's own request and every asset are treated as before.
 - The model check knows 2026.11.6's new built-in provider `requesty`, so a `requesty` entry without a base URL is reported as not checked instead of as missing its URL.
 - Doctor's recovery-copy manifest is still read when 2026.11.6 prints it; a default 2026.11.6 run logs it at debug level only, so the copy's size goes unmeasured there.
+
+## [0.10.319] - 2026-11-20
+
+The relay guard now finds an agent's workspace the way OpenClaw does when the config pulls it in from another file.
+
+### Fixed
+- A relative path in a relay turn's write, edit or patch lands in the agent's workspace. The relay guard read that workspace from `openclaw.json` as written, so a workspace set in a file the config pulls in with `$include` was missed, and a relative write there was judged against the wrong folder. The guard now resolves each live config's `$include` graph, as it already does for the agent folder behind learned skills, and still reads the workspace the file sets inline, so a broken include elsewhere never hides it. A relative write into an included workspace inside the relay's trust anchor is now refused.
 
 ## [0.10.318] - 2026-11-19
 
