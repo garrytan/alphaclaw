@@ -50,7 +50,7 @@ const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restar
 const kModelFixtureSource = String.raw`
 const http = require("http");
 const textOf = (c) => typeof c === "string" ? c : Array.isArray(c) ? c.map((p) => (p && p.text) || "").join(" ") : "";
-const recoveryNote = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work/i;
+const recoveryNote = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work|The Gateway restarted while you were working/i;
 const server = http.createServer((req, res) => {
   let body = "";
   req.on("data", (chunk) => (body += chunk));
@@ -304,6 +304,16 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
     await killHard(alphaclaw);
     model?.kill("SIGKILL");
   });
+
+  // A case that fails after its next boot leaves that AlphaClaw serving the
+  // shared root, and the next case (or the retry) would be refused as a second
+  // instance. Stop it the way a deploy does before moving on.
+  afterEach(async () => {
+    if (!alphaclaw || alphaclaw.exitCode !== null || alphaclaw.signalCode !== null) return;
+    alphaclaw.kill("SIGTERM");
+    await Promise.race([alphaclaw.exited, new Promise((resolve) => setTimeout(resolve, 60_000))]);
+    await killHard(alphaclaw);
+  }, 90_000);
 
   it("the floor budget (10 s) has no room for the ask: AlphaClaw signals the gateway directly and still exits inside the budget", async () => {
     const log = [];
