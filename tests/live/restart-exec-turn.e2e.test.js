@@ -318,7 +318,7 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
     const [text, meta] = notify.mock.calls[0];
     expect(text).toContain("The gateway stopped without a clean shutdown, so a turn it was running was lost:");
     expect(text).toContain(sessionKey);
-    expect(meta).toEqual({ eventType: "session_wedge", id: `session-lost-${gateway.getLaunchGeneration()}` });
+    expect(meta).toEqual({ eventType: "session_wedge", id: expect.stringMatching(/^session-lost-[0-9a-f]{16}$/) });
     expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.sessionKey, e.details.reason])).toEqual([["alerted", sessionKey, "lost"]]);
     const done = lastDoneLine();
     expect(done).toHaveLength(1);

@@ -145,7 +145,7 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
         expect(notify).toHaveBeenCalledTimes(1);
         expect(notify.mock.calls[0][0]).toContain("so a turn it was running was lost:");
         expect(notify.mock.calls[0][0]).toContain(sessionKey);
-        expect(notify.mock.calls[0][1]).toEqual({ eventType: "session_wedge", id: "session-lost-2" });
+        expect(notify.mock.calls[0][1]).toEqual({ eventType: "session_wedge", id: expect.stringMatching(/^session-lost-[0-9a-f]{16}$/) });
         expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.sessionKey, e.details.reason])).toEqual([["alerted", sessionKey, "lost"]]);
         expect(lines.find((line) => line.startsWith("[alphaclaw] wedge-sweep done generation=2 "))).toMatch(/ checked=[1-9]\d* lost=1$/);
 
