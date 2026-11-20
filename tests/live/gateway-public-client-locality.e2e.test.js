@@ -149,7 +149,12 @@ describeLive("live: sessionless clients through AlphaClaw are remote to the gate
   itLive("a new operator device or node with the gateway token waits for the owner's approval", async () => {
     const operator = await viaPublic({ device: newDevice(), auth: { token: kGatewayToken }, scopes: kAdminScopes });
     expect(operator.connect).toMatchObject({ ok: false, code: "NOT_PAIRED", detailCode: "PAIRING_REQUIRED" });
-    const node = await viaPublic({ clientId: "node-host", clientMode: "node", role: "node", device: newDevice(), auth: { token: kGatewayToken } });
+    const nodeDevice = newDevice();
+    let node = null;
+    for (const deadline = Date.now() + 30_000; ; await new Promise((resolve) => setTimeout(resolve, 1_000))) {
+      node = await viaPublic({ clientId: "node-host", clientMode: "node", role: "node", device: nodeDevice, auth: { token: kGatewayToken } });
+      if (node.connect?.code !== "UNAVAILABLE" || Date.now() > deadline) break;
+    }
     expect(node.connect, JSON.stringify(node.connect)).toMatchObject({ ok: false, code: "NOT_PAIRED", detailCode: "PAIRING_REQUIRED" });
   }, 60_000);
 
