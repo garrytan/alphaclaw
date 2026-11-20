@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { setup } = require("./helpers/relay-attested-harness");
+const { setup, expectProgramsRefused } = require("./helpers/relay-attested-harness");
 
 // GST-2336: the trust anchor is checked for every delegate tier, and no relay
 // session reads the relay's keys or databases.
@@ -70,6 +70,13 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ["a note in the workspace", "exec", { command: "echo done >> memory/notes.md" }],
     ["a secrets.json outside relay", "exec", { command: "cat /tmp/app/secrets.json" }],
   ];
+  // A delegate that is not the owner's own thread runs no programs
+  // (GST-2661), so its ordinary calls are the file tools.
+  const ordinaryFiles = (relay) => [
+    ["ls of the relay directory", "ls", { path: relay }],
+    ["a secrets.json outside relay", "read", { path: "/tmp/app/secrets.json" }],
+    ["a note in the workspace", "write", { path: path.join(path.dirname(relay), ".openclaw", "workspace", "memory", "notes.md"), content: "done" }],
+  ];
 
   it("refuses an unattested delegate's reads of the relay's keys and databases outright, with no row and no notice", async () => {
     ctx = setup();
@@ -107,20 +114,22 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
   it("holds an unattested delegate's low-rated change to AlphaClaw's installed code for the tap, and an approval admits that one call once", async () => {
     ctx = setup();
     const repoRoot = path.resolve(__dirname, "..", "..");
-    const params = { command: "touch x", workdir: path.join(repoRoot, "lib") };
+    const params = { path: path.join(repoRoot, "lib", "x.md"), content: "x" };
     const { agent } = ctx.oauthDelegate();
     const first = await ctx.deliver(agent);
-    const held = await ctx.call(first, "exec", params);
-    expect(held.blockReason).toContain("run a command inside AlphaClaw's relay or install files needs your owner's confirmation");
+    // The same change as a command is refused outright: no program runs.
+    expectProgramsRefused(ctx, first, "exec", { command: "touch x", workdir: path.join(repoRoot, "lib") });
+    const held = await ctx.call(first, "write", params);
+    expect(held.blockReason).toContain("needs your owner's confirmation");
     const ref = /rc_[a-f0-9]{16}/.exec(held.blockReason)[0];
     expect(ctx.confirmationCount()).toBe(1);
     ctx.confirmations.tick();
     expect(ctx.bridgeStore.confirmations.decide(ref, { state: "confirmed", by: "owner", expiresAt: ctx.clock.now + 600000 })).toBe(true);
     const retry = await ctx.deliver(agent, { relay_generation: 1, relay_route: "public", relay_confirmation_ref: ref });
-    expect(await ctx.call(retry, "exec", { command: "touch y", workdir: params.workdir })).toMatchObject({ block: true });
-    expect(await ctx.call(retry, "exec", params)).toEqual({});
+    expect(await ctx.call(retry, "write", { ...params, path: path.join(repoRoot, "lib", "y.md") })).toMatchObject({ block: true });
+    expect(await ctx.call(retry, "write", params)).toEqual({});
     expect(ctx.bridgeStore.confirmations.get(ref)).toMatchObject({ state: "spent" });
-    expect((await ctx.call(retry, "exec", params)).block).toBe(true);
+    expect((await ctx.call(retry, "write", params)).block).toBe(true);
   });
 
   it("refuses the same changes outright for the owner's attested thread", async () => {
@@ -134,9 +143,10 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
   it("still runs ordinary calls for both tiers with no row and no notice", async () => {
     ctx = setup();
     const relay = path.join(ctx.rootDir, "relay");
-    for (const run of [await ctx.deliver(ctx.oauthDelegate().agent), await ctx.deliver((await ctx.attestedAgent()).agent)]) {
-      for (const [label, tool, params] of ordinary(relay)) expect(await ctx.call(run, tool, params), label).toEqual({});
-    }
+    const unattested = await ctx.deliver(ctx.oauthDelegate().agent);
+    const owner = await ctx.deliver((await ctx.attestedAgent()).agent);
+    for (const [label, tool, params] of ordinaryFiles(relay)) expect(await ctx.call(unattested, tool, params), label).toEqual({});
+    for (const [label, tool, params] of [...ordinary(relay), ...ordinaryFiles(relay)]) expect(await ctx.call(owner, tool, params), label).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
     ctx.confirmations.tick();
     expect(ctx.notices).toEqual([]);

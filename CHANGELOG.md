@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.320] - 2026-11-20
+
+A relay delegate that is not the owner's own Capy thread can no longer run commands on the box, so it can't start an unchecked turn in the box's main session.
+
+### Security
+- A delegate connected through the plain Capy connector, or one another person owns, kept `exec`. A command such as `openclaw agent --session-key agent:main:main`, `openclaw cron add` or `openclaw gateway call agent` started a turn outside the relay session, which the relay guard never checks, so the delegate reached the box's full agent with no relay policy and no confirmation. Holding those commands by their text was tried and got around with quoting, exec's `env`, a bare session key or a script. The guard now refuses `exec` and `process` outright for any delegate that is not the owner's own thread (attested or pinned), with no confirmation and no notice, deciding only from the relay's own records. The operator's extra delegate tool list can't add them back. The owner's own threads keep `exec` exactly as before, the owner's own turns are unchanged, and peers stay messaging-only. Such a delegate keeps its file, web and memory tools, and its high-risk file writes still wait for the owner's tap.
+
 ## [0.10.319] - 2026-11-20
 
 The relay guard now finds an agent's workspace the way OpenClaw does when the config pulls it in from another file.

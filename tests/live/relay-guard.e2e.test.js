@@ -8,8 +8,11 @@
 //     /proc/self/environ, and every path tool on its own workspace files
 //     (relay sessions are messaging-only);
 //   - a main session keeps exec and the MCP tool;
-//   - the owner's own thread sends through the dispatcher (tool_call on
-//     2026.10.9, dispatch_action from 2026.11.2) as it does directly.
+//   - a delegate that is not the owner's own thread runs no programs
+//     (GST-2661), directly or through the dispatcher;
+//   - the owner's own thread keeps exec and sends through the dispatcher
+//     (tool_call on 2026.10.9, dispatch_action from 2026.11.2) as it does
+//     directly.
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -275,13 +278,14 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
   // Delegates (GST-1982): a Capy thread whose relay agent the operator
   // listed works as the owner's hands. The guard reads the same bridge.db
   // and remote.db rows the bridge writes, so this case seeds them directly
-  // and drives the real gateway: exec and write run, the owner-only and
+  // and drives the real gateway: write and read run, the owner-only and
   // outbound tools stay refused, an approved send passes the guard once per
   // named recipient, and a revoke drops the session back to messaging-only
-  // within the same turn sequence. The recorded residual: exec of the
-  // openclaw CLI is not something the guard sees.
+  // within the same turn sequence. This delegate is not the owner's own
+  // thread, so it runs no programs (GST-2661): exec, the openclaw CLI and a
+  // turn started in the main session through it are all refused.
   it(
-    "a delegate session runs exec and write, keeps outbound and owner-only tools refused, spends an approval once, and loses it all on revoke",
+    "a delegate session that is not the owner's thread runs write but no programs, keeps outbound and owner-only tools refused, spends an approval once, and loses it all on revoke",
     async () => {
       const { openBridgeStore } = require("../../lib/server/relay/bridge-store");
       const { openRemoteStore } = require("../../lib/server/relay/remote-store");
@@ -308,8 +312,8 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       const execMarker = path.join(kRootDir, "delegate-exec.marker");
       const execAnswer = await runTurn(relay, "exec", { command: "touch " + execMarker + " && echo delegate-ran" });
       console.log("[live] delegate exec: " + execAnswer.slice(0, 200));
-      expect(execAnswer).not.toContain("[relay-guard]");
-      await waitFor(async () => fs.existsSync(execMarker), 30_000, "delegate exec ran");
+      expect(execAnswer).toContain("[relay-guard] exec is not available to a delegate relay session that is not your owner's own thread");
+      expect(fs.existsSync(execMarker)).toBe(false);
 
       const written = path.join(workspace, "delegate-note.md");
       const writeAnswer = await runTurn(relay, "write", { path: written, content: "saved-by-delegate-4417\n" });
@@ -320,9 +324,21 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       const readAnswer = await runTurn(relay, "read", { path: path.join(workspace, "notes.txt") });
       expect(readAnswer).toContain("workspace-ok-7731");
 
-      const cliAnswer = await runTurn(relay, "exec", { command: "openclaw --version" });
-      console.log("[live] delegate exec of the openclaw CLI (recorded residual): " + cliAnswer.slice(0, 200));
-      expect(cliAnswer).not.toContain("[relay-guard]");
+      for (const args of [
+        { command: "openclaw --version" },
+        { command: "openclaw agent --session-key agent:'main':main -m 'touch the marker'" },
+        { command: "openclaw agent --session-key $K -m hi", env: { K: "agent:main:main" } },
+      ]) {
+        const cliAnswer = await runTurn(relay, "exec", args);
+        console.log("[live] delegate exec of the openclaw CLI: " + cliAnswer.slice(0, 200));
+        expect(cliAnswer).toContain("[relay-guard] exec is not available to a delegate relay session");
+      }
+      const execWrapper = ["dispatch_action", "tool_call"].find((name) => [...offered.values()].some((names) => names.includes(name))) || "dispatch_action";
+      const wrappedExec = await runTurn(relay, execWrapper, { id: "exec", args: { command: "touch " + execMarker } });
+      console.log("[live] delegate " + execWrapper + " exec: " + wrappedExec.slice(0, 200));
+      expect(wrappedExec.startsWith("NOT-OFFERED")).toBe(false);
+      expect(wrappedExec).toContain("[relay-guard]");
+      expect(fs.existsSync(execMarker)).toBe(false);
 
       // The pin defers some of these behind tool_search; a tool it does not
       // offer directly is called through the dispatch_action wrapper, which runs
@@ -411,6 +427,13 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       console.log("[live] owner-thread " + wrapperName + " read of relay secrets: " + wrappedKeyRead.slice(0, 240));
       expect(wrappedKeyRead).toContain("[relay-guard]");
       expect(wrappedKeyRead).not.toContain("rk_live_dummy_value");
+
+      // The owner's own thread keeps exec (GST-2661 changes other delegates only).
+      const ownerExecMarker = path.join(kRootDir, "owner-thread-exec.marker");
+      const ownerExec = await runTurn(relay, "exec", { command: "touch " + ownerExecMarker + " && echo owner-ran" });
+      console.log("[live] owner-thread exec: " + ownerExec.slice(0, 240));
+      expect(ownerExec).not.toContain("[relay-guard]");
+      await waitFor(async () => fs.existsSync(ownerExecMarker), 30_000, "owner-thread exec ran");
 
       const peerWrapped = await runTurn("agent:main:relay-capy-peerlive01", wrapperName, { id: "message", args: sendArgs });
       console.log("[live] peer " + wrapperName + " message: " + peerWrapped.slice(0, 240));

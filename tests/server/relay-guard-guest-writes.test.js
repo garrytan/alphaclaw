@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { setup } = require("./helpers/relay-attested-harness");
+const { setup, expectProgramsRefused } = require("./helpers/relay-attested-harness");
 
 // GST-2662: the guest notes broker's files (<root>/guest-writes: the
 // loopback routes' secret, the gbrain OAuth client, the claims database) are
@@ -102,9 +102,18 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
   it("still runs a listing and ordinary calls for both tiers", async () => {
     ctx = setup();
     const dir = brokerDir(ctx);
-    for (const run of [await ctx.deliver(ctx.oauthDelegate().agent), await ctx.deliver((await ctx.attestedAgent()).agent)]) {
-      for (const [label, tool, params] of ordinary(dir)) expect(await ctx.call(run, tool, params), label).toEqual({});
-    }
+    const unattested = await ctx.deliver(ctx.oauthDelegate().agent);
+    const owner = await ctx.deliver((await ctx.attestedAgent()).agent);
+    // A delegate that is not the owner's own thread runs no programs
+    // (GST-2661); its listing and ordinary calls are the file tools.
+    const files = [
+      ["ls of the broker directory", "ls", { path: dir }],
+      ["a broker-client.json outside guest-writes", "read", { path: "/tmp/app/broker-client.json" }],
+      ["a note in the workspace", "write", { path: path.join(ctx.rootDir, ".openclaw", "workspace", "memory", "notes.md"), content: "done" }],
+    ];
+    for (const [label, tool, params] of files) expect(await ctx.call(unattested, tool, params), label).toEqual({});
+    for (const [label, tool, params] of ordinary(dir)) expectProgramsRefused(ctx, unattested, tool, params, label);
+    for (const [label, tool, params] of [...ordinary(dir), ...files]) expect(await ctx.call(owner, tool, params), label).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
   });
 });

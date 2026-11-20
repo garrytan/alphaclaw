@@ -589,7 +589,7 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
     expect(box.call(first, "write", { path: configPath(), content: "{}" }).blockReason).toContain("is waiting for your owner's confirmation " + ref);
     // Low-risk work in the same turn is untouched.
     expect(box.call(first, "write", { path: path.join(box.rootDir, "notes.md"), content: "x" })).toEqual({});
-    expect(box.call(first, "exec", { command: "ls" })).toEqual({});
+    expect(box.call(first, "ls", { path: box.rootDir })).toEqual({});
 
     box.confirmations.tick();
     box.confirmations.tick();
@@ -699,20 +699,21 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
   it("a confirmation admits nothing for another target, another generation or another lane's message", async () => {
     box = makeBox();
     const first = box.running({ lane: "gbrain" });
-    const ref = refOf(box.call(first, "exec", { command: "openclaw config set gateway.bind lan" }));
+    const change = { path: configPath(), content: "{}" };
+    const ref = refOf(box.call(first, "write", change));
     box.confirmations.tick();
     await approve(box.notices[0]);
 
     const otherTarget = box.running({ lane: "gbrain", confirmationRef: ref });
-    expect(box.call(otherTarget, "exec", { command: "openclaw config set gateway.auth.mode none" }).block).toBe(true);
+    expect(box.call(otherTarget, "write", { path: path.join(box.rootDir, ".env"), content: "A=1" }).block).toBe(true);
     const otherGeneration = box.running({ lane: "gbrain", generation: 2, confirmationRef: ref });
-    expect(box.call(otherGeneration, "exec", { command: "openclaw config set gateway.bind lan" }).block).toBe(true);
+    expect(box.call(otherGeneration, "write", change).block).toBe(true);
     const otherLane = box.running({ lane: "evals" });
-    expect(box.call(otherLane, "exec", { command: "openclaw config set gateway.bind lan" }).block).toBe(true);
+    expect(box.call(otherLane, "write", change).block).toBe(true);
     expect(box.bridge.confirmations.get(ref).state).toBe("confirmed");
     // The message that carries the ref, on its own lane, still spends it.
     const retry = box.running({ lane: "gbrain", confirmationRef: ref });
-    expect(box.call(retry, "exec", { command: "openclaw config set gateway.bind lan" })).toEqual({});
+    expect(box.call(retry, "write", change)).toEqual({});
   });
 
   it("Deny tells the sender and refuses the retry", async () => {
@@ -769,9 +770,20 @@ describe("relay confirmations: the guard, the owner's link and the retry", () =>
   it("the owner's message names the action and key, never the value or the message text", () => {
     box = makeBox();
     const run = box.running();
-    box.call(run, "exec", { command: "openclaw secrets set OPENAI_API_KEY sk-live-abc123def456" });
+    const command = { command: "openclaw secrets set OPENAI_API_KEY sk-live-abc123def456" };
+    // The action a notice names is the classifier's: the key, never the value.
+    expect(classifyRisk({ toolName: "exec", params: command, rootDir: box.rootDir }).action).toContain("openclaw secrets set OPENAI_API_KEY");
+    expect(JSON.stringify(classifyRisk({ toolName: "exec", params: command, rootDir: box.rootDir }))).not.toContain("sk-live");
+    // This delegate is not the owner's own thread, so the command runs no
+    // program and asks nothing (GST-2661); a write of the value is held, and
+    // its notice names the file only.
+    const refused = box.call(run, "exec", command);
+    expect(refused.blockReason).toContain("exec is not available to a delegate relay session that is not your owner's own thread");
+    expect(refused.blockReason).not.toContain("sk-live");
+    box.call(run, "edit", { path: path.join(box.rootDir, ".env"), old_string: "OPENAI_API_KEY=", new_string: "OPENAI_API_KEY=sk-live-abc123def456" });
     box.confirmations.tick();
-    expect(box.notices[0].text).toContain("openclaw secrets set OPENAI_API_KEY");
+    expect(box.notices).toHaveLength(1);
+    expect(box.notices[0].text).toContain("edit .env");
     expect(box.notices[0].text).not.toContain("sk-live");
     expect(JSON.stringify(box.bridge.confirmations.listOpen())).not.toContain("sk-live");
   });

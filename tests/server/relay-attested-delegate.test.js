@@ -50,6 +50,7 @@ const {
   setup,
   expectHeld,
   expectHeldWithTap,
+  expectProgramsRefused,
 } = require("./helpers/relay-attested-harness");
 
 describe("relay attested delegates (GST-2323): no owner taps for the owner's attested threads", () => {
@@ -339,11 +340,13 @@ describe("relay attested delegates (GST-2323): the trust anchor is refused outri
     const run = await ctx.deliver(agent);
     for (const [label, toolName, params] of [
       ["relay dir: remote.db", "write", { path: path.join(ctx.rootDir, "relay", "remote.db"), content: "x" }],
-      ["guard: openclaw plugins disable", "exec", { command: "openclaw plugins disable relay-guard" }],
+      ["guard: an edit of the relay guard's entry", "edit", { path: ctx.openclawJson, old_string: '"enabled": true', new_string: '"enabled": false' }],
       ["env: ALPHACLAW_ROOT_DIR in .env", "edit", { path: ctx.dotEnv, old_string: "A=1", new_string: "A=1\nALPHACLAW_ROOT_DIR=/tmp/fake" }],
     ]) {
       expectHeld(ctx.call(run, toolName, params), label);
     }
+    // The same change as a command runs no program at all (GST-2661).
+    expectProgramsRefused(ctx, run, "exec", { command: "openclaw plugins disable relay-guard" });
     expect(ctx.confirmationCount()).toBe(3);
     ctx.confirmations.tick();
     expect(ctx.notices).toHaveLength(3);
@@ -434,7 +437,7 @@ describe("relay attested delegates (GST-2323): nothing the sender sends grants t
     expect(ctx.bridgeStore.get(run.messageId)).toMatchObject({ trust: "delegate", attestedOrg: null, attestedOwner: null });
     expect(ctx.admin.sends[0].message).not.toContain("Capy attestation was verified");
     expectHeld(ctx.call(run, "write", { path: ctx.openclawJson, content: "{}", attested: true, attestedOrg: "org_garry", user: kOwner }));
-    expectHeld(ctx.call({ ctx: { ...run.ctx, attested: true, attestedOrg: "org_garry", owner: kOwner } }, "exec", { command: "openclaw config set gateway.bind lan" }));
+    expectProgramsRefused(ctx, { ctx: { ...run.ctx, attested: true, attestedOrg: "org_garry", owner: kOwner } }, "exec", { command: "openclaw config set gateway.bind lan" });
   });
 
   it("checkConfirmation takes no attestation from its caller", async () => {
