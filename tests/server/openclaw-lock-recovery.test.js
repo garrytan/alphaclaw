@@ -4,6 +4,7 @@ const path = require("node:path");
 const {
   recoverStaleForeignGatewayLock,
   resolveGatewayLockDir,
+  sleepUnlessAborted,
 } = require("../../lib/server/openclaw-lock-recovery");
 
 const current = { host: "box-b", pidNsInode: "4026532999" };
@@ -130,5 +131,21 @@ describe("recovering the state locks of a gateway that died in another container
     fs.writeFileSync(path.join(lockDir, "gateway.state.lock"), "{not json");
     const { runCli } = cli({ holders: [] });
     await expect(run({ runCli })).resolves.toEqual({ status: "skipped", reason: "unreadable" });
+  });
+
+  it("ends the heartbeat wait on an abort, including one that landed before the wait, and leaves no listener", async () => {
+    const aborted = new AbortController();
+    aborted.abort();
+    const started = Date.now();
+    await sleepUnlessAborted(aborted.signal)(60_000);
+    const live = new AbortController();
+    const waiting = sleepUnlessAborted(live.signal)(60_000);
+    live.abort();
+    await waiting;
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const signal = new AbortController().signal;
+    const remove = vi.spyOn(signal, "removeEventListener");
+    await sleepUnlessAborted(signal)(5);
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 });
