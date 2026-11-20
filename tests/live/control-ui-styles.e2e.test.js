@@ -834,18 +834,20 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
 
   // ── Step 5: canary — the detector can still fire ─────────────────────────
   itLive(
-    "5. canary: with fonts blocked (workers off) the banner DOES appear, so a green step 3 means fixed, not detector-never-ran",
+    "5. canary: with the entry stylesheet blocked (workers off) the banner DOES appear, so a green step 3 means fixed, not detector-never-ran",
     async (ctx) => {
       if (!requireBrowser(ctx)) return;
-      // serviceWorkers: "block" — a worker would fetch the fonts itself and
-      // bypass page.route, turning the canary green for the wrong reason.
+      // serviceWorkers: "block" — a worker would fetch the stylesheet itself
+      // and bypass page.route, turning the canary green for the wrong reason.
+      // 2026.11.6's detector reads only the entry stylesheet's sentinel and
+      // ignores failed fonts, themes and plugins, so the canary blocks it.
       const canaryContext = await browser.newContext({ serviceWorkers: "block" });
       try {
         await installPageProbes(canaryContext);
         await canaryContext.addCookies([browserCookie(cookieValue), attachMarkerCookie(attachMarkerValue)]);
         const canaryPage = await canaryContext.newPage();
         const canaryObserved = observePage(canaryPage);
-        await canaryPage.route(`**${kMountPath}/fonts/**`, (route) => route.abort());
+        await canaryPage.route(`**${kMountPath}/assets/*.css`, (route) => route.abort());
         await canaryPage.goto(`${baseUrl}${launchLocation}`, { waitUntil: "load" });
         // The UI first HEAD-probes and reloads itself once per build id, THEN
         // shows the banner on the reloaded page — hence the generous wait.
@@ -860,9 +862,9 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
         expect(await banner.isVisible()).toBe(true);
         expect(
           canaryObserved.failed.some(
-            (f) => pathnameOf(f.url).includes(`${kMountPath}/fonts/`),
+            (f) => f.resourceType === "stylesheet" && pathnameOf(f.url).startsWith(`${kMountPath}/assets/`),
           ),
-          "the canary did not actually block a font request",
+          "the canary did not actually block the entry stylesheet",
         ).toBe(true);
       } finally {
         await canaryContext.close().catch(() => {});
