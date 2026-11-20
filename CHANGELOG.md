@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.318] - 2026-11-19
+
+The owner's own Capy thread can now edit the box's learned skills over Agent Relay, as the owner can.
+
+### Fixed
+- A relay turn from the owner's own thread (an attested owner thread or a pinned binding) was refused OpenClaw's `skill_workshop` tool, so it could not fix a learned skill from the relay. It now gets every `skill_workshop` action OpenClaw 2026.11.4 has. A skill write that would land in the relay's trust anchor (an agent directory configured inside it, also when that setting comes from an included config file, a skill named after the relay guard, or a script naming a relay trust setting) is still refused, and so is any skill write while a live OpenClaw config file cannot be read. Other delegates and peers are still refused the tool.
+
 ## [0.10.316] - 2026-11-19
 
 AgentRun no longer gets a cancelled run for each cron check OpenClaw skips, such as a heartbeat job's check with nothing to do.
