@@ -1,7 +1,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { createResumedDoctorTurnStop, createEventStopReader, findResumedDoctorRunId } = require("../../lib/server/doctor/resumed-turns");
+const { createResumedDoctorTurnStop, createEventStopReader, findResumedDoctorTurn } = require("../../lib/server/doctor/resumed-turns");
 
 // Message shapes as sessions.get returns them on the pinned OpenClaw 2026.10.9
 // (recorded against the real gateway: a SIGKILLed Doctor turn, its restart
@@ -12,6 +12,16 @@ const recoveryMessage = (key, recoveryRunId) => ({
   idempotencyKey: `${recoveryRunId}:user`,
   provenance: { kind: "internal_system", sourceSessionKey: key, sourceTool: "main_session_restart_recovery" },
   __openclaw: { idempotencyKey: `${recoveryRunId}:user`, seq: 2 },
+});
+// OpenClaw 2026.11.6's restart resume message, as sessions.get returned it
+// after a graceful restart cut a turn short: its idempotency key is its own
+// id, not the resumed run's, and it names no session.
+const restartResumeMessage = (id) => ({
+  role: "user",
+  timestamp: 1795138897623,
+  idempotencyKey: id,
+  provenance: { kind: "internal_system", sourceTool: "restart" },
+  __openclaw: { senderIsOwner: false, transport: { channel: "webchat", messageId: id }, id: "4b43d962-a4aa-4cf0-9403-78b0ad6cce88", idempotencyKey: id, seq: 3 },
 });
 const personMessage = (idem) => ({ role: "user", idempotencyKey: `${idem}:user`, __openclaw: { idempotencyKey: `${idem}:user`, seq: 3 } });
 const assistant = { role: "assistant", content: [{ type: "text", text: "working" }] };
@@ -310,16 +320,48 @@ describe("resumed Doctor turns after a gateway restart", () => {
     expect(await second).toEqual({ stopped: [], missed: [] });
   });
 
+  it("stops a Doctor turn OpenClaw 2026.11.5+ resumed after a graceful restart, by its session, since no gateway call names the resumed run", async () => {
+    const key = "agent:main:doctor:5";
+    const resumeId = "c422b941-9742-47cd-986f-a0b9f7606093";
+    const h = harness({
+      lists: [[active(key)]],
+      transcripts: { [key]: [doctorMessage(5), assistant, restartResumeMessage(resumeId)] },
+      abortBody: (params) => (params.runId ? { ok: true, aborted: false, runIds: [] } : { ok: true, aborted: true, runIds: ["094f33b3-c4f9-47b9-bc5c-1fbc502ab121"] }),
+    });
+    expect(await h.stop.onGatewayLaunch()).toEqual({ stopped: [resumeId], missed: [] });
+    expect(h.aborts()).toEqual([{ sessionKey: key }]);
+    expect(h.logger.log).toHaveBeenCalledWith("[alphaclaw] doctor: stopped Doctor run 5's turn, which the gateway restarted after a restart cut it off (agent:main:doctor:5, run 094f33b3-c4f9-47b9-bc5c-1fbc502ab121)");
+    expect(h.insertEvent).toHaveBeenCalledWith(expect.objectContaining({ details: { kind: "resumed_turn_stopped", sessionKey: key, doctorRunId: 5, runId: "094f33b3-c4f9-47b9-bc5c-1fbc502ab121" } }));
+    expect(h.stop.hasStopped(key, Date.now())).toBe(true);
+
+    const person = harness({
+      lists: [[active(key)]],
+      transcripts: { [key]: [doctorMessage(5), assistant, restartResumeMessage(resumeId), personMessage("user-turn-1")] },
+    });
+    expect(await person.stop.onGatewayLaunch()).toEqual({ stopped: [], missed: [] });
+    expect(person.aborts()).toEqual([]);
+    const theirs = harness({
+      lists: [[active(key)]],
+      transcripts: { [key]: [doctorMessage(5), assistant, personMessage("user-turn-1"), restartResumeMessage(resumeId)] },
+    });
+    expect(await theirs.stop.onGatewayLaunch()).toEqual({ stopped: [], missed: [] });
+    expect(theirs.aborts()).toEqual([]);
+    expect(findResumedDoctorTurn([doctorMessage(5), restartResumeMessage(resumeId)], key, 5)).toEqual({ resumeId, runId: "" });
+    expect(findResumedDoctorTurn([doctorMessage(5), restartResumeMessage("r0"), restartResumeMessage(resumeId)], key, 5)).toEqual({ resumeId, runId: "" });
+    expect(findResumedDoctorTurn([doctorMessage(5), restartResumeMessage("")], key, 5)).toBeNull();
+    expect(findResumedDoctorTurn([doctorMessage(4), restartResumeMessage(resumeId)], key, 5)).toBeNull();
+  });
+
   it("finds the restarted run only from the latest user message, after that Doctor run's own message", () => {
     const key = "agent:main:doctor:2";
-    expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage(key, "r")], key, 2)).toBe("r");
-    expect(findResumedDoctorRunId([recoveryMessage(key, "r")], key, 2)).toBe("");
-    expect(findResumedDoctorRunId([recoveryMessage(key, "r"), doctorMessage(2)], key, 2)).toBe("");
-    expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage(key, "doctor-run-2")], key, 2)).toBe("");
-    expect(findResumedDoctorRunId([doctorMessage(2), { ...recoveryMessage(key, "r"), idempotencyKey: "r", __openclaw: { idempotencyKey: "r" } }], key, 2)).toBe("");
-    expect(findResumedDoctorRunId(null, key, 2)).toBe("");
-    expect(findResumedDoctorRunId([doctorMessage(2), personMessage("p"), recoveryMessage(key, "r")], key, 2)).toBe("");
-    expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage(key, "r0"), recoveryMessage(key, "r")], key, 2)).toBe("r");
-    expect(findResumedDoctorRunId([doctorMessage(2), recoveryMessage("agent:main:main", "r0"), recoveryMessage(key, "r")], key, 2)).toBe("");
+    expect(findResumedDoctorTurn([doctorMessage(2), recoveryMessage(key, "r")], key, 2)).toEqual({ resumeId: "r", runId: "r" });
+    expect(findResumedDoctorTurn([recoveryMessage(key, "r")], key, 2)).toBeNull();
+    expect(findResumedDoctorTurn([recoveryMessage(key, "r"), doctorMessage(2)], key, 2)).toBeNull();
+    expect(findResumedDoctorTurn([doctorMessage(2), recoveryMessage(key, "doctor-run-2")], key, 2)).toBeNull();
+    expect(findResumedDoctorTurn([doctorMessage(2), { ...recoveryMessage(key, "r"), idempotencyKey: "r", __openclaw: { idempotencyKey: "r" } }], key, 2)).toBeNull();
+    expect(findResumedDoctorTurn(null, key, 2)).toBeNull();
+    expect(findResumedDoctorTurn([doctorMessage(2), personMessage("p"), recoveryMessage(key, "r")], key, 2)).toBeNull();
+    expect(findResumedDoctorTurn([doctorMessage(2), recoveryMessage(key, "r0"), recoveryMessage(key, "r")], key, 2)).toEqual({ resumeId: "r", runId: "r" });
+    expect(findResumedDoctorTurn([doctorMessage(2), recoveryMessage("agent:main:main", "r0"), recoveryMessage(key, "r")], key, 2)).toBeNull();
   });
 });
