@@ -106,6 +106,13 @@ describe("relay guard: skill_workshop for the owner's own thread (GST-3257)", ()
       fs.writeFileSync(ctx.openclawJson, JSON.stringify(config));
       expectAnchorRefusal(await ctx.call(run, "skill_workshop", kPatch), "an agentDir inside the relay's directory");
       expect(await ctx.call(run, "skill_workshop", { action: "view", name: "slack-dm-access" }), "a read there").toEqual({});
+      fs.writeFileSync(path.join(path.dirname(ctx.openclawJson), "agents.json"), JSON.stringify(config.agents));
+      config.agents = { $include: "agents.json" };
+      fs.writeFileSync(ctx.openclawJson, JSON.stringify(config));
+      expectAnchorRefusal(await ctx.call(run, "skill_workshop", kPatch), "an included agentDir inside the relay's directory");
+      config.agents = { $include: "missing.json" };
+      fs.writeFileSync(ctx.openclawJson, JSON.stringify(config));
+      expectAnchorRefusal(await ctx.call(run, "skill_workshop", kPatch), "a config whose include cannot be read");
       expect(ctx.confirmationCount()).toBe(0);
     });
   });
