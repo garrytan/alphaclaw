@@ -6,7 +6,7 @@ const { registerRelayRoutes } = require("../../lib/server/routes/relay");
 const { relayPaths } = require("../../lib/server/relay/constants");
 const { readRelayConfig } = require("../../lib/server/relay/config");
 const { resolveRelayTrust, isAttestedDelegateMessage, ownerThreadBasisOf } = require("../../lib/plugin/relay-guard/trust");
-const { setup, capyEnv, expectHeldWithTap } = require("./helpers/relay-attested-harness");
+const { setup, capyEnv, expectHeldWithTap, expectProgramsRefused } = require("./helpers/relay-attested-harness");
 
 // GST-2323 PR3: the owner pins relay bindings on
 // ALPHACLAW_RELAY_TRUSTED_BINDINGS (deployment env only). A pinned binding
@@ -195,7 +195,8 @@ describe("relay pinned binding (GST-2323 PR3): trusted like the owner's own thre
   it("still asks the owner when an unpinned delegate names the pin list", async () => {
     ctx = setup({ env: pinnedEnv() });
     const run = await ctx.deliver(other(ctx).agent);
-    expectHeldWithTap(ctx, run, "exec", { command: "echo ALPHACLAW_RELAY_TRUSTED_BINDINGS=" + kOther + " >> " + ctx.dotEnv });
+    expectHeldWithTap(ctx, run, "edit", { path: ctx.dotEnv, old_string: "A=1", new_string: "A=1\nALPHACLAW_RELAY_TRUSTED_BINDINGS=" + kOther });
+    expectProgramsRefused(ctx, run, "exec", { command: "echo ALPHACLAW_RELAY_TRUSTED_BINDINGS=" + kOther + " >> " + ctx.dotEnv });
   });
 
   it("serves a box with both paths configured: an attested thread keeps its basis beside the pinned binding", async () => {

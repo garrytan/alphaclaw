@@ -130,7 +130,7 @@ describe("relay delegates: the guard's tiers", () => {
     const file = fs.readdirSync(dist).find((name) => name.startsWith("core-tool-factory-descriptors-") && name.endsWith(".mjs"));
     const catalog = new Set([...fs.readFileSync(path.join(dist, file), "utf8").matchAll(/name: "([a-z_]+)",\s*family:/g)].map((match) => match[1]));
     expect(catalog.size).toBeGreaterThan(30);
-    for (const name of policy.kDelegateCoreTools) expect(catalog.has(name), name).toBe(true);
+    for (const name of [...policy.kDelegateCoreTools, ...policy.kOwnerThreadExecTools]) expect(catalog.has(name), name).toBe(true);
     for (const name of ["message", "sessions_send", "sessions_spawn", "subagents", "gateway", "plugins", "secrets", "nodes", "terminal", "openclaw", "skill_workshop"]) {
       expect(catalog.has(name), name).toBe(true);
       expect(policy.kDelegateAllowedTools).not.toContain(name);
@@ -141,8 +141,13 @@ describe("relay delegates: the guard's tiers", () => {
     box = makeBox();
     box.message();
     register();
-    for (const toolName of ["exec", "process", "read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "sessions_list", "tool_search", "dispatch_action", "tool_call", "EXEC"]) {
+    for (const toolName of ["read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "sessions_list", "tool_search", "dispatch_action", "tool_call"]) {
       expect(call(toolName, { command: "gbrain put x" }), toolName).toEqual({});
+    }
+    // Programs run only for the owner's own thread (GST-2661); this one is
+    // a delegate through the operator's list, not the owner's thread.
+    for (const toolName of ["exec", "process", "EXEC"]) {
+      expect(call(toolName, { command: "gbrain put x" }).blockReason, toolName).toContain("[relay-guard] " + toolName.toLowerCase() + " is not available to a delegate relay session that is not your owner's own thread");
     }
     for (const toolName of ["message", "sessions_send", "sessions_spawn", "subagents", "cron", "gateway", "plugins", "secrets", "ask_user", "nodes", "computer", "screen", "terminal", "browser", "openclaw", "skill_workshop", "personal_instructions", "github_publish", "relay__relay_send", "aside__click", "brand_new_tool"]) {
       const result = call(toolName, { action: "send", target: "@lupe" });
@@ -198,8 +203,8 @@ describe("relay delegates: the guard's tiers", () => {
   it("an operator entry never unlocks a withheld tool: short prefixes are ignored and the never-list wins over exact names", () => {
     box = makeBox();
     box.message();
-    register({ delegateTools: ["m*", "s*", "g*", "message", "gateway", "sessions_send", "browser", "conversations_inbox", "relay__*", "nori__*"] });
-    for (const toolName of ["message", "memory_wipe", "sessions_send", "sessions_spawn", "gateway", "browser", "conversations_inbox", "relay__relay_send", "secrets"]) {
+    register({ delegateTools: ["m*", "s*", "g*", "message", "gateway", "sessions_send", "browser", "conversations_inbox", "relay__*", "nori__*", "exec", "process"] });
+    for (const toolName of ["message", "memory_wipe", "sessions_send", "sessions_spawn", "gateway", "browser", "conversations_inbox", "relay__relay_send", "secrets", "exec", "process"]) {
       expect(blocked(call(toolName, { action: "send", target: "@x" })), toolName).toBe(true);
     }
     expect(call("nori__search", {})).toEqual({});
@@ -214,7 +219,8 @@ describe("relay delegates: the guard's tiers", () => {
     register({ delegateAgents: ["capy-someone-else"] });
     expect(call("exec", { command: "id" }).blockReason).toContain("messaging-only");
     register();
-    expect(call("exec", { command: "id" })).toEqual({});
+    expect(call("read", { path: "notes.md" })).toEqual({});
+    expect(call("exec", { command: "id" }).blockReason).toContain("not your owner's own thread");
   });
 
   it("an approval lets that run send with the message tool to its named recipients, once each, and nothing else", () => {

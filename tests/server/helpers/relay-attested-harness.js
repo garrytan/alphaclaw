@@ -350,6 +350,21 @@ const expectHeldWithTap = (ctx, run, toolName, params) => {
   expect(ctx.notices.at(-1).text).toContain("Relay confirmation needed");
 };
 
+// A delegate that is not the owner's own thread runs no programs
+// (GST-2661): refused outright, with no confirmation row and no notice.
+const expectProgramsRefused = (ctx, run, toolName, params, label = toolName) => {
+  ctx.confirmations.tick();
+  const before = ctx.confirmationCount();
+  const noticesBefore = ctx.notices.length;
+  const result = ctx.call(run, toolName, params);
+  expect(result.block, label).toBe(true);
+  expect(result.blockReason, label).toContain(toolName + " is not available to a delegate relay session that is not your owner's own thread");
+  expect(result.blockReason, label).not.toMatch(/rc_[a-f0-9]{16}/);
+  expect(ctx.confirmationCount(), label).toBe(before);
+  ctx.confirmations.tick();
+  expect(ctx.notices.length, label).toBe(noticesBefore);
+};
+
 module.exports = {
   kPublic,
   kResource,
@@ -371,4 +386,5 @@ module.exports = {
   setup,
   expectHeld,
   expectHeldWithTap,
+  expectProgramsRefused,
 };

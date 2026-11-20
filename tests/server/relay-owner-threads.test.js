@@ -7,7 +7,7 @@ const { relayPaths } = require("../../lib/server/relay/constants");
 const { kRelayGuardPluginId } = require("../../lib/server/relay/guard-entry");
 const { classifyAnchor, classifyRisk, gatewayRestartOf, mainOpenclawAnchorOf } = require("../../lib/plugin/relay-guard/confirm");
 const { kOwnerThreadPluginActions } = require("../../lib/plugin/relay-guard/policy");
-const { kOtherOwner, guardedConfig, setup, expectHeld, expectHeldWithTap } = require("./helpers/relay-attested-harness");
+const { kOtherOwner, guardedConfig, setup, expectHeldWithTap, expectProgramsRefused } = require("./helpers/relay-attested-harness");
 
 // GST-2323 PR2: the owner's own attested Capy thread (attested binding, the
 // box's org, an owner on ALPHACLAW_RELAY_CAPY_OWNERS) is trusted like the
@@ -255,7 +255,8 @@ describe("relay owner threads (GST-2323 PR2): a gateway restart runs through Alp
     alphaclaw = await startAlphaclaw(ctx);
     process.env.PORT = String(alphaclaw.port);
     const run = await ctx.deliver(ctx.oauthDelegate().agent);
-    expectHeldWithTap(ctx, run, "exec", { command: "alphaclaw admin POST /api/gateway/restart" });
+    expectProgramsRefused(ctx, run, "exec", { command: "alphaclaw admin POST /api/gateway/restart" });
+    expectProgramsRefused(ctx, run, "exec", { command: "openclaw gateway restart" });
     expect((await ctx.call(run, "gateway", { action: "restart" })).blockReason).toContain("gateway is not available to a delegate relay session");
     expect(alphaclaw.asked).toEqual([]);
   });
@@ -485,7 +486,7 @@ describe("relay owner threads (GST-2323 PR2): over-refusals fixed", () => {
     ctx = setup();
     const run = await ctx.deliver(ctx.oauthDelegate().agent);
     expectHeldWithTap(ctx, run, "edit", harnessEdit(ctx));
-    expectHeldWithTap(ctx, run, "exec", { command: messagingCommands[0] });
-    expectHeld(await ctx.call(run, "exec", { command: "openclaw config $(echo set) plugins.entries.relay-guard.enabled false" }));
+    expectProgramsRefused(ctx, run, "exec", { command: messagingCommands[0] });
+    expectProgramsRefused(ctx, run, "exec", { command: "openclaw config $(echo set) plugins.entries.relay-guard.enabled false" });
   });
 });
