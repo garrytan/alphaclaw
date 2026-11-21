@@ -196,16 +196,18 @@ describe("managed GitHub credential helper", () => {
         { repo: "beta/*", tokenEnv: "FILE_TOKEN" },
         { repo: "gamma/*", tokenEnv: "NPM_TOKEN" },
         { repo: "delta/*", tokenEnv: "MISSING_TOKEN" },
+        { repo: "relay/*", tokenEnv: "ALPHACLAW_RELAY_TAILNET_AUTHKEY" },
+        { repo: "local/*", tokenEnv: "CLAUDE_CODE_LOCAL_TOKEN" },
       ],
-      envFile: "FILE_TOKEN='" + kReadToken + "'\nNPM_TOKEN=npm-token-0123\n",
+      envFile: "FILE_TOKEN='" + kReadToken + "'\nNPM_TOKEN=npm-token-0123\nCLAUDE_CODE_LOCAL_TOKEN=local-token-0123\n",
     });
     expect((await ctx.managed.ensure(ctx.env)).status).toBe("repaired");
-    const env = { ...ctx.env, PUSH_TOKEN: kWriteToken, OTHER_TOKEN: kOtherToken, NPM_TOKEN: "npm-token-0123" };
+    const env = { ...ctx.env, PUSH_TOKEN: kWriteToken, OTHER_TOKEN: kOtherToken, NPM_TOKEN: "npm-token-0123", ALPHACLAW_RELAY_TAILNET_AUTHKEY: "relay-key-0123" };
     expect(await fill(ctx, "https://github.com/acme/app.git", env)).toMatchObject({ ok: true, password: kWriteToken, username: "x-access-token" });
     expect(await fill(ctx, "https://github.com/ACME/App", env)).toMatchObject({ ok: true, password: kWriteToken });
     expect(await fill(ctx, "https://github.com/acme/site.git", env)).toMatchObject({ ok: true, password: kOtherToken, username: "machine-user" });
     expect(await fill(ctx, "https://github.com/beta/notes.git", env)).toMatchObject({ ok: true, password: kReadToken });
-    for (const url of ["https://github.com/gamma/x.git", "https://github.com/delta/x.git", "https://github.com/zeta/x.git", "https://gitlab.com/acme/app.git", "http://github.com/acme/app.git"]) {
+    for (const url of ["https://github.com/gamma/x.git", "https://github.com/delta/x.git", "https://github.com/relay/x.git", "https://github.com/local/x.git", "https://github.com/zeta/x.git", "https://gitlab.com/acme/app.git", "http://github.com/acme/app.git"]) {
       expect(await fill(ctx, url, env)).toMatchObject({ ok: false, password: "" });
     }
 
@@ -252,7 +254,7 @@ describe("managed GitHub credential helper", () => {
 });
 
 describe("git credential routes", () => {
-  it("keeps valid routes, refuses withheld env names, and resolves the most specific one", () => {
+  it("keeps valid routes, refuses withheld and gateway-denied env names, and resolves the most specific one", () => {
     const { routes, manageGlobalConfig } = normalizeGitCredentialsConfig(
       {
         routes: [
@@ -263,6 +265,9 @@ describe("git credential routes", () => {
           { repo: "acme/app/extra", tokenEnv: "X" },
           { repo: "beta/*", tokenEnv: "ghp_literal-token" },
           { repo: "gamma/*", tokenEnv: "NPM_TOKEN" },
+          { repo: "relay/*", tokenEnv: "ALPHACLAW_RELAY_TAILNET_AUTHKEY" },
+          { repo: "local/*", tokenEnv: "CLAUDE_CODE_LOCAL_TOKEN" },
+          { repo: "npmrc/*", tokenEnv: "npm_config__authToken" },
         ],
         manageGlobalConfig: "yes",
       },

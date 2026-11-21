@@ -218,7 +218,7 @@ describe("git push checks with a token only the pushing process has", () => {
 });
 
 describe("git push checks keep withheld secrets from checkout helpers", () => {
-  it("runs a helper planted in a checkout's config with every secret AlphaClaw withholds from the gateway blanked, even from env files", async () => {
+  it("runs a helper planted in a checkout's config with every secret AlphaClaw withholds from the gateway blanked, and no key the gateway policy denies from an env file", async () => {
     const ctx = await setup({ repos: [] });
     const roots = path.join(ctx.root, "data");
     const planted = await ctx.clone("acme/planted", path.join(roots, "planted"));
@@ -226,10 +226,10 @@ describe("git push checks keep withheld secrets from checkout helpers", () => {
     // Anything that can write a checkout's .git/config can name a helper.
     await run(planted.dir, ["config", "--local", "--unset-all", "credential.helper"], ctx.env);
     await run(planted.dir, ["config", "--local", "--add", "credential.helper", ""], ctx.env);
-    await run(planted.dir, ["config", "--local", "--add", "credential.helper", "!f() { echo \"setup=$SETUP_PASSWORD slack=$SLACK_OAUTH_CLIENT_SECRET extra=$EXTRA_FROM_FILE\" >> " + seen + "; test \"$1\" = get && echo username=x && echo password=" + kWriteToken + "; }; f"], ctx.env);
+    await run(planted.dir, ["config", "--local", "--add", "credential.helper", "!f() { echo \"setup=$SETUP_PASSWORD slack=$SLACK_OAUTH_CLIENT_SECRET relay=$ALPHACLAW_RELAY_TAILNET_AUTHKEY local=$CLAUDE_CODE_LOCAL_TOKEN extra=$EXTRA_FROM_FILE\" >> " + seen + "; test \"$1\" = get && echo username=x && echo password=" + kWriteToken + "; }; f"], ctx.env);
     await run(planted.dir, ["commit", "-q", "--allow-empty", "-m", "ahead"], ctx.env);
     const envFile = path.join(ctx.root, "pusher.env");
-    fs.writeFileSync(envFile, "SETUP_PASSWORD=file-setup-secret\nSLACK_OAUTH_CLIENT_SECRET=file-slack-secret\nEXTRA_FROM_FILE=fine\n");
+    fs.writeFileSync(envFile, "SETUP_PASSWORD=file-setup-secret\nSLACK_OAUTH_CLIENT_SECRET=file-slack-secret\nALPHACLAW_RELAY_TAILNET_AUTHKEY=file-relay-key\nCLAUDE_CODE_LOCAL_TOKEN=file-local-token\nEXTRA_FROM_FILE=fine\n");
     const checks = createGitPushChecks({
       openclawDir: ctx.openclawDir,
       readConfig: () => ({ checkouts: [], envFiles: [envFile], discover: { roots: [roots], maxDepth: 2 } }),
@@ -243,7 +243,7 @@ describe("git push checks keep withheld secrets from checkout helpers", () => {
     expect(results[0]).toMatchObject({ routing: null, write: null, writeProbe: "ok" });
     const lines = fs.readFileSync(seen, "utf8").trim().split("\n");
     expect(lines.length).toBeGreaterThan(0);
-    for (const line of lines) expect(line).toBe("setup= slack= extra=fine");
+    for (const line of lines) expect(line).toBe("setup= slack= relay= local= extra=fine");
   });
 
   it("keeps an open push alert through a check that could not probe, and says it cleared only after a probe passes", async () => {
