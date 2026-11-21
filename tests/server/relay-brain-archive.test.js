@@ -639,6 +639,13 @@ describe("relay brain archive: what a page may carry", () => {
     ctx.messageGet = async () => ({ ok: false, unavailableReason: "oversized" });
     await ctx.settle();
     expect(ctx.puts()[0].stdin).toContain(answer.slice(0, kOpenclawHistoryTextChars) + kOpenclawCutMarker);
+    expect(ctx.warnings.filter((line) => line.includes("chat.history"))).toEqual([expect.stringContaining("box answer a-1 is saved as chat.history cut it")]);
+    // A revisit that still cannot read it whole does not warn again.
+    ctx.advance(61 * 60 * 1000);
+    await ctx.tick();
+    ctx.advance(3 * 60 * 1000);
+    await ctx.tick();
+    expect(ctx.messageGets.length).toBeGreaterThan(1);
     expect(ctx.warnings.filter((line) => line.includes("chat.history"))).toHaveLength(1);
     // The hourly revisit rewrites the page whole once OpenClaw returns it.
     ctx.messageGet = null;
