@@ -222,6 +222,25 @@ describe("relay liaison key (GST-2323 PR4)", () => {
     expect(JSON.parse(history.stdout)).toBeTypeOf("object");
   });
 
+  it("pages a long answer over the key path by part number and answers 400 past the last part (GST-3410)", async () => {
+    await start();
+    const privateKey = holderKey();
+    const ref = "rr_" + "d".repeat(24);
+    ctx.bridgeStore.saveResult({ ref, messageId: "900", sender: kAgent, parts: ["one", "two", "three"] });
+    const read = (args) => post(signed({ privateKey, body: JSON.stringify({ tool: "relay_result", args: { result_ref: ref, ...args } }) }));
+    for (const [part, text] of [[1, "one"], [2, "two"], [3, "three"]]) {
+      const res = await read({ part });
+      expect(res.status, "part " + part).toBe(200);
+      expect(res.body).toEqual({ result_ref: ref, part, parts: 3, lane: null, text });
+    }
+    expect((await read({})).body).toMatchObject({ part: 2, text: "two" });
+    for (const part of [0, 4]) {
+      const res = await read({ part });
+      expect(res.status, "part " + part).toBe(400);
+      expect(res.body).toMatchObject({ error: "invalid_input", detail: "part must be 1-3 for this result." });
+    }
+  });
+
   it("refuses a key file anyone else can read", async () => {
     await start();
     fs.chmodSync(keyFile, 0o644);

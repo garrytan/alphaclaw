@@ -972,3 +972,173 @@ describe("relay bridge: ALPH-71 (guard hold, participants, owner notices)", () =
   });
 });
 
+
+
+// GST-3410: OpenClaw 2026.11.4's chat.history cuts each message's text to
+// maxChars (DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS, 8,000) followed by
+// "\n...(truncated)...", and marks the cut message __openclaw.truncated with
+// reason "display-cap". chat.message.get reads one message by its
+// __openclaw.id under its own maxChars (schema maximum 8,000,000).
+const kOpenclawHistoryTextChars = 8000;
+const kOpenclawCutMarker = "\n...(truncated)...";
+const openclawDisplayCap = (message, maxChars) => {
+  const text = message.content?.[0]?.text;
+  if (typeof text !== "string" || text.length <= maxChars) return message;
+  return {
+    ...message,
+    content: [{ type: "text", text: text.slice(0, maxChars) + kOpenclawCutMarker }],
+    __openclaw: { ...message.__openclaw, truncated: true, reason: "display-cap" },
+  };
+};
+
+const longAnswer = (length) => {
+  let text = "";
+  for (let line = 1; text.length < length; line += 1) text += "Line " + line + ": the box finished step " + line + " and wrote down what it saw.\n";
+  return text.slice(0, length - 1) + ".";
+};
+
+describe("relay bridge: long answers to a Capy thread (GST-3410)", () => {
+  const { openRemoteStore, sha256 } = require("../../lib/server/relay/remote-store");
+  const { createRemoteRelayTools } = require("../../lib/server/relay/remote-tools");
+  const { kRelayErrors } = require("../../lib/server/relay/errors");
+  const kCapy = "capy-25cf4e98b5b6";
+  const kClient = "d1df4e9e-8f1b-4520-98f6-2db9ab5d035f";
+  let ctx;
+  let remote;
+  afterEach(() => {
+    remote?.close();
+    remote = null;
+    ctx?.cleanup();
+  });
+
+  // The gateway as the pinned OpenClaw answers: chat.history capped for
+  // display, chat.message.get whole up to its maxChars.
+  const start = () => {
+    ctx = setup();
+    const calls = [];
+    const fallThrough = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      calls.push({ method, params });
+      const rows = ctx.gateway.history.get(params?.sessionKey) || [];
+      if (method === "chat.history") return { messages: rows.map((message) => openclawDisplayCap(message, params.maxChars ?? kOpenclawHistoryTextChars)) };
+      if (method === "chat.message.get") {
+        const message = rows.find((entry) => entry.__openclaw?.id === params.messageId);
+        return message ? { ok: true, message: openclawDisplayCap(message, params.maxChars ?? 1e6) } : { ok: false, unavailableReason: "not_found" };
+      }
+      return fallThrough(method, params, ...rest);
+    };
+    remote = openRemoteStore({ dbPath: path.join(ctx.dir, "remote.db") });
+    remote.clients.insert({ client_id: kClient, client_name: "Capy", redirect_uris: ["https://capy.ai/web/callbacks/mcp"] });
+    remote.clients.markConsented(kClient);
+    remote.bindings.upsert({ agent: kCapy, threadId: "jam_A", clientId: kClient, webhookUrl: "https://api.capy.ai/w/x", until: Date.now() + 60 * 60 * 1000, capabilityHash: sha256("arcap_test"), agentToken: "at_capy" });
+    const tools = createRemoteRelayTools({
+      engine: { sendDm: async () => ({}), inbox: async () => ({ unread_dms: [] }), dmConversations: async () => [], dmMessages: async () => [] },
+      store: remote,
+      getWorkspaceKey: () => "rk",
+      getConfig: () => ({ hourlyCap: 30, maxBindingsPerClient: 20, wakeHosts: ["api.capy.ai"], delegateAgents: [] }),
+      getResult: (ref) => ctx.store.getResult(ref),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    const relayResult = async (args) => JSON.parse((await tools.call({ clientId: kClient, name: "relay_result", args: { as: kCapy, capability: "arcap_test", ...args }, route: "public" })).content[0].text);
+    return { calls, relayResult };
+  };
+
+  // A run that ends with one assistant message carrying OpenClaw's record id.
+  const ask = async (sender, text) => {
+    await ctx.tick();
+    const messageId = ctx.engine.dm(sender, "write the long report");
+    await ctx.tick();
+    const send = ctx.gateway.sends.at(-1);
+    ctx.gateway.history.get(send.sessionKey).push({ role: "assistant", content: [{ type: "text", text }], __openclaw: { id: "msg-" + messageId } });
+    ctx.gateway.active.delete(send.sessionKey);
+    ctx.bridge.handleGatewayEvent({ event: "agent", payload: { runId: send.runId, sessionKey: send.sessionKey, stream: "lifecycle", data: { phase: "end" } } });
+    await flush(20);
+    return { messageId, sessionKey: send.sessionKey, reply: ctx.engine.replies.at(-1) };
+  };
+
+  const readAllParts = async (relayResult, reply) => {
+    const ref = reply.data.relay_result_ref;
+    const count = reply.data.relay_result_parts;
+    const parts = [];
+    for (let part = 1; part <= count; part += 1) {
+      const read = await relayResult({ result_ref: ref, part });
+      expect(read).toMatchObject({ result_ref: ref, part, parts: count });
+      parts.push(read.text);
+    }
+    return parts;
+  };
+
+  it("a 20,000-character answer arrives whole across its relay_result parts, read from chat.message.get past chat.history's 8,000-character cap", async () => {
+    const { calls, relayResult } = start();
+    const text = longAnswer(20000);
+    const { messageId, sessionKey, reply } = await ask(kCapy, text);
+    expect(calls.filter((call) => call.method === "chat.message.get")).toEqual([
+      { method: "chat.message.get", params: { sessionKey, messageId: "msg-" + messageId, maxChars: 64000 } },
+    ]);
+    expect(reply.data).toMatchObject({ relay_status: "answered", relay_result_parts: 4 });
+    const parts = await readAllParts(relayResult, reply);
+    expect(parts.every((part) => part.length <= 6000)).toBe(true);
+    expect(parts.join("")).toBe(text);
+    expect(parts.join("")).not.toContain("(truncated)");
+    expect(reply.text.startsWith(parts[0] + "\n\n[Relay: this answer has 4 parts and this is part 1.")).toBe(true);
+  });
+
+  it("an answer of exactly 64,000 characters arrives whole; a longer one is read with maxChars 64,000, never more", async () => {
+    const { calls, relayResult } = start();
+    const atCeiling = longAnswer(64000);
+    const first = await ask(kCapy, atCeiling);
+    expect((await readAllParts(relayResult, first.reply)).join("")).toBe(atCeiling);
+    const overCeiling = longAnswer(70000);
+    const second = await ask(kCapy, overCeiling);
+    expect(calls.filter((call) => call.method === "chat.message.get").map((call) => call.params.maxChars)).toEqual([64000, 64000]);
+    expect((await readAllParts(relayResult, second.reply)).join("")).toBe(overCeiling.slice(0, 64000) + kOpenclawCutMarker);
+  });
+
+  it("numbers the parts 1 to n, reads part 2 by default and refuses part 0 and part n+1 with invalid_input (HTTP 400)", async () => {
+    const { relayResult } = start();
+    const { reply } = await ask(kCapy, longAnswer(20000));
+    const ref = reply.data.relay_result_ref;
+    const parts = await readAllParts(relayResult, reply);
+    expect(await relayResult({ result_ref: ref })).toMatchObject({ part: 2, parts: 4, text: parts[1] });
+    for (const part of [0, 5]) {
+      expect(await relayResult({ result_ref: ref, part })).toEqual(expect.objectContaining({ error: "invalid_input", detail: "part must be 1-4 for this result." }));
+    }
+    expect(kRelayErrors.invalid_input.status).toBe(400);
+  });
+
+  it("a short answer and an uncut one never call chat.message.get", async () => {
+    const { calls } = start();
+    const { reply } = await ask(kCapy, "Up 3 days.");
+    expect(reply.text).toBe("Up 3 days.");
+    const { reply: mid } = await ask(kCapy, longAnswer(7000));
+    expect(mid.data.relay_result_parts).toBe(2);
+    expect(calls.some((call) => call.method === "chat.message.get")).toBe(false);
+  });
+
+  it("a sender that is not a Capy thread keeps chat.history's text, as before", async () => {
+    const { calls } = start();
+    const text = longAnswer(20000);
+    const { reply } = await ask("peer-bot", text);
+    expect(calls.some((call) => call.method === "chat.message.get")).toBe(false);
+    expect(reply.data.relay_result_ref).toBeUndefined();
+    expect(reply.text).toBe(text.slice(0, kOpenclawHistoryTextChars) + kOpenclawCutMarker);
+  });
+
+  it("posts chat.history's text when chat.message.get fails, with one log line", async () => {
+    const { calls } = start();
+    const inner = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      if (method === "chat.message.get") {
+        calls.push({ method, params });
+        throw new Error("unknown method chat.message.get");
+      }
+      return inner(method, params, ...rest);
+    };
+    const text = longAnswer(20000);
+    const { reply } = await ask(kCapy, text);
+    expect(calls.filter((call) => call.method === "chat.message.get")).toHaveLength(1);
+    expect(reply.data).toMatchObject({ relay_status: "answered", relay_result_parts: 2 });
+    expect(ctx.store.getResult(reply.data.relay_result_ref).parts.join("")).toBe(text.slice(0, kOpenclawHistoryTextChars) + kOpenclawCutMarker);
+  });
+});
+

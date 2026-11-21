@@ -29,6 +29,11 @@ const { kLiveEnabled, waitFor, readDeclaredPin, runCliJson, repoOpenclawBin } = 
 const describeLive = kLiveEnabled && process.platform === "linux" ? describe : describe.skip;
 const kTestTimeoutMs = 10 * 60 * 1000;
 const kSlowTurnSeconds = 40;
+const liveLongAnswer = (length) => {
+  let text = "";
+  for (let line = 1; text.length < length; line += 1) text += "Line " + line + ": the box finished step " + line + " and wrote down what it saw.\n";
+  return text.slice(0, length - 1) + ".";
+};
 
 describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidate" : readDeclaredPin()} pin`, () => {
   let gateway;
@@ -120,6 +125,16 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
           }
           const ref = JSON.stringify(last.content).match(/rc_[a-f0-9]{16}/);
           res.write(chunk({ role: "assistant", content: ref ? "held " + ref[0] : "wrote probe " + probe[1] }));
+          res.write(chunk({}, "stop"));
+          res.end("data: [DONE]\n\n");
+          return;
+        }
+        // GST-3410: "long-report-N" answers with N characters, streamed in
+        // pieces, longer than chat.history's 8,000-character display cap.
+        const long = slow ? null : [...body.matchAll(/long-report-(\d+)/g)].pop();
+        if (long) {
+          const text = liveLongAnswer(Number(long[1]));
+          for (let at = 0; at < text.length; at += 2000) res.write(chunk(at === 0 ? { role: "assistant", content: text.slice(at, at + 2000) } : { content: text.slice(at, at + 2000) }));
           res.write(chunk({}, "stop"));
           res.end("data: [DONE]\n\n");
           return;
@@ -309,6 +324,24 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       expect(counts.answered).toBe(2);
       expect(counts.dispatched || 0).toBe(0);
       expect(counts.reconciling || 0).toBe(0);
+    },
+    kTestTimeoutMs,
+  );
+  it(
+    "a 20,000-character answer to a Capy thread is stored whole in its relay_result parts, past chat.history's 8,000-character display cap (GST-3410)",
+    async () => {
+      expect(relay.isReady()).toBe(true);
+      const capy = await relayCall("POST", "/v1/agents", secrets.workspaceKey, { name: "capy-long", type: "agent" });
+      const dm = await relayCall("POST", "/v1/dm", capy.token, { to: "wintermute", text: "long-report-20000" });
+      const dmId = dm.id || dm.message?.id;
+      await waitFor(async () => (await repliesOf(capy.token, dmId)).length > 0, 180_000, "long relay reply");
+      const [reply] = await repliesOf(capy.token, dmId);
+      const stored = relay.getStore().getResult(reply.metadata.relay_result_ref);
+      console.log("[live] long answer: " + JSON.stringify({ parts: stored?.parts.map((part) => part.length), metadata: reply.metadata }));
+      expect(reply.metadata).toMatchObject({ relay_status: "answered", relay_result_parts: 4 });
+      expect(stored.parts).toHaveLength(4);
+      expect(stored.parts.join("")).toBe(liveLongAnswer(20000));
+      expect(reply.text.startsWith(stored.parts[0] + "\n\n[Relay: this answer has 4 parts")).toBe(true);
     },
     kTestTimeoutMs,
   );

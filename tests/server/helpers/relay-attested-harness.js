@@ -147,6 +147,7 @@ const setup = ({ env = capyEnv(), routeOf, gate } = {}) => {
     paths,
     engine: createRemoteEngine(),
     isReady: () => true,
+    getStore: () => bridgeStore,
     getAuth: () => ({ workspaceKey: "rk_live_workspace", agentName: "wintermute", agentToken: "at_live_box" }),
     demoteSender: vi.fn(),
   };
