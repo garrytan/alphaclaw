@@ -187,6 +187,31 @@ describe("watchdog: failed plugin hot reload (GST-3345)", () => {
     h.watchdog.stop();
   });
 
+  it("turning auto-repair off while the restart notice is being sent stops the restart", async () => {
+    const h = createHarness();
+    let releaseNotice = null;
+    h.notifier.notify.mockImplementation((message) =>
+      String(message).includes("Restarting gateway: a plugin reload failed")
+        ? new Promise((resolve) => {
+            releaseNotice = () => resolve({ ok: true });
+          })
+        : Promise.resolve({ ok: true }),
+    );
+    await boot(h);
+    for (let i = 0; i < 120 && !releaseNotice; i += 1) await vi.advanceTimersByTimeAsync(1_000);
+    expect(releaseNotice).toEqual(expect.any(Function));
+    process.env.WATCHDOG_AUTO_REPAIR = "false";
+    expect(h.watchdog.updateSettings({ autoRepair: false })).toMatchObject({ autoRepair: false });
+    releaseNotice();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(h.restartGatewayColdStart).not.toHaveBeenCalled();
+    expect(h.repairRows().map((row) => [row.status, row.details?.reason ?? null])).toEqual([
+      ["started", null],
+      ["skipped", "auto_repair_disabled"],
+    ]);
+    h.watchdog.stop();
+  });
+
   it("with auto-repair off it records the skip once and does not restart", async () => {
     const h = createHarness({ autoRepair: false });
     await boot(h);
