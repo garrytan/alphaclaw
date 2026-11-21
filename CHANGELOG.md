@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.322] - 2026-11-21
+
+AlphaClaw can now give every GitHub checkout on the box the right push token, find those checkouts by itself, and test that each one can actually push, so a stale stored token can no longer break pushes unnoticed.
+
+### Added
+- `alphaclaw.json` `gitCredentials`: one GitHub credential helper that AlphaClaw manages. `routes` map `owner/repo`, `owner/*` or `*` to the name of an env var that holds the token (never the token). The helper answers `https://github.com` by repository path from the most specific route, with the token from the calling process's env or AlphaClaw's `.env`, and stores and erases nothing. Env vars AlphaClaw withholds from the gateway are refused as targets. With `manageGlobalConfig: true`, every push check (boot included) keeps the global git config's `[credential "https://github.com"]` section at exactly an empty `helper =`, AlphaClaw's helper and `useHttpPath = true`, at the end of the file; a section that drifted (for example after `gh auth setup-git`) is backed up (0600, newest 5 kept) and rewritten, and the owner is told once. Other hosts, other settings and every checkout's own `.git/config` are left alone. Without it, routes run in preview: the push checks log what the managed helper alone would do (`managed=ok`, `managed=no_route` or the failure) and nothing is written.
+- `gitPushChecks.discover` (`roots`, `maxDepth` 0 to 6, default 3, `exclude`): every check also covers each git checkout under the roots whose push URL is on `https://github.com` (at most 64; symlinks, `node_modules` and the state directory are skipped). Discovered checkouts get the credential routing, reachability and 30-minute unpushed-commit checks, and the push check when they have unpushed commits, a helper of their own or an explicit route.
+- A push check: `git push --dry-run` of a refspec that matches no local ref, with hooks off and helpers asked only for a credential. It authenticates against the remote's push service, which checks push access, and sends nothing (no POST to `git-receive-pack`, no ref change, nothing stored or erased; held by a test against a real `git http-backend`). A missing credential and a refused push ("Repository not found", permission denied, authentication failed) alert at once with the fix, other failures on the second check in a row. Reads alone could not catch a token that can fetch but not push.
+
+### Fixed
+- A global credential store that kept every token that ever worked and could not erase one sent the last-working token for every github.com repository, and pushes to repositories that token cannot reach failed with "Repository not found" while fetches still worked. With `gitCredentials` set, github.com no longer goes through that store.
+
 ## [0.10.321] - 2026-11-21
 
 The watchdog now restarts the gateway once when a plugin hot reload fails and leaves it not ready, instead of leaving it down until someone restarts it.
