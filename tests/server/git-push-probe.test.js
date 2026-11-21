@@ -163,6 +163,41 @@ describe("git push write probe", () => {
   });
 });
 
+describe("git push checks with a token only the pushing process has", () => {
+  it("reads the env files gitPushChecks.envFiles names, so a checkout helper that reads such a token is not reported silent", async () => {
+    const ctx = await setup();
+    const { dir, bare } = ctx.checkouts["acme/private"];
+    // The checkout's own helper, after a reset, reads a token from an env var
+    // that a cron job or a worker has and the AlphaClaw server does not.
+    await run(dir, ["config", "--local", "--unset-all", "credential.helper"], ctx.env);
+    await run(dir, ["config", "--local", "--add", "credential.helper", ""], ctx.env);
+    await run(dir, ["config", "--local", "--add", "credential.helper", "!f() { test \"$1\" = get && echo username=x-access-token && echo password=$PUSHER_ONLY_TOKEN; }; f"], ctx.env);
+    await run(dir, ["commit", "-q", "--allow-empty", "-m", "ahead"], ctx.env);
+    const before = refsOf(bare);
+    expect(ctx.env.PUSHER_ONLY_TOKEN).toBeUndefined();
+
+    const silent = createChecks(ctx, { checkouts: [{ path: dir, name: "pinned" }] });
+    expect((await silent.checks.check()).results[0].routing).toMatchObject({ code: "own_helper_silent" });
+    expect(silent.notify.mock.calls[0][0]).toContain("gitPushChecks.envFiles");
+
+    const envFile = path.join(ctx.root, "pusher.env");
+    fs.writeFileSync(envFile, "# the pushing job's env\nPUSHER_ONLY_TOKEN=" + kWriteToken + "\nPATH=/nowhere\n", { mode: 0o600 });
+    fs.rmSync(path.join(ctx.openclawDir, ".alphaclaw"), { recursive: true, force: true });
+    const missing = path.join(ctx.root, "missing.env");
+    const fixed = createChecks(ctx, { checkouts: [{ path: dir, name: "pinned" }], envFiles: [envFile, missing] });
+    const { results } = await fixed.checks.check();
+    expect(results[0]).toMatchObject({ routing: null, write: null, writeProbe: "ok" });
+    expect(fixed.notify).not.toHaveBeenCalled();
+    expect(server.requests.some((entry) => entry.service === "git-receive-pack" && entry.access === "write")).toBe(true);
+    expect(refsOf(bare)).toBe(before);
+    expect(fixed.logged).toContain("[alphaclaw] git-push-check env file unreadable: " + missing + " (ENOENT)");
+    expect(fixed.logged).toContain("[alphaclaw] git-push-check pinned: routing=ok write=ok stuck=none tracked_ignored=0");
+    const state = fs.readFileSync(path.join(ctx.openclawDir, ".alphaclaw", "git-push-checks.json"), "utf8");
+    for (const text of [state, fixed.logged.join("\n"), JSON.stringify(results)]) expect(text).not.toContain(kWriteToken);
+    expect(ctx.env.PUSHER_ONLY_TOKEN).toBeUndefined();
+  });
+});
+
 describe("git push checkout discovery", () => {
   it("finds github checkouts under the roots, probes the ones that push, and alerts on any stuck one", async () => {
     const ctx = await setup({ repos: [] });

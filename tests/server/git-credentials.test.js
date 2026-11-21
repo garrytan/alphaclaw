@@ -30,7 +30,9 @@ const baseEnv = (home) => {
 const git = (cwd, args, env, input) =>
   new Promise((resolve) => {
     const child = execFile("git", args, { cwd, env, encoding: "utf8" }, (error, stdout, stderr) => resolve({ ok: !error, stdout, stderr }));
-    child.stdin.end(input || "");
+    child.stdin.on("error", () => {});
+    if (input) child.stdin.end(input);
+    else child.stdin.end();
   });
 
 let server = null;
