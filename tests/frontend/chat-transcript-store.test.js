@@ -411,3 +411,44 @@ describe("keepSlidRows (ALPH-68)", () => {
   });
 });
 
+
+describe("frontend/chat transcript-store: rows chat.history cut for display (GST-3410)", () => {
+  // OpenClaw 2026.11.4's chat.history keeps the first 8,000 characters of a
+  // long message, appends "\n...(truncated)..." and marks it
+  // __openclaw.truncated; the server's history.js trims the row's content.
+  const cutRow = (id, role, whole, timestamp) => ({
+    id,
+    role,
+    content: whole.slice(0, 8000) + "\n...(truncated)...",
+    timestamp,
+    rawMessage: { role, __openclaw: { id: "m-" + id, truncated: true, reason: "display-cap" } },
+  });
+  const longText = (tag) => Array.from({ length: 400 }, (_, i) => tag + " line " + i + " of a pasted log").join("\n");
+
+  it("a sent message longer than 8,000 characters is confirmed by its cut history row, so its bubble does not stay forever", () => {
+    const whole = longText("deploy");
+    const confirmed = [];
+    const sent = { clientMsgId: "long", content: whole, createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100, status: "acked" };
+    mergeHistory({ current: [], rows: [cutRow("h1", "user", whole, 1_200)], outboxItems: [sent], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual(["long"]);
+  });
+
+  it("a cut row never confirms a message that only shares part of what it kept, or a row that was not cut", () => {
+    const whole = longText("deploy");
+    const confirmed = [];
+    const other = { clientMsgId: "other", content: longText("rollback"), createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100 };
+    const shorter = { clientMsgId: "shorter", content: whole.slice(0, 4000), createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100 };
+    mergeHistory({ current: [], rows: [cutRow("h1", "user", whole, 1_200)], outboxItems: [other, shorter], onConfirmed: (id) => confirmed.push(id) });
+    const plainRow = { ...historyRow("h2", "user", whole.slice(0, 8000) + "\n...(truncated)...", 1_200), rawMessage: { role: "user" } };
+    mergeHistory({ current: [], rows: [plainRow], outboxItems: [{ clientMsgId: "plain", content: whole, createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100 }], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual([]);
+  });
+
+  it("a finished run's live answer is covered by its cut history row", () => {
+    const whole = longText("report");
+    const live = { id: "live-1", role: "assistant", content: whole, createdAt: 5_000, live: true, streamMessageId: "s1" };
+    const merged = mergeHistory({ current: [live], rows: [cutRow("a1", "assistant", whole, 4_000)], activeMessageId: "" });
+    expect(merged.filter((row) => row.role === "assistant").map((row) => row.id)).toEqual(["a1"]);
+  });
+});
+

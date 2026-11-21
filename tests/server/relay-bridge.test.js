@@ -1124,6 +1124,22 @@ describe("relay bridge: long answers to a Capy thread (GST-3410)", () => {
     expect(reply.text).toBe(text.slice(0, kOpenclawHistoryTextChars) + kOpenclawCutMarker);
   });
 
+  it("posts chat.history's text when chat.message.get answers without the message", async () => {
+    const { calls } = start();
+    const inner = ctx.gateway.requestGateway;
+    ctx.gateway.requestGateway = async (method, params, ...rest) => {
+      if (method === "chat.message.get") {
+        calls.push({ method, params });
+        return { ok: false, unavailableReason: "oversized" };
+      }
+      return inner(method, params, ...rest);
+    };
+    const text = longAnswer(20000);
+    const { reply } = await ask(kCapy, text);
+    expect(calls.filter((call) => call.method === "chat.message.get")).toHaveLength(1);
+    expect(ctx.store.getResult(reply.data.relay_result_ref).parts.join("")).toBe(text.slice(0, kOpenclawHistoryTextChars) + kOpenclawCutMarker);
+  });
+
   it("posts chat.history's text when chat.message.get fails, with one log line", async () => {
     const { calls } = start();
     const inner = ctx.gateway.requestGateway;

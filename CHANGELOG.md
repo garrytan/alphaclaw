@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.324] - 2026-11-21
+
+Long answers from the box agent are now saved whole in the relay conversation pages in the brain, instead of being cut at 8,000 characters, and a long message sent from the Chat tab no longer leaves a stuck extra bubble.
+
+### Fixed
+- The relay brain archive read the box agent's session with OpenClaw's `chat.history`, which cuts every message to 8,000 characters for display and appends `\n...(truncated)...`. So a long answer was saved to its brain page cut, for every peer. The archive now reads each answer `chat.history` cut again with `chat.message.get`, up to the 64,000-character relay ceiling, before saving it. A failed read backs the conversation off and retries, as a failed history read does. A message OpenClaw will not return is saved as cut, with one warning. A page already saved with a cut answer is rewritten whole when the archive next reads its conversation: on its next message, or at the hourly revisit during the 24 hours after its last one. The read itself is now shared with the relay bridge's reply path from 0.10.323.
+- In the Chat tab, a message of yours longer than 8,000 characters stayed on screen as an extra "sent" bubble beside its history copy, across reloads, because the outbox only let go of a message when history showed the identical text, and history shows such a message cut. A long finished answer could also show twice. Both now match a history row OpenClaw cut against the text it kept. The Chat tab still shows long messages cut, as OpenClaw sends them.
+
 ## [0.10.323] - 2026-11-21
 
 Long answers from the box to a Capy thread over Agent Relay now arrive whole, up to 64,000 characters, instead of stopping at 8,000 characters with a "...(truncated)..." marker.
