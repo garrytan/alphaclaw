@@ -458,8 +458,25 @@ incident). The port answers and `/health` is green, but OpenClaw's own
 `ready: false` outright. Since v0.9.75 AlphaClaw treats this as degraded, not
 recovered: no "Gateway running again" notice, the incident stays open (a
 `gateway_readiness` incident opens when none is), and a pending replacement is
-not verified. Readiness alone never triggers `doctor --fix` or a restart — the
+not verified. Readiness alone never triggers `doctor --fix` — the
 degraded-repair counter counts liveness failures only.
+
+The one restart readiness can trigger is a **failed plugin hot reload**.
+On OpenClaw 2026.11.4 a `plugins.entries` change makes the
+gateway reload its plugins, and a plugin service that takes more than 5 s to
+start fails it: `/readyz` then stays at 503 `failing: ["plugin-reload"]` with
+`pluginReload.phase: "failed"` until a later reload succeeds or the gateway
+restarts. When two `/readyz` reads at least 30 s apart both say `failed`, the
+watchdog restarts the gateway once through the normal restart ladder (source
+`watchdog`, reason `plugin_reload_failed`, notification "🟡 Restarting gateway:
+a plugin reload failed and left it not ready"; ledger rows `repair` with
+`trigger: plugin_reload_failed`). A reload still running (`reloading`,
+`recovering`) never counts, and any other `/readyz` answer restarts the 30 s
+clock. It restarts at most once per `openclaw.json` content: if the same
+config fails again, it tells you once ("A plugin reload failed again …") and
+leaves the gateway alone until the config changes. It follows the auto-repair
+setting and every repair gate (a pause, a full disk, a running operation, the
+box lock).
 
 Since #87 the verdict is OpenClaw's, not AlphaClaw's. The `eventLoop`
 diagnostic in the `/readyz` body ("event loop under pressure" in the

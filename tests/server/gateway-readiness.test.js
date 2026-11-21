@@ -41,6 +41,28 @@ describe("classifyReadinessResponse — real 2026.9.8 / 2026.10.2 /readyz shapes
     ).toMatchObject({ kind: "not_ready", status: "draining", unreadyReason: "draining" });
   });
 
+  it("2026.11.4: a plugin hot reload is a component failure that carries its phase and plugins, bounded; a body without the block reads null", () => {
+    const failed = classifyReadinessResponse({
+      httpStatus: 503,
+      body: {
+        ready: false,
+        coreReady: false,
+        failing: ["plugin-reload"],
+        pluginReload: { phase: "failed", pluginIds: ["ghome", 7, "", "x".repeat(300)], reason: "Plugin activation or recovery failed." },
+        uptimeMs: 32106,
+      },
+    });
+    expect(failed).toMatchObject({ kind: "not_ready", status: null, unreadyReason: "components", failing: ["plugin-reload"] });
+    expect(failed.pluginReload).toEqual({ phase: "failed", pluginIds: ["ghome", "7", "x".repeat(100)] });
+    expect(
+      classifyReadinessResponse({ httpStatus: 503, body: { ready: false, failing: ["plugin-reload"], pluginReload: { phase: "recovering", pluginIds: ["ghome"] } } }).pluginReload,
+    ).toEqual({ phase: "recovering", pluginIds: ["ghome"] });
+    expect(
+      classifyReadinessResponse({ httpStatus: 503, body: { ready: false, failing: ["plugin-reload"], pluginReload: ["failed"] } }).pluginReload,
+    ).toBeNull();
+    expect(classifyReadinessResponse({ httpStatus: 200, body: { ready: true, failing: [] } }).pluginReload).toBeNull();
+  });
+
   it("2026.11.2: failing[] that is only agents still under inspection is the starting phase; any other agent refusal stays a component failure", () => {
     const pending = (agentId) => ({ agentId, paths: ["/data/.openclaw/agents/" + agentId + "/agent/openclaw-agent.sqlite"], code: "agent-database-inspection-pending" });
     expect(
