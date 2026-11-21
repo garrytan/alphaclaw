@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.323] - 2026-11-21
+
+Long answers from the box to a Capy thread over Agent Relay now arrive whole, up to 64,000 characters, instead of stopping at 8,000 characters with a "...(truncated)..." marker.
+
+### Fixed
+- The relay bridge read each answer from OpenClaw's `chat.history`, which cuts every message to 8,000 characters for display and appends `\n...(truncated)...`. So a long answer to a `capy-` agent was stored and paged as that cut text: two `relay_result` parts (about 6,000 and 2,000 characters) ending mid-sentence, and part 3 refused. The bridge now notices the cut (`__openclaw.truncated`) and reads that one message again with `chat.message.get`, capped at the 64,000 characters a Capy thread can page, before splitting it. If that read fails it posts the cut text as before and logs it. Answers to other agents are unchanged.
+
 ## [0.10.322] - 2026-11-21
 
 AlphaClaw can now give every GitHub checkout on the box the right push token, find those checkouts by itself, and test that each one can actually push, so a stale stored token can no longer break pushes unnoticed.
