@@ -489,6 +489,35 @@ For each checkout, with git running in the gateway's environment (the one the ag
 
 Each problem is announced once, with one more line when it clears; what was announced is kept in `.alphaclaw/git-push-checks.json` in the state directory so a restart never repeats it, and each episode also lands in the watchdog's event log (`git_push_check`). The check never fetches, writes or pushes in the checkout. The boot log says `[alphaclaw] git-push-check <name>: …` whenever a checkout's result changes.
 
+**Tokens only the pusher has.** The checks run git, and every checkout's own credential helpers, in the gateway's environment, with every secret AlphaClaw withholds from the gateway blanked. When a checkout's helper reads a token that only the pushing process has (a cron job's or a worker's env file), the check would see that helper return nothing (`own_helper_silent`) even though real pushes work. List those files in `gitPushChecks.envFiles` (absolute paths, `.env` format, at most 8): each check adds their variables to git's environment where AlphaClaw's own environment lacks them. Only regular files up to 1 MB are read. It never overrides a variable AlphaClaw has, never takes `PATH`, `HOME`, a `GIT_`, `LD_` or `NODE_` variable, or any variable the gateway env policy withholds or denies, never logs a value, and logs once when a file can't be read.
+
+**Every checkout, found by itself.** Add `"discover": { "roots": ["/data"], "maxDepth": 3, "exclude": ["/data/tmp"] }` to `gitPushChecks` and each check also covers every git checkout under those roots (up to `maxDepth` levels down, 0 to 6, default 3; at most 64 checkouts) whose push URL is on `https://github.com`. It skips symlinks, `node_modules`, the state directory (git sync already watches it) and anything under `exclude`. Discovered checkouts get the credential routing, reachability and stuck-push checks. They get the push check below when they look like checkouts that push: commits not yet on the remote, a helper of their own, or a `gitCredentials` route naming their repository. The tracked-ignored check stays for listed checkouts only.
+
+- **Push path.** Reads and pushes can authenticate differently: a token that can read a repository but not push to it passes fetch and `ls-remote`, and every push fails. So each check also runs `git push --dry-run` of a refspec that matches no local ref (`refs/alphaclaw-push-probe/none/*`), with hooks and submodule pushes off and the same get-only helper wrapper as `ls-remote`. git asks the remote's push service for its ref list, which needs push access, then finds nothing to send and stops: no POST to `git-receive-pack`, no ref change and no stored or erased credential (`tests/server/git-push-probe.test.js` records every request a real git sends). When no helper gives a credential at all, or the remote refuses the one git picks ("Repository not found", permission denied, authentication failed), the owner hears it at once, with the fix; a timeout or another failure is announced when two checks in a row see it. The log line gains `write=ok`, `write=skipped` or the failure code.
+
+### GitHub credentials for every checkout
+
+A global credential store answers every github.com request with the first stored entry that fits, and git runs `store` on every helper after any successful sign-in, so the token that last worked anywhere ends up in front. If a wrapper also turns `erase` into a no-op, a token GitHub refuses is never removed: every push from a repository that token cannot reach fails with "Repository not found", and git never tries another helper. A checkout only escapes by resetting the helper list in its own `.git/config`.
+
+`gitCredentials` in `alphaclaw.json` replaces that with one helper AlphaClaw manages. It maps repositories to the **name** of an env var that holds a token, never the token:
+
+```json
+{
+  "gitCredentials": {
+    "routes": [
+      { "repo": "acme/site", "tokenEnv": "SITE_DEPLOY_TOKEN" },
+      { "repo": "acme/*", "tokenEnv": "ACME_BOT_TOKEN" },
+      { "repo": "*", "tokenEnv": "GITHUB_TOKEN" }
+    ],
+    "manageGlobalConfig": true
+  }
+}
+```
+
+- **The helper.** AlphaClaw writes a small launcher at `.alphaclaw/bin/git-credential-alphaclaw` in the state directory (rewritten at every check, so it follows upgrades). For `https://github.com` only, it answers `get` with the most specific route for the request's repository (`owner/repo`, then `owner/*`, then `*`), username `x-access-token` unless the route sets `username`, and the token from the named env var, read from the calling process's environment first and then from AlphaClaw's `.env`. No route or no token: no answer. With the managed section in place (below) it is the only github.com helper outside a checkout, so a repository with no route gets a credential only from a helper in its own `.git/config`, and otherwise none at all. The preview shows these as `managed=no_route` before you switch. `store` and `erase` do nothing, because it keeps nothing. Env vars AlphaClaw withholds from the gateway (its own secrets, deployment tokens, and every key its gateway env policy denies, such as any `ALPHACLAW_` or `CLAUDE_CODE_LOCAL_` variable) are refused as route targets. Tokens are never logged or written anywhere.
+- **The global config.** With `manageGlobalConfig: true`, every check (boot included) makes sure the global git config's `[credential "https://github.com"]` section is exactly `helper =` (which clears every helper read before it, including an unscoped store), then the launcher, then `useHttpPath = true` (so git tells helpers which repository it wants), at the end of the file. When it is not (first run, or `gh auth setup-git` rewrote it), AlphaClaw backs up the file to `.alphaclaw/git-credentials/gitconfig-<time>.bak` (0600, newest 5 kept), rewrites only that section in a copy beside the file and renames the copy over it (so a running push never sees the section half-written), and tells the owner once. Other hosts' helpers and other settings stay as they are, and a checkout's own `.git/config` is never touched, so a checkout that resets the list and pins its own helper keeps it.
+- **Preview first.** With routes set and `manageGlobalConfig` off (the default), nothing is written to any git config. Each push check also runs the push probe with the managed helper alone and logs `managed=ok`, `managed=no_route` or the failure for that checkout, so you can see what turning it on would do. Turn it off again by setting `manageGlobalConfig` to `false` and restoring the newest backup.
+
 ### Log files
 
 Both logs live on the data volume under `ALPHACLAW_ROOT_DIR/logs`:

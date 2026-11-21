@@ -50,8 +50,8 @@ const setup = ({ pin = true, reset = false } = {}) => {
   return { root, home, openclawDir, env, git, bare, work };
 };
 
-// Real git for everything; ls-remote goes to the local bare repository, or
-// fails the way the caller says.
+// Real git for everything; ls-remote and the write probe's dry-run push go to
+// the local bare repository, or ls-remote fails the way the caller says.
 const makeExecFile = (bare, { lsRemote = null, calls = [] } = {}) => (file, args, options, callback) => {
   calls.push(args);
   const index = args.indexOf("ls-remote");
@@ -59,7 +59,9 @@ const makeExecFile = (bare, { lsRemote = null, calls = [] } = {}) => (file, args
     setImmediate(() => callback(Object.assign(new Error("failed"), { code: 128 }), "", lsRemote));
     return { stdin: { on() {}, end() {} } };
   }
-  const realArgs = index >= 0 ? args.map((arg, i) => (i === index + 2 ? bare : arg)) : args;
+  const pushIndex = args.indexOf("push");
+  const remoteIndex = index >= 0 ? index + 2 : pushIndex >= 0 ? args.indexOf("--", pushIndex) + 1 : -1;
+  const realArgs = remoteIndex > 0 ? args.map((arg, i) => (i === remoteIndex ? bare : arg)) : args;
   return execFile(file, realArgs, options, callback);
 };
 
