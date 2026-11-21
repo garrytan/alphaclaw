@@ -172,6 +172,22 @@ describe("managed GitHub credential helper", () => {
     for (const line of ctx.logged) expect(line).not.toContain("gh auth");
   });
 
+  it("rewrites the file a symlinked global config points to by renaming a finished copy over it", async () => {
+    const ctx = await setup({ routes: [{ repo: "acme/*", tokenEnv: "PUSH_TOKEN" }] });
+    const real = path.join(ctx.root, "dotfiles", "gitconfig");
+    fs.mkdirSync(path.dirname(real), { recursive: true });
+    fs.writeFileSync(real, "[user]\n\tname = Someone\n[credential \"https://github.com\"]\n\thelper = store\n", { mode: 0o640 });
+    fs.symlinkSync(real, ctx.globalFile);
+    const inodeBefore = fs.statSync(real).ino;
+    expect((await ctx.managed.ensure(ctx.env)).status).toBe("repaired");
+    expect(fs.lstatSync(ctx.globalFile).isSymbolicLink()).toBe(true);
+    expect(fs.statSync(real).ino).not.toBe(inodeBefore);
+    expect(fs.statSync(real).mode & 0o777).toBe(0o640);
+    expect((await git(ctx.root, ["config", "--global", "--get-all", "credential.https://github.com.helper"], ctx.env)).stdout).toBe("\n" + ctx.managed.launcherPath + "\n");
+    expect((await git(ctx.root, ["config", "--global", "--get", "user.name"], ctx.env)).stdout.trim()).toBe("Someone");
+    expect(fs.readdirSync(path.dirname(real))).toEqual(["gitconfig"]);
+  });
+
   it("answers github.com by repository path from the routes, with tokens from the env or the .env file, and never stores or erases", async () => {
     const ctx = await setup({
       routes: [

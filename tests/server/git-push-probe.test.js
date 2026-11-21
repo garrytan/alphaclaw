@@ -217,6 +217,67 @@ describe("git push checks with a token only the pushing process has", () => {
   });
 });
 
+describe("git push checks keep withheld secrets from checkout helpers", () => {
+  it("runs a helper planted in a checkout's config with every secret AlphaClaw withholds from the gateway blanked, even from env files", async () => {
+    const ctx = await setup({ repos: [] });
+    const roots = path.join(ctx.root, "data");
+    const planted = await ctx.clone("acme/planted", path.join(roots, "planted"));
+    const seen = path.join(ctx.root, "planted-saw.txt");
+    // Anything that can write a checkout's .git/config can name a helper.
+    await run(planted.dir, ["config", "--local", "--unset-all", "credential.helper"], ctx.env);
+    await run(planted.dir, ["config", "--local", "--add", "credential.helper", ""], ctx.env);
+    await run(planted.dir, ["config", "--local", "--add", "credential.helper", "!f() { echo \"setup=$SETUP_PASSWORD slack=$SLACK_OAUTH_CLIENT_SECRET extra=$EXTRA_FROM_FILE\" >> " + seen + "; test \"$1\" = get && echo username=x && echo password=" + kWriteToken + "; }; f"], ctx.env);
+    await run(planted.dir, ["commit", "-q", "--allow-empty", "-m", "ahead"], ctx.env);
+    const envFile = path.join(ctx.root, "pusher.env");
+    fs.writeFileSync(envFile, "SETUP_PASSWORD=file-setup-secret\nSLACK_OAUTH_CLIENT_SECRET=file-slack-secret\nEXTRA_FROM_FILE=fine\n");
+    const checks = createGitPushChecks({
+      openclawDir: ctx.openclawDir,
+      readConfig: () => ({ checkouts: [], envFiles: [envFile], discover: { roots: [roots], maxDepth: 2 } }),
+      // The server's own environment, as if a caller passed it by mistake.
+      getEnv: () => ({ ...ctx.env, SETUP_PASSWORD: "server-setup-secret", SLACK_OAUTH_CLIENT_SECRET: "server-slack-secret" }),
+      notify: vi.fn(async () => ({ ok: true })),
+      githubUrl: server.url,
+      logger: { log() {}, warn() {} },
+    });
+    const { results } = await checks.check();
+    expect(results[0]).toMatchObject({ routing: null, write: null, writeProbe: "ok" });
+    const lines = fs.readFileSync(seen, "utf8").trim().split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line).toBe("setup= slack= extra=fine");
+  });
+
+  it("keeps an open push alert through a check that could not probe, and says it cleared only after a probe passes", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    await run(dir, ["config", "--local", "credential.helper", loggingHelper(kReadToken, ctx.helperLog)], ctx.env);
+    const { checks, notify } = createChecks(ctx, { checkouts: [{ path: dir }] });
+    expect((await checks.check()).results[0].write).toMatchObject({ code: "push_denied" });
+    expect(notify).toHaveBeenCalledTimes(1);
+    // The remote is briefly unreachable: ls-remote fails, no probe runs.
+    await run(dir, ["remote", "set-url", "origin", "http://127.0.0.1:1/acme/private.git"], ctx.env);
+    expect((await checks.check()).results[0]).toMatchObject({ write: null, writeProbe: "skipped" });
+    expect(notify).toHaveBeenCalledTimes(1);
+    await run(dir, ["remote", "set-url", "origin", server.url + "/acme/private.git"], ctx.env);
+    await checks.check();
+    expect(notify).toHaveBeenCalledTimes(1);
+    await run(dir, ["config", "--local", "credential.helper", loggingHelper(kWriteToken, ctx.helperLog)], ctx.env);
+    await checks.check();
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify.mock.calls[1][0]).toContain("can push to its remote again");
+  });
+
+  it("skips an env file that is not a regular file instead of blocking on it", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    const fifo = path.join(ctx.root, "pipe.env");
+    execFileSync("mkfifo", [fifo]);
+    const { checks, logged } = createChecks(ctx, { checkouts: [{ path: dir }], envFiles: [fifo] });
+    const { results } = await checks.check();
+    expect(results[0].writeProbe).toBe("ok");
+    expect(logged).toContain("[alphaclaw] git-push-check env file unreadable: " + fifo + " (not_a_file)");
+  });
+});
+
 describe("git push checkout discovery", () => {
   it("finds github checkouts under the roots, probes the ones that push, and alerts on any stuck one", async () => {
     const ctx = await setup({ repos: [] });
