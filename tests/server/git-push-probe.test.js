@@ -196,6 +196,25 @@ describe("git push checks with a token only the pushing process has", () => {
     for (const text of [state, fixed.logged.join("\n"), JSON.stringify(results)]) expect(text).not.toContain(kWriteToken);
     expect(ctx.env.PUSHER_ONLY_TOKEN).toBeUndefined();
   });
+
+  it("never refills a secret AlphaClaw withholds from the gateway as an empty value", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    const seen = path.join(ctx.root, "helper-env.log");
+    await run(dir, ["config", "--local", "--unset-all", "credential.helper"], ctx.env);
+    await run(dir, ["config", "--local", "--add", "credential.helper", ""], ctx.env);
+    await run(dir, ["config", "--local", "--add", "credential.helper", "!f() { echo \"setup=$SETUP_PASSWORD\" >> " + seen + "; test \"$1\" = get && echo username=x-access-token && echo password=$PUSHER_ONLY_TOKEN; }; f"], ctx.env);
+    const envFile = path.join(ctx.root, "alphaclaw.env");
+    fs.writeFileSync(envFile, "SETUP_PASSWORD=withheld-setup-password\nPUSHER_ONLY_TOKEN=" + kWriteToken + "\n", { mode: 0o600 });
+    ctx.env.SETUP_PASSWORD = "";
+
+    const { checks } = createChecks(ctx, { checkouts: [{ path: dir, name: "pinned" }], envFiles: [envFile] });
+    const { results } = await checks.check();
+    expect(results[0]).toMatchObject({ routing: null, write: null, writeProbe: "ok" });
+    const lines = fs.readFileSync(seen, "utf8").trim().split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every((line) => line === "setup=")).toBe(true);
+  });
 });
 
 describe("git push checkout discovery", () => {
