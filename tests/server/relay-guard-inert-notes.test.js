@@ -269,6 +269,9 @@ const environReads = () => [
   ["exec", { command: "cd /proc && cat 1/environ" }],
   ["exec", { command: "p=/proc/self; cat $p/environ" }],
   ["exec", { command: "cat environ", workdir: "/proc/self" }],
+  ["exec", { command: "cat proc/self/environ", workdir: "/" }],
+  ["exec", { command: "cat pr*/self/env*", workdir: "/" }],
+  ["exec", { command: "cat self/environ", workdir: "/proc/" }],
   ["exec", { command: "grep -a TOKEN /proc/thread-self/environ" }],
   ["process", { action: "write", sessionId: "s1", data: "cat /proc/1/environ\n" }],
 ];
@@ -276,6 +279,8 @@ const environAllowed = () => [
   ["exec", { command: "ls /proc/1/environ" }],
   ["exec", { command: "echo 'checked /proc/self/environ' >> memory/notes.md" }],
   ["exec", { command: "cat /proc/self/status" }],
+  ["exec", { command: "cat proc/self/status", workdir: "/" }],
+  ["exec", { command: "cat tmp/*.log", workdir: "/" }],
   ["read", { path: "/proc/cpuinfo" }],
 ];
 
@@ -399,6 +404,41 @@ describe("relay guard and process environments (GST-2910)", () => {
       expect(classifyKeyRead({ toolName: "read", params: { path: "env-link" }, rootDir: root })?.environ).toBe(true);
       expect(classifyKeyRead({ toolName: "exec", params: { command: "cat env-link" }, rootDir: root })?.environ).toBe(true);
     } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
+  it("refuses a glob in the workspace that reaches a process environment through a symlink, and lets the same glob read other files", () => {
+    const link = path.join(workspace, "Lproc");
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync("/proc/self", link);
+    try {
+      for (const command of ["cat Lp*/environ", "cat L?roc/env*", "cat " + workspace + "/Lpro*/environ", "cd " + workspace + " && cat L*/environ", "cat Lp*/task/*/environ"]) {
+        expect(classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root })?.environ, command).toBe(true);
+      }
+      expect(classifyKeyRead({ toolName: "exec", params: { command: "cat */environ", workdir: workspace }, rootDir: root })?.environ).toBe(true);
+      for (const command of ["cat Lp*/status", "cat Lp*/cmdline", "ls Lp*/environ"]) expect(classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root }), command).toBeNull();
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
+  it("refuses a relative read from a workdir of ~, which OpenClaw joins onto the workspace, and lets other files through", () => {
+    const home = path.join(workspace, "~");
+    const link = path.join(workspace, "Lproc");
+    fs.rmSync(home, { force: true });
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(".", home);
+    fs.symlinkSync("/proc/self", link);
+    try {
+      for (const [command, workdir] of [["cat Lproc/environ", "~"], ["cat Lproc/environ", "~/"], ["cat environ", "~/Lproc"], ["cat Lp*/env*", "~"]]) {
+        expect(classifyKeyRead({ toolName: "exec", params: { command, workdir }, rootDir: root })?.environ, command + " in " + workdir).toBe(true);
+      }
+      for (const [command, workdir] of [["cat Lproc/status", "~"], ["cat Lp*/status", "~"], ["cat status", "~/Lproc"]]) {
+        expect(classifyKeyRead({ toolName: "exec", params: { command, workdir }, rootDir: root }), command + " in " + workdir).toBeNull();
+      }
+    } finally {
+      fs.rmSync(home, { force: true });
       fs.rmSync(link, { force: true });
     }
   });
