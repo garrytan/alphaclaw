@@ -833,7 +833,8 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
 // GST-3439: reading words with real quote state must not make the guard slow
 // on a long command (a 10 KB $'...' word took 1.8 s in review). Each shape
 // below runs through the plugin's hook for the owner's pinned thread; the
-// best of three warm runs finishes under 50 ms.
+// best of five warm runs finishes under 50 ms (the best, so a parallel test
+// file or a GC pause on a busy CI runner does not decide it).
 describe("relay guard on long commands (GST-3439)", () => {
   let ctx;
   afterEach(() => {
@@ -855,7 +856,7 @@ describe("relay guard on long commands (GST-3439)", () => {
       for (const [label, command] of shapes(size)) {
         expect(command.length, label).toBeGreaterThanOrEqual(size);
         let best = Infinity;
-        for (let i = 0; i < 4; i += 1) {
+        for (let i = 0; i < 6; i += 1) {
           const started = process.hrtime.bigint();
           const result = await ctx.call(run, "exec", { command: command + " " + i });
           const took = Number(process.hrtime.bigint() - started) / 1e6;
