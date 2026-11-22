@@ -71,6 +71,53 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
       ["a glob from a workdir of ~", "exec", { command: "cat r?/*.json", workdir: "~" }],
     ];
   };
+  // A Back up now copy beside the relay folder, reached by globs over the
+  // folder's name and through a ~ workdir (OpenClaw 2026.11.4 joins ~ onto
+  // the workspace, so ~/bk is <workspace>/~/bk).
+  const backupCopy = (ctx) => {
+    const backup = path.join(ctx.rootDir, "20261110-relay-backup");
+    fs.mkdirSync(backup, { recursive: true });
+    fs.writeFileSync(path.join(backup, "secrets.json"), "{}");
+    const workspace = path.join(ctx.rootDir, ".openclaw", "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.symlinkSync(backup, path.join(workspace, "bk"));
+    fs.rmSync(path.join(workspace, "~"), { force: true });
+    fs.symlinkSync(".", path.join(workspace, "~"));
+    return [
+      ["a recursive grep of the copy through a glob", "exec", { command: "grep -ra . " + ctx.rootDir + "/*-relay-b*" }],
+      ["a copy of the copy through a glob", "exec", { command: "cp -r " + ctx.rootDir + "/*relay-back*/. /tmp/out" }],
+      ["a relative glob over the copy from the root", "exec", { command: "cat *-relay-b?ckup/*", workdir: ctx.rootDir }],
+      ["a key read with a ~ workdir in the copy", "exec", { command: "cat secrets.json", workdir: "~/bk" }],
+      ["a note with a ~ workdir in the copy", "exec", { command: "echo x >> notes.md", workdir: "~/bk" }],
+      ["a note with an absolute workdir in the copy", "exec", { command: "echo x >> notes.md", workdir: path.join(ctx.rootDir, "20261110-relay-backup") }],
+    ];
+  };
+  // A workspace link with an ordinary name that lands on a Back up now copy:
+  // the copy itself counts, not only the key files named inside it.
+  const backupLink = (ctx) => {
+    const backup = path.join(ctx.rootDir, "20261111-relay-backup");
+    fs.mkdirSync(backup, { recursive: true });
+    fs.writeFileSync(path.join(backup, "secrets.json"), "{}");
+    const workspace = path.join(ctx.rootDir, ".openclaw", "workspace");
+    fs.mkdirSync(path.join(workspace, "plain"), { recursive: true });
+    fs.symlinkSync(backup, path.join(workspace, "foo"));
+    fs.symlinkSync(path.join(workspace, "plain"), path.join(workspace, "bar"));
+    return {
+      refused: [
+        ["a recursive grep of the link", "exec", { command: "grep -r x foo" }],
+        ["a recursive grep of a glob matching the link", "exec", { command: "grep -r x fo*" }],
+        ["a cd into the link, then a grep", "exec", { command: "cd foo && grep -r x ." }],
+        ["a tar of the link", "exec", { command: "tar czf /tmp/o.tgz foo" }],
+        ["a workdir in the link", "exec", { command: "grep -r x .", workdir: "foo" }],
+      ],
+      allowed: [
+        ["a listing of the link", "exec", { command: "ls -la foo" }],
+        ["a recursive grep of a link to an ordinary folder", "exec", { command: "grep -r x bar" }],
+        ["a glob matching only the ordinary link", "exec", { command: "grep -r x ba*" }],
+        ["a tar of the ordinary link", "exec", { command: "tar czf /tmp/o.tgz bar" }],
+      ],
+    };
+  };
   const relayWrites = (relay) => [
     ["cd into the root, then into relay, then rm secrets.json", "exec", { command: "cd " + path.dirname(relay) + " && cd relay && rm secrets.json" }],
     ["cd into relay, then rm bridge.db", "exec", { command: "cd " + relay + " && rm bridge.db" }],
@@ -86,6 +133,8 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ["a relative path outside relay with / as the workdir", "exec", { command: "cat tmp/app/secrets.json", workdir: "/" }],
     ["a glob outside relay", "exec", { command: "cat /tmp/app/*.json" }],
     ["a listing glob of the relay directory", "exec", { command: "ls " + path.dirname(relay) + "/re*" }],
+    ["a listing glob of the Back up now copies", "exec", { command: "ls -d " + path.dirname(relay) + "/*-relay-b*" }],
+    ["a glob that matches no copy", "exec", { command: "cat " + path.dirname(relay) + "/*-relay-notes*" }],
   ];
   // A delegate that is not the owner's own thread runs no programs
   // (GST-2661), so its ordinary calls are the file tools.
@@ -99,7 +148,7 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ctx = setup();
     const relay = path.join(ctx.rootDir, "relay");
     const run = await ctx.deliver(ctx.oauthDelegate().agent);
-    for (const [label, tool, params] of keyReads(relay)) {
+    for (const [label, tool, params] of [...keyReads(relay), ...backupCopy(ctx)]) {
       const result = await ctx.call(run, tool, params);
       expect(result.block, label).toBe(true);
       expect(result.blockReason, label).toContain("is refused in every relay session");
@@ -114,7 +163,16 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ctx = setup();
     const relay = path.join(ctx.rootDir, "relay");
     const run = await ctx.deliver((await ctx.attestedAgent()).agent);
-    for (const [label, tool, params] of [...keyReads(relay), ...symlinked(ctx)]) expectRefusedOutright(await ctx.call(run, tool, params), label);
+    for (const [label, tool, params] of [...keyReads(relay), ...symlinked(ctx), ...backupCopy(ctx)]) expectRefusedOutright(await ctx.call(run, tool, params), label);
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("refuses the owner's reads of a Back up now copy through a workspace link with an ordinary name, and runs the same commands through an ordinary link", async () => {
+    ctx = setup();
+    const run = await ctx.deliver((await ctx.attestedAgent()).agent);
+    const { refused, allowed } = backupLink(ctx);
+    for (const [label, tool, params] of refused) expectRefusedOutright(await ctx.call(run, tool, params), label);
+    for (const [label, tool, params] of allowed) expect(await ctx.call(run, tool, params), label).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
   });
 
