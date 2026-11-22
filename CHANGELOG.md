@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.328] - 2026-11-22
+
+The relay guard now catches a change or read in a protected folder made from an exec working folder that starts with `~`, and a glob that matches a whole relay backup copy.
+
+### Fixed
+- OpenClaw 2026.11.4 does not expand a leading `~` in an exec call's `workdir`; it joins it onto the agent's folder like any relative path. 0.10.327 read it that way for the guard's read checks, but the check for changes to AlphaClaw's protected files and the check for a working folder inside a relay backup copy still took `~` as the home folder. So a command run from a `~` working folder that a symlink in the workspace sent into the guest notes broker's folder or a backup copy was not caught. Both checks now count a leading `~` both ways, as joined onto each base and as the home folder.
+- A glob that matched a whole `*-relay-backup` copy (for example a recursive grep over `<root>/*-relay-b*`) was not caught, because only key files inside a copy counted. A match named like a backup copy now counts as reaching the relay's files.
+
+### Tests
+- The relay and environment walks' "glob matches too many entries to check" refusals are now covered on their own, for a command and for input typed into a running process, along with which reason wins beside a real reach.
+
 ## [0.10.327] - 2026-11-22
 
 The relay guard now refuses three more ways a relay session's command could read the relay's keys, the guest notes broker's files or a process environment. They go through the command's working folder, through a glob over the relay's files, or through a glob that follows a symlink into `/proc`.

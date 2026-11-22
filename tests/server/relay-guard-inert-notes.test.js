@@ -281,6 +281,8 @@ const environAllowed = () => [
   ["exec", { command: "cat /proc/self/status" }],
   ["exec", { command: "cat proc/self/status", workdir: "/" }],
   ["exec", { command: "cat tmp/*.log", workdir: "/" }],
+  ["exec", { command: "cat notes.md memory/*", workdir: "~/memory" }],
+  ["exec", { command: "cat notes.md", workdir: "~" }],
   ["read", { path: "/proc/cpuinfo" }],
 ];
 
@@ -610,6 +612,24 @@ describe("relay guard and big globs near the guest notes broker's files (GST-342
     } finally {
       fs.rmSync(links, { recursive: true, force: true });
       fs.rmSync(path.join(root, "relay"), { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a glob too big to check in the relay and environment walks too, below a real reach's own reason", () => {
+    const links = fs.mkdtempSync(path.join(root, ".openclaw", "workspace", "links-"));
+    for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
+    // With no AlphaClaw root there is no broker folder to walk toward, so
+    // only the relay and environment walks can give up on this glob.
+    const bare = (toolName, params) => classifyKeyRead({ toolName, params, rootDir: "" });
+    try {
+      expect(bare("exec", { command: "wc -l " + links + "/*.md" })).toEqual({ action: "a command whose glob matches too many entries to check", globCap: true });
+      expect(bare("process", { action: "write", sessionId: "s1", data: "wc -l " + links + "/*.md\n" })).toEqual({ action: "input whose glob matches too many entries to check", globCap: true });
+      expect(bare("exec", { command: "wc -l " + links + "/*.md /proc/self/environ" })?.environ).toBe(true);
+      expect(bare("exec", { command: "wc -l " + links + "/*.md /srv/relay/bridge.db" })?.action).toBe("a command that reaches the relay's bridge.db");
+      expect(bare("exec", { command: "ls " + links + "/*.md" })).toBeNull();
+      expect(bare("exec", { command: "wc -l " + links + "/l1*.md" })).toBeNull();
+    } finally {
+      fs.rmSync(links, { recursive: true, force: true });
     }
   });
 
