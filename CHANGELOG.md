@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.334] - 2026-11-22
+
+The upgrade runbook no longer says AlphaClaw keeps Back up now archives forever. Reported by @exGeni in #314.
+
+### Docs
+- `docs/upgrade-troubleshooting.md` ("Back up now") now describes the watchdog's 30-minute retention sweep and its two deployment-only settings, `ALPHACLAW_BACKUP_RETENTION_KEEP` (default 3) and `ALPHACLAW_BACKUP_RETENTION_DAYS` (default 7), what the sweep will and won't remove, and where to list archives: the **Backups** section of `alphaclaw diagnose` and `GET /api/box/disk`, which shows each archive's retention verdict.
+
 ## [0.10.333] - 2026-11-22
 
 The relay guard now refuses a change to its own config spelled as a brace list, such as `{openclaw,config,set,plugins.entries.relay-guard.enabled,false}`, which bash runs as `openclaw config set plugins.entries.relay-guard.enabled false`.

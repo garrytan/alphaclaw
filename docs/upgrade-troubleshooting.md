@@ -210,9 +210,23 @@ full 12 hours when the state cannot be measured quickly). A run that times out
 or fails removes the unfinished `.openclaw-backup-publish-*` staging folder it
 created, and a timed-out result records `timeoutMs` and `stateBytes`.
 The result lives in memory only, so it resets when AlphaClaw restarts; the
-archive itself stays in `<root>/backups/openclaw`. AlphaClaw adds no quiesce,
-retention, inventory or restore of its own. Delete old archives yourself when
-the volume fills.
+archive itself stays in `<root>/backups/openclaw`. AlphaClaw adds no quiesce
+or restore of its own, but it does prune old archives. The watchdog's
+30-minute retention sweep always keeps the newest
+`ALPHACLAW_BACKUP_RETENTION_KEEP` archives (default `3`, `1`–`100`) and every
+archive younger than `ALPHACLAW_BACKUP_RETENTION_DAYS` days (default `7`,
+`1`–`3650`), and removes the rest one at a time. It only removes regular files
+named like OpenClaw's own archives (`<timestamp>-openclaw-backup.tar.gz`) and
+owned by AlphaClaw's user, never anything a process holds open. The same sweep
+and settings cover the relay and hook ingress backups written beside the
+archives and OpenClaw's Doctor and update captures. Both settings are
+deployment env only, never honored from `.env`.
+
+To see what is there, the **Backups** section of `alphaclaw diagnose` (or
+`GET /api/diagnose`) lists every entry in the backups directory, newest first,
+with its size, and `GET /api/box/disk` lists each archive with its retention
+verdict: `kept_newest`, `kept_recent`, `due`, or `not_managed` with the reason.
+If the volume still fills, lower the two settings or delete archives yourself.
 
 Restoring is OpenClaw's own procedure. `openclaw backup verify <archive>`
 checks an archive, and `openclaw backup restore <archive> --target <dir>`
