@@ -666,3 +666,221 @@ describe("relay guard and big globs near the guest notes broker's files (GST-342
   });
 });
 
+
+// GST-3439: the key-read checks split a command into words after dropping
+// every quote and backslash, so a workspace link whose name holds a space
+// ("my notes", 'my notes', my\ notes) was read as two words that land
+// nowhere, and a recursive grep or a tar of a link to a relay backup copy,
+// the relay folder, the guest notes broker's folder or a process
+// environment ran. The checks now also read each word with real quote and
+// backslash state. Every row here also runs in real bash, zsh and dash (and
+// inside OpenClaw's eval), with stub cat, grep, head and tar on PATH that
+// record the arguments they were given: a refused row hands at least one
+// argument that lands on a protected file or folder to its command in every
+// shell, and an allowed neighbour hands none.
+describe("relay guard and link names with a space in them (GST-3439)", () => {
+  let spacedRoot;
+  let spacedWorkspace;
+  let argLog;
+  let argEnv;
+  let protectedDirs;
+  const kProtectedText = "PROTECTED-GST-3439";
+  beforeAll(() => {
+    spacedRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-spaced-")));
+    spacedWorkspace = path.join(spacedRoot, ".openclaw", "workspace");
+    fs.mkdirSync(path.join(spacedWorkspace, "memory"), { recursive: true });
+    fs.writeFileSync(path.join(spacedWorkspace, "memory", "n.md"), "x\n");
+    const backup = path.join(spacedRoot, "20261112-relay-backup");
+    const relay = path.join(spacedRoot, "relay");
+    const guest = path.join(spacedRoot, "guest-writes");
+    for (const [dir, file] of [[backup, "secrets.json"], [relay, "secrets.json"], [guest, "broker-client.json"]]) {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, file), kProtectedText + "\n");
+    }
+    const plain = path.join(spacedRoot, "plain folder");
+    fs.mkdirSync(plain);
+    fs.writeFileSync(path.join(plain, "a.md"), "x\n");
+    fs.symlinkSync(backup, path.join(spacedWorkspace, "my notes"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "box keys"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "$keys"));
+    fs.symlinkSync(backup, path.join(spacedWorkspace, "my \u00e9notes"));
+    fs.symlinkSync(guest, path.join(spacedWorkspace, "broker files"));
+    fs.symlinkSync("/proc/self", path.join(spacedWorkspace, "my proc"));
+    fs.symlinkSync("/proc/self/environ", path.join(spacedWorkspace, "my env"));
+    fs.symlinkSync(plain, path.join(spacedWorkspace, "my folder"));
+    protectedDirs = [backup, relay, guest];
+    const bin = path.join(spacedRoot, "stub-bin");
+    fs.mkdirSync(bin);
+    argLog = path.join(spacedRoot, "args.log");
+    const stub = "#!/bin/sh\nfor a in \"$@\"; do case $a in /*) printf '%s\\n' \"$a\" ;; *) printf '%s\\n' \"$PWD/$a\" ;; esac >> \"$ARG_LOG\"; done\n/usr/bin/head -c 200 >> \"$ARG_LOG\"\n";
+    for (const name of ["cat", "grep", "head", "tar"]) fs.writeFileSync(path.join(bin, name), stub, { mode: 0o755 });
+    argEnv = { PATH: bin + ":/usr/local/bin:/usr/bin:/bin", HOME: spacedRoot, ZDOTDIR: spacedRoot, ARG_LOG: argLog, LANG: "C" };
+  });
+  afterAll(() => fs.rmSync(spacedRoot, { recursive: true, force: true }));
+
+  // Each spelling of a spaced name the shells read as one word.
+  const spellings = (name) => [["double quotes", '"' + name + '"'], ["single quotes", "'" + name + "'"], ["a backslash", name.replace(/ /g, "\\ ")]];
+  const refusedRows = () => [
+    ...spellings("my notes").flatMap(([how, word]) => [
+      ["a recursive grep of a backup link in " + how, "grep -r x " + word, "relay"],
+      ["a tar of a backup link in " + how, "tar czf /tmp/o.tgz " + word, "relay"],
+      ["a cat of a key in a backup link in " + how, "cat " + word.replace(/(["']?)$/, "/secrets.json$1"), "relay"],
+    ]),
+    ...spellings("box keys").flatMap(([how, word]) => [
+      ["a recursive grep of a relay link in " + how, "grep -r x " + word, "relay"],
+      ["a cat of secrets.json in a relay link in " + how, "cat " + word.replace(/(["']?)$/, "/secrets.json$1"), "relay"],
+    ]),
+    ...spellings("broker files").flatMap(([how, word]) => [
+      ["a recursive grep of a guest-writes link in " + how, "grep -r x " + word, "guest"],
+      ["a cat in a guest-writes link in " + how, "cat " + word.replace(/(["']?)$/, "/broker-client.json$1"), "guest"],
+    ]),
+    ...spellings("my proc").map(([how, word]) => ["a cat of environ through a /proc/self link in " + how, "cat " + word.replace(/(["']?)$/, "/environ$1"), "environ"]),
+    ...spellings("my env").map(([how, word]) => ["a cat of a link to /proc/self/environ in " + how, "cat " + word, "environ"]),
+    ["half-quoted backup link", 'grep -r x my" notes"', "relay"],
+    ["a quoted cd into a backup link, then a grep", 'cd "my notes" && grep -r x secrets.json', "relay"],
+    ["a cd into a relay link with a backslash, then a cat", "cd box\\ keys && cat secrets.json", "relay"],
+    ["a grep of a backup link after a substituted cd", '`cd` grep -r x "my notes"', "relay"],
+    ["a grep of a backup link after $(cd)", '$(cd) grep -r x "my notes"', "relay"],
+    ["a cat in a relay link after a substituted cd", '`cd` cat "box keys/secrets.json"', "relay"],
+    ["a quoted redirect from a guest-writes link", 'head -c 9 < "broker files/broker-client.json"', "guest"],
+    ["a backup link in double quotes then a backslash", 'grep -r x "my"\\ notes', "relay"],
+    ["a relay link whose name holds a $, in single quotes", "cat '$keys/secrets.json'", "relay"],
+    // $'...' is bash and zsh quoting, $"..." bash's; dash reads each as a $
+    // and the quotes.
+    ["a backup link in $'...'", "grep -r x $'my notes'", "relay", ["bash", "zsh"]],
+    ["a backup link in $'...' with a hex escape", "tar czf /tmp/o.tgz $'my\\x20notes'", "relay", ["bash", "zsh"]],
+    ["a relay link in $'...' with an octal escape", "cat $'box\\040keys/secrets.json'", "relay", ["bash", "zsh"]],
+    ["a backup link in $'...' cut short by a NUL", "grep -r x $'my notes\\0junk'", "relay", ["bash", "zsh"]],
+    ["a backup link in $\"...\"", 'grep -r x $"my notes"', "relay", ["bash"]],
+    // \xc3\xa9 and \303\251 are the UTF-8 bytes of é, which the shells pass
+    // to the command as they are.
+    ["a backup link named with UTF-8 hex escapes in $'...'", "grep -r x $'my \\xc3\\xa9notes'", "relay", ["bash", "zsh"]],
+    ["a backup link named with UTF-8 octal escapes in $'...'", "tar czf /tmp/o.tgz $'my \\303\\251notes'", "relay", ["bash", "zsh"]],
+    // A cd that fails leaves the shell where it was, so later words still
+    // count from there.
+    ["a cat in a relay link after a cd that fails", 'cd nowhere; cat "box keys/secrets.json"', "relay"],
+    ["a grep of a backup link after a cd that fails, then ||", "cd nowhere || grep -r x 'my notes'", "relay"],
+    ["a cat in a relay link after a cd into a missing folder under an ordinary one", "cd 'my folder/none'; cat box\\ keys/secrets.json", "relay"],
+  ];
+  const allowedRows = () => [
+    ...spellings("my folder").flatMap(([how, word]) => [
+      ["a recursive grep of an ordinary spaced folder in " + how, "grep -r x " + word],
+      ["a tar of an ordinary spaced folder in " + how, "tar czf /tmp/o.tgz " + word],
+    ]),
+    ["a double-quoted search string", 'grep -rn "meeting notes" memory'],
+    ["a single-quoted search string with a key file's name", "grep -rn 'secrets json box' memory"],
+    ["a backslash-escaped search string", "grep -rn meeting\\ notes memory"],
+    ["a search string the shell fills in", 'grep -rn "$USER notes" memory'],
+    ["a search string in $'...'", "grep -rn $'meeting\\tnotes' memory"],
+    ["a listing of a spaced backup link", 'ls -la "my notes"'],
+    ["a note that names a spaced backup link", 'echo "my notes" >> memory/n.md'],
+  ];
+
+  const verdict = (toolName, command) => classifyKeyRead({ toolName, params: toolName === "exec" ? { command } : { action: "write", sessionId: "s1", data: command + "\n" }, rootDir: spacedRoot });
+  const landsProtected = (arg) => {
+    if (arg === kProtectedText) return true;
+    if (!arg.startsWith("/")) return false;
+    const spelled = path.resolve(arg);
+    let landed = spelled;
+    try {
+      landed = fs.realpathSync(spelled);
+    } catch {}
+    return /^\/proc\/[^/]+\/environ$/.test(landed) || protectedDirs.some((dir) => landed === dir || landed.startsWith(dir + "/"));
+  };
+  // Which runners hand their command an argument that lands on a protected
+  // file or folder (a relative one resolved from the folder the command runs
+  // in), or feed it a protected file on its input.
+  const shellsReaching = (command) => {
+    const reached = [];
+    for (const [name, file, argv] of kRunners) {
+      if (!file) continue;
+      fs.rmSync(argLog, { force: true });
+      spawnSync(file, argv(command), { cwd: spacedWorkspace, env: argEnv, timeout: 5000, stdio: "ignore" });
+      const args = fs.existsSync(argLog) ? fs.readFileSync(argLog, "utf8").split("\n") : [];
+      if (args.some(landsProtected)) reached.push(name);
+    }
+    return reached;
+  };
+  const shellNames = () => kRunners.filter(([, file]) => file).map(([name]) => name);
+
+  it("refuses an exec or typed input that reaches a protected file through a spaced link name, for every spelling", () => {
+    for (const [label, command, kind] of refusedRows()) {
+      for (const toolName of ["exec", "process"]) {
+        const hit = verdict(toolName, command);
+        expect(hit, toolName + ": " + label).not.toBeNull();
+        if (kind === "environ") expect(hit.environ, toolName + ": " + label).toBe(true);
+        else if (kind === "guest") expect(hit.action, toolName + ": " + label).toContain("guest notes broker's files");
+        else expect(hit.action, toolName + ": " + label).toContain("the relay's");
+      }
+    }
+  });
+
+  it("hands a protected path to the command in every real shell for each refused row ($'...' and $\"...\" in the shells that read them)", () => {
+    for (const [label, command, , only] of refusedRows()) {
+      expect(shellsReaching(command), label).toEqual(shellNames().filter((name) => !only || only.includes(name.replace(/^openclaw-/, ""))));
+    }
+  });
+
+  it("lets through an ordinary spaced folder, a quoted search string, a listing and a note", () => {
+    for (const [label, command] of allowedRows()) expect(verdict("exec", command), label).toBeNull();
+  });
+
+  it("hands no protected path to the command in any real shell for each allowed neighbour", () => {
+    for (const [label, command] of allowedRows()) expect(shellsReaching(command), label).toEqual([]);
+  });
+});
+
+// GST-3439: reading words with real quote state must not make the guard slow
+// on a long command (a 10 KB $'...' word took 1.8 s in review). Each shape
+// below runs through the plugin's hook for the owner's pinned thread; the
+// best of five warm runs finishes under 50 ms (the best, so a parallel test
+// file or a GC pause on a busy CI runner does not decide it).
+describe("relay guard on long commands (GST-3439)", () => {
+  let ctx;
+  afterEach(() => {
+    ctx?.cleanup();
+    ctx = null;
+  });
+  const shapes = (size) => [
+    ["$'...' full of unknown escapes", "grep -r x $'" + "\\q".repeat(size / 2) + "'"],
+    ["$'...' full of UTF-8 byte escapes", "grep -r x $'my " + "\\303\\251".repeat(size / 8) + "'"],
+    ["$'...' full of hex escapes", "cat $'" + "\\x41".repeat(size / 4) + "'"],
+    ["double quotes full of backslashes", 'cat "' + "\\a".repeat(size / 2) + '"'],
+    ["a word of escaped spaces", "cat " + "my\\ ".repeat(size / 4)],
+    ["a path of many folders and ..", "cat " + "q/".repeat(size / 4) + "../a/".repeat(size / 10)],
+  ];
+  it("checks a 10 KB and a 100 KB command in the hook in under 50 ms", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    for (const size of [10000, 100000]) {
+      for (const [label, command] of shapes(size)) {
+        expect(command.length, label).toBeGreaterThanOrEqual(size);
+        let best = Infinity;
+        for (let i = 0; i < 6; i += 1) {
+          const started = process.hrtime.bigint();
+          const result = await ctx.call(run, "exec", { command: command + " " + i });
+          const took = Number(process.hrtime.bigint() - started) / 1e6;
+          expect(result, label).toEqual({});
+          if (i > 0) best = Math.min(best, took);
+        }
+        expect(best, size + " bytes, " + label).toBeLessThan(50);
+      }
+    }
+  });
+
+  // A cd that fails keeps the folder the shell stood in, so each cd can add
+  // folders to check; past 64 the command is refused with its own reason
+  // rather than walked.
+  it("refuses a command whose cd steps leave more than 64 folders to check, and runs ordinary cds and a listing", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    const capped = await ctx.call(run, "exec", { command: "cd q; ".repeat(40) + "cat notes.md" });
+    expect(capped.block).toBe(true);
+    expect(capped.blockReason).toContain("a command whose cd steps leave more folders than the guard checks is refused in every relay session");
+    expect(capped.blockReason).toContain("Use absolute paths or split the command.");
+    expect(await ctx.call(run, "exec", { command: "cd q; ".repeat(40) + "ls -la" })).toEqual({});
+    expect(await ctx.call(run, "exec", { command: "cd memory && cd .. && cd memory; cd /tmp; cat notes.md" })).toEqual({});
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+});
+
