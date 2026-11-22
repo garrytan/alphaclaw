@@ -708,6 +708,9 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     fs.symlinkSync("/proc/self", path.join(spacedWorkspace, "my proc"));
     fs.symlinkSync("/proc/self/environ", path.join(spacedWorkspace, "my env"));
     fs.symlinkSync(plain, path.join(spacedWorkspace, "my folder"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "k{eys"));
+    fs.symlinkSync(backup, path.join(spacedWorkspace, "k}eys"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "keys"));
     protectedDirs = [backup, relay, guest];
     const bin = path.join(spacedRoot, "stub-bin");
     fs.mkdirSync(bin);
@@ -761,6 +764,21 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a cat in a relay link after a cd that fails", 'cd nowhere; cat "box keys/secrets.json"', "relay"],
     ["a grep of a backup link after a cd that fails, then ||", "cd nowhere || grep -r x 'my notes'", "relay"],
     ["a cat in a relay link after a cd into a missing folder under an ordinary one", "cd 'my folder/none'; cat box\\ keys/secrets.json", "relay"],
+    // GST-3446: an unquoted { , or } is part of the word, so a link named
+    // k{eys is read as it is; a brace list bash and zsh expand (dash does
+    // not) is read as each word it makes.
+    ["a cat in a relay link whose name holds an unquoted {", "cat k{eys/secrets.json", "relay"],
+    ["a cat in a backup link whose name holds an unquoted }", "cat k}eys/secrets.json", "relay"],
+    ["a recursive grep of a relay link whose name holds an unquoted {", "grep -r x k{eys", "relay"],
+    ["a cat in a relay link whose name holds a quoted {", 'cat "k{eys"/secrets.json', "relay"],
+    ["a cat in a backup link whose name holds a } in single quotes", "cat 'k}eys/secrets.json'", "relay"],
+    ["a cat in a relay link whose name holds a backslashed {", "cat k\\{eys/secrets.json", "relay"],
+    ["a cd into a relay link whose name holds an unquoted {, then a cat", "cd k{eys && cat secrets.json", "relay"],
+    ["a cat through a brace list that makes a relay link's name", "cat k{eys,x}/secrets.json", "relay", ["bash", "zsh"]],
+    ["a cat through a brace list at the start of a relay link's name", "cat {k,x}eys/secrets.json", "relay", ["bash", "zsh"]],
+    ["a cat through a nested brace list", "cat {k{eys,x},y}/secrets.json", "relay", ["bash", "zsh"]],
+    ["a recursive grep through a brace list that makes a spaced backup link's name", "grep -r x {my,no}\\ notes", "relay", ["bash", "zsh"]],
+    ["a cd and a cat inside a { ...; } group", "{ cd keys; cat secrets.json; }", "relay"],
   ];
   const allowedRows = () => [
     ...spellings("my folder").flatMap(([how, word]) => [
@@ -774,6 +792,10 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a search string in $'...'", "grep -rn $'meeting\\tnotes' memory"],
     ["a listing of a spaced backup link", 'ls -la "my notes"'],
     ["a note that names a spaced backup link", 'echo "my notes" >> memory/n.md'],
+    ["a brace list of ordinary notes", "cat memory/{n,o}.md"],
+    ["a brace list whose words name no link", "cat k{x,y}/secrets.json"],
+    ["a brace sequence in a note", "echo {1..5} >> memory/n.md"],
+    ["a cd and a cat of an ordinary note inside a { ...; } group", "{ cd memory; cat n.md; }"],
   ];
 
   const verdict = (toolName, command) => classifyKeyRead({ toolName, params: toolName === "exec" ? { command } : { action: "write", sessionId: "s1", data: command + "\n" }, rootDir: spacedRoot });
@@ -848,6 +870,7 @@ describe("relay guard on long commands (GST-3439)", () => {
     ["double quotes full of backslashes", 'cat "' + "\\a".repeat(size / 2) + '"'],
     ["a word of escaped spaces", "cat " + "my\\ ".repeat(size / 4)],
     ["a path of many folders and ..", "cat " + "q/".repeat(size / 4) + "../a/".repeat(size / 10)],
+    ["words with braces bash leaves as they are", "cat " + "k{x}/{y ".repeat(size / 8)],
   ];
   it("checks a 10 KB and a 100 KB command in the hook in under 50 ms", async () => {
     ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
@@ -880,6 +903,24 @@ describe("relay guard on long commands (GST-3439)", () => {
     expect(capped.blockReason).toContain("Use absolute paths or split the command.");
     expect(await ctx.call(run, "exec", { command: "cd q; ".repeat(40) + "ls -la" })).toEqual({});
     expect(await ctx.call(run, "exec", { command: "cd memory && cd .. && cd memory; cd /tmp; cat notes.md" })).toEqual({});
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  // GST-3446: each word a brace list makes is checked, so a list that makes
+  // more than 256 words for one word or 1,024 for a command is refused with
+  // its own reason rather than walked.
+  it("refuses a command whose brace lists make more words than the guard checks, and runs ordinary brace lists", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    const list = "{" + Array.from({ length: 8 }, (_, i) => "p" + i).join(",") + "}";
+    for (const command of ["cat {1..300}", "cat " + "{a,b}".repeat(9), "cat " + (list + "/" + list + " ").repeat(17)]) {
+      const capped = await ctx.call(run, "exec", { command });
+      expect(capped.block, command.slice(0, 40)).toBe(true);
+      expect(capped.blockReason).toContain("a command whose brace lists make more words than the guard checks is refused in every relay session");
+      expect(capped.blockReason).toContain("Write the names out, use a loop, or split the command.");
+    }
+    expect(await ctx.call(run, "exec", { command: "cat " + (list + "/" + list + " ").repeat(16) })).toEqual({});
+    expect(await ctx.call(run, "exec", { command: "cat memory/{a,b,c}.md; echo {1..200} >/dev/null" })).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
   });
 });
