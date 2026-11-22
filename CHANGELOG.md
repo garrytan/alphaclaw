@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.332] - 2026-11-22
+
+The relay guard now refuses a command that reads the relay folder or a relay backup through a workspace link whose name holds a brace or a comma, such as `k{eys`.
+
+### Fixed
+- The guard's read checks treated an unquoted `{` or `}` as the end of a word, so `cat k{eys/secrets.json` was read as `k` and `eys/secrets.json`, two words that land nowhere, while every shell hands `cat` the one word `k{eys/secrets.json`. Unquoted braces and commas now stay inside the word, and a `{ ...; }` group still reads the `cd` and the command inside it. Loops and heredocs with brace lists, such as `for i in {1..500}`, run as before.
+
 ## [0.10.331] - 2026-11-22
 
 The relay guard now refuses a command that reads a relay backup copy, the relay folder, the guest notes folder or a process environment through a workspace link whose name holds a space.

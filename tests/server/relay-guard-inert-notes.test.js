@@ -708,6 +708,10 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     fs.symlinkSync("/proc/self", path.join(spacedWorkspace, "my proc"));
     fs.symlinkSync("/proc/self/environ", path.join(spacedWorkspace, "my env"));
     fs.symlinkSync(plain, path.join(spacedWorkspace, "my folder"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "k{eys"));
+    fs.symlinkSync(backup, path.join(spacedWorkspace, "k}eys"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "k,eys"));
+    fs.symlinkSync(relay, path.join(spacedWorkspace, "keys"));
     protectedDirs = [backup, relay, guest];
     const bin = path.join(spacedRoot, "stub-bin");
     fs.mkdirSync(bin);
@@ -761,6 +765,17 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a cat in a relay link after a cd that fails", 'cd nowhere; cat "box keys/secrets.json"', "relay"],
     ["a grep of a backup link after a cd that fails, then ||", "cd nowhere || grep -r x 'my notes'", "relay"],
     ["a cat in a relay link after a cd into a missing folder under an ordinary one", "cd 'my folder/none'; cat box\\ keys/secrets.json", "relay"],
+    // GST-3446: an unquoted { , or } is part of the word, so a link named
+    // k{eys is read as it is.
+    ["a cat in a relay link whose name holds an unquoted {", "cat k{eys/secrets.json", "relay"],
+    ["a cat in a backup link whose name holds an unquoted }", "cat k}eys/secrets.json", "relay"],
+    ["a cat in a relay link whose name holds an unquoted ,", "cat k,eys/secrets.json", "relay"],
+    ["a recursive grep of a relay link whose name holds an unquoted {", "grep -r x k{eys", "relay"],
+    ["a cat in a relay link whose name holds a quoted {", 'cat "k{eys"/secrets.json', "relay"],
+    ["a cat in a backup link whose name holds a } in single quotes", "cat 'k}eys/secrets.json'", "relay"],
+    ["a cat in a relay link whose name holds a backslashed {", "cat k\\{eys/secrets.json", "relay"],
+    ["a cd into a relay link whose name holds an unquoted {, then a cat", "cd k{eys && cat secrets.json", "relay"],
+    ["a cd and a cat inside a { ...; } group", "{ cd keys; cat secrets.json; }", "relay"],
   ];
   const allowedRows = () => [
     ...spellings("my folder").flatMap(([how, word]) => [
@@ -774,6 +789,11 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a search string in $'...'", "grep -rn $'meeting\\tnotes' memory"],
     ["a listing of a spaced backup link", 'ls -la "my notes"'],
     ["a note that names a spaced backup link", 'echo "my notes" >> memory/n.md'],
+    ["a brace list of ordinary notes", "cat memory/{n,o}.md"],
+    ["a brace list whose words name no link", "cat k{x,y}/secrets.json"],
+    ["a loop over a long brace sequence", "for i in {1..500}; do echo $i; done"],
+    ["a heredoc holding a long brace sequence", "cat <<'EOF'\nrange={1..400}\nEOF"],
+    ["a cd and a cat of an ordinary note inside a { ...; } group", "{ cd memory; cat n.md; }"],
   ];
 
   const verdict = (toolName, command) => classifyKeyRead({ toolName, params: toolName === "exec" ? { command } : { action: "write", sessionId: "s1", data: command + "\n" }, rootDir: spacedRoot });
@@ -848,6 +868,7 @@ describe("relay guard on long commands (GST-3439)", () => {
     ["double quotes full of backslashes", 'cat "' + "\\a".repeat(size / 2) + '"'],
     ["a word of escaped spaces", "cat " + "my\\ ".repeat(size / 4)],
     ["a path of many folders and ..", "cat " + "q/".repeat(size / 4) + "../a/".repeat(size / 10)],
+    ["words full of braces and commas", "cat " + "k{x,y}/{z ".repeat(size / 10)],
   ];
   it("checks a 10 KB and a 100 KB command in the hook in under 50 ms", async () => {
     ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
