@@ -444,6 +444,15 @@ describe("frontend/chat transcript-store: rows chat.history cut for display (GST
     expect(confirmed).toEqual([]);
   });
 
+  it("a cut row never confirms a message the server did not acknowledge, so a different message sharing its first 8,000 characters is never dropped", () => {
+    const delivered = longText("deploy");
+    const undelivered = delivered.slice(0, 8000) + "\nbut roll back the database first";
+    const confirmed = [];
+    const sent = { clientMsgId: "unacked", content: undelivered, createdAt: 1_000, sentAt: 1_050, ackedAt: 0, status: "inflight" };
+    mergeHistory({ current: [], rows: [cutRow("h1", "user", delivered, 1_200)], outboxItems: [sent], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual([]);
+  });
+
   it("a finished run's live answer is covered by its cut history row", () => {
     const whole = longText("report");
     const live = { id: "live-1", role: "assistant", content: whole, createdAt: 5_000, live: true, streamMessageId: "s1" };
