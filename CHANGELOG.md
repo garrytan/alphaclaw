@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.327] - 2026-11-22
+
+The relay guard now refuses three more ways a relay session's command could read the relay's keys, the guest notes broker's files or a process environment: through the command's working folder, through a glob over the relay's files, and through a glob that follows a symlink into `/proc`.
+
+### Fixed
+- The guard resolved a command's relative paths from the agent's workspace and the gateway's folder, never from the exec call's own `workdir`. So a relative path or glob that reached the broker's files, the relay's keys or a process environment from that working folder was let through. Relative words now start from the `workdir` wherever it lands (an absolute one as it is, a relative one from each base), for all three checks.
+- A glob in a command was checked against the relay's files only by the folder it starts in, so a glob that stands in for part of the relay folder's name or a key file's name was let through. Such globs are now walked through the folders they match, the same walk the broker check uses, and refused when a match is a relay key or the relay folder.
+- A glob that reached a process environment through a workspace symlink to `/proc/<pid>` was let through, because the environment check matched a glob by its spelling only. It now also walks the glob through the folders it matches.
+- A glob too big to walk (more than 2,000 symlinks or folders) is refused with the "glob matches too many entries to check" reason in all three checks, and a real reach in the same command keeps its own reason. Each folder is still read once per call however many checks walk it.
+
 ## [0.10.325] - 2026-11-22
 
 A relay delegate's read across a big folder, such as a brain's 31,000-page people folder, is no longer refused as if it reached the guest notes broker's files, and a glob the guard does refuse for size now says so.

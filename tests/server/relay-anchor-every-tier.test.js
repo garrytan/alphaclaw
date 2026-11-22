@@ -46,6 +46,13 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ["a cd typed into a running shell", "process", { action: "write", sessionId: "s1", data: "cd " + relay + "\n" }],
     ["a workdir in a Back up now copy", "exec", { command: "cat secrets.json", workdir: path.dirname(relay) + "/2026-11-10T00-00-00Z-relay-backup" }],
     ["a read of an unfinished Back up now copy", "read", { path: path.dirname(relay) + "/2026-11-10T00-00-00Z-relay-backup.partial/secrets.json" }],
+    ["a glob that stands in for part of the relay directory and the file", "exec", { command: "cat " + path.dirname(relay) + "/re*/sec*" }],
+    ["a glob that stands in for the whole relay directory name", "exec", { command: "cat " + path.dirname(relay) + "/*/secrets.json" }],
+    ["cd into the root, then a relative glob into relay", "exec", { command: "cd " + path.dirname(relay) + " && cat rel?y/*.json" }],
+    ["a relative path with a workdir at the root", "exec", { command: "cat relay/secrets.json", workdir: path.dirname(relay) }],
+    ["a relative glob with a workdir at the root", "exec", { command: "cat r*/se*", workdir: path.dirname(relay) }],
+    ["a relative path with / as the workdir", "exec", { command: "cat " + relay.slice(1) + "/secrets.json", workdir: "/" }],
+    ["a relative workdir that climbs to the root", "exec", { command: "cat relay/internal.secret", workdir: "../.." }],
   ];
   const symlinked = (ctx) => {
     const workspace = path.join(ctx.rootDir, ".openclaw", "workspace");
@@ -55,6 +62,8 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     return [
       ["a cat through a symlinked directory", "exec", { command: "cat rl/secrets.json" }],
       ["a cat through a symlinked file", "exec", { command: "cat s.json" }],
+      ["a glob through a symlinked directory", "exec", { command: "cat r?/secrets.json" }],
+      ["a glob through a symlinked directory and the file", "exec", { command: "cat rl*/*.json" }],
     ];
   };
   const relayWrites = (relay) => [
@@ -69,6 +78,9 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     ["a plain grep", "exec", { command: "grep -rn needle notes" }],
     ["a note in the workspace", "exec", { command: "echo done >> memory/notes.md" }],
     ["a secrets.json outside relay", "exec", { command: "cat /tmp/app/secrets.json" }],
+    ["a relative path outside relay with / as the workdir", "exec", { command: "cat tmp/app/secrets.json", workdir: "/" }],
+    ["a glob outside relay", "exec", { command: "cat /tmp/app/*.json" }],
+    ["a listing glob of the relay directory", "exec", { command: "ls " + path.dirname(relay) + "/re*" }],
   ];
   // A delegate that is not the owner's own thread runs no programs
   // (GST-2661), so its ordinary calls are the file tools.

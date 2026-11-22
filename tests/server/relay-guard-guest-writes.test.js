@@ -43,6 +43,9 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     ["a single-character glob in the directory name", "exec", { command: "cat " + path.dirname(dir) + "/guest-write?/internal-secret" }],
     ["cd into the root, then a relative glob", "exec", { command: "cd " + path.dirname(dir) + " && cat gues*/broker-client.json" }],
     ["a sqlite read of the claims database", "exec", { command: "sqlite3 " + dir + "/broker.db .dump" }],
+    ["a relative glob with / as the workdir", "exec", { command: "cat " + path.dirname(dir).slice(1) + "/gu*/*", workdir: "/" }],
+    ["a relative glob with a workdir at the root", "exec", { command: "cat gu*/internal-secret", workdir: path.dirname(dir) }],
+    ["a relative glob with a relative workdir that climbs to the root", "exec", { command: "cat */broker-client.json", workdir: "../.." }],
     ["a read typed into a running shell", "process", { action: "write", sessionId: "s1", data: "cat " + dir + "/broker-client.json\n" }],
   ];
   const symlinked = (ctx) => {
@@ -67,6 +70,8 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     ["a broker-client.json outside guest-writes", "exec", { command: "cat /tmp/app/broker-client.json" }],
     ["a note in the workspace", "exec", { command: "echo done >> memory/notes.md" }],
     ["a glob in the workspace", "exec", { command: "cat memory/*.md" }],
+    ["a relative path outside guest-writes with / as the workdir", "exec", { command: "cat tmp/app/broker-client.json", workdir: "/" }],
+    ["a listing glob of the root", "exec", { command: "ls gu*", workdir: path.dirname(dir) }],
   ];
 
   it("refuses an unattested delegate's reads of the broker's files outright, with no row and no notice", async () => {
