@@ -703,6 +703,7 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     fs.symlinkSync(backup, path.join(spacedWorkspace, "my notes"));
     fs.symlinkSync(relay, path.join(spacedWorkspace, "box keys"));
     fs.symlinkSync(relay, path.join(spacedWorkspace, "$keys"));
+    fs.symlinkSync(backup, path.join(spacedWorkspace, "my \u00e9notes"));
     fs.symlinkSync(guest, path.join(spacedWorkspace, "broker files"));
     fs.symlinkSync("/proc/self", path.join(spacedWorkspace, "my proc"));
     fs.symlinkSync("/proc/self/environ", path.join(spacedWorkspace, "my env"));
@@ -751,6 +752,15 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a relay link in $'...' with an octal escape", "cat $'box\\040keys/secrets.json'", "relay", ["bash", "zsh"]],
     ["a backup link in $'...' cut short by a NUL", "grep -r x $'my notes\\0junk'", "relay", ["bash", "zsh"]],
     ["a backup link in $\"...\"", 'grep -r x $"my notes"', "relay", ["bash"]],
+    // \xc3\xa9 and \303\251 are the UTF-8 bytes of é, which the shells pass
+    // to the command as they are.
+    ["a backup link named with UTF-8 hex escapes in $'...'", "grep -r x $'my \\xc3\\xa9notes'", "relay", ["bash", "zsh"]],
+    ["a backup link named with UTF-8 octal escapes in $'...'", "tar czf /tmp/o.tgz $'my \\303\\251notes'", "relay", ["bash", "zsh"]],
+    // A cd that fails leaves the shell where it was, so later words still
+    // count from there.
+    ["a cat in a relay link after a cd that fails", 'cd nowhere; cat "box keys/secrets.json"', "relay"],
+    ["a grep of a backup link after a cd that fails, then ||", "cd nowhere || grep -r x 'my notes'", "relay"],
+    ["a cat in a relay link after a cd into a missing folder under an ordinary one", "cd 'my folder/none'; cat box\\ keys/secrets.json", "relay"],
   ];
   const allowedRows = () => [
     ...spellings("my folder").flatMap(([how, word]) => [
@@ -819,3 +829,57 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     for (const [label, command] of allowedRows()) expect(shellsReaching(command), label).toEqual([]);
   });
 });
+
+// GST-3439: reading words with real quote state must not make the guard slow
+// on a long command (a 10 KB $'...' word took 1.8 s in review). Each shape
+// below runs through the plugin's hook for the owner's pinned thread; the
+// best of three warm runs finishes under 50 ms.
+describe("relay guard on long commands (GST-3439)", () => {
+  let ctx;
+  afterEach(() => {
+    ctx?.cleanup();
+    ctx = null;
+  });
+  const shapes = (size) => [
+    ["$'...' full of unknown escapes", "grep -r x $'" + "\\q".repeat(size / 2) + "'"],
+    ["$'...' full of UTF-8 byte escapes", "grep -r x $'my " + "\\303\\251".repeat(size / 8) + "'"],
+    ["$'...' full of hex escapes", "cat $'" + "\\x41".repeat(size / 4) + "'"],
+    ["double quotes full of backslashes", 'cat "' + "\\a".repeat(size / 2) + '"'],
+    ["a word of escaped spaces", "cat " + "my\\ ".repeat(size / 4)],
+    ["a path of many folders and ..", "cat " + "q/".repeat(size / 4) + "../a/".repeat(size / 10)],
+  ];
+  it("checks a 10 KB and a 100 KB command in the hook in under 50 ms", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    for (const size of [10000, 100000]) {
+      for (const [label, command] of shapes(size)) {
+        expect(command.length, label).toBeGreaterThanOrEqual(size);
+        let best = Infinity;
+        for (let i = 0; i < 4; i += 1) {
+          const started = process.hrtime.bigint();
+          const result = await ctx.call(run, "exec", { command: command + " " + i });
+          const took = Number(process.hrtime.bigint() - started) / 1e6;
+          expect(result, label).toEqual({});
+          if (i > 0) best = Math.min(best, took);
+        }
+        expect(best, size + " bytes, " + label).toBeLessThan(50);
+      }
+    }
+  });
+
+  // A cd that fails keeps the folder the shell stood in, so each cd can add
+  // folders to check; past 64 the command is refused with its own reason
+  // rather than walked.
+  it("refuses a command whose cd steps leave more than 64 folders to check, and runs ordinary cds and a listing", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    const capped = await ctx.call(run, "exec", { command: "cd q; ".repeat(40) + "cat notes.md" });
+    expect(capped.block).toBe(true);
+    expect(capped.blockReason).toContain("a command whose cd steps leave more folders than the guard checks is refused in every relay session");
+    expect(capped.blockReason).toContain("Use absolute paths or split the command.");
+    expect(await ctx.call(run, "exec", { command: "cd q; ".repeat(40) + "ls -la" })).toEqual({});
+    expect(await ctx.call(run, "exec", { command: "cd memory && cd .. && cd memory; cd /tmp; cat notes.md" })).toEqual({});
+    expect(ctx.confirmationCount()).toBe(0);
+  });
+});
+

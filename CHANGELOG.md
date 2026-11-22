@@ -11,6 +11,9 @@ The relay guard now refuses a command that reads a relay backup copy, the relay 
 
 ### Fixed
 - The guard's read checks split a command into words after dropping every quote and backslash, so a link named `my notes` written as `"my notes"`, `'my notes'` or `my\ notes` was read as two words that land nowhere, and a recursive grep, a `tar` or a `cat` through it ran. Each word is now also read the way bash, zsh and dash split it, with quotes, backslash escapes and `$'...'` handled, and either reading counts. A grep or `tar` of an ordinary folder with a space in its name, and a quoted search string, still run. A command that reads a protected folder without naming the link, such as `grep -R .` from a folder above it, is still not caught by this check.
+- A `cd` that fails (its folder missing) no longer moves the folder the guard reads later words from: `cd nowhere; cat "box keys/secrets.json"` was let through. The guard now keeps the folder the shell stood in beside where the `cd` would land, and refuses a command whose `cd` steps leave more than 64 folders to check.
+- `$'...'` escapes are decoded as bytes, so `$'my \xc3\xa9notes'` is the link `my énotes`, as bash and zsh read it.
+- Path checks no longer slow down on long words: a 10 KB `$'...'` word took seconds in the guard, and a 100 KB command is now checked in well under 50 ms.
 
 ## [0.10.329] - 2026-11-22
 
