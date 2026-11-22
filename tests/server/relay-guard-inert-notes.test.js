@@ -537,6 +537,42 @@ describe("relay guard and big globs near the guest notes broker's files (GST-342
     }
   });
 
+  it("walks a relative glob from the command's folder, never from /", () => {
+    const workspace = path.join(root, ".openclaw", "workspace");
+    const stars = Array.from({ length: root.split("/").filter(Boolean).length + 1 }, () => "*").join("/");
+    expect(verdict("cd " + workspace + " && grep -r hi " + stars)).toBeNull();
+    expect(verdict("cd " + workspace + " && wc -l */*")).toBeNull();
+    expect(verdict("cd " + root + " && grep -r hi */*")).toBeTruthy();
+  });
+
+  it("follows .. from where a symlinked match lands, as the shell does", () => {
+    const sub = path.join(root, "sub");
+    const link = path.join(root, ".openclaw", "workspace", "Lsub");
+    fs.mkdirSync(sub);
+    fs.symlinkSync(sub, link);
+    try {
+      expect(verdict("cd " + path.join(root, ".openclaw", "workspace") + " && cat Ls*/../gu*/*")).toBeTruthy();
+      expect(verdict("cat " + path.join(root, ".openclaw", "workspace") + "/Ls*/../gu*/*")).toBeTruthy();
+    } finally {
+      fs.unlinkSync(link);
+      fs.rmSync(sub, { recursive: true, force: true });
+    }
+  });
+
+  it("gives a relay file or a process environment its own reason beside a glob too big to check", () => {
+    const links = fs.mkdtempSync(path.join(root, ".openclaw", "workspace", "links-"));
+    fs.mkdirSync(path.join(root, "relay"), { recursive: true });
+    fs.writeFileSync(path.join(root, "relay", "secrets.json"), "{}");
+    for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
+    try {
+      expect(verdict("wc -l " + links + "/*.md " + root + "/relay/secrets.json")?.action).toMatch(/^a command that reaches the relay's /);
+      expect(verdict("wc -l " + links + "/*.md /proc/self/environ")?.environ).toBe(true);
+    } finally {
+      fs.rmSync(links, { recursive: true, force: true });
+      fs.rmSync(path.join(root, "relay"), { recursive: true, force: true });
+    }
+  });
+
   // The box's people folder holds 31,194 pages. Its listing is served by
   // the fs the guard is given (35,000 regular files), so the case runs in
   // milliseconds without writing them; the folders and the symlink are real.
@@ -545,16 +581,20 @@ describe("relay guard and big globs near the guest notes broker's files (GST-342
     fs.mkdirSync(big, { recursive: true });
     fs.symlinkSync(path.join(root, "big-brain"), path.join(root, "big"));
     const pages = Array.from({ length: 35000 }, (_, i) => ({ name: "person-" + i + ".md", isSymbolicLink: () => false, isDirectory: () => false }));
-    const fsModule = { ...fs, readdirSync: (dir, options) => (dir === big ? pages : fs.readdirSync(dir, options)) };
+    let bigReads = 0;
+    const fsModule = { ...fs, readdirSync: (dir, options) => (dir === big ? (bigReads += 1, pages) : fs.readdirSync(dir, options)) };
     const command = wintermuteScan(path.join(root, "big", "people"));
     const timed = () => {
+      const readsBefore = bigReads;
       const started = process.hrtime.bigint();
       const result = classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root, fsModule });
-      return { result, ms: Number(process.hrtime.bigint() - started) / 1e6 };
+      return { result, ms: Number(process.hrtime.bigint() - started) / 1e6, reads: bigReads - readsBefore };
     };
     try {
       const runs = [timed(), timed(), timed()];
       expect(runs.map((run) => run.result)).toEqual([null, null, null]);
+      expect(runs.every((run) => run.reads >= 1 && run.reads <= 4)).toBe(true);
+      // gstack-timing-ok: the fastest of three runs, about 90 ms on a loaded 4-core runner; the read count above (at most once per glob word in the command) is the deterministic check
       expect(Math.min(...runs.map((run) => run.ms))).toBeLessThan(250);
       pages.push({ name: "zz-broker.md", isSymbolicLink: () => true, isDirectory: () => false });
       fs.symlinkSync(path.join(root, "guest-writes", "broker-client.json"), path.join(big, "zz-broker.md"));
