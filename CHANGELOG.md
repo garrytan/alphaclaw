@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.326] - 2026-11-21
+
+A long message the gateway turned down after accepting it now stays in the Chat tab's outbox to be retried, instead of being taken as delivered because history shows a different message with the same first 8,000 characters.
+
+### Fixed
+- Since 0.10.324 the Chat tab matches a history row OpenClaw cut at 8,000 characters against the longer text it kept, but only for a message the server acknowledged. The check looked at the acknowledgement time alone, which a message keeps after the gateway rejects it (status `failed`, `unknown` or `queued` again). So a rejected message that shared its first 8,000 characters with one that did arrive was matched to that one's row and dropped from the outbox, losing its retry. A cut row now confirms only a message whose status is still `acked`.
+
 ## [0.10.324] - 2026-11-21
 
 Long answers from the box agent are now saved whole in the relay conversation pages in the brain, instead of being cut at 8,000 characters, and a long message sent from the Chat tab no longer leaves a stuck extra bubble.
