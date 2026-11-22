@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.330] - 2026-11-22
+
+AlphaClaw can now keep proving that a fix is still in. Fix probes are named, read-only checks in `alphaclaw.json` (`fixProbes`), each tied to the issue it proves. They run 10 minutes after the gateway first answers ready, once a day and on demand, and tell the owner once when one stops passing.
+
+### Added
+- Fix probes, in five read-only kinds: `log_count` (lines in OpenClaw's file log, with a required daily liveness line so a silent log never reads as a pass), `webhook_deliveries` (signed, unsigned and failed deliveries for one hook; refused ones counted apart), `push_checks` (the push checker ran lately, probed the listed checkouts' write path and told the owner about every problem), `file_check` (a file under the workspace or a listed folder still carries a fix's marker or stays under a size; protected files refused before opening) and `relay_long_replies` (relay answers to Capy threads past 8,000 characters went out whole). A probe that turns failing or has no data tells the owner once, with the issue, what was expected and what was found, and once more when it passes again. When the watched issues change, one message lists each issue code and its state, nothing else. Results never carry a log line, file content, payload, configured fragment, marker or path.
+- `GET /api/fix-probes` (each probe's state and every invalid probe with its fix line) and `POST /api/fix-probes/run` (409 while a run is going, 429 more than once a minute), both in the agent admin manifest.
+- git-push-checks writes a counts-only summary of each check into its state file, and the relay bridge counts long answers to Capy threads per day (whole or cut, kept 8 days), for the probes to read.
+
 ## [0.10.329] - 2026-11-22
 
 The relay guard now refuses a command that reads a relay backup copy through a workspace link with an ordinary name.
