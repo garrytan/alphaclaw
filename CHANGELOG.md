@@ -10,8 +10,8 @@ Versions follow this repository's `package.json` release counter.
 The relay guard now refuses a change to its own config spelled as a brace list, such as `{openclaw,config,set,plugins.entries.relay-guard.enabled,false}`, which bash runs as `openclaw config set plugins.entries.relay-guard.enabled false`.
 
 ### Fixed
-- The check that keeps every relay session, the owner's own Capy thread included, from changing what decides relay trust now reads each unquoted brace list as the words bash and zsh make from it. An `openclaw config` or `plugins` change, `openclaw.json`, or a trust env name spelled through a list is refused like its plain spelling.
-- A list never makes the guard refuse by itself: loops like `for i in {1..500}` and lists that form no such change run as before. Past 256 words for a word or 1,024 for a command, the rest of the list is not read.
+- The check that keeps every relay session, the owner's own Capy thread included, from changing what decides relay trust now reads each brace list as the words bash and zsh make from it, quoted members and lists inside `bash -c '…'` or `eval '…'` included. An `openclaw config` or `plugins` change, `openclaw.json`, or a trust env name spelled through a list is refused like its plain spelling.
+- A list past the reading limits (256 words for a word, 1,024 for a command, 1,024 characters or 32 braces in a word) is refused as too large to check only when its text names `openclaw`, `relay-guard` or a trust env name. Loops like `for i in {1..500}` and lists that form no such change run as before.
 
 ## [0.10.332] - 2026-11-22
 

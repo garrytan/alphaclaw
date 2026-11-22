@@ -910,10 +910,12 @@ describe("relay guard on long commands (GST-3439)", () => {
 // GST-3457: bash and zsh expand an unquoted brace list into words, so
 // {openclaw,config,set,KEY,false} runs openclaw config set KEY false and
 // openclaw.{json,} names openclaw.json. The anchor check reads each list as
-// the words it makes (braceReadingOf); a list never makes it refuse, so loops
-// and lists that form no anchor change run as before. dash does not expand
-// lists, and zsh reads a list leading a command as a group, so a row runs
-// openclaw in bash and, unless the list leads, in zsh.
+// the words it makes (braceReadingOf), quoted members and bash -c or eval
+// scripts included. A list past the reading limits is refused only when its
+// text names an anchor token, so loops and lists that form no anchor change
+// run as before. dash does not expand lists, and zsh reads a list leading a
+// command as a group, so a row runs openclaw in bash and, unless the list
+// leads, in zsh (bash -c runs bash under every shell).
 describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () => {
   const kGuardKey = "plugins.entries.relay-guard.enabled";
   const shellsOf = (names) => names.flatMap((name) => [name, "openclaw-" + name]).filter((name) => kRunners.some(([runner, file]) => runner === name && file)).sort();
@@ -926,6 +928,12 @@ describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () 
     ["a plugins disable as one list", "{openclaw,plugins,disable,relay-guard}", "plugins disable relay-guard", ["bash"]],
     ["a list in a later segment", "echo x >> memory/n.md; {openclaw,config,patch}", "config patch", ["bash"]],
     ["a nested list", "{{openclaw,config},set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["a list with quoted members", "{openclaw,\"config\",set,\"" + kGuardKey + "\",false}", kSet, ["bash"]],
+    ["a list after earlier lists spent the reading", "true " + "{1..300} ".repeat(5) + "; {openclaw,plugins,disable,relay-guard}", "plugins disable relay-guard", ["bash"]],
+    ["a list inside bash -c", "bash -c '{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash", "zsh", "dash"]],
+    ["a list inside eval", "eval '{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash"]],
+    ["a list past 256 words hiding the change", "{" + ",".repeat(300) + "openclaw,config,set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["a list past 256 words hiding the verb and key", "openclaw {" + ",".repeat(300) + "config,set," + kGuardKey + ",false}", kSet, ["bash"]],
   ];
   // Which runners ran openclaw with exactly these arguments.
   const changeRunsOf = (command, args) => {
@@ -950,6 +958,7 @@ describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () 
     ["a list of notes to read", "cat memory/{a,b}.md"],
     ["a list of folders to make", "mkdir -p out/{a,b,c}"],
     ["a list that makes 512 words", "echo " + "{a,b}".repeat(9) + " > /dev/null"],
+    ["a list of 512 folders to make", "mkdir -p out/" + "{a,b}".repeat(9)],
     ["a quoted list in a note", "echo '{openclaw,config,set," + kGuardKey + ",false}' >> memory/n.md"],
     ["a backslashed list", "echo \\{openclaw,config,patch\\} >> memory/n.md"],
     ["a group reading a note", "{ cd memory; cat n.md; }"],
