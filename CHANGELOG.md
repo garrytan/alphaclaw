@@ -15,6 +15,13 @@ The relay guard now refuses three more ways a relay session's command could read
 - A glob that reached a process environment through a workspace symlink to `/proc/<pid>` was let through, because the environment check matched a glob by its spelling only. It now also walks the glob through the folders it matches.
 - A glob too big to walk (more than 2,000 symlinks or folders) is refused with the "glob matches too many entries to check" reason in all three checks, and a real reach in the same command keeps its own reason. Each folder is still read once per call however many checks walk it.
 
+## [0.10.326] - 2026-11-21
+
+A long message the gateway turned down after accepting it now stays in the Chat tab's outbox to be retried, instead of being taken as delivered because history shows a different message with the same first 8,000 characters.
+
+### Fixed
+- Since 0.10.324 the Chat tab matches a history row OpenClaw cut at 8,000 characters against the longer text it kept, but only for a message the server acknowledged. The check looked at the acknowledgement time alone, which a message keeps after the gateway rejects it (status `failed` or `queued` again). So a rejected message that shared its first 8,000 characters with one that did arrive was matched to that one's row and dropped from the outbox, losing its retry. A cut row now confirms an acknowledged message only while the outbox still counts it as possibly submitted, so a rejection the gateway marks as not submitted stays to be retried, while a delivered message the outbox marked `unknown` after a page reload or a failed history read is still confirmed.
+
 ## [0.10.325] - 2026-11-22
 
 A relay delegate's read across a big folder, such as a brain's 31,000-page people folder, is no longer refused as if it reached the guest notes broker's files, and a glob the guard does refuse for size now says so.

@@ -453,6 +453,29 @@ describe("frontend/chat transcript-store: rows chat.history cut for display (GST
     expect(confirmed).toEqual([]);
   });
 
+  it("a cut row never confirms a message the gateway rejected after its ack, so it stays in the outbox to retry", () => {
+    const delivered = longText("deploy");
+    const rejected = delivered.slice(0, 8000) + "\nbut roll back the database first";
+    for (const status of ["failed", "queued"]) {
+      const confirmed = [];
+      const item = { clientMsgId: "rejected-" + status, content: rejected, createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100, status, possiblySubmitted: false };
+      mergeHistory({ current: [], rows: [cutRow("h1", "user", delivered, 1_200)], outboxItems: [item], onConfirmed: (id) => confirmed.push(id) });
+      expect(confirmed, status).toEqual([]);
+    }
+    const confirmed = [];
+    const acked = { clientMsgId: "acked", content: delivered, createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100, status: "acked" };
+    mergeHistory({ current: [], rows: [cutRow("h1", "user", delivered, 1_200)], outboxItems: [acked], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual(["acked"]);
+  });
+
+  it("a long message acked before a reload is still confirmed by its cut row", () => {
+    const whole = longText("deploy");
+    const confirmed = [];
+    const restored = { clientMsgId: "reloaded", content: whole, createdAt: 1_000, sentAt: 1_050, ackedAt: 1_100, status: "unknown", possiblySubmitted: true };
+    mergeHistory({ current: [], rows: [cutRow("h1", "user", whole, 1_200)], outboxItems: [restored], onConfirmed: (id) => confirmed.push(id) });
+    expect(confirmed).toEqual(["reloaded"]);
+  });
+
   it("a finished run's live answer is covered by its cut history row", () => {
     const whole = longText("report");
     const live = { id: "live-1", role: "assistant", content: whole, createdAt: 5_000, live: true, streamMessageId: "s1" };
