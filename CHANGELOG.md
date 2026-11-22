@@ -5,14 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-<<<<<<< HEAD
 ## [0.10.326] - 2026-11-21
 
 A long message the gateway turned down after accepting it now stays in the Chat tab's outbox to be retried, instead of being taken as delivered because history shows a different message with the same first 8,000 characters.
 
 ### Fixed
 - Since 0.10.324 the Chat tab matches a history row OpenClaw cut at 8,000 characters against the longer text it kept, but only for a message the server acknowledged. The check looked at the acknowledgement time alone, which a message keeps after the gateway rejects it (status `failed` or `queued` again). So a rejected message that shared its first 8,000 characters with one that did arrive was matched to that one's row and dropped from the outbox, losing its retry. A cut row now confirms an acknowledged message only while the outbox still counts it as possibly submitted, so a rejection the gateway marks as not submitted stays to be retried, while a delivered message the outbox marked `unknown` after a page reload or a failed history read is still confirmed.
-=======
+
 ## [0.10.325] - 2026-11-22
 
 A relay delegate's read across a big folder, such as a brain's 31,000-page people folder, is no longer refused as if it reached the guest notes broker's files, and a glob the guard does refuse for size now says so.
@@ -21,7 +20,6 @@ A relay delegate's read across a big folder, such as a brain's 31,000-page peopl
 - The relay guard refuses any command whose glob could land in `<root>/guest-writes`. To bound the work, it gave up and refused when a glob matched more than 2,000 paths, and it counted each match once per spelling of the folder (a folder reached through a symlink counts twice). So a read-only `grep … *.md` over a brain people folder of more than 1,000 pages (31,194 on the box that hit it) was refused in every relay session. Now each folder is read once, where it lands. A match that is not a symlink is checked against the broker's folder by name, with no extra file reads, and kept for the next path segment only when it is a folder. Only symlinks and folders count toward the 2,000 limit. A 35,000-page folder behind a symlink is checked in well under 250 ms. A glob that spells the broker's folder, fans out through it, climbs into it, or matches a page or folder that links into it is still refused. So is a glob that matches more than 2,000 symlinks or folders.
 - That last refusal used to name the guest notes broker's files, which sent the agent looking for files called "guest". It now says the glob matches too many entries to check and asks for a narrower pattern, and the guard log says `refused a glob too large to check`. A command that also really reaches the broker's files, the relay's files or a process environment keeps that reason.
 - A glob that went through a symlink and then `..` (for example `cat L*/../guest-writes/*`, where `L` links into AlphaClaw's root) was checked as if `..` undid the symlink, so the guard missed that it reaches the broker's files. It now follows `..` from where the symlink lands, as the shell does.
->>>>>>> origin/main
 
 ## [0.10.324] - 2026-11-21
 
