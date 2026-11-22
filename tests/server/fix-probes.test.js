@@ -140,6 +140,21 @@ describe("fix probe kinds", () => {
     expect(kinds.judgeLogCount(probe, { matches: 0, liveness: 4 })).toMatchObject({ ok: true, code: "ok" });
   });
 
+  it("log_count is no_coverage when the read budget runs out before the window start", () => {
+    const ctx = setup();
+    const lines = [logLine("guard refused path staged-inbound/a", kNow - 20 * 3_600_000)];
+    for (let index = 0; index < 50; index += 1) lines.push(logLine("guard decision allow " + index, kNow - 3_600_000));
+    ctx.writeLog(lines);
+    const logFile = path.join(ctx.logDir, "openclaw.log");
+    const probe = logProbe({ max: 0 });
+    const size = fs.statSync(logFile).size;
+    const full = kinds.scanLogs({ probes: [probe], logFile, nowMs: kNow, maxBytes: size });
+    expect(kinds.judgeLogCount(probe, full.counts[0])).toMatchObject({ ok: false, code: "above_max" });
+    const cut = kinds.scanLogs({ probes: [probe], logFile, nowMs: kNow, maxBytes: Math.floor(size / 2) });
+    expect(cut.counts[0]).toMatchObject({ matches: 0, trimmed: true });
+    expect(kinds.judgeLogCount(probe, cut.counts[0])).toMatchObject({ ok: false, code: "no_coverage", coverage: { trimmed: true } });
+  });
+
   it("webhook_deliveries never counts a delivery AlphaClaw refused as unsigned or failed, and needs the window retained", () => {
     const root = tempRoot();
     webhooksDb.initWebhooksDb({ rootDir: root });
@@ -153,13 +168,20 @@ describe("fix probe kinds", () => {
       add("shared_token", 200);
       const summary = webhooksDb.summarizeHookDeliveries({ hookName: "cameras", sinceIso: "2000-01-01T00:00:00.000Z" });
       expect(summary).toMatchObject({ signed2xx: 2, admittedUnsigned: 1, rejected: 2, failed: 1, rowCount: 6 });
+      expect(summary.globalOldestAt).toEqual(expect.any(String));
+      const retained = { ...summary, globalOldestAt: "2026-11-01T00:00:00.000Z" };
       const probe = { name: "cameras", issue: "GST-2", kind: "webhook_deliveries", hook: "cameras", windowHours: 72, expect: { minSigned2xx: 1, maxAdmittedUnsigned: 0, maxFailed: 3 } };
       const windowStart = new Date(kNow - 72 * 3_600_000).toISOString();
-      expect(kinds.judgeWebhookDeliveries(probe, { ...summary, windowStart }, { minRowsNeverTrimmed: 25 })).toMatchObject({ ok: false, code: "admitted_unsigned" });
-      const clean = { ...summary, admittedUnsigned: 0 };
+      expect(kinds.judgeWebhookDeliveries(probe, { ...retained, windowStart }, { minRowsNeverTrimmed: 25 })).toMatchObject({ ok: false, code: "admitted_unsigned" });
+      const clean = { ...retained, admittedUnsigned: 0 };
       expect(kinds.judgeWebhookDeliveries(probe, { ...clean, windowStart }, { minRowsNeverTrimmed: 25 })).toMatchObject({ ok: true });
       const trimmed = { ...clean, rowCount: 500, oldestAt: new Date(kNow - 3_600_000).toISOString(), windowStart };
       expect(kinds.judgeWebhookDeliveries(probe, trimmed, { minRowsNeverTrimmed: 25 })).toMatchObject({ ok: false, code: "no_coverage" });
+      const recent = new Date(kNow - 3_600_000).toISOString();
+      const globallyTrimmed = { ...clean, oldestAt: recent, globalOldestAt: recent, windowStart };
+      expect(kinds.judgeWebhookDeliveries(probe, globallyTrimmed, { minRowsNeverTrimmed: 25 })).toMatchObject({ ok: false, code: "no_coverage" });
+      const silent = { ...clean, signed2xx: 0, rejected: 0, failed: 0, windowStart };
+      expect(kinds.judgeWebhookDeliveries({ ...probe, expect: { maxAdmittedUnsigned: 0 } }, silent, { minRowsNeverTrimmed: 25 })).toMatchObject({ ok: false, code: "no_coverage" });
     } finally {
       webhooksDb.closeWebhooksDb();
     }
@@ -207,6 +229,7 @@ describe("fix probe kinds", () => {
 
   it("relay_long_replies counts cut answers by outcome, and is not checked with the relay off", () => {
     expect(classifyLongReply({ text: "x".repeat(7000), wholeRead: false })).toBeNull();
+    expect(classifyLongReply({ text: "x".repeat(8000), wholeRead: false })).toBeNull();
     expect(classifyLongReply({ text: "x".repeat(8000) + "\n...(truncated)...", wholeRead: false })).toBe("cut");
     expect(classifyLongReply({ text: "x".repeat(8050), wholeRead: false })).toBe("cut");
     expect(classifyLongReply({ text: "x".repeat(8050), wholeRead: true })).toBe("whole");
@@ -323,6 +346,22 @@ describe("fix probe runner", () => {
     const messages = ctx.notify.mock.calls.map((call) => call[0]);
     expect(messages[0]).toContain("Fix checks now watching");
     expect(messages.slice(1).some((message) => message.startsWith("🔎 Fix checks now watching: GST-11 failing"))).toBe(true);
+  });
+
+  it("keeps a red relay probe red, without a passing message, while the relay is off", async () => {
+    const ctx = setup();
+    ctx.config.probes = [{ name: "relay", issue: "GST-13", kind: "relay_long_replies", expect: { maxCut: 0 } }];
+    ctx.deps.readRelayLongReplies.mockReturnValue({ seen: 2, whole: 1, cut: 1 });
+    const probes = ctx.probes();
+    await probes.runNow();
+    ctx.deps.readRelayLongReplies.mockReturnValue(null);
+    ctx.setNow(kNow + 2 * 60_000);
+    await probes.runNow();
+    expect(ctx.notify.mock.calls.map((call) => call[0]).some((message) => message.includes("passing again"))).toBe(false);
+    ctx.deps.readRelayLongReplies.mockReturnValue({ seen: 2, whole: 2, cut: 0 });
+    ctx.setNow(kNow + 4 * 60_000);
+    await probes.runNow();
+    expect(ctx.notify.mock.calls.map((call) => call[0])).toContain("✅ Fix check passing again: relay (GST-13).");
   });
 
   it("runs one at a time, at most once a minute on demand", async () => {
