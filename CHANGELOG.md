@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.333] - 2026-11-22
+
+The relay guard now refuses a change to its own config spelled as a brace list, such as `{openclaw,config,set,plugins.entries.relay-guard.enabled,false}`, which bash runs as `openclaw config set plugins.entries.relay-guard.enabled false`.
+
+### Fixed
+- The check that keeps every relay session, the owner's own Capy thread included, from changing what decides relay trust now reads each unquoted brace list the way bash expands it: comma lists (quoted members included), number and letter ranges, steps and nested lists, with a range that has a quoted or escaped part kept literal as bash keeps it. It does the same, two levels deep, for the command an unquoted `bash -c`, `sh -c`, `zsh -c`, `dash -c`, `ksh -c` or `eval` runs, after decoding its quotes and escapes; other wrappers such as `sudo` or `xargs` aren't followed. An `openclaw config` or `plugins` change, `openclaw.json`, or a trust env name spelled through a list is refused like its plain spelling.
+- A list past the reading limits (256 words for a word, 1,024 for a command, 1,024 characters or 32 braces in a word) is refused as too large to check only when the list itself names `openclaw`, `relay-guard` or a trust env name as a whole word, or another word of its command does and that command isn't a text command such as `grep`, `cat` or `echo`. Paths like `~/.openclaw/workspace/…`, names like `openclaw-notes` or `ALPHACLAW_RELAY_NOTES`, `grep openclaw logs/{001..300}.txt`, loops like `for i in {1..500}` and lists that form no such change run as before.
+
 ## [0.10.332] - 2026-11-22
 
 The relay guard now refuses a command that reads the relay folder or a relay backup through a workspace link whose name holds a brace or a comma, such as `k{eys`.

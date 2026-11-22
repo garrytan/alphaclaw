@@ -905,3 +905,100 @@ describe("relay guard on long commands (GST-3439)", () => {
   });
 });
 
+
+
+// GST-3457: bash and zsh expand an unquoted brace list into words, so
+// {openclaw,config,set,KEY,false} runs openclaw config set KEY false and
+// openclaw.{json,} names openclaw.json. The anchor check reads each list as
+// the words it makes (braceReadingOf), quoted members and bash -c or eval
+// scripts included. A list past the reading limits is refused only when its
+// text names an anchor token, so loops and lists that form no anchor change
+// run as before. dash does not expand lists, and zsh reads a list leading a
+// command as a group, so a row runs openclaw in bash and, unless the list
+// leads, in zsh (bash -c runs bash under every shell).
+describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () => {
+  const kGuardKey = "plugins.entries.relay-guard.enabled";
+  const shellsOf = (names) => names.flatMap((name) => [name, "openclaw-" + name]).filter((name) => kRunners.some(([runner, file]) => runner === name && file)).sort();
+  const expanding = shellsOf(["bash", "zsh"]);
+  const kSet = "config set " + kGuardKey + " false";
+  const runningRows = () => [
+    ["a whole openclaw config set as one list", "{openclaw,config,set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["the group, verb, key and value as one list", "openclaw {config,set," + kGuardKey + ",false}", kSet, ["bash", "zsh"]],
+    ["a list inside the key", "openclaw config set plugins.entries.{relay-guard,x}.enabled false", "config set " + kGuardKey + " plugins.entries.x.enabled false", ["bash", "zsh"]],
+    ["a plugins disable as one list", "{openclaw,plugins,disable,relay-guard}", "plugins disable relay-guard", ["bash"]],
+    ["a list in a later segment", "echo x >> memory/n.md; {openclaw,config,patch}", "config patch", ["bash"]],
+    ["a nested list", "{{openclaw,config},set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["a list with quoted members", "{openclaw,\"config\",set,\"" + kGuardKey + "\",false}", kSet, ["bash"]],
+    ["a list after earlier lists spent the reading", "true " + "{1..300} ".repeat(5) + "; {openclaw,plugins,disable,relay-guard}", "plugins disable relay-guard", ["bash"]],
+    ["a list inside bash -c", "bash -c '{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash", "zsh", "dash"]],
+    ["a list inside eval", "eval '{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash"]],
+    ["a backslashed list inside bash -c", "bash -c \\{openclaw,plugins,disable,relay-guard\\}", "plugins disable relay-guard", ["bash", "zsh", "dash"]],
+    ["a backslashed list inside eval", "eval \\{openclaw,plugins,disable,relay-guard\\}", "plugins disable relay-guard", ["bash"]],
+    ["a list in $'...' inside bash -c", "bash -c $'{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash", "zsh"]],
+    ["a list past 256 words before a later verb", "openclaw {" + ",".repeat(300) + "config,patch}", "config patch", ["bash"]],
+    ["a list past 256 words hiding the change", "{" + ",".repeat(300) + "openclaw,config,set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["a list past 256 words hiding the verb and key", "openclaw {" + ",".repeat(300) + "config,set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["a list past 256 words after env and an assignment", "env X=1 openclaw {" + ",".repeat(300) + "config,patch}", "config patch", ["bash"]],
+  ];
+  // Which runners ran openclaw with exactly these arguments.
+  const changeRunsOf = (command, args) => {
+    const ran = [];
+    for (const [name, file, argv] of kRunners) {
+      if (!file) continue;
+      fs.rmSync(stubLog, { force: true });
+      resetFixture();
+      spawnSync(file, argv(command), { cwd: workspace, env: shellEnv, timeout: 5000, stdio: "ignore" });
+      if (fs.existsSync(stubLog) && fs.readFileSync(stubLog, "utf8").split("\n").includes(args)) ran.push(name);
+    }
+    fs.rmSync(stubLog, { force: true });
+    return ran.sort();
+  };
+  const fileRows = () => [
+    ["a sed of openclaw.json named through a list", "sed -i s/allow/x/ openclaw.{json,}"],
+    ["a sed of openclaw.json named through a nested list", "sed -i s/allow/x/ openclaw.{{json,x},y}"],
+  ];
+  const neighbours = () => [
+    ["a loop over a long sequence", "for i in {1..500}; do echo $i; done"],
+    ["a sequence too long to read", "echo {1..100000} > /dev/null"],
+    ["a list of notes to read", "cat memory/{a,b}.md"],
+    ["a list of folders to make", "mkdir -p out/{a,b,c}"],
+    ["a list that makes 512 words", "echo " + "{a,b}".repeat(9) + " > /dev/null"],
+    ["a list of 512 folders to make", "mkdir -p out/" + "{a,b}".repeat(9)],
+    ["a quoted list in a note", "echo '{openclaw,config,set," + kGuardKey + ",false}' >> memory/n.md"],
+    ["a backslashed list", "echo \\{openclaw,config,patch\\} >> memory/n.md"],
+    ["a group reading a note", "{ cd memory; cat n.md; }"],
+    ["300 notes under the workspace's .openclaw folder", "touch ~/.openclaw/workspace/notes/{1..300}.md"],
+    ["512 folders whose name starts with openclaw-", "mkdir -p openclaw-notes/" + "{a,b}".repeat(9)],
+    ["a grep for openclaw over 300 logs", "grep -n -- openclaw notes/log-{001..300}.txt"],
+    ["300 folders under a name that is no trust env name", "mkdir -p docs/ALPHACLAW_RELAY_NOTES/{1..300}"],
+    ["a range with quoted ends, which bash keeps literal", "grep -n -- openclaw notes/log-{'001..300'}.txt"],
+  ];
+
+  it("refuses an openclaw change spelled as a brace list, which runs openclaw in bash and zsh", () => {
+    for (const [label, command, args, shells] of runningRows()) {
+      expect(anchorOf(command), label).not.toBeNull();
+      expect(changeRunsOf(command, args), label).toEqual(shellsOf(shells));
+    }
+  });
+
+  it("refuses a change to openclaw.json named through a brace list, which bash and zsh make", () => {
+    for (const [label, command] of fileRows()) {
+      expect(anchorOf(command), label).not.toBeNull();
+      expect(effectsOf(command).changed.sort(), label).toEqual(expanding);
+    }
+  });
+
+  it("refuses a trust env name spelled through a brace list", () => {
+    const command = "echo ALPHACLAW_RELAY_{CAPY_OWNERS,X}=1 >> memory/n.sh";
+    expect(anchorOf(command)?.action).toContain("ALPHACLAW_RELAY_CAPY_OWNERS");
+    if (kBash) expect(spawnSync(kBash, ["-c", "echo ALPHACLAW_RELAY_{CAPY_OWNERS,X}=1"], { encoding: "utf8" }).stdout).toContain("ALPHACLAW_RELAY_CAPY_OWNERS=1");
+  });
+
+  it("lets through loops, long sequences and lists that form no anchor change, and none runs openclaw", () => {
+    for (const [label, command] of neighbours()) {
+      expect(anchorOf(command), label).toBeNull();
+      expect(stubRunsOf(command), label).toEqual([]);
+    }
+  });
+});
+
