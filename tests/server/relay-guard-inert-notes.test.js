@@ -932,6 +932,10 @@ describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () 
     ["a list after earlier lists spent the reading", "true " + "{1..300} ".repeat(5) + "; {openclaw,plugins,disable,relay-guard}", "plugins disable relay-guard", ["bash"]],
     ["a list inside bash -c", "bash -c '{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash", "zsh", "dash"]],
     ["a list inside eval", "eval '{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash"]],
+    ["a backslashed list inside bash -c", "bash -c \\{openclaw,plugins,disable,relay-guard\\}", "plugins disable relay-guard", ["bash", "zsh", "dash"]],
+    ["a backslashed list inside eval", "eval \\{openclaw,plugins,disable,relay-guard\\}", "plugins disable relay-guard", ["bash"]],
+    ["a list in $'...' inside bash -c", "bash -c $'{openclaw,plugins,disable,relay-guard}'", "plugins disable relay-guard", ["bash", "zsh"]],
+    ["a list past 256 words before a later verb", "openclaw {" + ",".repeat(300) + "config,patch}", "config patch", ["bash"]],
     ["a list past 256 words hiding the change", "{" + ",".repeat(300) + "openclaw,config,set," + kGuardKey + ",false}", kSet, ["bash"]],
     ["a list past 256 words hiding the verb and key", "openclaw {" + ",".repeat(300) + "config,set," + kGuardKey + ",false}", kSet, ["bash"]],
   ];
@@ -962,6 +966,8 @@ describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () 
     ["a quoted list in a note", "echo '{openclaw,config,set," + kGuardKey + ",false}' >> memory/n.md"],
     ["a backslashed list", "echo \\{openclaw,config,patch\\} >> memory/n.md"],
     ["a group reading a note", "{ cd memory; cat n.md; }"],
+    ["300 notes under the workspace's .openclaw folder", "touch ~/.openclaw/workspace/notes/{1..300}.md"],
+    ["512 folders whose name starts with openclaw-", "mkdir -p openclaw-notes/" + "{a,b}".repeat(9)],
   ];
 
   it("refuses an openclaw change spelled as a brace list, which runs openclaw in bash and zsh", () => {
