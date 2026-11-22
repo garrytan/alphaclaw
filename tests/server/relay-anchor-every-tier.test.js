@@ -118,6 +118,40 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
       ],
     };
   };
+  // GST-3439: the same reads through links whose names hold a space, spelled
+  // the ways the shell reads as one word, beside ordinary spaced folders and
+  // quoted search strings that still run.
+  const spacedLinks = (ctx) => {
+    const workspace = path.join(ctx.rootDir, ".openclaw", "workspace");
+    const backup = path.join(ctx.rootDir, "20261112-relay-backup");
+    const guest = path.join(ctx.rootDir, "guest-writes");
+    for (const [dir, file] of [[backup, "secrets.json"], [guest, "broker-client.json"]]) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, file), "{}");
+    }
+    fs.mkdirSync(path.join(workspace, "plain folder"), { recursive: true });
+    fs.symlinkSync(backup, path.join(workspace, "my notes"));
+    fs.symlinkSync(path.join(ctx.rootDir, "relay"), path.join(workspace, "box keys"));
+    fs.symlinkSync(guest, path.join(workspace, "broker files"));
+    fs.symlinkSync("/proc/self", path.join(workspace, "my proc"));
+    fs.symlinkSync(path.join(workspace, "plain folder"), path.join(workspace, "my folder"));
+    const spellings = (name) => ['"' + name + '"', "'" + name + "'", name.replace(/ /g, "\\ ")];
+    return {
+      refused: [
+        ...spellings("my notes").flatMap((word) => [["a recursive grep of a backup link " + word, "exec", { command: "grep -r x " + word }], ["a tar of a backup link " + word, "exec", { command: "tar czf /tmp/o.tgz " + word }]]),
+        ...spellings("box keys").map((word) => ["a recursive grep of a relay link " + word, "exec", { command: "grep -r x " + word }]),
+        ...spellings("broker files").map((word) => ["a recursive grep of a guest-writes link " + word, "exec", { command: "grep -r x " + word }]),
+        ...spellings("my proc").map((word) => ["a cat of environ through a /proc/self link " + word, "exec", { command: "cat " + word.replace(/(["']?)$/, "/environ$1") }]),
+        ["a backup link in $'...'", "exec", { command: "grep -r x $'my notes'" }],
+      ],
+      allowed: [
+        ...spellings("my folder").flatMap((word) => [["a recursive grep of an ordinary spaced folder " + word, "exec", { command: "grep -r x " + word }], ["a tar of an ordinary spaced folder " + word, "exec", { command: "tar czf /tmp/o.tgz " + word }]]),
+        ["a double-quoted search string", "exec", { command: 'grep -rn "meeting notes" memory' }],
+        ["a single-quoted search string", "exec", { command: "grep -rn 'box of keys' memory" }],
+        ["a listing of a spaced backup link", "exec", { command: 'ls -la "my notes"' }],
+      ],
+    };
+  };
   const relayWrites = (relay) => [
     ["cd into the root, then into relay, then rm secrets.json", "exec", { command: "cd " + path.dirname(relay) + " && cd relay && rm secrets.json" }],
     ["cd into relay, then rm bridge.db", "exec", { command: "cd " + relay + " && rm bridge.db" }],
@@ -174,6 +208,26 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     for (const [label, tool, params] of refused) expectRefusedOutright(await ctx.call(run, tool, params), label);
     for (const [label, tool, params] of allowed) expect(await ctx.call(run, tool, params), label).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
+  });
+
+  it("refuses the owner's reads through links whose names hold a space, for the attested thread and a pinned binding, and runs ordinary spaced folders and quoted search strings (GST-3439)", async () => {
+    for (const owner of ["attested", "pinned"]) {
+      ctx = owner === "pinned" ? setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: "capy-25cf4e98b5b6" } }) : setup();
+      const run = await ctx.deliver(owner === "pinned" ? ctx.oauthDelegate("capy-25cf4e98b5b6").agent : (await ctx.attestedAgent()).agent);
+      const { refused, allowed } = spacedLinks(ctx);
+      for (const [label, tool, params] of refused) expectRefusedOutright(await ctx.call(run, tool, params), owner + ": " + label);
+      for (const [label, tool, params] of allowed) expect(await ctx.call(run, tool, params), owner + ": " + label).toEqual({});
+      expect(ctx.confirmationCount()).toBe(0);
+      ctx.cleanup();
+      ctx = null;
+    }
+    ctx = setup();
+    const unattested = await ctx.deliver(ctx.oauthDelegate().agent);
+    const { refused } = spacedLinks(ctx);
+    for (const [label, tool, params] of refused) expectRefusedOutright(await ctx.call(unattested, tool, params), "unattested: " + label);
+    expect(ctx.confirmationCount()).toBe(0);
+    ctx.confirmations.tick();
+    expect(ctx.notices).toEqual([]);
   });
 
   it("refuses an unattested delegate's changes to the relay's files outright, with no row and no notice", async () => {

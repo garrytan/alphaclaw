@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.330] - 2026-11-22
+
+The relay guard now refuses a command that reads a relay backup copy, the relay folder, the guest notes folder or a process environment through a workspace link whose name holds a space.
+
+### Fixed
+- The guard's read checks split a command into words after dropping every quote and backslash, so a link named `my notes` written as `"my notes"`, `'my notes'` or `my\ notes` was read as two words that land nowhere, and a recursive grep, a `tar` or a `cat` through it ran. Each word is now also read the way bash, zsh and dash split it, with quotes, backslash escapes and `$'...'` handled, and either reading counts. A grep or `tar` of an ordinary folder with a space in its name, and a quoted search string, still run. A command that reads a protected folder without naming the link, such as `grep -R .` from a folder above it, is still not caught by this check.
+
 ## [0.10.329] - 2026-11-22
 
 The relay guard now refuses a command that reads a relay backup copy through a workspace link with an ordinary name.
