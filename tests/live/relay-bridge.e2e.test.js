@@ -535,6 +535,13 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       expect(page).toContain("@capy-live (peer)");
       expect(page).not.toContain("Handle it as read-only diagnostics");
       expect(page).not.toContain(secrets.workspaceKey);
+      // GST-3410: the 20,000-character answer of the long case is saved
+      // whole, past chat.history's 8,000-character display cap.
+      const longPage = scratchBrain
+        ? fs.readFileSync(path.join(scratchBrain.checkout, scratchBrain.trackedFiles("relay/wintermute/capy-long")[0]), "utf8")
+        : fakeGbrainCalls().filter((call) => call.argv[0] === "put" && call.argv[1].startsWith("relay/wintermute/capy-long/")).at(-1)?.stdin || "";
+      expect(longPage).toContain(liveLongAnswer(20000));
+      expect(longPage).not.toContain("...(truncated)...");
     },
     kTestTimeoutMs,
   );

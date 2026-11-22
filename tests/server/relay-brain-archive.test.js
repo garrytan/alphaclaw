@@ -19,6 +19,33 @@ const kFakeCredentialUrl = "https://bot" + ":" + "hunter2" + "@db.example.com/x"
 const kFakePemHeader = "-----BEGIN " + "PRIVATE KEY-----";
 const msg = (id, from, text, atMs, extra = {}) => ({ id: String(id), from, text, createdAt: new Date(atMs).toISOString(), ...extra });
 
+// OpenClaw 2026.11.4's chat.history cuts each message's text to maxChars
+// (DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS, 8,000) followed by
+// "\n...(truncated)...", and marks the cut message __openclaw.truncated with
+// reason "display-cap"; chat.message.get reads one message by __openclaw.id
+// under its own maxChars (GST-3410).
+const kOpenclawHistoryTextChars = 8000;
+const kOpenclawCutMarker = "\n...(truncated)...";
+const openclawDisplayCap = (message, maxChars) => {
+  const cut = (text) => text.slice(0, maxChars) + kOpenclawCutMarker;
+  if (typeof message.content === "string") {
+    if (message.content.length <= maxChars) return message;
+    return { ...message, content: cut(message.content), __openclaw: { ...message.__openclaw, truncated: true, reason: "display-cap" } };
+  }
+  const text = Array.isArray(message.content) ? message.content.find((block) => block.type === "text")?.text : undefined;
+  if (typeof text !== "string" || text.length <= maxChars) return message;
+  return {
+    ...message,
+    content: message.content.map((block) => (block.type === "text" ? { ...block, text: cut(block.text) } : block)),
+    __openclaw: { ...message.__openclaw, truncated: true, reason: "display-cap" },
+  };
+};
+const longAnswer = (length) => {
+  let text = "";
+  for (let line = 1; text.length < length; line += 1) text += "Line " + line + ": the box finished step " + line + " and wrote down what it saw.\n";
+  return text.slice(0, length - 1) + ".";
+};
+
 // One harness per test: a fake gbrain on disk (argv, stdin and answers
 // recorded in GBRAIN_FAKE_DIR), a fake engine with one conversation between
 // the box agent (wintermute) and capy-x, and the box agent's relay session.
@@ -37,11 +64,16 @@ const setup = ({ brainMode = "auto", brainBin = kFakeGbrain, maskText = null, ti
     },
   ];
   const session = [];
+  const messageGets = [];
+  const warnings = [];
   const ctx = {
     root,
     fakeDir,
     engineMessages,
     session,
+    messageGets,
+    warnings,
+    messageGet: null,
     advance: (ms) => (t += ms),
     now: () => t,
     calls: () =>
@@ -59,9 +91,15 @@ const setup = ({ brainMode = "auto", brainBin = kFakeGbrain, maskText = null, ti
     getAuth: () => ({ workspaceKey: "rk_live_x", agentName: "wintermute" }),
     conversations: { transcript: async () => ({ messages: [...engineMessages], nextBefore: null }) },
     getBridgeStore: () => null,
-    requestGateway: async (method) => {
-      if (method !== "chat.history") throw new Error("unexpected " + method);
-      return { messages: [...session] };
+    requestGateway: async (method, params) => {
+      if (method === "chat.history") return { messages: session.map((message) => openclawDisplayCap(message, params.maxChars ?? kOpenclawHistoryTextChars)) };
+      if (method === "chat.message.get") {
+        messageGets.push(params);
+        if (ctx.messageGet) return ctx.messageGet(params);
+        const message = session.find((entry) => entry.__openclaw?.id === params.messageId);
+        return message ? { ok: true, message: openclawDisplayCap(message, params.maxChars ?? 1e6) } : { ok: false, unavailableReason: "not_found" };
+      }
+      throw new Error("unexpected " + method);
     },
     resolveAgentId: () => "main",
     maskText: maskText || ((text) => redactSecretText(String(text).split(kSecret).join("***"))),
@@ -69,7 +107,7 @@ const setup = ({ brainMode = "auto", brainBin = kFakeGbrain, maskText = null, ti
     env: { ...process.env, GBRAIN_FAKE_DIR: fakeDir, GBRAIN_FAKE_CHECKOUT: path.join(root, "relay-src") },
     now: ctx.now,
     sleep: async () => {},
-    logger: quiet,
+    logger: { log: () => {}, warn: (line) => warnings.push(line) },
     ...(fsModule ? { fsModule } : {}),
     ...(wrapperPath ? { wrapperPath } : {}),
     ...(timeoutMs ? { runner: require("../../lib/server/relay/brain-archive/gbrain").createGbrainRunner({ bin: brainBin, env: { ...process.env, GBRAIN_FAKE_DIR: fakeDir }, timeoutMs }) } : {}),
@@ -562,6 +600,61 @@ describe("relay brain archive: what a page may carry", () => {
     expect(page).toContain("The build is green.");
     expect(page).not.toContain(kFakeGithubToken);
     expect(page.match(/Checked\. Token is/g)).toHaveLength(1);
+  });
+
+  it("a box answer past chat.history's 8,000-character display cap is saved whole, read with chat.message.get (GST-3410)", async () => {
+    ctx = setup();
+    const answer = longAnswer(20000);
+    ctx.session.push(
+      { role: "user", content: "[Agent Relay message from @capy-x]\n(ref relay:1, hop 0)\nENVELOPE", timestamp: kT0 - 9.5 * 60 * 1000, __openclaw: { id: "u-1" } },
+      { role: "assistant", content: [{ type: "text", text: "Short note while working." }], timestamp: kT0 - 9.4 * 60 * 1000, __openclaw: { id: "a-1" } },
+      { role: "assistant", content: [{ type: "text", text: answer }], timestamp: kT0 - 9 * 60 * 1000, __openclaw: { id: "a-2" } },
+    );
+    await ctx.settle();
+    expect(ctx.messageGets).toEqual([{ sessionKey: "agent:main:relay-capy-x", messageId: "a-2", maxChars: 64000 }]);
+    const page = ctx.puts()[0].stdin;
+    expect(page).toContain(answer);
+    expect(page).not.toContain("...(truncated)...");
+    expect(page).toContain("Short note while working.");
+  });
+
+  it("an answer OpenClaw will not return whole is saved as chat.history cut it, with one warning; a failed read backs off and saves it whole on the retry", async () => {
+    ctx = setup();
+    const answer = longAnswer(20000);
+    ctx.session.push({ role: "assistant", content: answer, timestamp: kT0 - 9 * 60 * 1000, __openclaw: { id: "a-1" } });
+    ctx.messageGet = async () => {
+      throw new Error("gateway closed");
+    };
+    await ctx.settle();
+    expect(ctx.puts()).toHaveLength(0);
+    expect(conversationState(ctx)).toMatchObject({ state: "backoff", code: "relay_read_failed" });
+    ctx.messageGet = null;
+    ctx.advance(2 * 60 * 1000);
+    await ctx.tick();
+    expect(ctx.puts()[0].stdin).toContain(answer);
+
+    ctx.cleanup();
+    ctx = setup();
+    ctx.session.push({ role: "assistant", content: answer, timestamp: kT0 - 9 * 60 * 1000, __openclaw: { id: "a-1" } });
+    ctx.messageGet = async () => ({ ok: false, unavailableReason: "oversized" });
+    await ctx.settle();
+    expect(ctx.puts()[0].stdin).toContain(answer.slice(0, kOpenclawHistoryTextChars) + kOpenclawCutMarker);
+    expect(ctx.warnings.filter((line) => line.includes("chat.history"))).toEqual([expect.stringContaining("box answer a-1 is saved as chat.history cut it")]);
+    // A revisit that still cannot read it whole does not warn again.
+    ctx.advance(61 * 60 * 1000);
+    await ctx.tick();
+    ctx.advance(3 * 60 * 1000);
+    await ctx.tick();
+    expect(ctx.messageGets.length).toBeGreaterThan(1);
+    expect(ctx.warnings.filter((line) => line.includes("chat.history"))).toHaveLength(1);
+    // The hourly revisit rewrites the page whole once OpenClaw returns it.
+    ctx.messageGet = null;
+    ctx.advance(61 * 60 * 1000);
+    await ctx.tick();
+    ctx.advance(3 * 60 * 1000);
+    await ctx.tick();
+    expect(ctx.puts()).toHaveLength(2);
+    expect(ctx.puts()[1].stdin).toContain(answer);
   });
 
   it("a page that still trips the secret scanner after masking is refused (masked_refused), never written", async () => {
