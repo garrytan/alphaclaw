@@ -938,6 +938,7 @@ describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () 
     ["a list past 256 words before a later verb", "openclaw {" + ",".repeat(300) + "config,patch}", "config patch", ["bash"]],
     ["a list past 256 words hiding the change", "{" + ",".repeat(300) + "openclaw,config,set," + kGuardKey + ",false}", kSet, ["bash"]],
     ["a list past 256 words hiding the verb and key", "openclaw {" + ",".repeat(300) + "config,set," + kGuardKey + ",false}", kSet, ["bash"]],
+    ["a list past 256 words after env and an assignment", "env X=1 openclaw {" + ",".repeat(300) + "config,patch}", "config patch", ["bash"]],
   ];
   // Which runners ran openclaw with exactly these arguments.
   const changeRunsOf = (command, args) => {
@@ -968,6 +969,9 @@ describe("relay guard and anchor changes spelled as brace lists (GST-3457)", () 
     ["a group reading a note", "{ cd memory; cat n.md; }"],
     ["300 notes under the workspace's .openclaw folder", "touch ~/.openclaw/workspace/notes/{1..300}.md"],
     ["512 folders whose name starts with openclaw-", "mkdir -p openclaw-notes/" + "{a,b}".repeat(9)],
+    ["a grep for openclaw over 300 logs", "grep -n -- openclaw notes/log-{001..300}.txt"],
+    ["300 folders under a name that is no trust env name", "mkdir -p docs/ALPHACLAW_RELAY_NOTES/{1..300}"],
+    ["a range with quoted ends, which bash keeps literal", "grep -n -- openclaw notes/log-{'001..300'}.txt"],
   ];
 
   it("refuses an openclaw change spelled as a brace list, which runs openclaw in bash and zsh", () => {
