@@ -452,3 +452,157 @@ describe("relay guard refusals through the plugin (GST-2940, GST-2910)", () => {
     expect((await ctx.call(run, "read", { path: "/proc/1/environ" })).blockReason).toContain("read a process's environment (/proc/<pid>/environ) is refused in every relay session");
   });
 });
+
+// GST-3423: a glob over a big folder that cannot reach the guest notes
+// broker's directory was refused once it matched more than 2,000 paths (a
+// brain's people folder, reached through a symlink, counts each page twice).
+// A match that is not a symlink lands where its folder lands, so only
+// symlinks and folders count now; every real reach still refuses.
+describe("relay guard and big globs near the guest notes broker's files (GST-3423)", () => {
+  const kPages = 1200;
+  const wintermuteScan = (dir) =>
+    "cd " + dir + ' && grep -l -i -E "^(role|relationship|tags):.*(divorce|mediat|family law|custody|co-?parent|therap|psychiatr|physician|doctor|pediatrician|dentist|primary care)" *.md 2>/dev/null | while read f; do e=$(grep -m2 -o -i -E "[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}" "$f" | tr \'\\n\' \' \'); r=$(grep -m1 -i -E "^(role|relationship):" "$f" | cut -c1-110); echo "$f | $e | $r"; done | head -60';
+  let root;
+  let people;
+  let brainLink;
+  beforeAll(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-big-glob-")));
+    fs.mkdirSync(path.join(root, ".openclaw", "workspace", "memory"), { recursive: true });
+    const guest = path.join(root, "guest-writes");
+    fs.mkdirSync(guest);
+    for (const name of ["internal-secret", "broker-client.json", "broker.db"]) fs.writeFileSync(path.join(guest, name), "x");
+    people = path.join(root, "stronghold-brain", "brain", "people");
+    fs.mkdirSync(people, { recursive: true });
+    for (let i = 0; i < kPages; i += 1) fs.writeFileSync(path.join(people, "person-" + i + ".md"), "role: friend\n");
+    brainLink = path.join(root, "brain");
+    fs.symlinkSync(path.join(root, "stronghold-brain", "brain"), brainLink);
+    for (let i = 0; i < 2500; i += 1) fs.writeFileSync(path.join(root, ".openclaw", "workspace", "memory", "day-" + i + ".md"), "");
+  });
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+  const verdict = (command) => classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root });
+
+  it("lets through a scan of a 1,200-page folder reached through a symlink, and other big globs that cannot reach the broker", () => {
+    for (const command of [
+      wintermuteScan(path.join(brainLink, "people")),
+      wintermuteScan(people),
+      "grep -l -i role " + brainLink + "/people/*.md",
+      "cd " + brainLink + " && grep -l -i role */*.md",
+      "wc -l memory/*",
+      "wc -l memory/*.md memory/day-1*.md",
+    ]) {
+      expect(verdict(command), command.slice(0, 120)).toBeNull();
+    }
+  });
+
+  it("still refuses a big glob with a page that is a symlink into guest-writes, or a folder that is one", () => {
+    const page = path.join(people, "zz-broker.md");
+    fs.symlinkSync(path.join(root, "guest-writes", "broker-client.json"), page);
+    try {
+      expect(verdict(wintermuteScan(path.join(brainLink, "people")))?.action).toBe("a command that reaches the guest notes broker's files");
+      expect(verdict("grep -l -i role " + brainLink + "/people/*.md")).toBeTruthy();
+    } finally {
+      fs.unlinkSync(page);
+    }
+    const folder = path.join(people, "gw");
+    fs.symlinkSync(path.join(root, "guest-writes"), folder);
+    try {
+      expect(verdict("cd " + people + " && cat */internal-secret")).toBeTruthy();
+      expect(verdict("cd " + brainLink + " && grep -l -i role */*/*")).toBeTruthy();
+    } finally {
+      fs.unlinkSync(folder);
+    }
+  });
+
+  it("still refuses globs that spell the broker's folder, fan out through it, or climb into it", () => {
+    for (const command of [
+      "cd " + root + " && cat */broker-client.json",
+      "cd " + root + " && grep -l x */*",
+      "cat " + root + "/gu*/*",
+      "cat " + people + "/../../../guest-writes/*",
+      "cd " + people + " && cat ../../../guest-writes/*.json",
+    ]) {
+      expect(verdict(command), command).toBeTruthy();
+    }
+  });
+
+  it("still fails closed on a glob that matches more than 2,000 symlinks, saying the glob is too big rather than naming the broker; a real reach beside it keeps the broker's reason", () => {
+    const links = fs.mkdtempSync(path.join(root, ".openclaw", "workspace", "links-"));
+    for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
+    try {
+      expect(verdict("wc -l " + links + "/*.md")).toEqual({ action: "a command whose glob matches too many entries to check", globCap: true });
+      expect(verdict("wc -l " + links + "/*.md " + root + "/guest-writes/broker.db")).toEqual({ action: "a command that reaches the guest notes broker's files" });
+      expect(verdict("wc -l " + links + "/l1*.md")).toBeNull();
+    } finally {
+      fs.rmSync(links, { recursive: true, force: true });
+    }
+  });
+
+  it("walks a relative glob from the command's folder, never from /", () => {
+    const workspace = path.join(root, ".openclaw", "workspace");
+    const stars = Array.from({ length: root.split("/").filter(Boolean).length + 1 }, () => "*").join("/");
+    expect(verdict("cd " + workspace + " && grep -r hi " + stars)).toBeNull();
+    expect(verdict("cd " + workspace + " && wc -l */*")).toBeNull();
+    expect(verdict("cd " + root + " && grep -r hi */*")).toBeTruthy();
+  });
+
+  it("follows .. from where a symlinked match lands, as the shell does", () => {
+    const sub = path.join(root, "sub");
+    const link = path.join(root, ".openclaw", "workspace", "Lsub");
+    fs.mkdirSync(sub);
+    fs.symlinkSync(sub, link);
+    try {
+      expect(verdict("cd " + path.join(root, ".openclaw", "workspace") + " && cat Ls*/../gu*/*")).toBeTruthy();
+      expect(verdict("cat " + path.join(root, ".openclaw", "workspace") + "/Ls*/../gu*/*")).toBeTruthy();
+    } finally {
+      fs.unlinkSync(link);
+      fs.rmSync(sub, { recursive: true, force: true });
+    }
+  });
+
+  it("gives a relay file or a process environment its own reason beside a glob too big to check", () => {
+    const links = fs.mkdtempSync(path.join(root, ".openclaw", "workspace", "links-"));
+    fs.mkdirSync(path.join(root, "relay"), { recursive: true });
+    fs.writeFileSync(path.join(root, "relay", "secrets.json"), "{}");
+    for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
+    try {
+      expect(verdict("wc -l " + links + "/*.md " + root + "/relay/secrets.json")?.action).toMatch(/^a command that reaches the relay's /);
+      expect(verdict("wc -l " + links + "/*.md /proc/self/environ")?.environ).toBe(true);
+    } finally {
+      fs.rmSync(links, { recursive: true, force: true });
+      fs.rmSync(path.join(root, "relay"), { recursive: true, force: true });
+    }
+  });
+
+  // The box's people folder holds 31,194 pages. Its listing is served by
+  // the fs the guard is given (35,000 regular files), so the case runs in
+  // milliseconds without writing them; the folders and the symlink are real.
+  it("checks a 35,000-page folder behind a symlink quickly and lets it through", () => {
+    const big = path.join(root, "big-brain", "people");
+    fs.mkdirSync(big, { recursive: true });
+    fs.symlinkSync(path.join(root, "big-brain"), path.join(root, "big"));
+    const pages = Array.from({ length: 35000 }, (_, i) => ({ name: "person-" + i + ".md", isSymbolicLink: () => false, isDirectory: () => false }));
+    let bigReads = 0;
+    const fsModule = { ...fs, readdirSync: (dir, options) => (dir === big ? (bigReads += 1, pages) : fs.readdirSync(dir, options)) };
+    const command = wintermuteScan(path.join(root, "big", "people"));
+    const timed = () => {
+      const readsBefore = bigReads;
+      const started = process.hrtime.bigint();
+      const result = classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root, fsModule });
+      return { result, ms: Number(process.hrtime.bigint() - started) / 1e6, reads: bigReads - readsBefore };
+    };
+    try {
+      const runs = [timed(), timed(), timed()];
+      expect(runs.map((run) => run.result)).toEqual([null, null, null]);
+      expect(runs.every((run) => run.reads >= 1 && run.reads <= 4)).toBe(true);
+      // gstack-timing-ok: the fastest of three runs, about 90 ms on a loaded 4-core runner; the read count above (at most once per glob word in the command) is the deterministic check
+      expect(Math.min(...runs.map((run) => run.ms))).toBeLessThan(250);
+      pages.push({ name: "zz-broker.md", isSymbolicLink: () => true, isDirectory: () => false });
+      fs.symlinkSync(path.join(root, "guest-writes", "broker-client.json"), path.join(big, "zz-broker.md"));
+      expect(timed().result).toEqual({ action: "a command that reaches the guest notes broker's files" });
+    } finally {
+      fs.rmSync(path.join(root, "big"));
+      fs.rmSync(path.join(root, "big-brain"), { recursive: true, force: true });
+    }
+  });
+});
+
