@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.329] - 2026-11-22
+
+The relay guard now refuses a command that reads a relay backup copy through a workspace link with an ordinary name.
+
+### Fixed
+- The guard counted the relay's key files inside a `*-relay-backup` copy, but not the copy folder itself. So a recursive grep, a `cd`, a glob or a `tar` through a workspace link with an ordinary name that lands on a copy could read or pack its `secrets.json` and databases. Any path through a backup copy now counts as reaching the relay's files. A listing of the link and the same commands through a link to an ordinary folder still run.
+
 ## [0.10.328] - 2026-11-22
 
 The relay guard now catches a change or read in a protected folder made from an exec working folder that starts with `~`, and a glob that matches a whole relay backup copy.
