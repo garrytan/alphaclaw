@@ -59,11 +59,16 @@ describe("relay anchor for every delegate tier (GST-2336)", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.symlinkSync(path.join(ctx.rootDir, "relay"), path.join(workspace, "rl"));
     fs.symlinkSync(path.join(ctx.rootDir, "relay", "secrets.json"), path.join(workspace, "s.json"));
+    fs.symlinkSync(".", path.join(workspace, "~"));
     return [
       ["a cat through a symlinked directory", "exec", { command: "cat rl/secrets.json" }],
       ["a cat through a symlinked file", "exec", { command: "cat s.json" }],
       ["a glob through a symlinked directory", "exec", { command: "cat r?/secrets.json" }],
       ["a glob through a symlinked directory and the file", "exec", { command: "cat rl*/*.json" }],
+      ["a workdir of ~, which OpenClaw joins onto the workspace", "exec", { command: "cat rl/secrets.json", workdir: "~" }],
+      ["a workdir of ~/, which OpenClaw joins onto the workspace", "exec", { command: "cat s.json", workdir: "~/" }],
+      ["a workdir under ~, which OpenClaw joins onto the workspace", "exec", { command: "cat secrets.json", workdir: "~/rl" }],
+      ["a glob from a workdir of ~", "exec", { command: "cat r?/*.json", workdir: "~" }],
     ];
   };
   const relayWrites = (relay) => [

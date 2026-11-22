@@ -423,6 +423,26 @@ describe("relay guard and process environments (GST-2910)", () => {
     }
   });
 
+  it("refuses a relative read from a workdir of ~, which OpenClaw joins onto the workspace, and lets other files through", () => {
+    const home = path.join(workspace, "~");
+    const link = path.join(workspace, "Lproc");
+    fs.rmSync(home, { force: true });
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(".", home);
+    fs.symlinkSync("/proc/self", link);
+    try {
+      for (const [command, workdir] of [["cat Lproc/environ", "~"], ["cat Lproc/environ", "~/"], ["cat environ", "~/Lproc"], ["cat Lp*/env*", "~"]]) {
+        expect(classifyKeyRead({ toolName: "exec", params: { command, workdir }, rootDir: root })?.environ, command + " in " + workdir).toBe(true);
+      }
+      for (const [command, workdir] of [["cat Lproc/status", "~"], ["cat Lp*/status", "~"], ["cat status", "~/Lproc"]]) {
+        expect(classifyKeyRead({ toolName: "exec", params: { command, workdir }, rootDir: root }), command + " in " + workdir).toBeNull();
+      }
+    } finally {
+      fs.rmSync(home, { force: true });
+      fs.rmSync(link, { force: true });
+    }
+  });
+
   it("lets through a listing, a note and other /proc files", () => {
     for (const [toolName, params] of environAllowed()) expect(classifyKeyRead({ toolName, params, rootDir: root }), JSON.stringify(params)).toBeNull();
   });

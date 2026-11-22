@@ -53,10 +53,15 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     fs.mkdirSync(workspace, { recursive: true });
     fs.symlinkSync(path.join(ctx.rootDir, "guest-writes"), path.join(workspace, "gw"));
     fs.symlinkSync(path.join(ctx.rootDir, "guest-writes", "broker-client.json"), path.join(workspace, "c.json"));
+    fs.symlinkSync(".", path.join(workspace, "~"));
     return [
       ["a cat through a symlinked directory", "exec", { command: "cat gw/internal-secret" }],
       ["a cat through a symlinked file", "exec", { command: "cat c.json" }],
       ["a glob through a symlinked directory", "exec", { command: "cat g*/internal-secret" }],
+      ["a workdir of ~, which OpenClaw joins onto the workspace", "exec", { command: "cat gw/internal-secret", workdir: "~" }],
+      ["a workdir of ~/, which OpenClaw joins onto the workspace", "exec", { command: "cat c.json", workdir: "~/" }],
+      ["a workdir under ~, which OpenClaw joins onto the workspace", "exec", { command: "cat internal-secret", workdir: "~/gw" }],
+      ["a glob from a workdir of ~", "exec", { command: "cat g?/*", workdir: "~" }],
       ["a read tool through a symlinked file", "read", { path: path.join(workspace, "c.json") }],
     ];
   };
