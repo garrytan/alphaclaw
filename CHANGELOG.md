@@ -7,10 +7,11 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.325] - 2026-11-22
 
-A relay delegate's read across a big folder, such as a brain's 1,000-page people folder, is no longer refused as if it reached the guest notes broker's files.
+A relay delegate's read across a big folder, such as a brain's 31,000-page people folder, is no longer refused as if it reached the guest notes broker's files, and a glob the guard does refuse for size now says so.
 
 ### Fixed
-- The relay guard refuses any command whose glob could land in `<root>/guest-writes`. To bound the work, it gave up and refused when a glob matched more than 2,000 paths, and it counted each match once per spelling of the folder (a folder reached through a symlink counts twice). So a read-only `grep … *.md` over a brain people folder of more than 1,000 pages was refused in every relay session. Now a match that is not a symlink is checked against the broker's folder by name, with no extra file reads, and kept for the next path segment only when it is a folder. Only symlinks and folders count toward the 2,000 limit. A glob that spells the broker's folder, fans out through it, climbs into it, or matches a page or folder that links into it is still refused. So is a glob that matches more than 2,000 symlinks.
+- The relay guard refuses any command whose glob could land in `<root>/guest-writes`. To bound the work, it gave up and refused when a glob matched more than 2,000 paths, and it counted each match once per spelling of the folder (a folder reached through a symlink counts twice). So a read-only `grep … *.md` over a brain people folder of more than 1,000 pages (31,194 on the box that hit it) was refused in every relay session. Now each folder is read once, where it lands. A match that is not a symlink is checked against the broker's folder by name, with no extra file reads, and kept for the next path segment only when it is a folder. Only symlinks and folders count toward the 2,000 limit. A 35,000-page folder behind a symlink is checked in well under 250 ms. A glob that spells the broker's folder, fans out through it, climbs into it, or matches a page or folder that links into it is still refused. So is a glob that matches more than 2,000 symlinks or folders.
+- That last refusal used to name the guest notes broker's files, which sent the agent looking for files called "guest". It now says the glob matches too many entries to check and asks for a narrower pattern, and the guard log says `refused a glob too large to check`. A command that also really reaches the broker's files keeps the broker's reason.
 
 ## [0.10.323] - 2026-11-21
 

@@ -129,5 +129,12 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     expect(await ctx.call(owner, "exec", scan)).toEqual({});
     fs.symlinkSync(path.join(dir, "broker-client.json"), path.join(people, "zz.md"));
     expectRefusedOutright(await ctx.call(owner, "exec", scan), "a page that links into guest-writes");
+    const links = path.join(ctx.rootDir, "links");
+    fs.mkdirSync(links);
+    for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
+    const capped = await ctx.call(owner, "exec", { command: "wc -l " + links + "/*.md" });
+    expect(capped.block).toBe(true);
+    expect(capped.blockReason).toContain("glob matches too many entries to check; narrow the pattern");
+    expect(capped.blockReason).not.toContain("guest notes broker's files is refused");
   });
 });

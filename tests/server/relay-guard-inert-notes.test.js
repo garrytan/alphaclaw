@@ -525,11 +525,44 @@ describe("relay guard and big globs near the guest notes broker's files (GST-342
     }
   });
 
-  it("still fails closed on a glob that matches more than 2,000 symlinks", () => {
+  it("still fails closed on a glob that matches more than 2,000 symlinks, saying the glob is too big rather than naming the broker; a real reach beside it keeps the broker's reason", () => {
     const links = fs.mkdtempSync(path.join(root, ".openclaw", "workspace", "links-"));
     for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
-    expect(verdict("wc -l " + links + "/*.md")).toBeTruthy();
-    fs.rmSync(links, { recursive: true, force: true });
+    try {
+      expect(verdict("wc -l " + links + "/*.md")).toEqual({ action: "a command whose glob matches too many entries to check", globCap: true });
+      expect(verdict("wc -l " + links + "/*.md " + root + "/guest-writes/broker.db")).toEqual({ action: "a command that reaches the guest notes broker's files" });
+      expect(verdict("wc -l " + links + "/l1*.md")).toBeNull();
+    } finally {
+      fs.rmSync(links, { recursive: true, force: true });
+    }
+  });
+
+  // The box's people folder holds 31,194 pages. Its listing is served by
+  // the fs the guard is given (35,000 regular files), so the case runs in
+  // milliseconds without writing them; the folders and the symlink are real.
+  it("checks a 35,000-page folder behind a symlink quickly and lets it through", () => {
+    const big = path.join(root, "big-brain", "people");
+    fs.mkdirSync(big, { recursive: true });
+    fs.symlinkSync(path.join(root, "big-brain"), path.join(root, "big"));
+    const pages = Array.from({ length: 35000 }, (_, i) => ({ name: "person-" + i + ".md", isSymbolicLink: () => false, isDirectory: () => false }));
+    const fsModule = { ...fs, readdirSync: (dir, options) => (dir === big ? pages : fs.readdirSync(dir, options)) };
+    const command = wintermuteScan(path.join(root, "big", "people"));
+    const timed = () => {
+      const started = process.hrtime.bigint();
+      const result = classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root, fsModule });
+      return { result, ms: Number(process.hrtime.bigint() - started) / 1e6 };
+    };
+    try {
+      const runs = [timed(), timed(), timed()];
+      expect(runs.map((run) => run.result)).toEqual([null, null, null]);
+      expect(Math.min(...runs.map((run) => run.ms))).toBeLessThan(250);
+      pages.push({ name: "zz-broker.md", isSymbolicLink: () => true, isDirectory: () => false });
+      fs.symlinkSync(path.join(root, "guest-writes", "broker-client.json"), path.join(big, "zz-broker.md"));
+      expect(timed().result).toEqual({ action: "a command that reaches the guest notes broker's files" });
+    } finally {
+      fs.rmSync(path.join(root, "big"));
+      fs.rmSync(path.join(root, "big-brain"), { recursive: true, force: true });
+    }
   });
 });
 
