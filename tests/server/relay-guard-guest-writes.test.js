@@ -116,4 +116,25 @@ describe("relay guard keeps relay sessions away from the guest notes broker's fi
     for (const [label, tool, params] of [...ordinary(dir), ...files]) expect(await ctx.call(owner, tool, params), label).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
   });
+
+  it("runs the owner's grep across a 1,200-page brain folder reached through a symlink, and refuses it once a page links into guest-writes (GST-3423)", async () => {
+    ctx = setup();
+    const dir = brokerDir(ctx);
+    const people = path.join(ctx.rootDir, "stronghold-brain", "brain", "people");
+    fs.mkdirSync(people, { recursive: true });
+    for (let i = 0; i < 1200; i += 1) fs.writeFileSync(path.join(people, "person-" + i + ".md"), "role: friend\n");
+    fs.symlinkSync(path.join(ctx.rootDir, "stronghold-brain", "brain"), path.join(ctx.rootDir, "brain"));
+    const scan = { command: "cd " + path.join(ctx.rootDir, "brain", "people") + ' && grep -l -i -E "^(role|relationship):.*(doctor|dentist)" *.md 2>/dev/null | head -60' };
+    const owner = await ctx.deliver((await ctx.attestedAgent()).agent);
+    expect(await ctx.call(owner, "exec", scan)).toEqual({});
+    fs.symlinkSync(path.join(dir, "broker-client.json"), path.join(people, "zz.md"));
+    expectRefusedOutright(await ctx.call(owner, "exec", scan), "a page that links into guest-writes");
+    const links = path.join(ctx.rootDir, "links");
+    fs.mkdirSync(links);
+    for (let i = 0; i < 2001; i += 1) fs.symlinkSync(path.join(people, "person-0.md"), path.join(links, "l" + i + ".md"));
+    const capped = await ctx.call(owner, "exec", { command: "wc -l " + links + "/*.md" });
+    expect(capped.block).toBe(true);
+    expect(capped.blockReason).toContain("glob matches too many entries to check; narrow the pattern");
+    expect(capped.blockReason).not.toContain("guest notes broker's files is refused");
+  });
 });
