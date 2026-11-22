@@ -779,6 +779,9 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a cat through a nested brace list", "cat {k{eys,x},y}/secrets.json", "relay", ["bash", "zsh"]],
     ["a recursive grep through a brace list that makes a spaced backup link's name", "grep -r x {my,no}\\ notes", "relay", ["bash", "zsh"]],
     ["a cd and a cat inside a { ...; } group", "{ cd keys; cat secrets.json; }", "relay"],
+    // zsh reads a brace list in command position as a group, not a list.
+    ["a brace list in command position that makes a cat of a relay link", "{cat,keys/secrets.json}", "relay", ["bash"]],
+    ["a brace list in command position that makes a cd into a relay link", "{cd,keys}; cat secrets.json", "relay", ["bash"]],
   ];
   const allowedRows = () => [
     ...spellings("my folder").flatMap(([how, word]) => [
@@ -796,6 +799,7 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
     ["a brace list whose words name no link", "cat k{x,y}/secrets.json"],
     ["a brace sequence in a note", "echo {1..5} >> memory/n.md"],
     ["a cd and a cat of an ordinary note inside a { ...; } group", "{ cd memory; cat n.md; }"],
+    ["a brace list in command position that makes a cat of an ordinary note", "{cat,memory/n.md}"],
   ];
 
   const verdict = (toolName, command) => classifyKeyRead({ toolName, params: toolName === "exec" ? { command } : { action: "write", sessionId: "s1", data: command + "\n" }, rootDir: spacedRoot });
@@ -889,6 +893,23 @@ describe("relay guard on long commands (GST-3439)", () => {
         expect(best, size + " bytes, " + label).toBeLessThan(50);
       }
     }
+  });
+
+  // GST-3446: the brace word cap is counted while the words are read, so a
+  // long command of lists that expand is refused without expanding them all.
+  it("refuses a 100 KB command of expanding brace lists in under 50 ms", async () => {
+    ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
+    const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
+    const command = "cat " + "x{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}{o,p} ".repeat(100000 / 42 + 1);
+    let best = Infinity;
+    for (let i = 0; i < 6; i += 1) {
+      const started = process.hrtime.bigint();
+      const result = await ctx.call(run, "exec", { command: command + i });
+      const took = Number(process.hrtime.bigint() - started) / 1e6;
+      expect(result.blockReason).toContain("a command whose brace lists make more words than the guard checks is refused in every relay session");
+      if (i > 0) best = Math.min(best, took);
+    }
+    expect(best).toBeLessThan(50);
   });
 
   // A cd that fails keeps the folder the shell stood in, so each cd can add
