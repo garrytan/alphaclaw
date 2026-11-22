@@ -238,6 +238,31 @@ describe("git push checks", () => {
     }
   });
 
+  it("writes a counts-only summary for fix probes: probes run and passed, and problems the owner was never told about", async () => {
+    const healthy = setup({ reset: true });
+    await createChecks(healthy).checks.check();
+    const summary = JSON.parse(fs.readFileSync(statePath(healthy), "utf8")).summary;
+    expect(summary).toMatchObject({ listed: 1, listedProbed: 1, listedWriteOk: 1, discovered: 0, problems: 0, untold: 0 });
+    expect(Number.isFinite(Date.parse(summary.finishedAt))).toBe(true);
+
+    // A routing problem skips the write probe; once the owner is told it is
+    // not "untold". When the notice keeps failing, the second check counts it.
+    const broken = setup();
+    const told = createChecks(broken);
+    await told.checks.check();
+    expect(JSON.parse(fs.readFileSync(statePath(broken), "utf8")).summary).toMatchObject({ listed: 1, listedProbed: 0, problems: 1, untold: 0 });
+    const silent = setup();
+    const failing = createChecks(silent);
+    failing.notify.mockImplementation(async () => ({ ok: false, reason: "telegram down" }));
+    await failing.checks.check();
+    expect(JSON.parse(fs.readFileSync(statePath(silent), "utf8")).summary).toMatchObject({ problems: 1, untold: 0 });
+    await failing.checks.check();
+    const text = fs.readFileSync(statePath(silent), "utf8");
+    expect(JSON.parse(text).summary).toMatchObject({ problems: 1, untold: 1 });
+    expect(text).not.toContain(kGlobalToken);
+    expect(text).not.toContain(kRepoToken);
+  });
+
   it("runs no git when no checkout is listed", async () => {
     const ctx = setup();
     const calls = [];
