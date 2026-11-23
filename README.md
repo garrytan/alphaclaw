@@ -480,7 +480,7 @@ A checkout that pins its own GitHub token in `.git/config` stops pushing the mom
 }
 ```
 
-Every check below uses the remote git would push the current branch to: `branch.<name>.pushRemote`, then `remote.pushDefault`, then `branch.<name>.remote`, then `origin`, so a checkout that pushes to a fork, or has no `origin` at all, is checked where it actually pushes. A listed checkout with a `remote` other than `origin` is checked on that remote, and a detached HEAD, or a setting that names no remote with a URL, falls back to the checkout's remote. The log line names the remote it used (`remote=<name>`, never its URL).
+Every check below uses the remote git would push the current branch to: `branch.<name>.pushRemote`, then `remote.pushDefault`, then `branch.<name>.remote`, then `origin`, so a checkout that pushes to a fork, or has no `origin` at all, is checked where it actually pushes. A listed checkout with a `remote` other than `origin` is checked on that remote, and a detached HEAD, or a setting that names no remote with a URL, falls back to the checkout's remote. A URL in one of those settings (git pushes straight to it) is not followed either: that checkout is still checked on its remote. The log line names the remote it used (`remote=<name>`, never its URL).
 
 For each checkout, with git running in the gateway's environment (the one the agent pushes from) and prompts off:
 

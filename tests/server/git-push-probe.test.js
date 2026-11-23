@@ -385,6 +385,17 @@ describe("git push checks follow the remote the branch pushes to", () => {
     expect((await origin.checks.check()).results[0]).toMatchObject({ remote: "agents", write: null });
   });
 
+  it("keeps origin when pushRemote names a remote with no URL, or a URL, which is not a remote name", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    for (const value of ["gone", server.url + "/agents/private.git"]) {
+      await run(dir, ["config", "--local", "branch.main.pushRemote", value], ctx.env);
+      const { checks, logged } = createChecks(ctx, { checkouts: [{ path: dir, name: "fallback" }] });
+      expect((await checks.check()).results[0]).toMatchObject({ remote: "origin", routing: null, write: null });
+      expect(logged).toContain("[alphaclaw] git-push-check fallback: remote=origin routing=ok write=ok stuck=none tracked_ignored=0");
+    }
+  });
+
   it("uses remote.pushDefault, then branch.<name>.remote, so a discovered checkout with no origin is found, and keeps origin on a detached HEAD", async () => {
     const ctx = await setup({ repos: [] });
     const roots = path.join(ctx.root, "data");
