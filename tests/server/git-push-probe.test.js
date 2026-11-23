@@ -103,7 +103,7 @@ describe("git push write probe", () => {
     expect(message).toContain("gitCredentials.routes");
     expect(message).toContain("repo \"acme/private\"");
     expect(message).not.toContain(kReadToken);
-    expect(logged.join("\n")).toContain("git-push-check private: routing=ok write=push_denied stuck=none tracked_ignored=0");
+    expect(logged.join("\n")).toContain("git-push-check private: remote=origin routing=ok write=push_denied stuck=none tracked_ignored=0");
 
     // The read path worked; the write path was only asked for its ref
     // advertisement; nothing was posted to either service.
@@ -191,7 +191,7 @@ describe("git push checks with a token only the pushing process has", () => {
     expect(server.requests.some((entry) => entry.service === "git-receive-pack" && entry.access === "write")).toBe(true);
     expect(refsOf(bare)).toBe(before);
     expect(fixed.logged).toContain("[alphaclaw] git-push-check env file unreadable: " + missing + " (ENOENT)");
-    expect(fixed.logged).toContain("[alphaclaw] git-push-check pinned: routing=ok write=ok stuck=none tracked_ignored=0");
+    expect(fixed.logged).toContain("[alphaclaw] git-push-check pinned: remote=origin routing=ok write=ok stuck=none tracked_ignored=0");
     const state = fs.readFileSync(path.join(ctx.openclawDir, ".alphaclaw", "git-push-checks.json"), "utf8");
     for (const text of [state, fixed.logged.join("\n"), JSON.stringify(results)]) expect(text).not.toContain(kWriteToken);
     expect(ctx.env.PUSHER_ONLY_TOKEN).toBeUndefined();
@@ -318,7 +318,7 @@ describe("git push checkout discovery", () => {
     ]);
     // own, pusher, reader and the non-GitHub one, which is then skipped.
     expect(logged).toContain("[alphaclaw] git-push-check discovery: found 4 git checkout(s) under " + roots + " (depth 3)");
-    expect(logged).toContain("[alphaclaw] git-push-check projects/reader: routing=ok write=skipped stuck=none");
+    expect(logged).toContain("[alphaclaw] git-push-check projects/reader: remote=origin routing=ok write=skipped stuck=none");
     const receive = server.requests.filter((entry) => entry.service === "git-receive-pack");
     expect(receive.some((entry) => entry.path.includes("/acme/reader"))).toBe(false);
     expect(server.requests.filter((entry) => entry.method !== "GET")).toEqual([]);
@@ -332,3 +332,158 @@ describe("git push checkout discovery", () => {
     expect((await checks.check()).results.map((entry) => entry.checkout.path)).not.toContain(ctx.openclawDir);
   });
 });
+
+describe("git push checks follow the remote the branch pushes to", () => {
+  // GST-3629: a checkout whose branch pushes to a second remote (an agents
+  // fork) read push_denied because the probe tested origin, which it never
+  // pushes to. This helper, with credential.useHttpPath, gives the token that
+  // can push only for repositories under agents/, and the read token for the
+  // rest, so a probe of the wrong remote fails.
+  const pathHelper = (logFile) =>
+    "!f() { echo \"$1\" >> " + logFile + "; test \"$1\" = get || exit 0; t=" + kReadToken + "; while read l; do case \"$l\" in path=agents/*) t=" + kWriteToken + ";; esac; done; echo username=x-access-token; echo password=$t; }; f";
+  const addAgentsRemote = async (ctx, dir, repo) => {
+    const bare = path.join(ctx.root, "srv", "agents", repo + ".git");
+    fs.mkdirSync(path.dirname(bare), { recursive: true });
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare], { env: ctx.env });
+    await run(dir, ["remote", "add", "agents", server.url + "/agents/" + repo + ".git"], ctx.env);
+    await run(dir, ["-c", "credential.helper=", "-c", "credential.helper=" + loggingHelper(kWriteToken, path.join(ctx.root, "seed.log")), "push", "-q", "agents", "main"], ctx.env);
+    await run(dir, ["config", "--local", "credential.useHttpPath", "true"], ctx.env);
+    await run(dir, ["config", "--local", "credential.helper", pathHelper(ctx.helperLog)], ctx.env);
+    return bare;
+  };
+  const pathsOf = (service) => server.requests.filter((entry) => entry.service === service).map((entry) => entry.path);
+
+  it("probes, lists and counts against branch.<name>.pushRemote instead of origin", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    const bare = await addAgentsRemote(ctx, dir, "private");
+    await run(dir, ["config", "--local", "branch.main.pushRemote", "agents"], ctx.env);
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await run(dir, ["commit", "-q", "--allow-empty", "-m", "stranded"], { ...ctx.env, GIT_COMMITTER_DATE: old });
+    const before = refsOf(bare);
+    server.requests.length = 0;
+    const { checks, notify, logged } = createChecks(ctx, { checkouts: [{ path: dir, name: "split" }] });
+
+    const { results } = await checks.check();
+    expect(results[0]).toMatchObject({ remote: "agents", routing: null, write: null, writeProbe: "ok", stuck: { code: "stuck_push", count: 1 } });
+    expect(pathsOf("git-receive-pack").length).toBeGreaterThan(0);
+    expect(pathsOf("git-receive-pack").every((entry) => entry.startsWith("/agents/private.git/"))).toBe(true);
+    expect(pathsOf("git-upload-pack").every((entry) => entry.startsWith("/agents/private.git/"))).toBe(true);
+    expect(server.requests.filter((entry) => entry.method !== "GET")).toEqual([]);
+    expect(refsOf(bare)).toBe(before);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain("that are not on agents/main");
+    expect(notify.mock.calls[0][0]).toContain("push agents main");
+    expect(logged).toContain("[alphaclaw] git-push-check split: remote=agents routing=ok write=ok stuck=1 tracked_ignored=0");
+    expect(fs.readFileSync(ctx.helperLog, "utf8").trim().split("\n").every((line) => line === "get")).toBe(true);
+
+    // A listed checkout's remote other than origin is checked as configured.
+    await run(dir, ["remote", "add", "mirror", server.url + "/acme/private.git"], ctx.env);
+    const named = createChecks(ctx, { checkouts: [{ path: dir, name: "named", remote: "mirror" }] });
+    expect((await named.checks.check()).results[0]).toMatchObject({ remote: "mirror", write: { code: "push_denied" } });
+    const origin = createChecks(ctx, { checkouts: [{ path: dir, name: "origin", remote: "origin" }] });
+    expect((await origin.checks.check()).results[0]).toMatchObject({ remote: "agents", write: null });
+  });
+
+  it("keeps origin when pushRemote names a remote with no URL, or a URL, which is not a remote name", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    for (const value of ["gone", server.url + "/agents/private.git"]) {
+      await run(dir, ["config", "--local", "branch.main.pushRemote", value], ctx.env);
+      const { checks, logged } = createChecks(ctx, { checkouts: [{ path: dir, name: "fallback" }] });
+      expect((await checks.check()).results[0]).toMatchObject({ remote: "origin", routing: null, write: null });
+      expect(logged).toContain("[alphaclaw] git-push-check fallback: remote=origin routing=ok write=ok stuck=none tracked_ignored=0");
+    }
+  });
+
+  it("reads an https fetch URL only through the get-only helper when the push URL is ssh, so no helper is told to store or erase", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    // ls-remote reads the https fetch URL; pushes go over ssh, which this
+    // test stubs to fail at once.
+    await run(dir, ["config", "--local", "remote.origin.pushurl", "ssh://git@127.0.0.1/acme/private.git"], ctx.env);
+    await run(dir, ["config", "--local", "core.sshCommand", "false"], ctx.env);
+    server.requests.length = 0;
+    const { checks } = createChecks(ctx, { checkouts: [{ path: dir, name: "split-url" }] });
+    expect((await checks.check()).results[0]).toMatchObject({ remote: "origin", url: "ssh://127.0.0.1/acme/private.git", routing: null });
+    expect(server.requests.some((entry) => entry.service === "git-upload-pack" && entry.access === "write")).toBe(true);
+    expect(fs.readFileSync(ctx.helperLog, "utf8").trim().split("\n")).toEqual(expect.arrayContaining(["get"]));
+    expect(fs.readFileSync(ctx.helperLog, "utf8").trim().split("\n").every((line) => line === "get")).toBe(true);
+  });
+
+  it("never puts a remote URL's userinfo on a git command line, in ls-remote, the probe or the stuck check", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    const withToken = server.url.replace("://", "://x-access-token:" + kWriteToken + "@") + "/acme/private.git";
+    await run(dir, ["remote", "set-url", "origin", withToken], ctx.env);
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await run(dir, ["commit", "-q", "--allow-empty", "-m", "stranded"], { ...ctx.env, GIT_COMMITTER_DATE: old });
+    const argv = [];
+    const logged = [];
+    const checks = createGitPushChecks({
+      openclawDir: ctx.openclawDir,
+      readConfig: () => ({ checkouts: [{ path: dir, name: "userinfo" }] }),
+      getEnv: () => ctx.env,
+      notify: async () => ({ ok: true }),
+      recordEvent() {},
+      githubUrl: server.url,
+      execFileImpl: (file, args, options, callback) => {
+        argv.push(args);
+        return execFile(file, args, options, callback);
+      },
+      logger: { log: (line) => logged.push(line), warn: (line) => logged.push(line) },
+    });
+    const { results } = await checks.check();
+    expect(results[0]).toMatchObject({ routing: null, write: null, writeProbe: "ok", stuck: { code: "stuck_push", count: 1 } });
+    for (const verb of ["ls-remote", "push", "log"]) expect(argv.some((args) => args.includes(verb))).toBe(true);
+    for (const args of argv) expect(args.join(" ")).not.toContain(kWriteToken);
+    for (const text of [logged.join("\n"), JSON.stringify(results)]) expect(text).not.toContain(kWriteToken);
+  });
+
+  it("uses the only remote when nothing names one, as git push does, and origin when there are several", async () => {
+    const ctx = await setup({ repos: [] });
+    const roots = path.join(ctx.root, "data");
+    const archive = await ctx.clone("agents/archive", path.join(roots, "archive"));
+    await run(archive.dir, ["remote", "rename", "origin", "offbox"], ctx.env);
+    await run(archive.dir, ["config", "--local", "--unset", "branch.main.remote"], ctx.env);
+    await run(archive.dir, ["config", "--local", "--unset", "branch.main.merge"], ctx.env);
+    server.requests.length = 0;
+    const { checks, logged } = createChecks(ctx, { checkouts: [], discover: { roots: [roots], maxDepth: 2 } });
+    expect((await checks.check()).results).toEqual([expect.objectContaining({ remote: "offbox", routing: null, write: null, writeProbe: "ok" })]);
+    expect(server.requests.filter((entry) => entry.service === "git-receive-pack").every((entry) => entry.path.startsWith("/agents/archive.git/"))).toBe(true);
+    expect(logged).toContain("[alphaclaw] git-push-check archive: remote=offbox routing=ok write=ok stuck=none");
+
+    await run(archive.dir, ["remote", "add", "second", server.url + "/agents/archive.git"], ctx.env);
+    expect((await checks.check()).results).toEqual([]);
+  });
+
+  it("uses remote.pushDefault, then branch.<name>.remote, so a discovered checkout with no origin is found, and keeps origin on a detached HEAD", async () => {
+    const ctx = await setup({ repos: [] });
+    const roots = path.join(ctx.root, "data");
+    const fork = await ctx.clone("acme/fork", path.join(roots, "fork"));
+    await addAgentsRemote(ctx, fork.dir, "fork");
+    await run(fork.dir, ["config", "--local", "remote.pushDefault", "agents"], ctx.env);
+    // An off-box archive: its only remote is offbox, which main tracks.
+    const archive = await ctx.clone("agents/archive", path.join(roots, "archive"));
+    await run(archive.dir, ["remote", "rename", "origin", "offbox"], ctx.env);
+    server.requests.length = 0;
+    const { checks, logged } = createChecks(ctx, { checkouts: [], discover: { roots: [roots], maxDepth: 2 } });
+
+    const { results } = await checks.check();
+    const byName = Object.fromEntries(results.map((entry) => [entry.checkout.name, entry]));
+    expect(Object.keys(byName).sort()).toEqual(["archive", "fork"]);
+    expect(byName.fork).toMatchObject({ remote: "agents", routing: null, write: null, writeProbe: "ok" });
+    expect(byName.archive).toMatchObject({ remote: "offbox", routing: null, write: null, writeProbe: "ok" });
+    expect(pathsOf("git-receive-pack").some((entry) => entry.startsWith("/acme/"))).toBe(false);
+    expect(logged).toContain("[alphaclaw] git-push-check fork: remote=agents routing=ok write=ok stuck=none");
+    expect(logged).toContain("[alphaclaw] git-push-check archive: remote=offbox routing=ok write=ok stuck=none");
+    expect(logged.join("\n")).not.toContain(server.url);
+
+    await run(archive.dir, ["checkout", "-q", "--detach"], ctx.env);
+    await run(fork.dir, ["checkout", "-q", "--detach"], ctx.env);
+    const detached = Object.fromEntries((await checks.check()).results.map((entry) => [entry.checkout.name, entry]));
+    expect(Object.keys(detached)).toEqual(["fork"]);
+    expect(detached.fork).toMatchObject({ remote: "origin" });
+  });
+});
+
