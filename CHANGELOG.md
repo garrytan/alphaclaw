@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.335] - 2026-11-23
+
+The plan doc for the WhatsApp pairing status and model pricing work now has valid YAML frontmatter, so tools that read a doc's frontmatter can parse it. Reported by @exGeni in #489.
+
+### Docs
+- `docs/plans/2026-06-05-001-split-whatsapp-status-and-pricing-plan.md` quotes its `title:`, which holds `: ` and made the frontmatter fail to parse (`bad indentation of a mapping entry (2:21)`).
+
 ## [0.10.334] - 2026-11-22
 
 The upgrade runbook no longer says AlphaClaw keeps Back up now archives forever. Reported by @exGeni in #314.
