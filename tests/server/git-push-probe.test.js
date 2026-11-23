@@ -396,6 +396,37 @@ describe("git push checks follow the remote the branch pushes to", () => {
     }
   });
 
+  it("reads the push URL, never a different fetch URL, so an https fetch URL is never asked for a credential", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    // The fetch URL stays on the https server; pushes go over ssh, which this
+    // test stubs to fail at once.
+    await run(dir, ["config", "--local", "remote.origin.pushurl", "ssh://git@127.0.0.1/acme/private.git"], ctx.env);
+    await run(dir, ["config", "--local", "core.sshCommand", "false"], ctx.env);
+    server.requests.length = 0;
+    const { checks } = createChecks(ctx, { checkouts: [{ path: dir, name: "split-url" }] });
+    expect((await checks.check()).results[0]).toMatchObject({ remote: "origin", url: "ssh://127.0.0.1/acme/private.git", routing: { code: "ls_remote_failed" } });
+    expect(server.requests).toEqual([]);
+    expect(fs.existsSync(ctx.helperLog) ? fs.readFileSync(ctx.helperLog, "utf8").trim() : "").toBe("");
+  });
+
+  it("uses the only remote when nothing names one, as git push does, and origin when there are several", async () => {
+    const ctx = await setup({ repos: [] });
+    const roots = path.join(ctx.root, "data");
+    const archive = await ctx.clone("agents/archive", path.join(roots, "archive"));
+    await run(archive.dir, ["remote", "rename", "origin", "offbox"], ctx.env);
+    await run(archive.dir, ["config", "--local", "--unset", "branch.main.remote"], ctx.env);
+    await run(archive.dir, ["config", "--local", "--unset", "branch.main.merge"], ctx.env);
+    server.requests.length = 0;
+    const { checks, logged } = createChecks(ctx, { checkouts: [], discover: { roots: [roots], maxDepth: 2 } });
+    expect((await checks.check()).results).toEqual([expect.objectContaining({ remote: "offbox", routing: null, write: null, writeProbe: "ok" })]);
+    expect(server.requests.filter((entry) => entry.service === "git-receive-pack").every((entry) => entry.path.startsWith("/agents/archive.git/"))).toBe(true);
+    expect(logged).toContain("[alphaclaw] git-push-check archive: remote=offbox routing=ok write=ok stuck=none");
+
+    await run(archive.dir, ["remote", "add", "second", server.url + "/agents/archive.git"], ctx.env);
+    expect((await checks.check()).results).toEqual([]);
+  });
+
   it("uses remote.pushDefault, then branch.<name>.remote, so a discovered checkout with no origin is found, and keeps origin on a detached HEAD", async () => {
     const ctx = await setup({ repos: [] });
     const roots = path.join(ctx.root, "data");
