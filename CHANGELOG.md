@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.337] - 2026-11-23
+
+The push checks now test the remote a checkout's branch really pushes to, so a checkout that pushes to a fork or has no `origin` no longer reports a false "pushes would fail".
+
+### Fixed
+- The write probe, `ls-remote` and the stuck-push count resolve the push remote the way `git push` does: `branch.<name>.pushRemote`, then `remote.pushDefault`, then `branch.<name>.remote`, then `origin`. Before, they always used `origin`, so a checkout whose branch pushes to a second remote read `push_denied` from a remote it never pushes to. Discovery's github.com test uses the same remote, so a checkout whose only remote is not `origin` is found. A listed checkout with a `remote` other than `origin` is checked on that remote, and a detached HEAD or an unresolvable setting keeps `origin`. The log line gains `remote=<name>` (a name only, never a URL).
+
 ## [0.10.336] - 2026-11-23
 
 The boot's full `openclaw doctor --lint` is no longer killed by its timeout on installs with a few hundred MB to a few GB of state, so its findings reach the dashboard again. Reported by @exGeni in #488.

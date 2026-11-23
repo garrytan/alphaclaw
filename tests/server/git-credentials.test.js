@@ -249,7 +249,7 @@ describe("managed GitHub credential helper", () => {
       ["docs", null, "no_route"],
     ]);
     expect(ctx.notify).not.toHaveBeenCalled();
-    expect(logged).toContain("[alphaclaw] git-push-check app: routing=ok write=ok managed=push_denied stuck=none tracked_ignored=0");
+    expect(logged).toContain("[alphaclaw] git-push-check app: remote=origin routing=ok write=ok managed=push_denied stuck=none tracked_ignored=0");
   });
 });
 
