@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.336] - 2026-11-23
+
+The boot's full `openclaw doctor --lint` is no longer killed by its timeout on installs with a few hundred MB to a few GB of state, so its findings reach the dashboard again. Reported by @exGeni in #488.
+
+### Fixed
+- A full lint's ceiling is now its 60 s floor plus 150 s per GiB of OpenClaw state, instead of the larger of the two. The per-GiB rate was measured on `doctor --fix` runs and left out the lint's fixed cost (starting the CLI, loading plugins, checking each agent's config). A 0.72 GiB install got 108 s, its lint needed about 135 s, and every boot killed it, swept the snapshot copy it left and kept lint findings off the dashboard for the hour-long timeout cooldown; it now gets 168 s. `doctor --fix` ceilings (boot migration, Retry upgrade, watchdog repair) and `--only` lint runs are unchanged.
+
 ## [0.10.335] - 2026-11-23
 
 The plan doc for the WhatsApp pairing status and model pricing work now has valid YAML frontmatter, so tools that read a doc's frontmatter can parse it. Reported by @exGeni in #489.

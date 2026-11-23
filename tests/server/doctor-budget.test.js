@@ -5,6 +5,7 @@ const path = require("path");
 const {
   kDoctorTimeoutCapMs,
   createDoctorTimeoutResolver,
+  resolveDoctorLintTimeoutMs,
   resolveDoctorTimeoutMs,
 } = require("../../lib/server/doctor-budget");
 
@@ -53,5 +54,37 @@ describe("doctor --fix ceiling sized from the state (ALPH-23)", () => {
     });
     expect(resolve(30 * kMinute)).toBe(30 * kMinute);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("EACCES"));
+  });
+});
+
+describe("full doctor --lint ceiling adds the state term to its floor (#488)", () => {
+  const kSecond = 1000;
+
+  it("lets a lint of 0.72 GiB of state run past the 135 s it took by hand", () => {
+    const stateBytes = 0.72 * kGib;
+    expect(resolveDoctorLintTimeoutMs({ stateBytes, floorMs: 60 * kSecond })).toBeGreaterThanOrEqual(135 * kSecond);
+    expect(resolveDoctorLintTimeoutMs({ stateBytes, floorMs: 60 * kSecond })).toBe(168 * kSecond);
+  });
+
+  it("keeps the floor for an empty state and caps a huge one", () => {
+    expect(resolveDoctorLintTimeoutMs({ stateBytes: 0, floorMs: 60 * kSecond })).toBe(60 * kSecond);
+    expect(resolveDoctorLintTimeoutMs({ stateBytes: 1000 * kGib, floorMs: 60 * kSecond })).toBe(kDoctorTimeoutCapMs);
+  });
+
+  it("is what a resolver built for the lint measures with, leaving the --fix resolver unchanged", () => {
+    const db = "/state/openclaw-agent.sqlite";
+    const fsModule = { ...fs, lstatSync: (target) => ({ isFile: () => true, size: target === db ? 0.72 * kGib : 0 }) };
+    const lint = createDoctorTimeoutResolver({ listStateDbFiles: () => [db], fsModule, resolve: resolveDoctorLintTimeoutMs });
+    const fix = createDoctorTimeoutResolver({ listStateDbFiles: () => [db], fsModule });
+    expect(lint(60 * kSecond)).toBe(168 * kSecond);
+    expect(fix(60 * kSecond)).toBe(108 * kSecond);
+  });
+});
+
+describe("boot wiring of the lint ceiling (#488)", () => {
+  it("sizes the lint runner's ceiling with the lint resolver", () => {
+    const serverSource = fs.readFileSync(path.join(__dirname, "../../lib/server.js"), "utf8");
+    expect(serverSource).toMatch(/resolve: resolveDoctorLintTimeoutMs,/);
+    expect(serverSource).toMatch(/resolveTimeoutMs: \(floorMs\) => resolveDoctorLintCeilingMs\(floorMs\),/);
   });
 });
