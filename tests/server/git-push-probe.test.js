@@ -396,18 +396,48 @@ describe("git push checks follow the remote the branch pushes to", () => {
     }
   });
 
-  it("reads the push URL, never a different fetch URL, so an https fetch URL is never asked for a credential", async () => {
+  it("reads an https fetch URL only through the get-only helper when the push URL is ssh, so no helper is told to store or erase", async () => {
     const ctx = await setup();
     const { dir } = ctx.checkouts["acme/private"];
-    // The fetch URL stays on the https server; pushes go over ssh, which this
+    // ls-remote reads the https fetch URL; pushes go over ssh, which this
     // test stubs to fail at once.
     await run(dir, ["config", "--local", "remote.origin.pushurl", "ssh://git@127.0.0.1/acme/private.git"], ctx.env);
     await run(dir, ["config", "--local", "core.sshCommand", "false"], ctx.env);
     server.requests.length = 0;
     const { checks } = createChecks(ctx, { checkouts: [{ path: dir, name: "split-url" }] });
-    expect((await checks.check()).results[0]).toMatchObject({ remote: "origin", url: "ssh://127.0.0.1/acme/private.git", routing: { code: "ls_remote_failed" } });
-    expect(server.requests).toEqual([]);
-    expect(fs.existsSync(ctx.helperLog) ? fs.readFileSync(ctx.helperLog, "utf8").trim() : "").toBe("");
+    expect((await checks.check()).results[0]).toMatchObject({ remote: "origin", url: "ssh://127.0.0.1/acme/private.git", routing: null });
+    expect(server.requests.some((entry) => entry.service === "git-upload-pack" && entry.access === "write")).toBe(true);
+    expect(fs.readFileSync(ctx.helperLog, "utf8").trim().split("\n")).toEqual(expect.arrayContaining(["get"]));
+    expect(fs.readFileSync(ctx.helperLog, "utf8").trim().split("\n").every((line) => line === "get")).toBe(true);
+  });
+
+  it("never puts a remote URL's userinfo on a git command line, in ls-remote, the probe or the stuck check", async () => {
+    const ctx = await setup();
+    const { dir } = ctx.checkouts["acme/private"];
+    const withToken = server.url.replace("://", "://x-access-token:" + kWriteToken + "@") + "/acme/private.git";
+    await run(dir, ["remote", "set-url", "origin", withToken], ctx.env);
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await run(dir, ["commit", "-q", "--allow-empty", "-m", "stranded"], { ...ctx.env, GIT_COMMITTER_DATE: old });
+    const argv = [];
+    const logged = [];
+    const checks = createGitPushChecks({
+      openclawDir: ctx.openclawDir,
+      readConfig: () => ({ checkouts: [{ path: dir, name: "userinfo" }] }),
+      getEnv: () => ctx.env,
+      notify: async () => ({ ok: true }),
+      recordEvent() {},
+      githubUrl: server.url,
+      execFileImpl: (file, args, options, callback) => {
+        argv.push(args);
+        return execFile(file, args, options, callback);
+      },
+      logger: { log: (line) => logged.push(line), warn: (line) => logged.push(line) },
+    });
+    const { results } = await checks.check();
+    expect(results[0]).toMatchObject({ routing: null, write: null, writeProbe: "ok", stuck: { code: "stuck_push", count: 1 } });
+    for (const verb of ["ls-remote", "push", "log"]) expect(argv.some((args) => args.includes(verb))).toBe(true);
+    for (const args of argv) expect(args.join(" ")).not.toContain(kWriteToken);
+    for (const text of [logged.join("\n"), JSON.stringify(results)]) expect(text).not.toContain(kWriteToken);
   });
 
   it("uses the only remote when nothing names one, as git push does, and origin when there are several", async () => {
