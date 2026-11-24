@@ -12,6 +12,7 @@ The owner's own Capy threads working over Agent Relay can now make images with O
 ### Changed
 - The relay guard opens `image_generate` to a delegate that is the owner's own thread (an attested owner thread or a pinned binding), decided per call from the box's records like the guard's other owner-thread tools. Every other delegate and every peer is still refused, and the tool is now on the delegate never list, so `ALPHACLAW_RELAY_DELEGATE_TOOLS` can no longer open it to other delegates.
 - A reference image (`image` or `images`) is read from disk, so the guard checks each local one like a `read` path and refuses one that reaches the relay's files, the guest notes broker's files or a process's environment. URLs, `data:` and `media://` references pass. The output can't land in the trust anchor: OpenClaw always saves it in its media store under a sanitized file name.
+- OpenClaw runs the generation as a background task, so the relay reply carries only its "started" note. The finished image arrives in a later turn of the same relay session, which the relay doesn't forward yet; the thread reads it with `sessions_history` or from OpenClaw's media folder.
 
 ## [0.10.337] - 2026-11-23
 

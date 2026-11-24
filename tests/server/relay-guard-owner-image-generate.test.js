@@ -47,12 +47,15 @@ describe("relay guard: image_generate for the owner's own thread (GST-3677)", ()
       { prompt: "x", image: "MEDIA:" + secrets },
       { prompt: "x", images: ["https://example.com/a.png", "file://" + secrets] },
       { prompt: "x", image: "/proc/self/environ" },
+      { prompt: "x", images: secrets },
+      { prompt: "x", images: [...Array(20).fill("https://example.com/a.png"), "@https://example.com/a.png", secrets] },
     ]) expect(classifyKeyRead({ toolName: "image_generate", params, rootDir, agentId: "main" }), JSON.stringify(params)).toMatchObject({ action: expect.stringContaining("image_generate") });
     for (const params of [
       kGenerate,
       { prompt: "x", image: path.join(rootDir, ".openclaw", "workspace", "ref.png") },
       { prompt: "x", images: ["https://example.com/relay/secrets.json", "data:image/png;base64,AAAA", "media://inbound/a.png"] },
       { prompt: "x", filename: "../../relay/secrets.json" },
+      { prompt: "x", images: [...Array.from({ length: 16 }, (_, index) => "https://example.com/" + index + ".png"), secrets] },
     ]) {
       expect(classifyKeyRead({ toolName: "image_generate", params, rootDir, agentId: "main" }), JSON.stringify(params)).toBeNull();
       expect(classifyAnchor({ toolName: "image_generate", params, rootDir, agentId: "main" }), JSON.stringify(params)).toBeNull();
