@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.339] - 2026-11-24
+
+When the owner's own Capy thread asks the box for an image over Agent Relay, the relay now sends back the finished image instead of the "started" note, and video and music generation stay closed to every relay agent.
+
+### Fixed
+- OpenClaw runs `image_generate`, `video_generate` and `music_generate` as background tasks, so the turn a relay message starts ends with only a "Background task started" note, and the finished media comes back later as a turn of its own in the same relay session. For the owner's own thread (an attested owner thread or a pinned binding), the relay now holds its reply until that later turn has answered and posts that answer, with its media paths, as the message's one reply. It waits up to 15 minutes, reading the session's history at most every 10 seconds; with no newer answer by then it posts the reply it has, with a note that the media wasn't ready. The wait is stored in `bridge.db`, so a restart of AlphaClaw or the gateway in the middle posts exactly once. A thread that stops being the owner's own while it waits gets its reply at once, and every other relay agent is answered as before.
+
+### Changed
+- `video_generate` and `music_generate` are on the delegate never list, so `ALPHACLAW_RELAY_DELEGATE_TOOLS` can't open them to any relay agent, the owner's own thread included. Their reference arguments get the same check as `image_generate`'s: a local file in `image`, `images`, `video`, `videos`, `audioRef` or `audioRefs` that reaches the relay's files, the guest notes broker's files or a process's environment is refused.
+- The reference check for `image_generate` now checks every reference in the call, however many it lists. It used to skip a call listing more than 16, relying on OpenClaw to refuse such a call before reading any file; it no longer depends on that, and a call listing 2,000 is still checked in well under a second.
+
 ## [0.10.338] - 2026-11-24
 
 The owner's own Capy threads working over Agent Relay can now make images with OpenClaw's `image_generate` tool, so a page they build for the owner can carry generated art. Other relay agents still can't use it.
