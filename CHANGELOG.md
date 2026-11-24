@@ -5,6 +5,14 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.338] - 2026-11-24
+
+The owner's own Capy threads working over Agent Relay can now make images with OpenClaw's `image_generate` tool, so a page they build for the owner can carry generated art. Other relay agents still can't use it.
+
+### Changed
+- The relay guard opens `image_generate` to a delegate that is the owner's own thread (an attested owner thread or a pinned binding), decided per call from the box's records like the guard's other owner-thread tools. Every other delegate and every peer is still refused, and the tool is now on the delegate never list, so `ALPHACLAW_RELAY_DELEGATE_TOOLS` can no longer open it to other delegates.
+- A reference image (`image` or `images`) is read from disk, so the guard checks each local one like a `read` path and refuses one that reaches the relay's files, the guest notes broker's files or a process's environment. URLs, `data:` and `media://` references pass. The output can't land in the trust anchor: OpenClaw always saves it in its media store under a sanitized file name.
+
 ## [0.10.337] - 2026-11-23
 
 The push checks now test the remote a checkout's branch really pushes to, so a checkout that pushes to a fork or has no `origin` no longer reports a false "pushes would fail".
