@@ -62,11 +62,14 @@ describe("relay guard: image_generate for the owner's own thread (GST-3677)", ()
     }
   });
 
-  it("checks a long reference list in one pass over the bases", () => {
+  it("checks a long reference list in one pass over the bases, and refuses one too long to check", () => {
     const rootDir = "/srv/alphaclaw";
-    const images = [...Array.from({ length: 2000 }, (_, index) => path.join(rootDir, ".openclaw", "workspace", "ref-" + index + ".png")), path.join(rootDir, "relay", "secrets.json")];
+    const refs = (count) => Array.from({ length: count }, (_, index) => path.join(rootDir, ".openclaw", "workspace", "ref-" + index + ".png"));
     const started = Date.now();
-    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images }, rootDir, agentId: "main" })).toMatchObject({ action: expect.stringContaining("secrets.json") });
+    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images: [...refs(255), path.join(rootDir, "relay", "secrets.json")] }, rootDir, agentId: "main" })).toMatchObject({ action: expect.stringContaining("secrets.json") });
+    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images: refs(256) }, rootDir, agentId: "main" })).toBeNull();
+    expect(classifyKeyRead({ toolName: "video_generate", params: { prompt: "x", images: refs(200), videos: refs(57).map((ref) => ref.replace(".png", ".mp4")) }, rootDir, agentId: "main" })).toMatchObject({ action: "video_generate with more than 256 reference files, too many to check" });
+    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images: refs(100000) }, rootDir, agentId: "main" })).toMatchObject({ action: expect.stringContaining("too many to check") });
     expect(Date.now() - started).toBeLessThan(2000);
   });
 

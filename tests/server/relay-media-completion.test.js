@@ -90,9 +90,10 @@ const mediaTurn = (tool = "image_generate", started = kStarted, t0 = 1) => [
 ];
 
 // The completion turn OpenClaw starts when the task finishes.
-const completionTurn = (t0 = 100) => [
-  { role: "user", content: "[Internal task completion event] The image is ready for the original chat.", timestamp: t0 },
-  { role: "assistant", content: [{ type: "text", text: "Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png" }], timestamp: t0 + 1 },
+// Its user row is OpenClaw's runtime prompt (formatTaskCompletionEvent).
+const completionTurn = (t0 = 100, task = "task_01", text = "Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png") => [
+  { role: "user", content: "[Internal task completion event]\nsource: image_generation\nsession_key: image_generate:" + task + "\nsession_id: " + task + "\ntype: image generation task\nstatus: completed", timestamp: t0 },
+  { role: "assistant", content: [{ type: "text", text }], timestamp: t0 + 1 },
 ];
 
 const setup = ({ dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-media-")), nowRef = { value: Date.now() }, verdict = { trust: "delegate", pinned: true, generation: 1, grantId: "g1" } } = {}) => {
@@ -256,6 +257,45 @@ describe("relay bridge: a background media task in the owner's own thread (GST-3
     expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png"]);
   });
 
+  it("a late completion of an earlier message's task is never this message's reply", async () => {
+    ctx = setup();
+    const { messageId, send } = await start(ctx);
+    await ctx.end(send, [...mediaTurn("image_generate", kStarted.replace("task_01", "task_02")), ...completionTurn(100, "task_01", "Here is the OLD lighthouse.")]);
+    expect(ctx.engine.replies).toEqual([]);
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    await ctx.later(11 * 1000);
+    expect(ctx.engine.replies).toEqual([]);
+    ctx.gateway.history.get(send.sessionKey).push(...completionTurn(200, "task_02", "Here is the new lighthouse."));
+    await ctx.later(11 * 1000);
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the new lighthouse."]);
+  });
+
+  it("the 15-minute deadline holds while a completion turn is still running", async () => {
+    ctx = setup();
+    const { messageId, send } = await start(ctx);
+    await ctx.end(send, mediaTurn());
+    ctx.gateway.active.add(send.sessionKey);
+    await ctx.later(14 * 60 * 1000);
+    expect(ctx.engine.replies).toEqual([]);
+    await ctx.later(61 * 1000);
+    expect(ctx.engine.replies).toHaveLength(1);
+    expect(ctx.engine.replies[0].text).toContain("[Relay: the generated media was not ready within 15 minutes");
+    expect(ctx.store.get(messageId).state).toBe("answered");
+  });
+
+  it("a held row keeps its own lane waiting but frees its run slot", async () => {
+    ctx = setup();
+    const { send } = await start(ctx);
+    await ctx.end(send, mediaTurn());
+    await ctx.tick();
+    ctx.engine.dm("capy-other-a", "first", {});
+    ctx.engine.dm("capy-other-b", "second", {});
+    const same = ctx.engine.dm(kAgent, "and another", { relay_generation: 1 });
+    await ctx.tick();
+    expect(ctx.gateway.sends.map((sent) => sent.sessionKey)).toEqual([send.sessionKey, "agent:main:relay-capy-other-a", "agent:main:relay-capy-other-b"]);
+    expect(ctx.store.get(same).state).toBe("queued");
+  });
+
   it("with no completion in 15 minutes it posts the reply it has, with a note", async () => {
     ctx = setup();
     const { messageId, send } = await start(ctx);
@@ -279,9 +319,20 @@ describe("relay bridge: a background media task in the owner's own thread (GST-3
     await ctx.tick();
     expect(ctx.store.get(messageId).pinnedBinding).toBe(null);
     await ctx.later(11 * 1000);
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Started the image; it comes back in a moment.\n\n[Relay: this thread stopped being the owner's own while its generated media was pending, so the relay does not send the media here.]"]);
+  });
+
+  it("a thread demoted before its completion arrived never gets the completion's media", async () => {
+    ctx = setup();
+    const { send } = await start(ctx);
+    await ctx.end(send, mediaTurn());
+    ctx.verdictRef.value = { trust: "delegate", pinned: false, generation: 1, grantId: "g1" };
+    await ctx.tick();
+    ctx.gateway.history.get(send.sessionKey).push(...completionTurn());
+    await ctx.later(11 * 1000);
     expect(ctx.engine.replies).toHaveLength(1);
-    expect(ctx.engine.replies[0].text).toContain("Started the image; it comes back in a moment.");
-    expect(ctx.engine.replies[0].text).toContain("[Relay: the generated media was not ready");
+    expect(ctx.engine.replies[0].text).not.toContain("MEDIA:");
+    expect(ctx.engine.replies[0].text).toMatch(/^Started the image; it comes back in a moment\.\n\n\[Relay: this thread stopped being the owner's own/);
   });
 
   it("a delegate that is not the owner's own thread is answered at once, as before", async () => {
