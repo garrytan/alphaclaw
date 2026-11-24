@@ -296,6 +296,29 @@ describe("relay bridge: a background media task in the owner's own thread (GST-3
     expect(ctx.store.get(same).state).toBe("queued");
   });
 
+  it("a history read that fails at the run's end is read again by reconcile, and the wait still happens", async () => {
+    ctx = setup();
+    const { messageId, send } = await start(ctx);
+    const request = ctx.gateway.requestGateway;
+    let failures = 1;
+    ctx.gateway.requestGateway = async (method, ...rest) => {
+      if (method === "chat.history" && failures > 0) {
+        failures -= 1;
+        throw new Error("gateway timeout");
+      }
+      return request(method, ...rest);
+    };
+    await ctx.end(send, mediaTurn());
+    expect(ctx.engine.replies).toEqual([]);
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "reconciling", mediaWaitUntil: null });
+    await ctx.later(3 * 60 * 1000);
+    expect(ctx.engine.replies).toEqual([]);
+    expect(ctx.store.get(messageId).mediaWaitUntil).toBeGreaterThan(ctx.nowRef.value);
+    ctx.gateway.history.get(send.sessionKey).push(...completionTurn());
+    await ctx.later(11 * 1000);
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png"]);
+  });
+
   it("with no completion in 15 minutes it posts the reply it has, with a note", async () => {
     ctx = setup();
     const { messageId, send } = await start(ctx);
