@@ -49,17 +49,44 @@ describe("relay guard: image_generate for the owner's own thread (GST-3677)", ()
       { prompt: "x", image: "/proc/self/environ" },
       { prompt: "x", images: secrets },
       { prompt: "x", images: [...Array(20).fill("https://example.com/a.png"), "@https://example.com/a.png", secrets] },
+      { prompt: "x", images: [...Array.from({ length: 16 }, (_, index) => "https://example.com/" + index + ".png"), secrets] },
     ]) expect(classifyKeyRead({ toolName: "image_generate", params, rootDir, agentId: "main" }), JSON.stringify(params)).toMatchObject({ action: expect.stringContaining("image_generate") });
     for (const params of [
       kGenerate,
       { prompt: "x", image: path.join(rootDir, ".openclaw", "workspace", "ref.png") },
       { prompt: "x", images: ["https://example.com/relay/secrets.json", "data:image/png;base64,AAAA", "media://inbound/a.png"] },
       { prompt: "x", filename: "../../relay/secrets.json" },
-      { prompt: "x", images: [...Array.from({ length: 16 }, (_, index) => "https://example.com/" + index + ".png"), secrets] },
     ]) {
       expect(classifyKeyRead({ toolName: "image_generate", params, rootDir, agentId: "main" }), JSON.stringify(params)).toBeNull();
       expect(classifyAnchor({ toolName: "image_generate", params, rootDir, agentId: "main" }), JSON.stringify(params)).toBeNull();
     }
+  });
+
+  it("checks a long reference list in one pass over the bases, and refuses one too long to check", () => {
+    const rootDir = "/srv/alphaclaw";
+    const refs = (count) => Array.from({ length: count }, (_, index) => path.join(rootDir, ".openclaw", "workspace", "ref-" + index + ".png"));
+    const started = Date.now();
+    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images: [...refs(255), path.join(rootDir, "relay", "secrets.json")] }, rootDir, agentId: "main" })).toMatchObject({ action: expect.stringContaining("secrets.json") });
+    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images: refs(256) }, rootDir, agentId: "main" })).toBeNull();
+    expect(classifyKeyRead({ toolName: "video_generate", params: { prompt: "x", images: refs(200), videos: refs(57).map((ref) => ref.replace(".png", ".mp4")) }, rootDir, agentId: "main" })).toMatchObject({ action: "video_generate with more than 256 reference files, too many to check" });
+    expect(classifyKeyRead({ toolName: "image_generate", params: { prompt: "x", images: refs(100000) }, rootDir, agentId: "main" })).toMatchObject({ action: expect.stringContaining("too many to check") });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("keeps video_generate and music_generate closed to every delegate and checks their reference files", () => {
+    const rootDir = "/srv/alphaclaw";
+    const secrets = path.join(rootDir, "relay", "secrets.json");
+    for (const toolName of ["video_generate", "music_generate"]) {
+      for (const ownerThread of [false, true]) {
+        expect(decideRelayToolCall({ toolName, params: { prompt: "x" }, trust: delegate, delegateTools: [toolName], ownerThread }).allow, toolName).toBe(false);
+      }
+      expect(classifyKeyRead({ toolName, params: { prompt: "x", images: ["https://example.com/a.png", secrets] }, rootDir, agentId: "main" }), toolName).toMatchObject({ action: expect.stringContaining(toolName) });
+      expect(classifyKeyRead({ toolName, params: { prompt: "x", image: "https://example.com/a.png" }, rootDir, agentId: "main" }), toolName).toBeNull();
+    }
+    for (const params of [{ video: secrets }, { videos: ["file://" + secrets] }, { audioRef: "@" + secrets }, { audioRefs: [secrets] }, { video: "/proc/1/environ" }]) {
+      expect(classifyKeyRead({ toolName: "video_generate", params: { prompt: "x", ...params }, rootDir, agentId: "main" }), JSON.stringify(params)).toMatchObject({ action: expect.stringContaining("video_generate") });
+    }
+    expect(classifyKeyRead({ toolName: "music_generate", params: { prompt: "x", video: secrets }, rootDir, agentId: "main" })).toBeNull();
   });
 
   describe("through the plugin entry", () => {
