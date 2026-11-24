@@ -222,6 +222,40 @@ describe("relay bridge: a background media task in the owner's own thread (GST-3
     expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png"]);
   });
 
+  it("posts at once when the completion turn already answered before the first read", async () => {
+    ctx = setup();
+    const { messageId, send } = await start(ctx);
+    await ctx.end(send, [...mediaTurn(), ...completionTurn()]);
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png"]);
+    expect(ctx.store.get(messageId)).toMatchObject({ state: "answered", mediaWaitUntil: null });
+  });
+
+  it("after a gateway restart, a completion that already answered is posted without a wait or a note", async () => {
+    ctx = setup();
+    const { send } = await start(ctx);
+    ctx.bridge.onGatewayDisconnect();
+    ctx.gateway.history.get(send.sessionKey).push(...mediaTurn(), ...completionTurn());
+    ctx.gateway.active.delete(send.sessionKey);
+    await ctx.later(3 * 60 * 1000);
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png"]);
+  });
+
+  it("OpenClaw's restart recovery prompt is not the completion turn", async () => {
+    ctx = setup();
+    const { messageId, send } = await start(ctx);
+    const recovered = [
+      ...mediaTurn().slice(0, 2),
+      { role: "user", content: "[System] Your previous turn was interrupted while OpenClaw was waiting on tool/model work.", timestamp: 4 },
+      { role: "assistant", content: [{ type: "text", text: "Resumed: the image task is running." }], timestamp: 5 },
+    ];
+    await ctx.end(send, recovered);
+    expect(ctx.engine.replies).toEqual([]);
+    expect(ctx.store.get(messageId).state).toBe("reconciling");
+    ctx.gateway.history.get(send.sessionKey).push(...completionTurn());
+    await ctx.later(11 * 1000);
+    expect(ctx.engine.replies.map((reply) => reply.text)).toEqual(["Here is the lighthouse.\nMEDIA:/data/.openclaw/media/generated/lighthouse.png"]);
+  });
+
   it("with no completion in 15 minutes it posts the reply it has, with a note", async () => {
     ctx = setup();
     const { messageId, send } = await start(ctx);
