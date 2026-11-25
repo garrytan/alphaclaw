@@ -860,7 +860,13 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
           if (stripped !== css) sentinelsRemoved += 1;
           await route.fulfill({ response, body: stripped });
         });
-        await canaryPage.goto(`${baseUrl}${launchLocation}`, { waitUntil: "load" });
+        await canaryPage.goto(`${baseUrl}${launchLocation}`, { waitUntil: "load", timeout: 60_000 }).catch((error) => {
+          throw new Error(
+            `canary page never loaded: ${error.message}\nsentinels removed: ${sentinelsRemoved}\nfailed requests: ${JSON.stringify(
+              canaryObserved.failed.map((f) => `${f.resourceType} ${pathnameOf(f.url)} ${f.error}`),
+            )}\nlog tail: ${logTail()}`,
+          );
+        });
         // The UI first HEAD-probes and reloads itself once per build id, THEN
         // shows the banner on the reloaded page — hence the generous wait.
         const banner = canaryPage.getByRole("alert").filter({ hasText: kBannerText }).first();
