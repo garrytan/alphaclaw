@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.341] - 2026-11-25
+
+The Doctor no longer warns about skills bloat when a skills limit is set to 0, which switches OpenClaw's skills list off, and it now says so when that list is off and gbrain's skill resolver isn't enabled to suggest skills instead.
+
+### Changed
+- The Doctor reads the main agent's effective skills limits the way OpenClaw 2026.11.4 does: the agent's own `skillsLimits.maxSkillsPromptChars` wins over `skills.limits`, and an explicit 0 is kept. Before, it read `skills.limits` only and treated 0 as "use the default".
+- With `maxSkillsInPrompt` or `maxSkillsPromptChars` at 0, the Doctor skips the skills-bloat estimate, because no skills are listed and there is nothing to trim.
+
+### Added
+- A P2 card, "OpenClaw's skills list is switched off and nothing suggests skills instead", for a skills limit of 0 while the `gbrain-skill-resolver` plugin is not enabled. The plugin counts as enabled when OpenClaw would load it, which means its `plugins.entries` row or `plugins.allow` entry exists, it is not disabled or denied, plugins are on, and a non-empty allow list names it. The card changes no files. It suggests turning the resolver on or removing the 0.
+
 ## [0.10.339] - 2026-11-24
 
 When the owner's own Capy thread asks the box for an image over Agent Relay, the relay now answers with the agent's reply once the image is finished (its caption and the image's path on the box) instead of the "started" note, and video and music generation stay closed to every relay agent.
