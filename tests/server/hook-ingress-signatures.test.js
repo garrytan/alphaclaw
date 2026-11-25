@@ -537,11 +537,10 @@ describe("verkada", () => {
 describe("agentphone", () => {
   it("verifies 'sha256=<hex>' over '<timestamp>.<body>' keyed by the whole secret string", () => {
     const headers = agentphoneHeaders();
-    const hex = headers["x-webhook-signature"].slice("sha256=".length);
     expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers })).toEqual({
       ok: true,
       scheme: "agentphone",
-      replayKey: hex,
+      replayKey: crypto.createHash("sha256").update(kBody).digest("hex"),
       deliveryId: null,
       signedHeaders: { "x-webhook-timestamp": String(kNowSec), "x-webhook-signature": headers["x-webhook-signature"] },
     });
@@ -600,17 +599,32 @@ describe("agentphone", () => {
   it("does not trust the unsigned delivery id or event headers", () => {
     const result = verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { ...agentphoneHeaders(), "x-webhook-id": "other" } });
     expect(result.ok).toBe(true);
-    expect(result.replayKey).toBe(agentphoneHeaders()["x-webhook-signature"].slice(7));
     expect(result.signedHeaders).not.toHaveProperty("x-webhook-id");
     expect(result.signedHeaders).not.toHaveProperty("x-webhook-event");
   });
 
-  it("lower-cases the replay key", () => {
+  it("keys replays on the signed body, so a retry re-signed with a fresh timestamp is the same delivery", () => {
+    const bodyHash = crypto.createHash("sha256").update(kBody).digest("hex");
+    const first = verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: agentphoneHeaders() });
+    const later = verify({
+      preset: "agentphone",
+      secret: kAgentphoneSecret,
+      nowMs: kNowMs + 30 * 60 * 1000,
+      headers: agentphoneHeaders({ ts: String(kNowSec + 30 * 60) }),
+    });
+    expect([first.ok, later.ok]).toEqual([true, true]);
+    expect(first.replayKey).toBe(bodyHash);
+    expect(later.replayKey).toBe(bodyHash);
+    const other = verify({ preset: "agentphone", secret: kAgentphoneSecret, rawBody: flipLastByte(kBody), headers: agentphoneHeaders({ body: flipLastByte(kBody) }) });
+    expect(other.ok).toBe(true);
+    expect(other.replayKey).not.toBe(bodyHash);
+  });
+
+  it("accepts an upper-case hex signature", () => {
     const headers = agentphoneHeaders();
     const hex = headers["x-webhook-signature"].slice(7);
     const result = verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { ...headers, "x-webhook-signature": "sha256=" + hex.toUpperCase() } });
     expect(result.ok).toBe(true);
-    expect(result.replayKey).toBe(hex);
   });
 
   it("reports a missing signature", () => {

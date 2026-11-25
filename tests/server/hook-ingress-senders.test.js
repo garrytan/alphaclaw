@@ -546,6 +546,10 @@ describe("several signing keys", () => {
     expect(h.gateway.calls[0].headers["x-webhook-event"]).toBeUndefined();
     const replay = await post({ "x-webhook-signature": signature, "x-webhook-timestamp": ts, "x-webhook-id": "del_2" });
     expect(replay.body).toEqual({ ok: true, deduped: true });
+    h.clock.now += 2 * 60 * 60 * 1000;
+    const retryTs = String(Math.floor(h.clock.now / 1000));
+    const retry = await post({ "x-webhook-signature": "sha256=" + hmacHex(secret, retryTs + "." + body), "x-webhook-timestamp": retryTs, "x-webhook-id": "del_1" });
+    expect(retry.body).toEqual({ ok: true, deduped: true });
     const forged = await post({ "x-webhook-signature": "sha256=" + hmacHex("whsec_other", ts + "." + body), "x-webhook-timestamp": ts });
     expect(forged.status).toBe(401);
     const old = String(Math.floor(h.clock.now / 1000) - 301);
