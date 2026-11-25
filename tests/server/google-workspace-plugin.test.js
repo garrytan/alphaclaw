@@ -87,14 +87,14 @@ const register = ({ socketPath, rootDir, accounts = [kOwner], toolSurface, now, 
   // the tool's execute under the same tool call id. Tool definitions are
   // the owner's (2026.11.2+ keeps one tool set per session for every sender).
   let seq = 0;
-  const invoke = async ({ toolName, params = {}, requester = kOwnerTurn, sessionKey = kDmKey, runId = "run-1", assertInvocationCurrent = () => {}, skipHook = false }) => {
+  const invoke = async ({ toolName, params = {}, requester = kOwnerTurn, sessionKey = kDmKey, toolSessionKey = sessionKey, runId = "run-1", assertInvocationCurrent = () => {}, skipHook = false, toolCallId: fixedId = null }) => {
     seq += 1;
-    const toolCallId = "call-" + seq;
+    const toolCallId = fixedId || "call-" + seq;
     if (!skipHook) {
       const hook = await handlers.before_tool_call({ toolName, params, toolCallId, runId }, { sessionKey, runId, requester });
       if (hook?.block) return { blocked: hook.blockReason };
     }
-    const tools = factory.create({ sessionKey: kDmKey, senderIsOwner: true, assertInvocationCurrent });
+    const tools = factory.create({ sessionKey: toolSessionKey, senderIsOwner: true, assertInvocationCurrent });
     const tool = tools.find((entry) => entry.name === toolName);
     return tool.execute(toolCallId, params, undefined);
   };
@@ -141,6 +141,17 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(resolveSocketPath({ env: {}, homedir: "/root" })).toBe("/root/.gbrain/run/google.sock");
       expect(resolveSocketPath({ socketPath: "/srv/g.sock", env: { GBRAIN_HOME: "/data" } })).toBe("/srv/g.sock");
       expect(resolveSocketPath({ socketPath: "rel.sock", env: {}, homedir: "/root" })).toBe("/root/.gbrain/run/google.sock");
+    });
+
+    it("never reads GBRAIN_HOME from the gateway env", () => {
+      const seen = [];
+      const createBroker = ({ socketPath }) => {
+        seen.push(socketPath);
+        return { request: async () => ({ transport: "down" }) };
+      };
+      const plugin = createGoogleWorkspacePlugin({ env: { GBRAIN_HOME: "/tmp/agent" }, homedir: () => rootDir, createBroker });
+      plugin.register({ pluginConfig: { rootDir, accounts: [kOwner] }, logger: {}, on: () => {}, registerTool: () => {} });
+      expect(seen[0]).toBe(path.join(rootDir, ".gbrain", "run", "google.sock"));
     });
 
     it("maps every broker code to a fixed error", () => {
@@ -219,6 +230,19 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(result.isError).toBe(true);
       expect(result.details.code).toBe("gw_not_owner");
       expect(broker.calls()).toHaveLength(0);
+    });
+
+    it("takes an admission only in the session whose hook wrote it", async () => {
+      broker = await startBroker(defaultHandler);
+      const { handlers, invoke } = register({ socketPath: broker.socketPath, rootDir });
+      const other = "agent:main:subagent:aa11";
+      await handlers.before_tool_call({ toolName: "gw_calendar_list_events", params: {}, toolCallId: "toolu_1", runId: "run-a" }, { sessionKey: kDmKey, runId: "run-a", requester: kOwnerTurn });
+      await handlers.before_tool_call({ toolName: "gw_calendar_list_events", params: {}, toolCallId: "toolu_1", runId: "run-b" }, { sessionKey: other, runId: "run-b", requester: kOwnerTurn });
+      await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1" });
+      await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1", toolSessionKey: other });
+      expect(broker.calls().map((call) => call.turn_id)).toEqual(["run-a", "run-b"]);
+      const again = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1" });
+      expect(again.details.code).toBe("gw_not_owner");
     });
 
     it("checks the invocation is current right before the write, and writes nothing when it is not", async () => {
@@ -357,6 +381,40 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(textOf(lost)).not.toContain(kMarker);
     });
 
+    it("keeps a held intent across a gateway restart, in an owner-only file without arguments or the account", async () => {
+      broker = await startBroker((request) => (request.op === "tools" ? { v: 4, ok: true, tools: [] } : "close"));
+      const params = { to: "a@example.com", body: kMarker };
+      const first = register({ socketPath: broker.socketPath, rootDir });
+      const lost = await first.invoke({ toolName: "gw_gmail_create_draft", params });
+      expect(lost.details.code).toBe("gw_outcome_unknown");
+      const file = path.join(rootDir, "google-workspace", "held.json");
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      const saved = fs.readFileSync(file, "utf8");
+      expect(saved).not.toContain(kMarker);
+      expect(saved).not.toContain(kOwner);
+      expect(saved).toContain(lost.details.ref);
+      const restarted = register({ socketPath: broker.socketPath, rootDir });
+      await restarted.invoke({ toolName: "gw_gmail_create_draft", params });
+      expect(broker.calls()).toHaveLength(2);
+      expect(broker.calls()[1].idempotency_key).toBe(lost.details.ref);
+    });
+
+    it("runs calls side by side, so a slow call holds up no other", async () => {
+      let releaseSlow;
+      broker = await startBroker((request) => {
+        if (request.op === "tools") return { v: 4, ok: true, tools: [] };
+        if (request.args.slow) return new Promise((resolve) => (releaseSlow = () => resolve(okReply())));
+        return okReply();
+      });
+      const { invoke } = register({ socketPath: broker.socketPath, rootDir });
+      const slow = invoke({ toolName: "gw_calendar_list_events", params: { slow: true } });
+      const quick = await invoke({ toolName: "gw_calendar_list_events", params: { slow: false } });
+      expect(quick.details.status).toBe("ok");
+      expect(releaseSlow).toBeTypeOf("function");
+      releaseSlow();
+      expect((await slow).details.status).toBe("ok");
+    });
+
     it("says the broker is down when its socket is not there, and sends nothing", async () => {
       const { invoke } = register({ socketPath: path.join(rootDir, "missing.sock"), rootDir });
       const result = await invoke({ toolName: "gw_calendar_list_events", params: {} });
@@ -468,10 +526,17 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(resolveDesiredGoogleWorkspaceEntry({ env: env("not-an-email, ,"), rootDir: "/data" })).toBeNull();
       expect(resolveDesiredGoogleWorkspaceEntry({ env: env("Owner@Example.com, " + kSecond + "," + kOwner), rootDir: "/data" })).toEqual({
         enabled: true,
-        config: { _alphaclawManaged: "google-workspace", rootDir: "/data", accounts: [kOwner, kSecond], toolSurface: "core" },
+        config: { _alphaclawManaged: "google-workspace", rootDir: "/data", accounts: [kOwner, kSecond], toolSurface: "core", socketPath: path.join(os.homedir(), ".gbrain", "run", "google.sock") },
       });
       expect(resolveDesiredGoogleWorkspaceEntry({ env: env(kOwner, { ALPHACLAW_GOOGLE_WORKSPACE_TOOLS: "ALL", ALPHACLAW_GOOGLE_WORKSPACE_SOCKET: "/data/.gbrain/run/google.sock" }), rootDir: "/data" }).config).toMatchObject({ toolSurface: "all", socketPath: "/data/.gbrain/run/google.sock" });
-      expect(resolveDesiredGoogleWorkspaceEntry({ env: env(kOwner, { ALPHACLAW_GOOGLE_WORKSPACE_SOCKET: "relative.sock" }), rootDir: "/data" }).config).not.toHaveProperty("socketPath");
+      expect(resolveDesiredGoogleWorkspaceEntry({ env: env(kOwner, { ALPHACLAW_GOOGLE_WORKSPACE_SOCKET: "relative.sock" }), rootDir: "/data", deploymentEnv: {}, homedir: "/root" }).config.socketPath).toBe("/root/.gbrain/run/google.sock");
+    });
+
+    it("finds GBrain's socket from the deployment env only, never the .env's GBRAIN_HOME", () => {
+      const resolve = (deploymentEnv) => resolveDesiredGoogleWorkspaceEntry({ env: env(kOwner, { GBRAIN_HOME: "/tmp/agent" }), rootDir: "/data", deploymentEnv, homedir: "/root" }).config.socketPath;
+      expect(resolve({ GBRAIN_HOME: "/data" })).toBe("/data/.gbrain/run/google.sock");
+      expect(resolve({})).toBe("/root/.gbrain/run/google.sock");
+      expect(resolve(null)).toBe("/root/.gbrain/run/google.sock");
     });
 
     it("adds and removes only its own entry, load path and allow", () => {
