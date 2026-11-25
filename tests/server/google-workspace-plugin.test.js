@@ -5,8 +5,9 @@ const path = require("path");
 
 const { createGoogleWorkspacePlugin, dispatchedToolOf } = require("../../lib/plugin/google-workspace");
 const catalog = require("../../lib/plugin/google-workspace/catalog");
-const { resolveSocketPath } = require("../../lib/plugin/google-workspace/broker");
+const { resolveSocketPath, createBrokerClient } = require("../../lib/plugin/google-workspace/broker");
 const { createAudit } = require("../../lib/plugin/google-workspace/audit");
+const { createCaller } = require("../../lib/plugin/google-workspace/call");
 const { kErrors, kBrokerCodes } = require("../../lib/plugin/google-workspace/errors");
 const manifest = require("../../lib/plugin/google-workspace/openclaw.plugin.json");
 const { applyGoogleWorkspaceEntry, resolveDesiredGoogleWorkspaceEntry, kGoogleWorkspacePluginPath, kGoogleWorkspaceEnvKeys } = require("../../lib/server/google-workspace-entry");
@@ -478,6 +479,210 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(new Set(keys).size).toBe(1);
       await invoke({ toolName: "gw_gmail_create_draft", params });
       expect(broker.calls()[3].idempotency_key).not.toBe(keys[0]);
+    });
+
+    describe("write journal", () => {
+      const fakeBroker = (answers) => {
+        const sent = [];
+        return {
+          sent,
+          request: async (payload) => {
+            sent.push(payload);
+            const next = answers.shift();
+            return typeof next === "function" ? next() : next;
+          },
+        };
+      };
+      const call = (caller, extra = {}) => caller.callTool({ account: kOwner, server: "gmail", tool: "create_draft", args: { to: "a@example.com" }, turnId: "run-1", ...extra });
+      const holdsFile = () => path.join(rootDir, "google-workspace", "held.json");
+
+      it("sends no write whose request id cannot be saved, and still sends reads", async () => {
+        fs.writeFileSync(path.join(rootDir, "google-workspace"), "not a folder");
+        const broker2 = fakeBroker([{ reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        expect((await call(caller)).details.code).toBe("gw_journal_failed");
+        expect(broker2.sent).toHaveLength(0);
+        expect((await call(caller, { tool: "search_threads", write: false })).details.status).toBe("ok");
+        expect(broker2.sent).toHaveLength(1);
+      });
+
+      it("never lets one failed connection clear the key an identical write still has in flight", async () => {
+        let finishSecond;
+        const broker2 = fakeBroker([{ transport: "down" }, () => new Promise((resolve) => (finishSecond = resolve)), { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        expect((await first).details.code).toBe("gw_broker_down");
+        await call(caller);
+        expect(broker2.sent[2].idempotency_key).toBe(broker2.sent[1].idempotency_key);
+        finishSecond({ reply: okReply() });
+        await second;
+      });
+
+      it("treats a reply it cannot read as an unknown outcome for a write, and a failure for a read", async () => {
+        const broker2 = fakeBroker([{ reply: { v: 4 } }, { reply: { v: 4, ok: false, code: "brand_new" } }, { reply: { v: 4 } }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = await call(caller);
+        expect(first.details.code).toBe("gw_outcome_unknown");
+        expect((await call(caller)).details.code).toBe("gw_outcome_unknown");
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        expect((await call(caller, { tool: "search_threads", write: false })).details.code).toBe("gw_broker_internal");
+      });
+
+      it("never holds a read: a lost read is retried under a fresh id", async () => {
+        const broker2 = fakeBroker([{ transport: "lost" }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        expect((await call(caller, { tool: "search_threads", write: false })).details.code).toBe("gw_read_unanswered");
+        expect((await call(caller, { tool: "search_threads", write: false })).details.status).toBe("ok");
+        expect(broker2.sent[1].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+        expect(fs.existsSync(holdsFile()) ? JSON.parse(fs.readFileSync(holdsFile(), "utf8")) : {}).toEqual({});
+      });
+
+      it("lets a replayed write go once the broker refuses it for good", async () => {
+        const broker2 = fakeBroker([{ transport: "lost" }, { reply: { v: 4, ok: false, code: "tool_error", reason: "tool_failed", message_md: "Invalid" } }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        await call(caller);
+        expect((await call(caller)).details.code).toBe("gw_tool_failed");
+        await call(caller);
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+      });
+
+      it("never evicts a write whose outcome is unknown to make room", async () => {
+        const until = Date.now() + 60 * 60 * 1000;
+        const entry = (n, kind) => [n.toString(16).padStart(64, "0"), { key: "k-" + n, account: "0".repeat(16), until, kind }];
+        fs.mkdirSync(path.dirname(holdsFile()), { recursive: true });
+        fs.writeFileSync(holdsFile(), JSON.stringify(Object.fromEntries(Array.from({ length: 500 }, (_, n) => entry(n + 1, "unknown")))));
+        const full = fakeBroker([{ reply: okReply() }]);
+        expect((await call(createCaller({ broker: full, holdsFile: holdsFile() }))).details.code).toBe("gw_journal_failed");
+        expect(full.sent).toHaveLength(0);
+        fs.writeFileSync(holdsFile(), JSON.stringify(Object.fromEntries([...Array.from({ length: 499 }, (_, n) => entry(n + 1, "unknown")), entry(999, "confirm")])));
+        const room = fakeBroker([{ reply: okReply() }]);
+        expect((await call(createCaller({ broker: room, holdsFile: holdsFile() }))).details.status).toBe("ok");
+        const left = JSON.parse(fs.readFileSync(holdsFile(), "utf8"));
+        expect(Object.values(left).filter((held) => held.kind === "unknown")).toHaveLength(499);
+        expect(Object.values(left).some((held) => held.key === "k-999")).toBe(false);
+      });
+
+      it("walks an owner pause through each answer: settled by success or a definite refusal, kept through another refusal, unknown when lost", async () => {
+        const clock = { at: Date.now() };
+        const pause = { reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-p" } };
+        const heldNow = () => Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8")));
+        const broker2 = fakeBroker([
+          pause, { reply: okReply() }, { reply: okReply() },
+          pause, { reply: { v: 4, ok: false, code: "tool_error", reason: "tool_failed", message_md: "Invalid" } }, { reply: okReply() },
+          pause, { reply: { v: 4, ok: false, code: "not_connected" } }, { transport: "lost" },
+        ]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        const keys = () => broker2.sent.map((sent) => sent.idempotency_key);
+        expect((await call(caller)).details.code).toBe("gw_owner_confirm");
+        expect(heldNow()).toMatchObject([{ kind: "confirm", until: clock.at + 10 * 60 * 1000 }]);
+        expect((await call(caller)).details.status).toBe("ok");
+        expect(heldNow()).toEqual([]);
+        await call(caller);
+        expect(keys()[1]).toBe(keys()[0]);
+        expect(keys()[2]).not.toBe(keys()[0]);
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.code).toBe("gw_owner_confirm");
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.code).toBe("gw_tool_failed");
+        expect(heldNow()).toEqual([]);
+        await call(caller, { args: { to: "b@example.com" } });
+        expect(keys()[4]).toBe(keys()[3]);
+        expect(keys()[5]).not.toBe(keys()[3]);
+        expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_owner_confirm");
+        expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_not_connected");
+        expect(heldNow()).toMatchObject([{ kind: "unknown", key: keys()[6] }]);
+        expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_outcome_unknown");
+        expect(keys()[8]).toBe(keys()[6]);
+        expect(heldNow()).toMatchObject([{ kind: "unknown", key: keys()[6], until: clock.at + 24 * 60 * 60 * 1000 }]);
+      });
+
+      it("journals an approved owner pause as an unknown outcome before replaying it, so a restart mid-call still replays it", async () => {
+        const clock = { at: Date.now() };
+        const broker2 = fakeBroker([{ reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-p" } }, () => new Promise(() => {}), { reply: okReply() }]);
+        const first = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        expect((await call(first)).details.code).toBe("gw_owner_confirm");
+        call(first);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8")))).toMatchObject([{ kind: "unknown", until: clock.at + 24 * 60 * 60 * 1000 }]);
+        clock.at += 11 * 60 * 1000;
+        const restarted = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        await call(restarted);
+        expect(new Set(broker2.sent.map((sent) => sent.idempotency_key)).size).toBe(1);
+      });
+
+      it("never settles a write on an error reply that does not say ok: false", async () => {
+        const broker2 = fakeBroker([{ reply: { v: 4, code: "tool_error", reason: "tool_failed", message_md: "Invalid" } }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        expect((await call(caller)).details.code).toBe("gw_outcome_unknown");
+        await call(caller);
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+      });
+
+      it("lets an owner pause go after 10 minutes and an unknown outcome after 24 hours", async () => {
+        const clock = { at: Date.now() };
+        const broker2 = fakeBroker([
+          { reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-p" } }, { reply: okReply() },
+          { transport: "lost" }, { transport: "lost" }, { reply: okReply() },
+        ]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        const keys = () => broker2.sent.map((sent) => sent.idempotency_key);
+        await call(caller);
+        clock.at += 10 * 60 * 1000 + 1;
+        expect((await call(caller)).details.status).toBe("ok");
+        expect(keys()[1]).not.toBe(keys()[0]);
+        await call(caller, { args: { to: "b@example.com" } });
+        clock.at += 24 * 60 * 60 * 1000 - 1;
+        await call(caller, { args: { to: "b@example.com" } });
+        expect(keys()[3]).toBe(keys()[2]);
+        clock.at += 24 * 60 * 60 * 1000 + 1;
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.status).toBe("ok");
+        expect(keys()[4]).not.toBe(keys()[2]);
+        expect(JSON.parse(fs.readFileSync(holdsFile(), "utf8"))).toEqual({});
+      });
+
+      it("lets an intent go once one identical call succeeded, whatever the other one still in flight gets back", async () => {
+        let finishFirst;
+        let finishSecond;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), () => new Promise((resolve) => (finishSecond = resolve)), { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        finishFirst({ reply: okReply() });
+        expect((await first).details.status).toBe("ok");
+        finishSecond({ reply: { v: 4, ok: false, code: "rate_limited" } });
+        expect((await second).details.code).toBe("gw_rate_limited");
+        expect(JSON.parse(fs.readFileSync(holdsFile(), "utf8"))).toEqual({});
+        await call(caller);
+        expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+      });
+    });
+
+    it("reads a large reply in many pieces whole, in linear time", async () => {
+      // 24 MB in 4 KB writes: the old string buffer, searched whole on every
+      // read, took about 3.9 s here; the byte buffer takes about 0.2 s.
+      const text = "x".repeat(24 * 1024 * 1024) + " \u00e9";
+      const dir = tempDir("gw-large-");
+      const socketPath = path.join(dir, "google.sock");
+      const server = net.createServer((conn) => {
+        conn.once("data", () => {
+          const bytes = Buffer.from(JSON.stringify(okReply({ content: [{ type: "text", text }] })) + "\n", "utf8");
+          for (let at = 0; at < bytes.length; at += 4096) conn.write(bytes.subarray(at, at + 4096));
+        });
+      });
+      await new Promise((resolve) => server.listen(socketPath, resolve));
+      try {
+        const client = createBrokerClient({ socketPath });
+        const started = Date.now();
+        const answer = await client.request({ op: "call" });
+        const took = Date.now() - started;
+        expect(answer.reply.result.content[0].text === text).toBe(true);
+        expect(took).toBeLessThan(1500);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("runs calls side by side, so a slow call holds up no other", async () => {

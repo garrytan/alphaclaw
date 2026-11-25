@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.346] - 2026-11-25
+## [0.10.347] - 2026-11-25
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.
 
@@ -30,6 +30,22 @@ AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data 
 - A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
 - Doctor's recovery-copy manifest is still read when OpenClaw 2026.11.5 and later print it; a default run logs it at debug level only, so the copy's size goes unmeasured there.
 - The owner's Google Workspace calls go through again on 2026.11.10. When the agent reaches a Google tool through OpenClaw's tool dispatcher, 2026.11.10 names the chat's own session in the safety check before the call but the session's shared key when the tool runs, so the plugin never found the check's go-ahead and refused every owner call as not the owner's. The go-ahead is now matched by the turn's run id, which both sides share; a call still runs only after its own check passed, and the owner rule is unchanged.
+
+## [0.10.346] - 2026-11-25
+
+The Google Workspace plugin is now safe to switch on: a write can no longer be sent twice or lose track of its outcome in the edge cases the final review found, large replies no longer stall the gateway, and a Google call past a run's tool cap still keeps that run's text out of AgentRun.
+
+### Fixed
+- A write is not sent when the plugin cannot save its request id (a full or read-only disk); it fails with `gw_journal_failed` and sends nothing. Reads are never saved or replayed: a read that times out fails with `gw_read_unanswered` and the next read gets a fresh id, instead of being pinned to the old one for 24 hours.
+- Two identical writes at once share one request id: a failed connection on one no longer clears it while the other is still in flight, and once one of them succeeds the id is let go when both are done, so a later identical write is sent as new.
+- A broker reply the plugin cannot read as a definite answer (no `ok`, or a code it does not know) now leaves a write's outcome unknown and keeps its request id, instead of reporting a failure the agent would retry under a new id.
+- A replayed write is let go once the broker refuses it for good (a Google tool error, refused arguments or a tool the broker does not allow), so the owner can retry it. Making room for a new saved write never drops one whose outcome is unknown: expired entries go first, then the oldest owner pause, and with no room the new write is not sent.
+- An owner pause the owner may have just approved is saved as an unknown outcome before it is sent again, so a gateway that dies mid-call still replays it under the same id, and an error reply that does not say `ok: false` no longer settles a write.
+- Broker replies are read in linear time, kept as bytes and decoded once, so a large Drive or Docs read no longer blocks the gateway's event loop.
+- The live owner-gate test stops only the gateway it started.
+
+### Security
+- A cron run that reaches a Google Workspace tool after its 500th recorded tool still records that tool, so the run's text stays out of AgentRun on both sides and across a gateway restart. A marker that fails to write is tried again, and a run whose marker never lands is left open, so it ends with no contents.
 
 ## [0.10.345] - 2026-11-25
 
