@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.347] - 2026-11-25
+## [0.10.348] - 2026-11-25
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.
 
@@ -30,6 +30,18 @@ AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data 
 - A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
 - Doctor's recovery-copy manifest is still read when OpenClaw 2026.11.5 and later print it; a default run logs it at debug level only, so the copy's size goes unmeasured there.
 - The owner's Google Workspace calls go through again on 2026.11.10. When the agent reaches a Google tool through OpenClaw's tool dispatcher, 2026.11.10 names the chat's own session in the safety check before the call but the session's shared key when the tool runs, so the plugin never found the check's go-ahead and refused every owner call as not the owner's. The go-ahead is now matched by the turn's run id, which both sides share; a call still runs only after its own check passed, and the owner rule is unchanged.
+
+## [0.10.347] - 2026-11-25
+
+Closes the last narrow gaps the final review of the Google Workspace hardening found, before the plugin is switched on.
+
+### Fixed
+- A write's request id now stays reserved while a call under it is still in flight, even past its 24-hour expiry, so an identical write in that window replays it instead of starting a second one. Bookkeeping for identical writes in flight is kept per request id, so an older call can never release a newer id.
+- A late owner-pause reply to one of two identical writes no longer turns the other's unknown outcome back into a 10-minute pause that could expire or be evicted, an owner pause becomes a pause only when no identical call is still in flight, and a refusal on one identical write no longer lets go of an id the other left unknown.
+- An older call that ends after a newer identical write took a new id (for example after the account was revoked and reconnected) never drops or replaces that newer id.
+
+### Security
+- AgentRun carries a listed cron run's contents only for a turn whose end record says it used no Google tool (and a cron run only when every turn folded into it qualifies). The plugin writes that verdict from what the run did, so a Google marker line that never landed or was torn by a failed write can no longer open contents, and a turn with no end record, read as finished or interrupted, goes out as metadata only. A turn whose end OpenClaw never reported also goes out without contents. A listed cron turn seen live still completes with complete evidence.
 
 ## [0.10.346] - 2026-11-25
 
