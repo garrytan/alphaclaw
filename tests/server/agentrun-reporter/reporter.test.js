@@ -262,6 +262,37 @@ describe("agentrun reporter: queue and sender", () => {
     expect(wire).not.toContain("Summarize the inbox");
   });
 
+  it("retries a Google marker it could not write, and leaves the run open when it never can (GST-3848)", async () => {
+    const rootDir = makeRoot();
+    let refuse = 1;
+    const flaky = { ...fs, appendFileSync: (file, data, options) => {
+      if (String(data).includes("gw_gmail_get_thread") && refuse > 0) {
+        refuse -= 1;
+        throw new Error("ENOSPC");
+      }
+      return fs.appendFileSync(file, data, options);
+    } };
+    const { handlers } = registerPlugin(rootDir, { fsModule: flaky });
+    const sessionKey = "agent:main:cron:brief";
+    const turn = (runId) => {
+      const ctx = { runId, sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+      handlers.model_call_started({ runId, sessionKey, provider: "anthropic", model: "claude" }, { runId, sessionKey, agentId: "main" });
+      handlers.llm_output({ runId, provider: "anthropic", model: "claude", assistantTexts: ["early " + kMarker], usage: { input: 1, output: 1 } }, ctx);
+      for (let n = 0; n < 500; n += 1) handlers.after_tool_call({ toolName: "read", params: {}, runId, durationMs: 1 }, { ...ctx, toolName: "read" });
+      handlers.after_tool_call({ toolName: "gw_gmail_get_thread", params: {}, runId, durationMs: 5 }, { ...ctx, toolName: "gw_gmail_get_thread" });
+      handlers.agent_end({ runId, success: true, durationMs: 50 }, ctx);
+      return readSpool(rootDir).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    };
+    const retried = turn("r-gw4");
+    expect(retried.filter((record) => record.name === "gw_gmail_get_thread")).toHaveLength(1);
+    expect(retried.some((record) => record.t === "end" || record.status === "completed")).toBe(true);
+    fs.rmSync(path.join(rootDir, "agentrun-spool"), { recursive: true, force: true });
+    refuse = Infinity;
+    const never = turn("r-gw5");
+    expect(never.some((record) => record.name === "gw_gmail_get_thread")).toBe(false);
+    expect(never.some((record) => record.status === "completed")).toBe(false);
+  });
+
   it("sends no contents for a listed cron turn that reached a Google tool through the dispatcher (GST-3848)", async () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);

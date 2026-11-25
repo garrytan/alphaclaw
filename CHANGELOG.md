@@ -14,11 +14,12 @@ The Google Workspace plugin is now safe to switch on: a write can no longer be s
 - Two identical writes at once share one request id: a failed connection on one no longer clears it while the other is still in flight, and once one of them succeeds the id is let go when both are done, so a later identical write is sent as new.
 - A broker reply the plugin cannot read as a definite answer (no `ok`, or a code it does not know) now leaves a write's outcome unknown and keeps its request id, instead of reporting a failure the agent would retry under a new id.
 - A replayed write is let go once the broker refuses it for good (a Google tool error, refused arguments or a tool the broker does not allow), so the owner can retry it. Making room for a new saved write never drops one whose outcome is unknown: expired entries go first, then the oldest owner pause, and with no room the new write is not sent.
+- An owner pause the owner may have just approved is saved as an unknown outcome before it is sent again, so a gateway that dies mid-call still replays it under the same id, and an error reply that does not say `ok: false` no longer settles a write.
 - Broker replies are read in linear time, kept as bytes and decoded once, so a large Drive or Docs read no longer blocks the gateway's event loop.
 - The live owner-gate test stops only the gateway it started.
 
 ### Security
-- A cron run that reaches a Google Workspace tool after its 500th recorded tool still records that tool, so the run's text stays out of AgentRun on both sides and across a gateway restart.
+- A cron run that reaches a Google Workspace tool after its 500th recorded tool still records that tool, so the run's text stays out of AgentRun on both sides and across a gateway restart. A marker that fails to write is tried again, and a run whose marker never lands is left open, so it ends with no contents.
 
 ## [0.10.345] - 2026-11-25
 

@@ -565,10 +565,32 @@ describe("google-workspace plugin (GST-3848)", () => {
         expect(keys()[5]).not.toBe(keys()[3]);
         expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_owner_confirm");
         expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_not_connected");
-        expect(heldNow()).toMatchObject([{ kind: "confirm", key: keys()[6] }]);
+        expect(heldNow()).toMatchObject([{ kind: "unknown", key: keys()[6] }]);
         expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_outcome_unknown");
         expect(keys()[8]).toBe(keys()[6]);
         expect(heldNow()).toMatchObject([{ kind: "unknown", key: keys()[6], until: clock.at + 24 * 60 * 60 * 1000 }]);
+      });
+
+      it("journals an approved owner pause as an unknown outcome before replaying it, so a restart mid-call still replays it", async () => {
+        const clock = { at: Date.now() };
+        const broker2 = fakeBroker([{ reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-p" } }, () => new Promise(() => {}), { reply: okReply() }]);
+        const first = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        expect((await call(first)).details.code).toBe("gw_owner_confirm");
+        call(first);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8")))).toMatchObject([{ kind: "unknown", until: clock.at + 24 * 60 * 60 * 1000 }]);
+        clock.at += 11 * 60 * 1000;
+        const restarted = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        await call(restarted);
+        expect(new Set(broker2.sent.map((sent) => sent.idempotency_key)).size).toBe(1);
+      });
+
+      it("never settles a write on an error reply that does not say ok: false", async () => {
+        const broker2 = fakeBroker([{ reply: { v: 4, code: "tool_error", reason: "tool_failed", message_md: "Invalid" } }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        expect((await call(caller)).details.code).toBe("gw_outcome_unknown");
+        await call(caller);
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
       });
 
       it("lets an owner pause go after 10 minutes and an unknown outcome after 24 hours", async () => {
