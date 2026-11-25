@@ -173,4 +173,24 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     for (const [label, tool, params] of [...ordinary(dirs), ...files]) expect(await ctx.call(owner, tool, params), label).toEqual({});
     expect(ctx.confirmationCount()).toBe(0);
   });
+
+  it("treats a change to the Google Workspace plugin's openclaw.json entry as an anchor change", async () => {
+    ctx = setup();
+    const owner = await ctx.deliver((await ctx.attestedAgent()).agent);
+    const config = JSON.parse(fs.readFileSync(ctx.openclawJson, "utf8"));
+    config.plugins.entries["google-workspace"] = { enabled: true, config: {} };
+    const changes = [
+      ["openclaw config set on the plugin's entry", "exec", { command: "openclaw config set plugins.entries.google-workspace.enabled true" }],
+      ["openclaw config set on the plugin's config, bracketed", "exec", { command: "openclaw config set 'plugins.entries[\"google-workspace\"].config.accounts' '[]'" }],
+      ["openclaw plugins enable", "exec", { command: "openclaw plugins enable google-workspace" }],
+      ["openclaw plugins disable", "exec", { command: "openclaw plugins disable google-workspace" }],
+      ["the plugins tool enabling it", "plugins", { action: "enable", pluginId: "google-workspace" }],
+      ["a write of openclaw.json that adds the entry", "write", { path: ctx.openclawJson, content: JSON.stringify(config, null, 2) }],
+    ];
+    for (const [label, tool, params] of changes) expectRefusedOutright(await ctx.call(owner, tool, params), label);
+    const unattested = await ctx.deliver(ctx.oauthDelegate().agent);
+    expect((await ctx.call(unattested, "plugins", { action: "enable", pluginId: "google-workspace" })).block).toBe(true);
+    expect(await ctx.call(owner, "exec", { command: "openclaw config set plugins.entries.other-plugin.enabled true" })).toEqual({});
+    expect(await ctx.call(owner, "plugins", { action: "enable", pluginId: "other-plugin" })).toEqual({});
+  });
 });
