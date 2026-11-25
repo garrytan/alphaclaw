@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.340] - 2026-11-25
+
+Agent Relay sessions can no longer read or change the files on the box that hold account tokens: OpenClaw's state database (where it keeps MCP OAuth tokens), GBrain's credential store and its broker socket folder, and AlphaClaw's Google Workspace folder. A process's command line is now refused the same way as its environment.
+
+### Security
+- The relay guard refuses a read, a shell command or input typed into a running process that reaches OpenClaw's state database (`state/openclaw.sqlite` under `$OPENCLAW_STATE_DIR`, else `<root>/.openclaw`) or its `-wal`, `-shm` and `-journal` files, GBrain's `credentials.json` or `run/` folder (under `$GBRAIN_HOME`, else `~/.gbrain`), or `<root>/google-workspace/`. It follows paths the way the guest notes broker's check does: by name, `cd`, symlinks, globs and an exec's `workdir`. This holds for every relay agent, the owner's own thread included, and asks nobody: the refusal names the store and says it holds tokens for the box's accounts. A plain listing and a note that only mentions a name still run.
+- A change to any of those files is a change to what decides relay trust, so it is refused outright for the owner's own thread and held for every other relay agent.
+- `/proc/<pid>/cmdline` and `/proc/<pid>/task/<tid>/cmdline` are refused like `environ`, because a tool that takes a token as a flag shows it there.
+
 ## [0.10.339] - 2026-11-24
 
 When the owner's own Capy thread asks the box for an image over Agent Relay, the relay now answers with the agent's reply once the image is finished (its caption and the image's path on the box) instead of the "started" note, and video and music generation stay closed to every relay agent.
