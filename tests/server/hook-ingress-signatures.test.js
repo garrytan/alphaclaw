@@ -547,10 +547,46 @@ describe("agentphone", () => {
     });
   });
 
-  it("matches AgentPhone's published Node verifier byte for byte", () => {
-    const ts = String(kNowSec);
-    const expected = crypto.createHmac("sha256", kAgentphoneSecret).update(ts + ".").update(kBody).digest("hex");
-    expect(agentphoneHeaders()["x-webhook-signature"]).toBe("sha256=" + expected);
+  it("agrees with AgentPhone's published Node verifier on the fixture and its mutations", () => {
+    // Pasted from docs.agentphone.ai/webhooks, "Verification example (Node.js)".
+    const { createHmac, timingSafeEqual } = crypto;
+    function verifyWebhook(rawBody, signature, timestamp, secret) {
+      if (!Buffer.isBuffer(rawBody) || typeof secret !== "string" || !secret) return false;
+      if (typeof timestamp !== "string" || !/^\d{1,12}$/.test(timestamp)) return false;
+      if (typeof signature !== "string" || !/^sha256=[0-9a-f]{64}$/.test(signature)) return false;
+      const seconds = Number(timestamp);
+      if (!Number.isSafeInteger(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300) return false;
+      const expected = createHmac("sha256", secret)
+        .update(timestamp + ".")
+        .update(rawBody)
+        .digest();
+      const received = Buffer.from(signature.slice(7), "hex");
+      return received.length === expected.length && timingSafeEqual(received, expected);
+    }
+    vi.spyOn(Date, "now").mockReturnValue(kNowMs);
+    try {
+      const ts = String(kNowSec);
+      const cases = [
+        { name: "fixture", headers: agentphoneHeaders() },
+        { name: "wrong secret", secret: kUtf8OtherSecret, headers: agentphoneHeaders() },
+        { name: "body changed", rawBody: flipLastByte(kBody), headers: agentphoneHeaders() },
+        { name: "timestamp changed", headers: { ...agentphoneHeaders(), "x-webhook-timestamp": String(kNowSec + 1) } },
+        { name: "stale", headers: agentphoneHeaders({ ts: String(kNowSec - 600) }) },
+        {
+          name: "body only",
+          headers: { "x-webhook-signature": "sha256=" + hmac(Buffer.from(kAgentphoneSecret), "hex", kBody), "x-webhook-timestamp": ts },
+        },
+        { name: "unprefixed secret", headers: agentphoneHeaders({ secret: kAgentphoneSecret.slice(kKeyPrefix.length) }) },
+      ];
+      for (const { name, secret = kAgentphoneSecret, rawBody = kBody, headers } of cases) {
+        const theirs = verifyWebhook(rawBody, headers["x-webhook-signature"], headers["x-webhook-timestamp"], secret);
+        const ours = verify({ preset: "agentphone", secret, rawBody, headers }).ok;
+        expect({ name, ours }).toEqual({ name, ours: theirs });
+        expect({ name, theirs }).toEqual({ name, theirs: name === "fixture" });
+      }
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("refuses a signature over the body alone or keyed by the secret without its prefix", () => {
