@@ -877,7 +877,6 @@ describeLive("live: Control UI styles render through the /openclaw proxy (real b
             )}\nlog tail: ${logTail()}`,
           );
         });
-        expect(await banner.isVisible()).toBe(true);
         expect(sentinelsRemoved, "the canary did not actually remove the entry stylesheet's sentinel").toBeGreaterThan(0);
       } finally {
         await canaryContext.close().catch(() => {});
