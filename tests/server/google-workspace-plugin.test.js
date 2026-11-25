@@ -84,17 +84,18 @@ const register = ({ socketPath, rootDir, accounts = [kOwner], toolSurface, now, 
   });
   const factory = registered[0]?.factory;
   // OpenClaw's path for one call: before_tool_call with the requester, then
-  // the tool's execute under the same tool call id. Tool definitions are
-  // the owner's (2026.11.2+ keeps one tool set per session for every sender).
+  // the tool's execute under the same tool call id, in a tool context that
+  // carries the same run id. Tool definitions are the owner's (2026.11.2+
+  // keeps one tool set per session for every sender).
   let seq = 0;
-  const invoke = async ({ toolName, params = {}, requester = kOwnerTurn, sessionKey = kDmKey, toolSessionKey = sessionKey, runId = "run-1", assertInvocationCurrent = () => {}, skipHook = false, toolCallId: fixedId = null }) => {
+  const invoke = async ({ toolName, params = {}, requester = kOwnerTurn, sessionKey = kDmKey, toolSessionKey = sessionKey, runId = "run-1", toolRunId = runId, assertInvocationCurrent = () => {}, skipHook = false, toolCallId: fixedId = null }) => {
     seq += 1;
     const toolCallId = fixedId || "call-" + seq;
     if (!skipHook) {
       const hook = await handlers.before_tool_call({ toolName, params, toolCallId, runId }, { sessionKey, runId, requester });
       if (hook?.block) return { blocked: hook.blockReason };
     }
-    const tools = factory.create({ sessionKey: toolSessionKey, senderIsOwner: true, assertInvocationCurrent });
+    const tools = factory.create({ sessionKey: toolSessionKey, runId: toolRunId, senderIsOwner: true, assertInvocationCurrent });
     const tool = tools.find((entry) => entry.name === toolName);
     return tool.execute(toolCallId, params, undefined);
   };
@@ -232,17 +233,41 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(broker.calls()).toHaveLength(0);
     });
 
-    it("takes an admission only in the session whose hook wrote it", async () => {
+    it("takes an admission only in the run whose hook wrote it", async () => {
       broker = await startBroker(defaultHandler);
       const { handlers, invoke } = register({ socketPath: broker.socketPath, rootDir });
       const other = "agent:main:subagent:aa11";
       await handlers.before_tool_call({ toolName: "gw_calendar_list_events", params: {}, toolCallId: "toolu_1", runId: "run-a" }, { sessionKey: kDmKey, runId: "run-a", requester: kOwnerTurn });
       await handlers.before_tool_call({ toolName: "gw_calendar_list_events", params: {}, toolCallId: "toolu_1", runId: "run-b" }, { sessionKey: other, runId: "run-b", requester: kOwnerTurn });
-      await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1" });
-      await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1", toolSessionKey: other });
+      const elsewhere = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1", runId: "run-c" });
+      expect(elsewhere.details.code).toBe("gw_not_owner");
+      await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1", runId: "run-a" });
+      await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1", runId: "run-b", toolSessionKey: other });
       expect(broker.calls().map((call) => call.turn_id)).toEqual(["run-a", "run-b"]);
-      const again = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1" });
+      const again = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_1", runId: "run-a" });
       expect(again.details.code).toBe("gw_not_owner");
+    });
+
+    it("admits a dispatched call whose hook names the delivery route's session key (OpenClaw 2026.11.10)", async () => {
+      broker = await startBroker(defaultHandler);
+      const { invoke } = register({ socketPath: broker.socketPath, rootDir });
+      const result = await invoke({ toolName: "gw_calendar_list_events", sessionKey: kDmKey, toolSessionKey: "agent:main:main", runId: "run-9", toolCallId: "tool_call:call_1:gw_calendar_list_events:1" });
+      expect(result.details.code).not.toBe("gw_not_owner");
+      expect(broker.calls().map((call) => call.turn_id)).toEqual(["run-9"]);
+      const other = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolSessionKey: "agent:main:main", runId: "run-10", toolCallId: "tool_call:call_1:gw_calendar_list_events:1" });
+      expect(other.details.code).toBe("gw_not_owner");
+    });
+
+    it("keys an admission by session when OpenClaw passes no run id", async () => {
+      broker = await startBroker(defaultHandler);
+      const { handlers, invoke } = register({ socketPath: broker.socketPath, rootDir });
+      await handlers.before_tool_call({ toolName: "gw_calendar_list_events", params: {}, toolCallId: "toolu_2" }, { sessionKey: kDmKey, requester: kOwnerTurn });
+      const wrong = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_2", runId: "", toolSessionKey: "agent:main:subagent:bb22" });
+      expect(wrong.details.code).toBe("gw_not_owner");
+      await handlers.before_tool_call({ toolName: "gw_calendar_list_events", params: {}, toolCallId: "toolu_3" }, { sessionKey: kDmKey, requester: kOwnerTurn });
+      const right = await invoke({ toolName: "gw_calendar_list_events", skipHook: true, toolCallId: "toolu_3", runId: "" });
+      expect(right.details.code).not.toBe("gw_not_owner");
+      expect(broker.calls()).toHaveLength(1);
     });
 
     it("checks the invocation is current right before the write, and writes nothing when it is not", async () => {
