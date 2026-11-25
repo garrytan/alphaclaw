@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.341] - 2026-11-25
+## [0.10.340] - 2026-11-25
 
 The Doctor no longer warns about skills bloat when a skills limit is set to 0, which switches OpenClaw's skills list off, and it now says so when that list is off and gbrain's skill resolver isn't enabled to suggest skills instead.
 
