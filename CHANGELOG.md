@@ -29,6 +29,7 @@ AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data 
 - The model check knows the new built-in provider `requesty`, so a `requesty` entry without a base URL is reported as not checked instead of as missing its URL.
 - A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
 - Doctor's recovery-copy manifest is still read when OpenClaw 2026.11.5 and later print it; a default run logs it at debug level only, so the copy's size goes unmeasured there.
+- The owner's Google Workspace calls go through again on 2026.11.10. When the agent reaches a Google tool through OpenClaw's tool dispatcher, 2026.11.10 names the chat's own session in the safety check before the call but the session's shared key when the tool runs, so the plugin never found the check's go-ahead and refused every owner call as not the owner's. The go-ahead is now matched by the turn's run id, which both sides share; a call still runs only after its own check passed, and the owner rule is unchanged.
 
 ## [0.10.345] - 2026-11-25
 
