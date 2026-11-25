@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.340] - 2026-11-25
+
+A webhook can now check that a delivery really came from AgentPhone, so texts and call events sent to a phone number on AgentPhone can reach the agent through AlphaClaw's `/hooks` without the shared webhook token.
+
+### Added
+- **AgentPhone** sender verification (Webhooks → a hook → Sender verification). Paste the secret AgentPhone returned when the webhook was created or last updated. A delivery passes only when `x-webhook-signature` is `sha256=<hex>` of HMAC-SHA256 over `<x-webhook-timestamp>.<exact body bytes>`, keyed by that whole secret string, and the timestamp is within 5 minutes. The gateway gets the exact bytes, the signature and the signed timestamp; AgentPhone's `x-webhook-id` and `x-webhook-event` are not signed, so they are not forwarded, and a replay is recognized by its signature (kept 1 hour, beyond the 5-minute window). A second signing key can be added like any other signed preset.
+
 ## [0.10.339] - 2026-11-24
 
 When the owner's own Capy thread asks the box for an image over Agent Relay, the relay now answers with the agent's reply once the image is finished (its caption and the image's path on the box) instead of the "started" note, and video and music generation stay closed to every relay agent.

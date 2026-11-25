@@ -524,6 +524,37 @@ describe("several signing keys", () => {
     await h.close();
   });
 
+  it("verifies AgentPhone's signature, forwards its signed timestamp and drops its unsigned headers", async () => {
+    const h = await createHarness();
+    const secret = "whsec_" + randomSecret();
+    expect(h.hookIngress.setIngress("phone", { preset: "agentphone", secret })).toMatchObject({ preset: "agentphone", hasSecret: true, state: "waiting" });
+    const body = JSON.stringify({ event: "agent.message", channel: "sms", data: { messageId: "msg_1", message: "hi" } });
+    const ts = String(Math.floor(h.clock.now / 1000));
+    const signature = "sha256=" + hmacHex(secret, ts + "." + body);
+    const post = (headers) => {
+      let req = request(h.app).post("/hooks/phone").set("content-type", "application/json");
+      for (const [name, value] of Object.entries(headers)) req = req.set(name, value);
+      return req.send(body);
+    };
+    const ok = await post({ "x-webhook-signature": signature, "x-webhook-timestamp": ts, "x-webhook-id": "del_1", "x-webhook-event": "agent.message" });
+    expect(ok.status).toBe(200);
+    expect(h.gateway.calls).toHaveLength(1);
+    expect(h.gateway.calls[0].body.toString()).toBe(body);
+    expect(h.gateway.calls[0].headers["x-webhook-signature"]).toBe(signature);
+    expect(h.gateway.calls[0].headers["x-webhook-timestamp"]).toBe(ts);
+    expect(h.gateway.calls[0].headers["x-webhook-id"]).toBeUndefined();
+    expect(h.gateway.calls[0].headers["x-webhook-event"]).toBeUndefined();
+    const replay = await post({ "x-webhook-signature": signature, "x-webhook-timestamp": ts, "x-webhook-id": "del_2" });
+    expect(replay.body).toEqual({ ok: true, deduped: true });
+    const forged = await post({ "x-webhook-signature": "sha256=" + hmacHex("whsec_other", ts + "." + body), "x-webhook-timestamp": ts });
+    expect(forged.status).toBe(401);
+    const old = String(Math.floor(h.clock.now / 1000) - 301);
+    const stale = await post({ "x-webhook-signature": "sha256=" + hmacHex(secret, old + "." + body), "x-webhook-timestamp": old });
+    expect(stale.status).toBe(401);
+    expect(h.gateway.calls).toHaveLength(1);
+    await h.close();
+  });
+
   it("takes a pasted Verkada secret as well as a generated one, but never a pasted own token", async () => {
     const h = await createHarness();
     const secret = randomSecret();

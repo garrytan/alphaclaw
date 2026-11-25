@@ -27,6 +27,7 @@ const kSwSecret = kKeyPrefix + kKeyBytes.toString("base64");
 const kSwOtherSecret = kKeyPrefix + kOtherKeyBytes.toString("base64");
 const kQuoBareSecret = kKeyBytes.toString("base64");
 const kUtf8Secret = ["fixture", "signing", "k".repeat(24)].join("-");
+const kAgentphoneSecret = kKeyPrefix + "agentphone" + "k".repeat(24);
 const kUtf8OtherSecret = ["fixture", "signing", "q".repeat(24)].join("-");
 const kNowSec = 18 * 10 ** 8;
 const kNowMs = kNowSec * 1000;
@@ -64,12 +65,19 @@ const verkadaHeaders = ({ secret = kUtf8Secret, ts = String(kNowSec), body = kBo
   "verkada-signature": ts + "|" + hmac(Buffer.from(secret, "utf8"), "hex", body, "|" + ts),
 });
 
+const agentphoneHeaders = ({ secret = kAgentphoneSecret, ts = String(kNowSec), body = kBody } = {}) => ({
+  "x-webhook-signature": "sha256=" + hmac(Buffer.from(secret, "utf8"), "hex", ts + ".", body),
+  "x-webhook-timestamp": ts,
+  "x-webhook-id": "del_" + "fixture01",
+  "x-webhook-event": "agent.message",
+});
+
 const verify = (overrides) =>
   verifySignedDelivery({ rawBody: kBody, nowMs: kNowMs, toleranceMs: kToleranceMs, ...overrides });
 
 describe("kSignedPresets", () => {
-  it("lists the four presets and is frozen", () => {
-    expect(kSignedPresets).toEqual(["standard_webhooks", "circleback", "quo", "verkada"]);
+  it("lists the five presets and is frozen", () => {
+    expect(kSignedPresets).toEqual(["standard_webhooks", "circleback", "quo", "verkada", "agentphone"]);
     expect(Object.isFrozen(kSignedPresets)).toBe(true);
   });
 });
@@ -526,6 +534,112 @@ describe("verkada", () => {
   });
 });
 
+describe("agentphone", () => {
+  it("verifies 'sha256=<hex>' over '<timestamp>.<body>' keyed by the whole secret string", () => {
+    const headers = agentphoneHeaders();
+    const hex = headers["x-webhook-signature"].slice("sha256=".length);
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers })).toEqual({
+      ok: true,
+      scheme: "agentphone",
+      replayKey: hex,
+      deliveryId: null,
+      signedHeaders: { "x-webhook-timestamp": String(kNowSec), "x-webhook-signature": headers["x-webhook-signature"] },
+    });
+  });
+
+  it("matches AgentPhone's published Node verifier byte for byte", () => {
+    const ts = String(kNowSec);
+    const expected = crypto.createHmac("sha256", kAgentphoneSecret).update(ts + ".").update(kBody).digest("hex");
+    expect(agentphoneHeaders()["x-webhook-signature"]).toBe("sha256=" + expected);
+  });
+
+  it("refuses a signature over the body alone or keyed by the secret without its prefix", () => {
+    const ts = String(kNowSec);
+    const bodyOnly = { "x-webhook-signature": "sha256=" + hmac(Buffer.from(kAgentphoneSecret), "hex", kBody), "x-webhook-timestamp": ts };
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: bodyOnly }).reason).toBe("bad_signature");
+    const unprefixed = agentphoneHeaders({ secret: kAgentphoneSecret.slice(kKeyPrefix.length) });
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: unprefixed }).reason).toBe("bad_signature");
+  });
+
+  it("does not trust the unsigned delivery id or event headers", () => {
+    const result = verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { ...agentphoneHeaders(), "x-webhook-id": "other" } });
+    expect(result.ok).toBe(true);
+    expect(result.replayKey).toBe(agentphoneHeaders()["x-webhook-signature"].slice(7));
+    expect(result.signedHeaders).not.toHaveProperty("x-webhook-id");
+    expect(result.signedHeaders).not.toHaveProperty("x-webhook-event");
+  });
+
+  it("lower-cases the replay key", () => {
+    const headers = agentphoneHeaders();
+    const hex = headers["x-webhook-signature"].slice(7);
+    const result = verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { ...headers, "x-webhook-signature": "sha256=" + hex.toUpperCase() } });
+    expect(result.ok).toBe(true);
+    expect(result.replayKey).toBe(hex);
+  });
+
+  it("reports a missing signature", () => {
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { "x-webhook-timestamp": String(kNowSec) } }).reason).toBe(
+      "missing_signature",
+    );
+  });
+
+  it("rejects the wrong secret and a body changed by one byte", () => {
+    expect(verify({ preset: "agentphone", secret: kUtf8OtherSecret, headers: agentphoneHeaders() }).reason).toBe("bad_signature");
+    expect(
+      verify({ preset: "agentphone", secret: kAgentphoneSecret, rawBody: flipLastByte(kBody), headers: agentphoneHeaders() }).reason,
+    ).toBe("bad_signature");
+  });
+
+  it("rejects a signature whose timestamp was swapped", () => {
+    const headers = { ...agentphoneHeaders(), "x-webhook-timestamp": String(kNowSec + 1) };
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers }).reason).toBe("bad_signature");
+  });
+
+  it("rejects stale and future timestamps beyond five minutes and accepts the edge", () => {
+    const tolerance = kToleranceMs / 1000;
+    for (const ts of [kNowSec - tolerance - 1, kNowSec + tolerance + 1]) {
+      expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: agentphoneHeaders({ ts: String(ts) }) }).reason).toBe(
+        "stale_timestamp",
+      );
+    }
+    for (const ts of [kNowSec - tolerance, kNowSec + tolerance]) {
+      expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: agentphoneHeaders({ ts: String(ts) }) }).ok).toBe(true);
+    }
+  });
+
+  it("reports malformed headers, including a millisecond timestamp", () => {
+    const headers = agentphoneHeaders();
+    const hex = headers["x-webhook-signature"].slice(7);
+    const badSignatures = [hex, "sha1=" + hex, "sha256=" + hex + "00", "sha256=" + hex.slice(2), "sha256=" + "z".repeat(64), "v1," + hex];
+    for (const value of badSignatures) {
+      expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { ...headers, "x-webhook-signature": value } }).reason).toBe(
+        "malformed",
+      );
+    }
+    for (const ts of ["", "now", String(kNowMs) + "000", "-1"]) {
+      expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: { ...headers, "x-webhook-timestamp": ts } }).reason).toBe(
+        "malformed",
+      );
+    }
+  });
+
+  it("reads array-valued headers and refuses two different values", () => {
+    const headers = agentphoneHeaders();
+    const single = { "x-webhook-signature": [headers["x-webhook-signature"]], "x-webhook-timestamp": [headers["x-webhook-timestamp"]] };
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: single }).ok).toBe(true);
+    const twice = { ...headers, "x-webhook-signature": [headers["x-webhook-signature"], headers["x-webhook-signature"]] };
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: twice }).reason).toBe("malformed");
+    const twoTimes = { ...headers, "x-webhook-timestamp": [String(kNowSec), String(kNowSec - 1)] };
+    expect(verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: twoTimes }).reason).toBe("malformed");
+  });
+
+  it("reports an unusable secret as no_secret", () => {
+    for (const secret of [undefined, "", "has space", "x".repeat(513)]) {
+      expect(verify({ preset: "agentphone", secret, headers: agentphoneHeaders() }).reason).toBe("no_secret");
+    }
+  });
+});
+
 describe("validateSecret", () => {
   it("accepts well-formed secrets per preset", () => {
     expect(validateSecret("standard_webhooks", kSwSecret)).toEqual({ ok: true });
@@ -533,6 +647,7 @@ describe("validateSecret", () => {
     expect(validateSecret("quo", kQuoBareSecret)).toEqual({ ok: true });
     expect(validateSecret("circleback", kUtf8Secret)).toEqual({ ok: true });
     expect(validateSecret("verkada", kUtf8Secret)).toEqual({ ok: true });
+    expect(validateSecret("agentphone", kAgentphoneSecret)).toEqual({ ok: true });
     expect(validateSecret("standard_webhooks", kKeyPrefix + Buffer.alloc(16, 1).toString("base64"))).toEqual({ ok: true });
   });
 

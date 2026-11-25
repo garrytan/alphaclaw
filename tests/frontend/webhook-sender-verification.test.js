@@ -75,12 +75,13 @@ describe("frontend/webhook sender verification status line", () => {
 });
 
 describe("frontend/webhook sender verification presets", () => {
-  it("lists the six methods with the agreed labels", () => {
+  it("lists the seven methods with the agreed labels", () => {
     expect(kSenderVerificationPresets.map(({ id, label }) => [id, label])).toEqual([
       ["token", "Shared webhook token (today)"],
       ["circleback", "Circleback"],
       ["quo", "Quo"],
       ["verkada", "Verkada"],
+      ["agentphone", "AgentPhone"],
       ["standard_webhooks", "Standard Webhooks"],
       ["per_hook_token", "Own token for this hook"],
     ]);
