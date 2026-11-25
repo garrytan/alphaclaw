@@ -399,6 +399,62 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(broker.calls()[1].idempotency_key).toBe(lost.details.ref);
     });
 
+    it("decodes a reply whose characters are split across reads", async () => {
+      const text = "h\u00e9llo \ud83d\ude00 w\u00f6rld";
+      const dir = tempDir("gw-split-");
+      const socketPath = path.join(dir, "google.sock");
+      const server = net.createServer((conn) => {
+        conn.once("data", (chunk) => {
+          const request = JSON.parse(chunk.toString("utf8").split("\n")[0]);
+          const bytes = Buffer.from(JSON.stringify(request.op === "tools" ? { v: 4, ok: true, tools: [] } : okReply({ content: [{ type: "text", text }] })) + "\n", "utf8");
+          const cut = bytes.indexOf(Buffer.from("\ud83d\ude00", "utf8")) + 2;
+          conn.write(bytes.subarray(0, cut));
+          setTimeout(() => conn.write(bytes.subarray(cut)), 20);
+        });
+      });
+      await new Promise((resolve) => server.listen(socketPath, resolve));
+      try {
+        const { invoke } = register({ socketPath, rootDir });
+        expect(textOf(await invoke({ toolName: "gw_calendar_list_events", params: {} }))).toBe(text);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("journals every intent before sending it, so a restart mid-call replays it", async () => {
+      broker = await startBroker((request) => (request.op === "tools" ? { v: 4, ok: true, tools: [] } : new Promise(() => {})));
+      const first = register({ socketPath: broker.socketPath, rootDir });
+      first.invoke({ toolName: "gw_gmail_create_draft", params: { to: "a@example.com" } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(broker.calls()).toHaveLength(1);
+      const restarted = register({ socketPath: broker.socketPath, rootDir });
+      restarted.invoke({ toolName: "gw_gmail_create_draft", params: { to: "a@example.com" } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(broker.calls()).toHaveLength(2);
+      expect(broker.calls()[1].idempotency_key).toBe(broker.calls()[0].idempotency_key);
+    });
+
+    it("keeps a replayed intent held through a refusal, and lets a fresh refusal go", async () => {
+      let step = 0;
+      broker = await startBroker((request) => {
+        if (request.op === "tools") return { v: 4, ok: true, tools: [] };
+        step += 1;
+        if (step === 1) return "close";
+        if (step === 2) return { v: 4, ok: false, code: "not_connected", request_id: "req-n" };
+        return okReply();
+      });
+      const { invoke } = register({ socketPath: broker.socketPath, rootDir });
+      const params = { to: "a@example.com" };
+      expect((await invoke({ toolName: "gw_gmail_create_draft", params })).details.code).toBe("gw_outcome_unknown");
+      await invoke({ toolName: "gw_gmail_create_draft", params });
+      await invoke({ toolName: "gw_gmail_create_draft", params });
+      const keys = broker.calls().map((call) => call.idempotency_key);
+      expect(new Set(keys).size).toBe(1);
+      await invoke({ toolName: "gw_gmail_create_draft", params });
+      expect(broker.calls()[3].idempotency_key).not.toBe(keys[0]);
+    });
+
     it("runs calls side by side, so a slow call holds up no other", async () => {
       let releaseSlow;
       broker = await startBroker((request) => {
@@ -447,7 +503,7 @@ describe("google-workspace plugin (GST-3848)", () => {
 
     it("tells the owner once at 1,200 and stops at 1,500 without a second counter", async () => {
       let used = 1199;
-      broker = await startBroker((request) => (request.op === "tools" ? { v: 4, ok: true, tools: [] } : okReply(undefined, ++used)));
+      broker = await startBroker((request) => (request.op === "tools" ? { v: 4, ok: true, tools: [] } : { ...okReply(), quota: quota(++used, "2026-11-25") }));
       let clock = Date.parse("2026-11-25T12:00:00Z");
       const { invoke, lines } = register({ socketPath: broker.socketPath, rootDir, now: () => clock });
       const day = "2026-11-25";

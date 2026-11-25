@@ -58,6 +58,7 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
   let telegram;
   let broker;
   let port;
+  let started = false;
   const brokerRequests = [];
   const probeStage = new Map();
   const toolResults = new Map();
@@ -187,6 +188,7 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
     process.env.OPENCLAW_GATEWAY_TOKEN = token;
     gateway = require("../../lib/server/gateway");
     await gateway.startGateway();
+    started = true;
     await waitFor(readyzOk, 180_000, "gateway /readyz 200");
     await waitFor(async () => telegram.polls() > 1, 120_000, "telegram polling the fake Bot API");
   }, 6 * 60 * 1000);
@@ -195,7 +197,7 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
     try {
       await gateway?.stopGatewayForShutdown?.({ budgetMs: 8000 });
     } catch {}
-    for (const pid of require("../../lib/server/gateway-identity").findPortListenerPids?.(port) || []) {
+    for (const pid of started ? require("../../lib/server/gateway-identity").findPortListenerPids?.(port) || [] : []) {
       try {
         process.kill(pid, "SIGKILL");
       } catch {}
