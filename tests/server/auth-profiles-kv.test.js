@@ -128,12 +128,12 @@ it("treats missing rows as empty, but rejects malformed runtime state and unknow
 });
 
 it("refuses a newer shared schema with its version and the fix, as a 409 from the Codex exchange", async () => {
-  seed(37);
+  seed(41);
   expect(() => ap.upsertProfile("openai:default", { type: "api_key", provider: "openai", key: "synthetic" })).toThrow(expect.objectContaining({
     code: "AUTH_STORE_UNREADABLE",
     reason: "unsupported_schema",
-    userVersion: 37,
-    message: expect.stringMatching(/uses schema 37; this AlphaClaw reads schemas 12-36\. Update AlphaClaw .* Do not downgrade OpenClaw/),
+    userVersion: 41,
+    message: expect.stringMatching(/uses schema 41; this AlphaClaw reads schemas 12-40\. Update AlphaClaw .* Do not downgrade OpenClaw/),
   }));
   const app = express();
   app.use(express.json());
@@ -145,7 +145,7 @@ it("refuses a newer shared schema with its version and the fix, as a 409 from th
   try {
     const exchange = await request(app).post("/api/codex/exchange").send({ input: `http://localhost/callback?code=synthetic-code&state=${oauthState}` });
     expect(exchange.status).toBe(409);
-    expect(exchange.body).toMatchObject({ ok: false, code: "config_unreadable", reason: "unsupported_schema", userVersion: 37, supportedSchemas: { min: 12, max: 36 } });
+    expect(exchange.body).toMatchObject({ ok: false, code: "config_unreadable", reason: "unsupported_schema", userVersion: 41, supportedSchemas: { min: 12, max: 40 } });
     expect(exchange.body.error).toContain("Do not downgrade OpenClaw");
     expect(exchange.body.error).toContain("Nothing was saved; after updating AlphaClaw, sign in to Codex again.");
     expect(exchange.body).toMatchObject({
@@ -153,7 +153,7 @@ it("refuses a newer shared schema with its version and the fix, as a 409 from th
       docsUrl: "https://github.com/garrytan/alphaclaw#openclaw-version",
     });
   } finally { fetchSpy.mockRestore(); }
-  expect(read(37).store).toEqual(secrets());
+  expect(read(41).store).toEqual(secrets());
 });
 
 it("rolls back both documents when the second write fails", () => {

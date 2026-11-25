@@ -131,11 +131,24 @@ describe("relay delegates: the guard's tiers", () => {
     const read = (name) => fs.readFileSync(path.join(dist, name), "utf8");
     const descriptors = names.find((name) => name.startsWith("core-tool-factory-descriptors-"));
     // 2026.11.5 replaced core-tool-factory-descriptors with CORE_TOOL_DEFINITIONS
-    // in tool-catalog-*.mjs: one [ "<id>", {...} ] tuple per tool.
+    // in tool-catalog-*.mjs: one [ "<id>", {...} ] tuple per tool. 2026.11.10
+    // groups the tuples in coreTools(<group>, {...}, [[`<id>`, {...}], ...])
+    // calls and prints its dist minified, with template-literal strings.
     const definitions = () => {
-      const text = read(names.find((name) => name.startsWith("tool-catalog-") && read(name).includes("const CORE_TOOL_DEFINITIONS = [")));
-      const start = text.indexOf("const CORE_TOOL_DEFINITIONS = [");
-      return [...text.slice(start, text.indexOf("\n];", start)).matchAll(/(?:^\t+|, \[)\[\s*"([a-z_]+)"/gm)].map((match) => match[1]);
+      const kStart = /const CORE_TOOL_DEFINITIONS\s*=\s*\[/;
+      const text = read(names.find((name) => name.startsWith("tool-catalog-") && kStart.test(read(name))));
+      const start = text.search(kStart);
+      let end = text.indexOf("[", start);
+      for (let depth = 0, quote = null; end < text.length; end += 1) {
+        const ch = text[end];
+        if (quote) {
+          if (ch === "\\") end += 1;
+          else if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+        else if (ch === "[") depth += 1;
+        else if (ch === "]" && --depth === 0) break;
+      }
+      return [...text.slice(start, end).matchAll(/(?:\[|\],)\s*\[\s*["'`]([a-z_]+)["'`]/g)].map((match) => match[1]);
     };
     const catalog = new Set(
       descriptors ? [...read(descriptors).matchAll(/name: "([a-z_]+)",\s*family:/g)].map((match) => match[1]) : definitions(),
