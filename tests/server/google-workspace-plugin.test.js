@@ -632,6 +632,37 @@ describe("google-workspace plugin (GST-3848)", () => {
         await call(caller);
         expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
       });
+
+      it("never lets a late owner pause turn an identical call's unknown outcome back into a pause", async () => {
+        let finishFirst;
+        let finishSecond;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), () => new Promise((resolve) => (finishSecond = resolve))]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        finishSecond({ transport: "lost" });
+        expect((await second).details.code).toBe("gw_outcome_unknown");
+        finishFirst({ reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-late" } });
+        expect((await first).details.code).toBe("gw_owner_confirm");
+        expect(Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8")))).toMatchObject([{ kind: "unknown", key: broker2.sent[0].idempotency_key }]);
+      });
+
+      it("keeps an intent id reserved past its expiry while a call under it is still in flight", async () => {
+        const clock = { at: Date.now() };
+        let finishFirst;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), { reply: okReply() }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        const first = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        clock.at += 24 * 60 * 60 * 1000 + 1;
+        await call(caller);
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        finishFirst({ transport: "lost" });
+        await first;
+        await call(caller);
+        expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+      });
     });
 
     it("reads a large reply in many pieces whole, in linear time", async () => {

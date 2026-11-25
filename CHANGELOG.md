@@ -5,6 +5,17 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.347] - 2026-11-25
+
+Closes the last narrow gaps the final review of the Google Workspace hardening found, before the plugin is switched on.
+
+### Fixed
+- A write's request id now stays reserved while a call under it is still in flight, even past its 24-hour expiry, so an identical write in that window replays it instead of starting a second one. Bookkeeping for identical writes in flight is kept per request id, so an older call can never release a newer id.
+- A late owner-pause reply to one of two identical writes no longer turns the other's unknown outcome back into a 10-minute pause that could expire or be evicted.
+
+### Security
+- AgentRun carries a listed cron run's contents only for a turn with an end record (and a cron run only when every turn folded into it has one). The plugin writes the Google marker before a turn's end, so a turn whose marker never landed, and whose file is read as finished or interrupted, now goes out as metadata only. A turn whose end OpenClaw never reported also goes out without contents.
+
 ## [0.10.346] - 2026-11-25
 
 The Google Workspace plugin is now safe to switch on: a write can no longer be sent twice or lose track of its outcome in the edge cases the final review found, large replies no longer stall the gateway, and a Google call past a run's tool cap still keeps that run's text out of AgentRun.

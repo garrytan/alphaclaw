@@ -293,6 +293,34 @@ describe("agentrun reporter: queue and sender", () => {
     expect(never.some((record) => record.status === "completed")).toBe(false);
   });
 
+  it("sends no contents for a listed cron turn whose Google marker never landed, even when its file reads as finished (GST-3848)", async () => {
+    const rootDir = makeRoot();
+    const refusing = { ...fs, appendFileSync: (file, data, options) => {
+      if (String(data).includes("gw_gmail_get_thread")) throw new Error("ENOSPC");
+      return fs.appendFileSync(file, data, options);
+    } };
+    const { handlers } = registerPlugin(rootDir, { fsModule: refusing });
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r-gw6", sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+    handlers.model_call_started({ runId: "r-gw6", sessionKey, provider: "anthropic", model: "claude" }, { runId: "r-gw6", sessionKey, agentId: "main" });
+    handlers.llm_output({ runId: "r-gw6", provider: "anthropic", model: "claude", assistantTexts: ["early " + kMarker], usage: { input: 1, output: 1 } }, ctx);
+    for (let n = 0; n < 500; n += 1) handlers.after_tool_call({ toolName: "read", params: {}, runId: "r-gw6", durationMs: 1 }, { ...ctx, toolName: "read" });
+    handlers.after_tool_call({ toolName: "gw_gmail_get_thread", params: {}, runId: "r-gw6", durationMs: 5 }, { ...ctx, toolName: "gw_gmail_get_thread" });
+    handlers.llm_output({ runId: "r-gw6", provider: "anthropic", model: "claude", assistantTexts: ["late"], usage: { input: 1, output: 1 }, lastAssistant: { stopReason: "stop" } }, ctx);
+    handlers.agent_end({ runId: "r-gw6", success: true, durationMs: 50 }, ctx);
+    const records = readSpool(rootDir).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(records[records.length - 1].t).toBe("llm");
+    expect(records.some((record) => record.t === "end")).toBe(false);
+    const clock = Date.now() + 31_000;
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake, now: () => clock, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the inbox" } }] });
+    expect(source.ingest().added).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    const wire = fake.requests.map((request) => request.body).join("\n");
+    expect(wire).not.toContain(kMarker);
+    expect(wire).not.toContain("Summarize the inbox");
+  });
+
   it("sends no contents for a listed cron turn that reached a Google tool through the dispatcher (GST-3848)", async () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);
