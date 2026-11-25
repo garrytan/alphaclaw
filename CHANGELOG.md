@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.342] - 2026-11-25
+
+The relay guard's long-command speed test no longer fails on busy CI runners, and it now checks that the guard's time grows in line with the command's length instead of comparing one timing against a tight fixed limit.
+
+### Fixed
+- The test that runs 10 KB and 100 KB commands through the relay guard required the best of five runs to finish under 50 ms. The guard's work is linear and unchanged since the test was added (about 33 ms for the slowest shape at 100 KB on an idle machine), but with the rest of the suite running beside it on a shared CI runner it measured 50 to 60 ms and failed pull requests that never touched the guard. The test now runs the two sizes in turn, keeps the best of seven warm runs of each, and requires the 100 KB command to take under 15 times as long as the 10 KB one (measured 4.3 to 6.9 times; quadratic work comes out near 100 times) and under 150 ms. A slowdown that only quadruples the 100 KB time still fails it.
+
 ## [0.10.339] - 2026-11-24
 
 When the owner's own Capy thread asks the box for an image over Agent Relay, the relay now answers with the agent's reply once the image is finished (its caption and the image's path on the box) instead of the "started" note, and video and music generation stay closed to every relay agent.
