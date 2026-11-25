@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.340] - 2026-11-25
+## [0.10.342] - 2026-11-25
 
 Agent Relay sessions can no longer read or change the files on the box that hold account tokens: OpenClaw's state database (where it keeps MCP OAuth tokens), GBrain's credential store and its broker socket folder, and AlphaClaw's Google Workspace folder. A process's command line is now refused the same way as its environment.
 
@@ -13,6 +13,23 @@ Agent Relay sessions can no longer read or change the files on the box that hold
 - The relay guard refuses a read, a shell command or input typed into a running process that reaches OpenClaw's state database (`state/openclaw.sqlite` under `$OPENCLAW_STATE_DIR`, else `<root>/.openclaw`) or its `-wal`, `-shm` and `-journal` files, GBrain's `credentials.json` or `run/` folder, where its broker socket lives (in GBrain's config dir `$GBRAIN_HOME/.gbrain`, else `~/.gbrain`, and in `$GBRAIN_HOME` itself), or `<root>/google-workspace/`. It follows paths the way the guest notes broker's check does: by name, `cd`, symlinks, globs and an exec's `workdir`. This holds for every relay agent, the owner's own thread included, and asks nobody: the refusal names the store and says it holds tokens for the box's accounts. A plain listing and a note that only mentions a name still run.
 - A change to any of those files, or to the `google-workspace` plugin's entry in `openclaw.json` (`openclaw config set plugins.entries.google-workspace...`, `openclaw plugins enable|disable google-workspace`, the plugins tool, or a write of the file), is a change to what decides relay trust, so it is refused outright for the owner's own thread and held for every other relay agent.
 - `/proc/<pid>/cmdline` and `/proc/<pid>/task/<tid>/cmdline` are refused like `environ`, because a tool that takes a token as a flag shows it there.
+## [0.10.341] - 2026-11-25
+
+The relay guard's long-command speed test no longer fails on busy CI runners, and it now checks that the guard's time grows in line with the command's length instead of comparing one timing against a tight fixed limit.
+
+### Fixed
+- The test that runs 10 KB and 100 KB commands through the relay guard required the best of five runs to finish under 50 ms. The guard's work is linear and unchanged since the test was added (about 33 ms for the slowest shape at 100 KB on an idle machine), but with the rest of the suite running beside it on a shared CI runner it measured 50 to 60 ms and failed pull requests that never touched the guard. The test now runs the two sizes in turn, keeps the best of seven warm runs of each, and requires the 100 KB command to take under 15 times as long as the 10 KB one (measured 4.3 to 6.9 times; quadratic work comes out near 100 times) and under 150 ms. A planted quadratic slowdown that made most 100 KB runs about four times slower failed it in 5 of 5 runs. A smaller one that added about 30 ms at 100 KB passed it; the old 50 ms bound caught that one, but it also failed runs with no slowdown at all.
+
+## [0.10.340] - 2026-11-25
+
+The Doctor no longer warns about skills bloat when a skills limit is set to 0, which switches OpenClaw's skills list off, and it now says so when that list is off and gbrain's skill resolver isn't enabled to suggest skills instead.
+
+### Changed
+- The Doctor reads the main agent's effective skills limits the way OpenClaw 2026.11.4 does: the agent's own `skillsLimits.maxSkillsPromptChars` wins over `skills.limits`, and an explicit 0 is kept. Before, it read `skills.limits` only and treated 0 as "use the default".
+- With `maxSkillsInPrompt` or `maxSkillsPromptChars` at 0, the Doctor skips the skills-bloat estimate, because no skills are listed and there is nothing to trim.
+
+### Added
+- A P2 card, "OpenClaw's skills list is switched off and nothing suggests skills instead", for a skills limit of 0 while the `gbrain-skill-resolver` plugin is not enabled. The plugin counts as enabled when OpenClaw would load it, which means its `plugins.entries` row or `plugins.allow` entry exists, it is not disabled or denied, plugins are on, and a non-empty allow list names it. The card changes no files. It suggests turning the resolver on or removing the 0.
 
 ## [0.10.339] - 2026-11-24
 
