@@ -7,6 +7,7 @@ const { createGoogleWorkspacePlugin, dispatchedToolOf } = require("../../lib/plu
 const catalog = require("../../lib/plugin/google-workspace/catalog");
 const { resolveSocketPath } = require("../../lib/plugin/google-workspace/broker");
 const { createAudit } = require("../../lib/plugin/google-workspace/audit");
+const { createCaller } = require("../../lib/plugin/google-workspace/call");
 const { kErrors, kBrokerCodes } = require("../../lib/plugin/google-workspace/errors");
 const manifest = require("../../lib/plugin/google-workspace/openclaw.plugin.json");
 const { applyGoogleWorkspaceEntry, resolveDesiredGoogleWorkspaceEntry, kGoogleWorkspacePluginPath, kGoogleWorkspaceEnvKeys } = require("../../lib/server/google-workspace-entry");
@@ -453,6 +454,112 @@ describe("google-workspace plugin (GST-3848)", () => {
       expect(new Set(keys).size).toBe(1);
       await invoke({ toolName: "gw_gmail_create_draft", params });
       expect(broker.calls()[3].idempotency_key).not.toBe(keys[0]);
+    });
+
+    describe("write journal", () => {
+      const fakeBroker = (answers) => {
+        const sent = [];
+        return {
+          sent,
+          request: async (payload) => {
+            sent.push(payload);
+            const next = answers.shift();
+            return typeof next === "function" ? next() : next;
+          },
+        };
+      };
+      const call = (caller, extra = {}) => caller.callTool({ account: kOwner, server: "gmail", tool: "create_draft", args: { to: "a@example.com" }, turnId: "run-1", ...extra });
+      const holdsFile = () => path.join(rootDir, "google-workspace", "held.json");
+
+      it("sends no write whose request id cannot be saved, and still sends reads", async () => {
+        fs.writeFileSync(path.join(rootDir, "google-workspace"), "not a folder");
+        const broker2 = fakeBroker([{ reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        expect((await call(caller)).details.code).toBe("gw_journal_failed");
+        expect(broker2.sent).toHaveLength(0);
+        expect((await call(caller, { tool: "search_threads", write: false })).details.status).toBe("ok");
+        expect(broker2.sent).toHaveLength(1);
+      });
+
+      it("never lets one failed connection clear the key an identical write still has in flight", async () => {
+        let finishSecond;
+        const broker2 = fakeBroker([{ transport: "down" }, () => new Promise((resolve) => (finishSecond = resolve)), { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        expect((await first).details.code).toBe("gw_broker_down");
+        await call(caller);
+        expect(broker2.sent[2].idempotency_key).toBe(broker2.sent[1].idempotency_key);
+        finishSecond({ reply: okReply() });
+        await second;
+      });
+
+      it("treats a reply it cannot read as an unknown outcome for a write, and a failure for a read", async () => {
+        const broker2 = fakeBroker([{ reply: { v: 4 } }, { reply: { v: 4, ok: false, code: "brand_new" } }, { reply: { v: 4 } }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = await call(caller);
+        expect(first.details.code).toBe("gw_outcome_unknown");
+        expect((await call(caller)).details.code).toBe("gw_outcome_unknown");
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        expect((await call(caller, { tool: "search_threads", write: false })).details.code).toBe("gw_broker_internal");
+      });
+
+      it("never holds a read: a lost read is retried under a fresh id", async () => {
+        const broker2 = fakeBroker([{ transport: "lost" }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        expect((await call(caller, { tool: "search_threads", write: false })).details.code).toBe("gw_read_unanswered");
+        expect((await call(caller, { tool: "search_threads", write: false })).details.status).toBe("ok");
+        expect(broker2.sent[1].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+        expect(fs.existsSync(holdsFile()) ? JSON.parse(fs.readFileSync(holdsFile(), "utf8")) : {}).toEqual({});
+      });
+
+      it("lets a replayed write go once the broker refuses it for good", async () => {
+        const broker2 = fakeBroker([{ transport: "lost" }, { reply: { v: 4, ok: false, code: "tool_error", reason: "tool_failed", message_md: "Invalid" } }, { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        await call(caller);
+        expect((await call(caller)).details.code).toBe("gw_tool_failed");
+        await call(caller);
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+      });
+
+      it("never evicts a write whose outcome is unknown to make room", async () => {
+        const until = Date.now() + 60 * 60 * 1000;
+        const entry = (n, kind) => [n.toString(16).padStart(64, "0"), { key: "k-" + n, account: "0".repeat(16), until, kind }];
+        fs.mkdirSync(path.dirname(holdsFile()), { recursive: true });
+        fs.writeFileSync(holdsFile(), JSON.stringify(Object.fromEntries(Array.from({ length: 500 }, (_, n) => entry(n + 1, "unknown")))));
+        const full = fakeBroker([{ reply: okReply() }]);
+        expect((await call(createCaller({ broker: full, holdsFile: holdsFile() }))).details.code).toBe("gw_journal_failed");
+        expect(full.sent).toHaveLength(0);
+        fs.writeFileSync(holdsFile(), JSON.stringify(Object.fromEntries([...Array.from({ length: 499 }, (_, n) => entry(n + 1, "unknown")), entry(999, "confirm")])));
+        const room = fakeBroker([{ reply: okReply() }]);
+        expect((await call(createCaller({ broker: room, holdsFile: holdsFile() }))).details.status).toBe("ok");
+        const left = JSON.parse(fs.readFileSync(holdsFile(), "utf8"));
+        expect(Object.values(left).filter((held) => held.kind === "unknown")).toHaveLength(499);
+        expect(Object.values(left).some((held) => held.key === "k-999")).toBe(false);
+      });
+    });
+
+    it("reads a large reply in many pieces whole", async () => {
+      const text = "x".repeat(4 * 1024 * 1024) + " é";
+      const dir = tempDir("gw-large-");
+      const socketPath = path.join(dir, "google.sock");
+      const server = net.createServer((conn) => {
+        conn.once("data", () => {
+          const bytes = Buffer.from(JSON.stringify(okReply({ content: [{ type: "text", text }] })) + "\n", "utf8");
+          for (let at = 0; at < bytes.length; at += 4096) conn.write(bytes.subarray(at, at + 4096));
+        });
+      });
+      await new Promise((resolve) => server.listen(socketPath, resolve));
+      try {
+        const { invoke } = register({ socketPath, rootDir });
+        const started = Date.now();
+        expect(textOf(await invoke({ toolName: "gw_calendar_list_events", params: {} }))).toBe(text);
+        expect(Date.now() - started).toBeLessThan(5000);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("runs calls side by side, so a slow call holds up no other", async () => {

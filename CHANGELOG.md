@@ -5,6 +5,21 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.346] - 2026-11-25
+
+The Google Workspace plugin is now safe to switch on: a write can no longer be sent twice or lose track of its outcome in the edge cases the final review found, large replies no longer stall the gateway, and a Google call past a run's tool cap still keeps that run's text out of AgentRun.
+
+### Fixed
+- A write is not sent when the plugin cannot save its request id (a full or read-only disk); it fails with `gw_journal_failed` and sends nothing. Reads are never saved or replayed: a read that times out fails with `gw_read_unanswered` and the next read gets a fresh id, instead of being pinned to the old one for 24 hours.
+- Two identical writes at once share one request id, and a failed connection on one no longer clears it while the other is still in flight.
+- A broker reply the plugin cannot read as a definite answer (no `ok`, or a code it does not know) now leaves a write's outcome unknown and keeps its request id, instead of reporting a failure the agent would retry under a new id.
+- A replayed write is let go once the broker refuses it for good (a Google tool error, refused arguments or a tool the broker does not allow), so the owner can retry it. Making room for a new saved write never drops one whose outcome is unknown: expired entries go first, then the oldest owner pause, and with no room the new write is not sent.
+- Broker replies are read in linear time, kept as bytes and decoded once, so a large Drive or Docs read no longer blocks the gateway's event loop.
+- The live owner-gate test stops only the gateway it started.
+
+### Security
+- A cron run that reaches a Google Workspace tool after its 500th recorded tool still records that tool, so the run's text stays out of AgentRun on both sides and across a gateway restart.
+
 ## [0.10.345] - 2026-11-25
 
 The agent can use your Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides and Tasks) on your own turns, through GBrain's Google broker, which holds the account's tokens and makes every Google call. Nobody else who talks to the agent, in a group or a relay session, can reach your account. A scheduled or command-line turn counts as yours when OpenClaw marks it as the owner's, which it does by default for a turn started on the box. It is off until the deployment names the account.
