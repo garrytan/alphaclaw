@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.342] - 2026-11-25
+## [0.10.341] - 2026-11-25
 
 The relay guard's long-command speed test no longer fails on busy CI runners, and it now checks that the guard's time grows in line with the command's length instead of comparing one timing against a tight fixed limit.
 
