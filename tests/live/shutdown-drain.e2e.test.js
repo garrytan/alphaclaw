@@ -41,8 +41,6 @@ const kCaseTimeoutMs = 15 * 60 * 1000;
 const kSetupPassword = "live-shutdown-drain-pw-1";
 const kGatewayToken = "live-shutdown-drain-token-000000000000";
 const kExecSleepSeconds = 300;
-// 2026.10.6 says "interrupted by a gateway restart"; 2026.10.7 dropped it.
-const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work|The Gateway restarted while you were working/i;
 
 // The model fixture runs in its own process so the synchronous CLI reads
 // below never stall it. On OpenClaw's restart-recovery note it re-issues the
@@ -370,7 +368,9 @@ describeLive(`LIVE deploy SIGTERM with a running turn against the ${readDeclared
       const finalText = textOf([...messages].reverse().find((m) => m.role === "assistant")?.content);
       return finalText.includes(`exec done: resumed-${tag}`);
     }, 240_000, "the interrupted turn resumed and finished after the next boot");
-    expect(messages.some((m) => m.role === "user" && kRecoveryNotePattern.test(textOf(m.content)))).toBe(true);
+    // The fixture answers "resumed-" only on the restart note, so the reply
+    // proves the model got it. 2026.11.10 sends the note to the model but no
+    // longer writes it into chat.history as a user message.
   }, kCaseTimeoutMs);
 
   it("the default budget with a stdio MCP server that takes 3 s to exit: the ask reserves the child's close, so the gateway still exits on its own inside the budget (ALPH-48)", async () => {

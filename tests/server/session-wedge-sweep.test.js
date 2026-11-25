@@ -100,6 +100,37 @@ describe("post-relaunch lost-turn check (OpenClaw 2026.11.5+)", () => {
     expect(await idOf([lostRow("agent:ops:c"), lostRow("agent:main:d")])).toBe(await idOf([lostRow("agent:main:d"), lostRow("agent:ops:c")]));
   });
 
+  it("on 2026.11.10 also names a turn killed before its row recorded it: no startedAt, and chat.history ends on the message sent before the launch", async () => {
+    const unstartedRow = (key, extra = {}) => ({ key, agentId: "main", sessionId: `id-${key}`, hasActiveRun: false, abortedLastRun: false, lastInteractionAt: kLaunchAt - 90_000, updatedAt: kLaunchAt - 89_000, ...extra });
+    const histories = {
+      "agent:main:lost": { messages: [{ role: "user", content: "count slowly", timestamp: kLaunchAt - 90_500 }] },
+      "agent:main:answered": { messages: [{ role: "user", timestamp: kLaunchAt - 90_500 }, { role: "assistant", timestamp: kLaunchAt - 80_000 }] },
+      "agent:main:empty": { messages: [] },
+    };
+    const gateway = createGateway({
+      "sessions.list": () => ({ body: { sessions: [
+        unstartedRow("agent:main:lost"),
+        unstartedRow("agent:main:answered"),
+        unstartedRow("agent:main:empty"),
+        unstartedRow("agent:main:unreadable"),
+        unstartedRow("agent:main:after-launch", { lastInteractionAt: kLaunchAt + 5_000 }),
+        unstartedRow("agent:main:never-interacted", { lastInteractionAt: undefined }),
+      ] } }),
+      "chat.history": ({ sessionKey }) => (histories[sessionKey] ? { body: histories[sessionKey] } : { ok: false, body: null }),
+    });
+    const { sweep, notify, insertEvent } = createSweep(gateway);
+    expect(await sweep.onGatewayLaunch({ generation: 5, startedAt: kLaunchAt })).toEqual({ alerted: ["agent:main:lost"] });
+    expect(gateway.calls.filter(({ method }) => method === "chat.history").map(({ params }) => params)).toEqual([
+      { sessionKey: "agent:main:lost", limit: 3 },
+      { sessionKey: "agent:main:answered", limit: 3 },
+      { sessionKey: "agent:main:empty", limit: 3 },
+      { sessionKey: "agent:main:unreadable", limit: 3 },
+    ]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain("so a turn it was running was lost:");
+    expect(insertEvent.mock.calls.map(([event]) => [event.status, event.details.sessionKey, event.details.reason])).toEqual([["alerted", "agent:main:lost", "lost"]]);
+  });
+
   it("names every lost turn of one relaunch in a single notice", async () => {
     const gateway = createGateway({ "sessions.list": () => ({ body: { sessions: [lostRow("agent:main:a"), lostRow("agent:ops:b")] } }) });
     const { sweep, notify } = createSweep(gateway);

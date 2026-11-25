@@ -402,14 +402,21 @@ session names, and the Health page has a `session_wedge` event with status
 **Why it happens:** OpenClaw 2026.11.5 and later resume running turns
 themselves after a clean restart: a graceful stop marks every session with live
 work, and the next gateway sends each one "The Gateway restarted while you were
-working" (with "Background exec processes were stopped; rerun them if still
-needed" when a background command was running). A crash, a SIGKILL (the
+working" (when a background command was running, 2026.11.6 adds "Background
+exec processes were stopped; rerun them if still needed" and 2026.11.10 sends
+an exec completion saying it "was stopped when the Gateway shut down"). A crash, a SIGKILL (the
 watchdog's kill step, the kernel's out-of-memory kill) or a container that dies
-writes no marker, and OpenClaw accepts that loss by design: nothing resumes the
-turn. After every launch, once the new gateway is ready + 90 s (AlphaClaw waits
+writes no marker. OpenClaw 2026.11.5 and 2026.11.6 accept that loss by design:
+nothing resumes the turn. OpenClaw 2026.11.10 resumes it too, when the boot
+record it keeps names the dead process's lifetime, so on that pin this notice
+means OpenClaw could not resume the turn (for example a resume it deferred
+because the agent database was unavailable). After every launch, once the new gateway is ready + 90 s (AlphaClaw waits
 up to 30 minutes for ready), AlphaClaw reads OpenClaw's `sessions.list` and
 names each session whose last turn started before the launch, never ended and
-has no live run. It looks back to the launch of its previous check (6 hours on
+has no live run. 2026.11.10 can lose a turn killed moments after it started
+before the session row records the run; such a row has no start or end time, so
+AlphaClaw also reads the last few messages of a session whose last message came
+before the launch and names it when nothing came after that message. It looks back to the launch of its previous check (6 hours on
 an AlphaClaw boot), so one loss is reported once, in at most one notice per
 launch. A Doctor session whose restarted Doctor turn AlphaClaw stopped is
 skipped.

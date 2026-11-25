@@ -233,18 +233,21 @@ describeLive(`LIVE model not found against the ${kCandidateBinDir ? "candidate" 
       expect(byRef(before)["acct/muse-1"].fix).toContain("Your acct key has access to no models. Enable model access for this key in acct's dashboard");
       expect(JSON.stringify(before)).not.toContain(kApiKey);
 
-      // 4. Apply the fix the notice named; the next reply and the check pass.
+      // 4. Apply the fix the notice named; a reply and the check pass. On
+      // 2026.11.10 a message sent within a second of the hot reload can still
+      // go out on the old API (its prepared model catalog catches up a few
+      // seconds later), so a message that fails that way is sent again.
       updateOpenclawConfig({ openclawDir: OPENCLAW_DIR, mutate: (cfg) => { cfg.models.providers.fixture.api = "openai-responses"; } });
+      let lastSendAt = 0;
       await waitFor(async () => {
-        if (!(await readyzOk())) return false;
+        if (transcript().includes("pong responses wonder-1")) return true;
+        if (Date.now() - lastSendAt < 15_000 || !(await readyzOk())) return false;
         try {
           send("Hi again");
-        } catch {
-          return false;
-        }
-        return true;
-      }, 180_000, "chat.send after the fix");
-      await waitForTranscript("pong responses wonder-1", "the fixed model replied");
+          lastSendAt = Date.now();
+        } catch {}
+        return false;
+      }, 180_000, "the fixed model replied");
       const after = await modelCheck.run();
       expect(byRef(after)["fixture/wonder-1"]).toMatchObject({ status: "ok", api: "openai-responses" });
       expect(byRef(after)["fixture/fixture"]).toMatchObject({ status: "ok" });

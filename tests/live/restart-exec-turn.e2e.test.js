@@ -14,12 +14,15 @@
 // finishes in the same session; sessions.list shows no live run and no
 // abortedLastRun, and the lost-turn check stays silent.
 //
-// An exec that already yielded to a background process session is marked
-// too: OpenClaw resumes that session with "Background exec processes were
-// stopped; rerun them if still needed", so AlphaClaw tells the owner nothing.
+// An exec that already yielded to a background process session is stopped by
+// the restart and the session is told so (2026.11.6: "Background exec
+// processes were stopped; rerun them if still needed"; 2026.11.10: an exec
+// completion saying it "was stopped when the Gateway shut down"), so
+// AlphaClaw tells the owner nothing.
 //
-// A SIGKILL writes no marker and OpenClaw accepts the loss: nothing resumes
-// the turn, and the lost-turn check tells the owner once, naming the session.
+// A SIGKILL writes no marker. 2026.11.10 resumes the turn anyway (its boot
+// record names the killed process's lifetime), so the lost-turn check stays
+// silent; naming a turn nothing resumed is held by the hermetic sweep tests.
 //
 // ALPH-18's "exec turn lost" verdict came from its blackbox mock model, which
 // answered the recovery prompt with plain text instead of acting on it. This
@@ -51,7 +54,13 @@ const kCaseTimeoutMs = 12 * 60 * 1000;
 const kExecSleepSeconds = 300;
 // 2026.10.6: "…interrupted by a gateway restart while OpenClaw was waiting on
 // tool/model work"; 2026.10.7 dropped "by a gateway restart" from the note.
-const kRecoveryNotePattern = /previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\/model work|The Gateway restarted while you were working/i;
+// 2026.11.10 tells a session whose background exec the stop killed with an
+// exec completion instead of a restart note.
+const kBackgroundStoppedPattern = /Background exec processes were stopped|was stopped when the Gateway shut down, so its result will not arrive/i;
+const kRecoveryNotePattern = new RegExp(
+  `previous turn was interrupted (by a gateway restart )?while OpenClaw was waiting on tool\\/model work|The Gateway restarted while you were working|${kBackgroundStoppedPattern.source}`,
+  "i",
+);
 
 const textOf = (content) =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => part?.text || "").join(" ") : "";
@@ -104,7 +113,7 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
         } else if (/exec:\s*(.+)/.test(userText)) command = userText.match(/exec:\s*(.+)/)[1].trim();
         else reply = "pong";
         const yieldMs = /in the background/.test(userText) && !recovery ? 2000 : 600000;
-        requests.push({ at: Date.now(), tag, recovery, backgroundStopped: /Background exec processes were stopped/.test(userText), execOffered: toolNames.includes("exec") });
+        requests.push({ at: Date.now(), tag, recovery, backgroundStopped: kBackgroundStoppedPattern.test(userText), execOffered: toolNames.includes("exec") });
         const chunk = (delta, finish = null) =>
           `data: ${JSON.stringify({ id: "exec-restart-live", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
         res.writeHead(200, { "content-type": "text/event-stream" });
@@ -225,7 +234,6 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
       const finalText = textOf([...history].reverse().find((m) => m.role === "assistant")?.content);
       return finalText.includes(`exec done: resumed-${tag}`);
     }, 240_000, `${name}: the interrupted exec turn resumed and finished`);
-    expect(history.some((m) => m.role === "user" && kRecoveryNotePattern.test(textOf(m.content)))).toBe(true);
     const recoveryRequest = requests.find((r) => r.tag === tag && r.recovery);
     expect(recoveryRequest, "OpenClaw sent the restart continuation").toBeTruthy();
     expect(recoveryRequest.execOffered, "exec is still offered to the resumed turn under full exec access").toBe(true);
@@ -304,27 +312,14 @@ describeLive(`LIVE exec turn across every restart class against the ${kCandidate
     await expectSilentCheck();
   }, kCaseTimeoutMs);
 
-  it("SIGKILL crash and relaunch: nothing resumes the turn, and the owner is told once which session lost it", async () => {
+  it("SIGKILL crash and relaunch: OpenClaw resumes the turn the killed gateway left open, and the lost-turn check stays silent", async () => {
     const { tag, sessionKey } = await startExec("sigkill");
     sweepJob = null;
     gateway.killManagedGatewayChildNow();
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await gateway.startGateway();
     await waitFor(readyzOk, 240_000, "sigkill: /readyz after the relaunch");
-    expect(sweepJob, "the relaunch scheduled a check").toBeTruthy();
-    expect(await sweepJob).toEqual({ alerted: [sessionKey] });
-    expect(requests.some((r) => r.tag === tag && r.recovery), "OpenClaw resumes nothing after a SIGKILL").toBe(false);
-    expect(notify).toHaveBeenCalledTimes(1);
-    const [text, meta] = notify.mock.calls[0];
-    expect(text).toContain("The gateway stopped without a clean shutdown, so a turn it was running was lost:");
-    expect(text).toContain(sessionKey);
-    expect(meta).toEqual({ eventType: "session_wedge", id: expect.stringMatching(/^session-lost-[0-9a-f]{16}$/) });
-    expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.sessionKey, e.details.reason])).toEqual([["alerted", sessionKey, "lost"]]);
-    const done = lastDoneLine();
-    expect(done).toHaveLength(1);
-    expect(done[0]).toMatch(/ checked=\d+ lost=1$/);
-    const row = await listedRow(sessionKey);
-    expect(row.hasActiveRun).not.toBe(true);
-    expect(row.endedAt ?? null).toBeNull();
+    await waitForResumed("sigkill", tag, sessionKey, Date.now());
+    await expectSilentCheck();
   }, kCaseTimeoutMs);
 });

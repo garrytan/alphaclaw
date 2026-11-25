@@ -2,9 +2,11 @@
 // OpenClaw 2026.11.5+) against the REAL pinned OpenClaw: its sessions.list
 // read after a relaunch, with a real agent turn in flight (a local streaming
 // model fixture holds it open). The gateway is SIGKILLed mid-turn and
-// relaunched; OpenClaw writes no restart marker for a SIGKILL and resumes
-// nothing, so the check must name that session to the owner exactly once,
-// and a later check after a clean launch must stay silent.
+// relaunched. OpenClaw 2026.11.10 resumes a turn the killed gateway left open
+// (its boot record names the crashed process's lifetime), except one killed
+// before its row recorded the run, which is lost. The check must stay silent
+// after a resume and name the session to the owner exactly once after a
+// loss; a later check stays silent either way.
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -108,7 +110,7 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
     await waitFor(async () => modelRequests > before, 120_000, "turn reached the model");
   };
   it(
-    "the lost-turn check against the real pin: a turn killed by SIGKILL is named to the owner once after the relaunch, and a later check stays silent",
+    "the lost-turn check against the real pin: after a SIGKILL mid-turn it stays silent when OpenClaw resumed the turn and names the session once when it was lost, and a later check stays silent",
     async () => {
       const lines = [];
       const originalLog = console.log;
@@ -134,23 +136,35 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
         expect(boot).toEqual({ alerted: [] });
 
         // 1. A turn in flight, then SIGKILL (the OOM shape) and a relaunch.
+        // 2026.11.10 usually resumes the turn; one killed before its row
+        // recorded the run is lost. The check must match what happened:
+        // silent after a resume, one notice naming the session after a loss.
         const sessionKey = "agent:main:sweep-live-1";
         await startTurn(clawCmd, sessionKey);
+        const killedAt = modelRequests;
         gateway.killManagedGatewayChildNow();
         await new Promise((resolve) => setTimeout(resolve, 2000));
         await gateway.startGateway();
         const result = await sweep.onGatewayLaunch({ generation: 2, startedAt: Date.now() });
-        originalLog(`[live] after SIGKILL: ${JSON.stringify(result)}`);
-        expect(result).toEqual({ alerted: [sessionKey] });
-        expect(notify).toHaveBeenCalledTimes(1);
-        expect(notify.mock.calls[0][0]).toContain("so a turn it was running was lost:");
-        expect(notify.mock.calls[0][0]).toContain(sessionKey);
-        expect(notify.mock.calls[0][1]).toEqual({ eventType: "session_wedge", id: expect.stringMatching(/^session-lost-[0-9a-f]{16}$/) });
-        expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.sessionKey, e.details.reason])).toEqual([["alerted", sessionKey, "lost"]]);
-        expect(lines.find((line) => line.startsWith("[alphaclaw] wedge-sweep done generation=2 "))).toMatch(/ checked=[1-9]\d* lost=1$/);
+        const resumed = modelRequests > killedAt;
+        originalLog(`[live] after SIGKILL: ${JSON.stringify({ result, resumed })}`);
+        if (resumed) {
+          expect(result).toEqual({ alerted: [] });
+          expect(notify).not.toHaveBeenCalled();
+          expect(insertEvent).not.toHaveBeenCalled();
+          expect(lines.find((line) => line.startsWith("[alphaclaw] wedge-sweep done generation=2 "))).toMatch(/ checked=[1-9]\d* lost=0$/);
+        } else {
+          expect(result).toEqual({ alerted: [sessionKey] });
+          expect(notify).toHaveBeenCalledTimes(1);
+          expect(notify.mock.calls[0][0]).toContain("so a turn it was running was lost:");
+          expect(notify.mock.calls[0][0]).toContain(sessionKey);
+          expect(notify.mock.calls[0][1]).toEqual({ eventType: "session_wedge", id: expect.stringMatching(/^session-lost-[0-9a-f]{16}$/) });
+          expect(insertEvent.mock.calls.map(([e]) => [e.status, e.details.sessionKey, e.details.reason])).toEqual([["alerted", sessionKey, "lost"]]);
+          expect(lines.find((line) => line.startsWith("[alphaclaw] wedge-sweep done generation=2 "))).toMatch(/ checked=[1-9]\d* lost=1$/);
+        }
 
-        // 2. The next launch reaches back only to the last check, so the same
-        // loss is not reported again.
+        // 2. The next launch reaches back only to the last check, so a loss
+        // is not reported again, and a resumed turn stays unreported.
         insertEvent.mockClear();
         notify.mockClear();
         const quiet = await sweep.onGatewayLaunch({ generation: 3, startedAt: Date.now() });

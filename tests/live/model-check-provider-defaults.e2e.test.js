@@ -17,7 +17,9 @@ const { kOpenclawBuiltInProviderIds } = require("../../lib/server/model-check/op
 
 const describeLive = kLiveEnabled ? describe : describe.skip;
 const kDistDir = path.dirname(require.resolve("openclaw"));
-const kOverlayRegion = "//#region src/config/model-provider-overlay-ids.ts";
+// Unminified pins mark the module with a region comment; minified pins
+// (2026.11.10+) keep only the constant's name.
+const kOverlayMarkers = ["//#region src/config/model-provider-overlay-ids.ts", "BUILT_IN_MODEL_PROVIDER_OVERLAY_IDS="];
 
 // The box's block (OpenClaw 2026.10.9), key order as stored: no baseUrl key.
 const kBoxGoogleBlock = {
@@ -53,10 +55,10 @@ describeLive("model check vs OpenClaw's built-in providers (live, pinned dist)",
       .filter((name) => name.endsWith(".mjs"))
       .flatMap((name) => {
         const text = fs.readFileSync(path.join(kDistDir, name), "utf8");
-        const start = text.indexOf(kOverlayRegion);
-        if (start < 0) return [];
-        const body = text.slice(start, text.indexOf("]);", start));
-        return [{ name, ids: [...body.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort() }];
+        const start = kOverlayMarkers.map((marker) => text.indexOf(marker)).find((index) => index >= 0);
+        if (start === undefined) return [];
+        const body = text.slice(start, text.indexOf("])", start));
+        return [{ name, ids: [...body.matchAll(/["`]([^"`]+)["`]/g)].map((match) => match[1]).sort() }];
       });
     expect(copies.length).toBeGreaterThan(0);
     for (const copy of copies) expect({ name: copy.name, ids: copy.ids }).toEqual({ name: copy.name, ids: [...kOpenclawBuiltInProviderIds].sort() });

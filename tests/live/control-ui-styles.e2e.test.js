@@ -194,7 +194,12 @@ const readLandingHref = (page) => page.evaluate(() => window.__acLandingHref || 
 const readStyleState = (page) =>
   page.evaluate(
     async ({ bannerText, reloadButtonText }) => {
-      const alerts = Array.from(document.querySelectorAll('[role="alert"]'));
+      // Only alerts on screen: 2026.11.10's index.html carries its own
+      // "OpenClaw didn't start" mount fallback (role=alert, with a Reload
+      // button) hidden in every page until the app fails to render.
+      const alerts = Array.from(document.querySelectorAll('[role="alert"]')).filter(
+        (el) => !el.closest("[hidden]") && el.checkVisibility(),
+      );
       const bannerAlerts = alerts
         .filter((el) => String(el.textContent || "").includes(bannerText))
         .map((el) => String(el.textContent || "").trim());

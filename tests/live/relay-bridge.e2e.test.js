@@ -260,7 +260,7 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
   });
 
   it(
-    "a relay DM becomes a run in the sender's own session and its answer comes back as one reply; a gateway SIGKILL mid-run (which OpenClaw no longer resumes) settles with exactly one run_interrupted reply and no second send",
+    "a relay DM becomes a run in the sender's own session and its answer comes back as one reply; a gateway SIGKILL mid-run is resumed by OpenClaw and still ends in exactly one reply and no second send",
     async () => {
       await gateway.startGateway();
       await waitFor(readyzOk, 180_000, "gateway /readyz 200");
@@ -317,13 +317,13 @@ describeLive(`LIVE Agent Relay bridge against the ${kCandidateBinDir ? "candidat
       expect(gatewaySends).toBe(2);
       const counts = relay.getStatus().bridge.counts;
       console.log("[live] relay after SIGKILL: " + JSON.stringify({ text: replies[0].text.slice(0, 200), metadata: replies[0].metadata, counts }));
-      // OpenClaw 2026.11.5+ writes no restart marker for a SIGKILL and resumes
-      // nothing (openclaw/openclaw#185730), so the bridge settles the run as
-      // interrupted with one reply that asks the sender to send it again.
-      expect(replies[0].text).toContain("The agent run was cut off");
-      expect(replies[0].metadata).toMatchObject({ relay_status: "failed", relay_code: "run_interrupted" });
-      expect(counts.answered).toBe(1);
-      expect(counts.interrupted).toBe(1);
+      // OpenClaw 2026.11.10 resumes a run the killed gateway left open (its
+      // boot record names the crashed process's lifetime), so the bridge
+      // relays the resumed run's answer: one reply, never a second send.
+      expect(replies[0].text).toContain("pong-42 from the box");
+      expect(replies[0].metadata).toMatchObject({ relay_status: "answered" });
+      expect(counts.answered).toBe(2);
+      expect(counts.interrupted || 0).toBe(0);
       expect(counts.dispatched || 0).toBe(0);
       expect(counts.reconciling || 0).toBe(0);
     },
