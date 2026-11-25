@@ -197,6 +197,27 @@ describe("post-relaunch lost-turn check (OpenClaw 2026.11.5+)", () => {
     expect(lines()).toContain("[alphaclaw] wedge-sweep skipped generation=13 reason=read_failed");
   });
 
+  it("a check superseded during its chat.history reads moves no look-back, so the next relaunch still names the turn", async () => {
+    const rows = [];
+    let third = null;
+    const gateway = createGateway({
+      "sessions.list": () => ({ body: { sessions: rows } }),
+      "chat.history": () => {
+        if (!third) third = sweep.onGatewayLaunch({ generation: 23, startedAt: at() });
+        return { body: { messages: [{ role: "assistant", timestamp: kLaunchAt }] } };
+      },
+    });
+    const { sweep, notify, advance, at } = createSweep(gateway);
+    expect(await sweep.onGatewayLaunch({ generation: 21, startedAt: kLaunchAt })).toEqual({ alerted: [] });
+    advance(10 * 60_000);
+    const second = at();
+    rows.push(lostRow("agent:main:a", { startedAt: second - 60_000 }));
+    rows.push({ key: "agent:main:u", agentId: "main", sessionId: "id-u", hasActiveRun: false, lastInteractionAt: second - 30_000 });
+    expect(await sweep.onGatewayLaunch({ generation: 22, startedAt: second })).toEqual({ skipped: "superseded" });
+    expect((await third).alerted).toEqual(["agent:main:a"]);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   it("checks a boot that took about 8 minutes to become ready (GST-2884)", async () => {
     let probes = 0;
     const gateway = createGateway({ "sessions.list": () => ({ body: { sessions: [lostRow("agent:main:a")] } }) });

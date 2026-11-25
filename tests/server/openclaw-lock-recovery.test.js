@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const {
   recoverStaleForeignGatewayLock,
   resolveGatewayLockDir,
@@ -131,6 +132,21 @@ describe("recovering the state locks of a gateway that died in another container
     fs.writeFileSync(path.join(lockDir, "gateway.state.lock"), "{not json");
     const { runCli } = cli({ holders: [] });
     await expect(run({ runCli })).resolves.toEqual({ status: "skipped", reason: "unreadable" });
+  });
+
+  it("never blocks on a FIFO named like a lock file, and leaves it to OpenClaw", async () => {
+    execFileSync("mkfifo", [path.join(lockDir, "gateway.state.lock")]);
+    const { runCli } = cli({ holders: [] });
+    await expect(run({ runCli })).resolves.toEqual({ status: "skipped", reason: "unreadable" });
+    expect(runCli).not.toHaveBeenCalled();
+  });
+
+  it("does not read a lock file larger than 64 KiB, and leaves it to OpenClaw", async () => {
+    writeLock("gateway.state.lock", { host: "box-a", pidNsInode: "4026531836" }, 120_000);
+    fs.appendFileSync(path.join(lockDir, "gateway.state.lock"), " ".repeat(64 * 1024));
+    const { runCli } = cli({ holders: [] });
+    await expect(run({ runCli })).resolves.toEqual({ status: "skipped", reason: "unreadable" });
+    expect(runCli).not.toHaveBeenCalled();
   });
 
   it("ends the heartbeat wait on an abort, including one that landed before the wait, and leaves no listener", async () => {
