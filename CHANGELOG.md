@@ -11,10 +11,11 @@ Closes the last narrow gaps the final review of the Google Workspace hardening f
 
 ### Fixed
 - A write's request id now stays reserved while a call under it is still in flight, even past its 24-hour expiry, so an identical write in that window replays it instead of starting a second one. Bookkeeping for identical writes in flight is kept per request id, so an older call can never release a newer id.
-- A late owner-pause reply to one of two identical writes no longer turns the other's unknown outcome back into a 10-minute pause that could expire or be evicted.
+- A late owner-pause reply to one of two identical writes no longer turns the other's unknown outcome back into a 10-minute pause that could expire or be evicted, an owner pause becomes a pause only when no identical call is still in flight, and a refusal on one identical write no longer lets go of an id the other left unknown.
+- An older call that ends after a newer identical write took a new id (for example after the account was revoked and reconnected) never drops or replaces that newer id.
 
 ### Security
-- AgentRun carries a listed cron run's contents only for a turn with an end record (and a cron run only when every turn folded into it has one). The plugin writes the Google marker before a turn's end, so a turn whose marker never landed, and whose file is read as finished or interrupted, now goes out as metadata only. A turn whose end OpenClaw never reported also goes out without contents.
+- AgentRun carries a listed cron run's contents only for a turn whose end record says it used no Google tool (and a cron run only when every turn folded into it qualifies). The plugin writes that verdict from what the run did, so a Google marker line that never landed or was torn by a failed write can no longer open contents, and a turn with no end record, read as finished or interrupted, goes out as metadata only. A turn whose end OpenClaw never reported also goes out without contents. A listed cron turn seen live still completes with complete evidence.
 
 ## [0.10.346] - 2026-11-25
 

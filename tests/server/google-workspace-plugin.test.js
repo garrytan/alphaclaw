@@ -663,6 +663,74 @@ describe("google-workspace plugin (GST-3848)", () => {
         await call(caller);
         expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
       });
+
+      it("never lets a down answer on one identical call drop the id another left unknown", async () => {
+        let finishFirst;
+        let finishSecond;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), () => new Promise((resolve) => (finishSecond = resolve)), { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        finishSecond({ transport: "lost" });
+        expect((await second).details.code).toBe("gw_outcome_unknown");
+        finishFirst({ transport: "down" });
+        expect((await first).details.code).toBe("gw_broker_down");
+        await call(caller);
+        expect(broker2.sent[2].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+      });
+
+      it("keeps the saved id an unknown outcome while an identical call is in flight, even when an owner pause answers first", async () => {
+        let finishFirst;
+        let finishSecond;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), () => new Promise((resolve) => (finishSecond = resolve))]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        finishFirst({ reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-early" } });
+        expect((await first).details.code).toBe("gw_owner_confirm");
+        expect(Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8")))).toMatchObject([{ kind: "unknown" }]);
+        finishSecond({ reply: okReply() });
+        expect((await second).details.status).toBe("ok");
+        expect(JSON.parse(fs.readFileSync(holdsFile(), "utf8"))).toEqual({});
+      });
+
+      it("never lets an older call's answer drop or replace a newer id for the same arguments", async () => {
+        for (const late of [{ transport: "lost" }, { reply: okReply() }]) {
+          fs.rmSync(path.dirname(holdsFile()), { recursive: true, force: true });
+          let finishFirst;
+          const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), { reply: { v: 4, ok: false, code: "revoked" } }, { transport: "lost" }, { reply: okReply() }]);
+          const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+          const first = call(caller);
+          await new Promise((resolve) => setImmediate(resolve));
+          expect((await call(caller, { args: { to: "z@example.com" } })).details.code).toBe("gw_revoked");
+          expect((await call(caller)).details.code).toBe("gw_outcome_unknown");
+          const newer = broker2.sent[2].idempotency_key;
+          expect(newer).not.toBe(broker2.sent[0].idempotency_key);
+          finishFirst(late);
+          await first;
+          await call(caller);
+          expect(broker2.sent[3].idempotency_key).toBe(newer);
+        }
+      });
+
+      it("never evicts an expired hold whose call is still in flight to make room", async () => {
+        const clock = { at: Date.now() };
+        const until = clock.at + 60 * 60 * 1000;
+        fs.mkdirSync(path.dirname(holdsFile()), { recursive: true });
+        fs.writeFileSync(holdsFile(), JSON.stringify(Object.fromEntries(Array.from({ length: 499 }, (_, n) => [(n + 1).toString(16).padStart(64, "0"), { key: "k-" + n, account: "0".repeat(16), until, kind: "unknown" }]))));
+        let finishFirst;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        const first = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        clock.at += 25 * 60 * 60 * 1000;
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.status).toBe("ok");
+        expect(Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8"))).map((held) => held.key)).toContain(broker2.sent[0].idempotency_key);
+        finishFirst({ reply: okReply() });
+        await first;
+      });
     });
 
     it("reads a large reply in many pieces whole, in linear time", async () => {
