@@ -415,11 +415,11 @@ describe("relay guard and process environments (GST-2910)", () => {
     fs.rmSync(link, { force: true });
     fs.symlinkSync("/proc/self", link);
     try {
-      for (const command of ["cat Lp*/environ", "cat L?roc/env*", "cat " + workspace + "/Lpro*/environ", "cd " + workspace + " && cat L*/environ", "cat Lp*/task/*/environ"]) {
+      for (const command of ["cat Lp*/environ", "cat L?roc/env*", "cat " + workspace + "/Lpro*/environ", "cd " + workspace + " && cat L*/environ", "cat Lp*/task/*/environ", "cat Lp*/cmdline", "cat Lp*/task/*/cmdline"]) {
         expect(classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root })?.environ, command).toBe(true);
       }
       expect(classifyKeyRead({ toolName: "exec", params: { command: "cat */environ", workdir: workspace }, rootDir: root })?.environ).toBe(true);
-      for (const command of ["cat Lp*/status", "cat Lp*/cmdline", "ls Lp*/environ"]) expect(classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root }), command).toBeNull();
+      for (const command of ["cat Lp*/status", "cat Lp*/comm", "ls Lp*/environ"]) expect(classifyKeyRead({ toolName: "exec", params: { command }, rootDir: root }), command).toBeNull();
     } finally {
       fs.rmSync(link, { force: true });
     }
@@ -490,8 +490,8 @@ describe("relay guard refusals through the plugin (GST-2940, GST-2910)", () => {
     const run = await pinnedRun();
     const result = await ctx.call(run, "exec", { command: "tr '\\0' '\\n' < /proc/self/environ" });
     expect(result.block).toBe(true);
-    expect(result.blockReason).toContain("a command that reaches a process's environment (/proc/<pid>/environ) is refused in every relay session");
-    expect((await ctx.call(run, "read", { path: "/proc/1/environ" })).blockReason).toContain("read a process's environment (/proc/<pid>/environ) is refused in every relay session");
+    expect(result.blockReason).toContain("a command that reaches a process's environment or command line (/proc/<pid>/environ or cmdline) is refused in every relay session");
+    expect((await ctx.call(run, "read", { path: "/proc/1/environ" })).blockReason).toContain("read a process's environment or command line (/proc/<pid>/environ or cmdline) is refused in every relay session");
   });
 });
 
