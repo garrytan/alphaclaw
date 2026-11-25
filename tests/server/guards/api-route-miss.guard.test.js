@@ -71,17 +71,6 @@ const asHuman = (method, url, options = {}) =>
 
 const concretePath = (opPath) => opPath.replace(/:[A-Za-z_]+/g, "x1");
 
-const startServer = (port, rootDir) =>
-  spawn(process.execPath, ["-e", `require(${JSON.stringify(kServerPath)})`], {
-    env: {
-      ...process.env,
-      SETUP_PASSWORD: kPassword,
-      PORT: String(port),
-      ALPHACLAW_ROOT_DIR: rootDir,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ac-route-miss-guard-"));
   const rootDir = path.join(tmpDir, "root");
@@ -108,7 +97,10 @@ beforeAll(async () => {
     let port = await acquirePort();
     while (port === deadGatewayPort) port = await acquirePort();
     output = "";
-    child = startServer(port, rootDir);
+    child = spawn(process.execPath, ["-e", `require(${JSON.stringify(kServerPath)})`], {
+      env: { ...process.env, SETUP_PASSWORD: kPassword, PORT: String(port), ALPHACLAW_ROOT_DIR: rootDir },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let timer = null;
     const bind = await new Promise((resolve) => {
       const onData = (data) => {
