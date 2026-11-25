@@ -549,6 +549,9 @@ describe("server/doctor/deterministic-checks", () => {
     expect(isSkillResolverEnabled({ plugins: { deny: [id], entries: { [id]: {} } } })).toBe(false);
     expect(isSkillResolverEnabled({ plugins: { allow: ["other"], entries: { [id]: {} } } })).toBe(false);
     expect(isSkillResolverEnabled({ plugins: { allow: [id], entries: { [id]: {} } } })).toBe(true);
+    expect(isSkillResolverEnabled({ plugins: { allow: [], entries: { [id]: {} } } })).toBe(true);
+    expect(isSkillResolverEnabled({ plugins: { allow: [id] } })).toBe(true);
+    expect(isSkillResolverEnabled({ plugins: { allow: [id], entries: { [id]: { enabled: false } } } })).toBe(false);
   });
 
   it("counts YAML block-scalar skill descriptions toward the prompt estimate", () => {
