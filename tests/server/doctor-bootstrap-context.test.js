@@ -8,6 +8,7 @@ const {
   createBootstrapContextAnalyzer,
   formatChars,
   kDoctorBootstrapReadMaxBytes,
+  resolveMainSkillsLimits,
 } = require("../../lib/server/doctor/bootstrap-context");
 const {
   kCurrentContextProfile,
@@ -1126,5 +1127,27 @@ describe("server/doctor/bootstrap-context", () => {
         reason: "hook_disabled",
       }),
     ]);
+  });
+
+  describe("resolveMainSkillsLimits", () => {
+    it("keeps skills.limits, lets main's maxSkillsPromptChars win and keeps an explicit 0", () => {
+      expect(resolveMainSkillsLimits({})).toEqual({});
+      expect(resolveMainSkillsLimits({ skills: { limits: null } })).toEqual({});
+      expect(resolveMainSkillsLimits({ skills: { limits: { maxSkillsInPrompt: 0 } } })).toEqual({
+        maxSkillsInPrompt: 0,
+      });
+      expect(
+        resolveMainSkillsLimits({
+          skills: { limits: { maxSkillsInPrompt: 80, maxSkillsPromptChars: 18000 } },
+          agents: { list: [{ id: "sidekick", skillsLimits: { maxSkillsPromptChars: 1 } }, { id: "main", skillsLimits: { maxSkillsPromptChars: 0 } }] },
+        }),
+      ).toEqual({ maxSkillsInPrompt: 80, maxSkillsPromptChars: 0 });
+      expect(
+        resolveMainSkillsLimits({
+          skills: { limits: { maxSkillsPromptChars: 18000 } },
+          agents: { entries: { main: { skillsLimits: { maxSkillsPromptChars: null } } } },
+        }),
+      ).toEqual({ maxSkillsPromptChars: 18000 });
+    });
   });
 });

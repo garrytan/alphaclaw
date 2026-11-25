@@ -5,12 +5,23 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.340] - 2026-11-25
+## [0.10.341] - 2026-11-25
 
 A webhook can now check that a delivery really came from AgentPhone, so texts and call events sent to a phone number on AgentPhone can reach the agent through AlphaClaw's `/hooks` without the shared webhook token.
 
 ### Added
 - **AgentPhone** sender verification (Webhooks → a hook → Sender verification). Paste the secret AgentPhone returned when the webhook was created or last updated. A delivery passes only when `x-webhook-signature` is `sha256=<hex>` of HMAC-SHA256 over `<x-webhook-timestamp>.<exact body bytes>`, keyed by that whole secret string, and the timestamp is within 5 minutes. The gateway gets the exact bytes, the signature and the signed timestamp; AgentPhone's `x-webhook-id` and `x-webhook-event` are not signed, so they are not forwarded, and a replay is recognized by its signature (kept 1 hour, beyond the 5-minute window). A second signing key can be added like any other signed preset.
+
+## [0.10.340] - 2026-11-25
+
+The Doctor no longer warns about skills bloat when a skills limit is set to 0, which switches OpenClaw's skills list off, and it now says so when that list is off and gbrain's skill resolver isn't enabled to suggest skills instead.
+
+### Changed
+- The Doctor reads the main agent's effective skills limits the way OpenClaw 2026.11.4 does: the agent's own `skillsLimits.maxSkillsPromptChars` wins over `skills.limits`, and an explicit 0 is kept. Before, it read `skills.limits` only and treated 0 as "use the default".
+- With `maxSkillsInPrompt` or `maxSkillsPromptChars` at 0, the Doctor skips the skills-bloat estimate, because no skills are listed and there is nothing to trim.
+
+### Added
+- A P2 card, "OpenClaw's skills list is switched off and nothing suggests skills instead", for a skills limit of 0 while the `gbrain-skill-resolver` plugin is not enabled. The plugin counts as enabled when OpenClaw would load it, which means its `plugins.entries` row or `plugins.allow` entry exists, it is not disabled or denied, plugins are on, and a non-empty allow list names it. The card changes no files. It suggests turning the resolver on or removing the 0.
 
 ## [0.10.339] - 2026-11-24
 
