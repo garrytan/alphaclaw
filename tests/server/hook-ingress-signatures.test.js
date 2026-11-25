@@ -606,12 +606,8 @@ describe("agentphone", () => {
   it("keys replays on the signed body, so a retry re-signed with a fresh timestamp is the same delivery", () => {
     const bodyHash = crypto.createHash("sha256").update(kBody).digest("hex");
     const first = verify({ preset: "agentphone", secret: kAgentphoneSecret, headers: agentphoneHeaders() });
-    const later = verify({
-      preset: "agentphone",
-      secret: kAgentphoneSecret,
-      nowMs: kNowMs + 30 * 60 * 1000,
-      headers: agentphoneHeaders({ ts: String(kNowSec + 30 * 60) }),
-    });
+    const laterHeaders = agentphoneHeaders({ ts: String(kNowSec + 30 * 60) });
+    const later = verify({ preset: "agentphone", secret: kAgentphoneSecret, nowMs: kNowMs + 30 * 60 * 1000, headers: laterHeaders });
     expect([first.ok, later.ok]).toEqual([true, true]);
     expect(first.replayKey).toBe(bodyHash);
     expect(later.replayKey).toBe(bodyHash);
