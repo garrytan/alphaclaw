@@ -888,6 +888,22 @@ describe("a launch after something edited the applied files (GST-3061)", () => {
   const kRepo = path.resolve(__dirname, "../..");
   // gateway.js reads its state dir from ALPHACLAW_ROOT_DIR at load, so each
   // launch runs in its own node process rooted at the install's root dir.
+  // That process and the re-apply it spawns see only the gateways this file
+  // started in /proc: a bare "openclaw-gateway" title anywhere on the machine
+  // (another test file's fake gateway under a parallel run) counts as a
+  // gateway running from every install.
+  const ourGatewayPids = new Set();
+  const procViewPreload = () => {
+    const file = path.join(tmp("pkg-proc-view-"), "proc-view.js");
+    write(
+      file,
+      [
+        `const fs = require("fs"); const readdirSync = fs.readdirSync; const visible = new Set(${JSON.stringify([...ourGatewayPids])});`,
+        'fs.readdirSync = (dir, ...rest) => (dir === "/proc" ? readdirSync(dir, ...rest).filter((name) => visible.has(name)) : readdirSync(dir, ...rest));',
+      ].join("\n"),
+    );
+    return `--require ${JSON.stringify(file)}`;
+  };
   const prepareLaunch = (install, env, args) => {
     const script = [
       `require(${JSON.stringify(path.join(kRepo, "lib/server/self-dependency"))}).resolveSelfDependency = () => ({ installDir: ${JSON.stringify(install.installDir)} });`,
@@ -898,7 +914,7 @@ describe("a launch after something edited the applied files (GST-3061)", () => {
       `gateway.prepareGatewayLaunch(${JSON.stringify(args)}).then((result) => done({ result }), (error) => done({ error: { name: error.name, reason: error.reason, message: error.message } }));`,
     ].join("\n");
     const run = require("child_process").spawnSync(process.execPath, ["-e", script], {
-      env: { ...process.env, ...env, ALPHACLAW_ROOT_DIR: install.rootDir, HOME: install.rootDir, ALPHACLAW_GATEWAY_PRELAUNCH_HOOK: "" },
+      env: { ...process.env, ...env, ALPHACLAW_ROOT_DIR: install.rootDir, HOME: install.rootDir, ALPHACLAW_GATEWAY_PRELAUNCH_HOOK: "", NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} ${procViewPreload()}`.trim() },
       encoding: "utf8",
       timeout: 120000,
     });
@@ -922,6 +938,7 @@ describe("a launch after something edited the applied files (GST-3061)", () => {
   const startGatewayFrom = (packageDir) =>
     new Promise((resolve) => {
       const child = require("child_process").spawn(process.execPath, ["-e", 'console.log("ready"); setInterval(() => {}, 1000);', path.join(packageDir, "openclaw.mjs"), "gateway", "run"], { stdio: ["ignore", "pipe", "ignore"] });
+      ourGatewayPids.add(String(child.pid));
       child.stdout.once("data", () => resolve(child));
     });
 

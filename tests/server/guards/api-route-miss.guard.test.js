@@ -1,4 +1,5 @@
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
 const os = require("os");
@@ -24,15 +25,22 @@ const kPassword = "route-miss-guard-pass";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const acquirePort = () =>
-  new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
+// Ports below the kernel's ephemeral range (32768+ on Linux, 49152+ on
+// macOS). A port listen(0) hands out goes back into that pool when the probe
+// closes, so a parallel worker's listen(0) or outgoing connection can take it
+// before the server binds it; neither ever draws a port below the range.
+const acquirePort = async () => {
+  for (let tries = 0; tries < 50; tries += 1) {
+    const port = 20000 + crypto.randomInt(12768);
+    const free = await new Promise((resolve) => {
+      const srv = net.createServer();
+      srv.once("error", () => resolve(false));
+      srv.listen(port, "0.0.0.0", () => srv.close(() => resolve(true)));
     });
-  });
+    if (free) return port;
+  }
+  throw new Error("no free port below the ephemeral range");
+};
 
 let tmpDir = "";
 let openclawDir = "";
@@ -82,23 +90,44 @@ beforeAll(async () => {
   fs.writeFileSync(path.join(openclawDir, ".alphaclaw", "agent-admin-token"), `${agentToken}\n`, {
     mode: 0o600,
   });
-  const port = await acquirePort();
-  base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ["-e", `require(${JSON.stringify(kServerPath)})`], {
-    env: {
-      ...process.env,
-      SETUP_PASSWORD: kPassword,
-      PORT: String(port),
-      ALPHACLAW_ROOT_DIR: rootDir,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  child.stdout.on("data", (data) => {
-    output += data;
-  });
-  child.stderr.on("data", (data) => {
-    output += data;
-  });
+  // Health and every call go to the port only once the server itself logs
+  // that it listens there; a port another process took first starts it again
+  // on a fresh one.
+  for (let attempt = 1; !base; attempt += 1) {
+    let port = await acquirePort();
+    while (port === deadGatewayPort) port = await acquirePort();
+    output = "";
+    child = spawn(process.execPath, ["-e", `require(${JSON.stringify(kServerPath)})`], {
+      env: {
+        ...process.env,
+        SETUP_PASSWORD: kPassword,
+        PORT: String(port),
+        ALPHACLAW_ROOT_DIR: rootDir,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let timer = null;
+    const bind = await new Promise((resolve) => {
+      const onData = (data) => {
+        output += data;
+        if (output.includes(`Express listening on :${port}`)) resolve("listening");
+        else if (output.includes(`Port ${port} in use`)) resolve("in_use");
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.once("exit", () => resolve("exited"));
+      timer = setTimeout(() => resolve("timeout"), 20000);
+    });
+    clearTimeout(timer);
+    if (bind === "listening") {
+      base = `http://127.0.0.1:${port}`;
+    } else if (bind === "in_use" && attempt < 5) {
+      child.kill("SIGKILL");
+      await new Promise((resolve) => (child.exitCode === null && child.signalCode === null ? child.once("exit", resolve) : resolve()));
+    } else {
+      throw new Error(`server did not listen on :${port} (${bind}, attempt ${attempt}). Output:\n${output}`);
+    }
+  }
   let healthy = false;
   for (let i = 0; i < 200 && !healthy; i += 1) {
     try {
