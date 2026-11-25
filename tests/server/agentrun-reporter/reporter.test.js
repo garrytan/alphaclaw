@@ -240,6 +240,48 @@ describe("agentrun reporter: queue and sender", () => {
     expect(outbox.counts()).toEqual({ sent: 3 });
   });
 
+  it("sends no contents for a listed cron turn that reached a Google tool through the dispatcher (GST-3848)", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r-gw2", sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+    handlers.model_call_started({ runId: "r-gw2", sessionKey, provider: "anthropic", model: "claude" }, { runId: "r-gw2", sessionKey, agentId: "main" });
+    handlers.after_tool_call({ toolName: "dispatch_action", params: { id: "openclaw:google-workspace:gw_gmail_search_threads", args: {} }, runId: "r-gw2", durationMs: 5 }, { ...ctx, toolName: "dispatch_action" });
+    handlers.llm_output({ runId: "r-gw2", provider: "anthropic", model: "claude", assistantTexts: ["inbox " + kMarker], usage: { input: 1, output: 1 } }, ctx);
+    handlers.agent_end({ runId: "r-gw2", success: false, error: "boom " + kMarker, durationMs: 50 }, ctx);
+    const spool = readSpool(rootDir);
+    expect(spool).not.toContain(kMarker);
+    expect(spool).toContain("gw_gmail_search_threads");
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the inbox" } }] });
+    expect(source.ingest().added).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    expect(fake.requests.map((request) => request.body).join("\n")).not.toContain("Summarize the inbox");
+  });
+
+  it("sends no contents for a listed cron turn that used a Google Workspace tool (GST-3848)", async () => {
+    const rootDir = makeRoot();
+    const { handlers } = registerPlugin(rootDir);
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r-gw", sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+    handlers.model_call_started({ runId: "r-gw", sessionKey, provider: "anthropic", model: "claude" }, { runId: "r-gw", sessionKey, agentId: "main" });
+    handlers.llm_output({ runId: "r-gw", provider: "anthropic", model: "claude", assistantTexts: [`before ${kMarker}`], usage: { input: 1, output: 1 } }, ctx);
+    handlers.after_tool_call({ toolName: "gw_gmail_search_threads", params: {}, runId: "r-gw", durationMs: 5 }, { ...ctx, toolName: "gw_gmail_search_threads" });
+    handlers.llm_output({ runId: "r-gw", provider: "anthropic", model: "claude", assistantTexts: [`inbox ${kMarker}`], usage: { input: 1, output: 1 } }, ctx);
+    handlers.agent_end({ runId: "r-gw", success: false, error: `boom ${kMarker}`, durationMs: 50 }, ctx);
+    const spool = readSpool(rootDir);
+    expect(spool).not.toContain(`inbox ${kMarker}`);
+    expect(spool).not.toContain(`boom ${kMarker}`);
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the inbox" } }] });
+    expect(source.ingest().added).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    const wire = fake.requests.map((request) => request.body).join("\n");
+    expect(wire).not.toContain(kMarker);
+    expect(wire).not.toContain("Summarize the inbox");
+    expect(wire).toContain("1 tool call");
+  });
+
   it("keeps every turn while AgentRun is down for 30 hours and then reports each once", async () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);
