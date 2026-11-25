@@ -293,6 +293,62 @@ describe("agentrun reporter: queue and sender", () => {
     expect(never.some((record) => record.status === "completed")).toBe(false);
   });
 
+  it("sends no contents for a listed cron turn whose Google marker never landed, even when its file reads as finished (GST-3848)", async () => {
+    const rootDir = makeRoot();
+    const refusing = { ...fs, appendFileSync: (file, data, options) => {
+      if (String(data).includes("gw_gmail_get_thread")) throw new Error("ENOSPC");
+      return fs.appendFileSync(file, data, options);
+    } };
+    const { handlers } = registerPlugin(rootDir, { fsModule: refusing });
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r-gw6", sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+    handlers.model_call_started({ runId: "r-gw6", sessionKey, provider: "anthropic", model: "claude" }, { runId: "r-gw6", sessionKey, agentId: "main" });
+    handlers.llm_output({ runId: "r-gw6", provider: "anthropic", model: "claude", assistantTexts: ["early " + kMarker], usage: { input: 1, output: 1 } }, ctx);
+    for (let n = 0; n < 500; n += 1) handlers.after_tool_call({ toolName: "read", params: {}, runId: "r-gw6", durationMs: 1 }, { ...ctx, toolName: "read" });
+    handlers.after_tool_call({ toolName: "gw_gmail_get_thread", params: {}, runId: "r-gw6", durationMs: 5 }, { ...ctx, toolName: "gw_gmail_get_thread" });
+    handlers.llm_output({ runId: "r-gw6", provider: "anthropic", model: "claude", assistantTexts: ["late"], usage: { input: 1, output: 1 }, lastAssistant: { stopReason: "stop" } }, ctx);
+    handlers.agent_end({ runId: "r-gw6", success: true, durationMs: 50 }, ctx);
+    const records = readSpool(rootDir).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(records[records.length - 1].t).toBe("llm");
+    expect(records.some((record) => record.t === "end")).toBe(false);
+    const clock = Date.now() + 31_000;
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake, now: () => clock, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the inbox" } }] });
+    expect(source.ingest().added).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    const wire = fake.requests.map((request) => request.body).join("\n");
+    expect(wire).not.toContain(kMarker);
+    expect(wire).not.toContain("Summarize the inbox");
+  });
+
+  it("sends no contents when a torn Google marker line is lost, because the end record says the turn used Google (GST-3848)", async () => {
+    const rootDir = makeRoot();
+    let torn = false;
+    const tearing = { ...fs, appendFileSync: (file, data, options) => {
+      if (!torn && String(data).includes("gw_gmail_get_thread")) {
+        torn = true;
+        fs.appendFileSync(file, String(data).slice(0, 12), options);
+        throw new Error("ENOSPC");
+      }
+      return fs.appendFileSync(file, data, options);
+    } };
+    const { handlers } = registerPlugin(rootDir, { fsModule: tearing });
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r-gw7", sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+    handlers.model_call_started({ runId: "r-gw7", sessionKey, provider: "anthropic", model: "claude" }, { runId: "r-gw7", sessionKey, agentId: "main" });
+    handlers.llm_output({ runId: "r-gw7", provider: "anthropic", model: "claude", assistantTexts: ["early " + kMarker], usage: { input: 1, output: 1 } }, ctx);
+    for (let n = 0; n < 500; n += 1) handlers.after_tool_call({ toolName: "read", params: {}, runId: "r-gw7", durationMs: 1 }, { ...ctx, toolName: "read" });
+    handlers.after_tool_call({ toolName: "gw_gmail_get_thread", params: {}, runId: "r-gw7", durationMs: 5 }, { ...ctx, toolName: "gw_gmail_get_thread" });
+    handlers.agent_end({ runId: "r-gw7", success: true, durationMs: 50 }, ctx);
+    const fake = createFakeAgentrun();
+    const { source, sender } = makePipeline(rootDir, { fake, contentCron: ["brief"], cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the inbox" } }] });
+    expect(source.ingest().added).toBe(1);
+    expect(await sender.sendDue()).toMatchObject({ sent: 1 });
+    const wire = fake.requests.map((request) => request.body).join("\n");
+    expect(wire).not.toContain(kMarker);
+    expect(wire).not.toContain("Summarize the inbox");
+  });
+
   it("sends no contents for a listed cron turn that reached a Google tool through the dispatcher (GST-3848)", async () => {
     const rootDir = makeRoot();
     const { handlers } = registerPlugin(rootDir);
@@ -1496,6 +1552,25 @@ describe("agentrun reporter: live runs", () => {
     expect(fake.runs.size).toBe(1);
     return [...fake.runs.values()][0];
   };
+
+  it("completes a listed cron turn seen live with its contents and complete evidence", async () => {
+    const s = setup({ env: { ALPHACLAW_AGENTRUN_CONTENT_CRON: "brief" }, cronJobs: [{ id: "brief", name: "Morning brief", payload: { kind: "agentTurn", message: "Summarize the news" } }] });
+    const sessionKey = "agent:main:cron:brief";
+    const ctx = { runId: "r-live", sessionKey, trigger: "cron", jobId: "brief", agentId: "main", channel: "telegram" };
+    s.handlers.model_call_started({ runId: "r-live" }, { runId: "r-live", sessionKey, agentId: "main" });
+    s.handlers.after_tool_call({ toolName: "read", runId: "r-live", durationMs: 5 }, ctx);
+    await s.tick();
+    const run = onlyRun(s.fake);
+    expect(run.completion).toBe(null);
+    s.handlers.agent_end({ runId: "r-live", success: true, durationMs: 1000 }, ctx);
+    s.handlers.llm_output({ runId: "r-live", provider: "anthropic", model: "claude", assistantTexts: ["the news " + kMarker], usage: { input: 10, output: 2 } }, ctx);
+    s.at(31_000);
+    await s.tick();
+    s.at(15_000);
+    await s.tick();
+    expect(run.completion).toMatchObject({ status: "completed", evidence_complete: true });
+    expect(JSON.stringify(run.completion)).toContain(kMarker);
+  });
 
   it("starts a live run only once a hook decided its class, never from model_call_started alone", async () => {
     const s = setup();

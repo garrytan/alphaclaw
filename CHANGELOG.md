@@ -5,6 +5,18 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.347] - 2026-11-25
+
+Closes the last narrow gaps the final review of the Google Workspace hardening found, before the plugin is switched on.
+
+### Fixed
+- A write's request id now stays reserved while a call under it is still in flight, even past its 24-hour expiry, so an identical write in that window replays it instead of starting a second one. Bookkeeping for identical writes in flight is kept per request id, so an older call can never release a newer id.
+- A late owner-pause reply to one of two identical writes no longer turns the other's unknown outcome back into a 10-minute pause that could expire or be evicted, an owner pause becomes a pause only when no identical call is still in flight, and a refusal on one identical write no longer lets go of an id the other left unknown.
+- An older call that ends after a newer identical write took a new id (for example after the account was revoked and reconnected) never drops or replaces that newer id.
+
+### Security
+- AgentRun carries a listed cron run's contents only for a turn whose end record says it used no Google tool (and a cron run only when every turn folded into it qualifies). The plugin writes that verdict from what the run did, so a Google marker line that never landed or was torn by a failed write can no longer open contents, and a turn with no end record, read as finished or interrupted, goes out as metadata only. A turn whose end OpenClaw never reported also goes out without contents. A listed cron turn seen live still completes with complete evidence.
+
 ## [0.10.346] - 2026-11-25
 
 The Google Workspace plugin is now safe to switch on: a write can no longer be sent twice or lose track of its outcome in the edge cases the final review found, large replies no longer stall the gateway, and a Google call past a run's tool cap still keeps that run's text out of AgentRun.
