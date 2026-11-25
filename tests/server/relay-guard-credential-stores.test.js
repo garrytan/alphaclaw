@@ -34,8 +34,12 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     const gbrain = path.join(ctx.rootDir, "gbrain-home");
     fs.mkdirSync(path.join(gbrain, "run"), { recursive: true });
     fs.writeFileSync(path.join(gbrain, "credentials.json"), "x");
-    fs.writeFileSync(path.join(gbrain, "run", "google-mint.sock"), "");
+    fs.writeFileSync(path.join(gbrain, "run", "google.sock"), "");
     process.env.GBRAIN_HOME = gbrain;
+    const config = path.join(gbrain, ".gbrain");
+    fs.mkdirSync(path.join(config, "run"), { recursive: true });
+    fs.writeFileSync(path.join(config, "credentials.json"), "x");
+    fs.writeFileSync(path.join(config, "run", "google.sock"), "");
     const state = path.join(stateDir || path.join(ctx.rootDir, ".openclaw"), "state");
     if (stateDir) process.env.OPENCLAW_STATE_DIR = stateDir;
     else delete process.env.OPENCLAW_STATE_DIR;
@@ -59,14 +63,18 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     ["a glob for the state folder's name", "exec", { command: "cat " + path.dirname(state) + "/st*/openclaw.sqlite-shm" }],
     ["a workdir in the state folder", "exec", { command: "head -c 4096 openclaw.sqlite", workdir: state }],
     ["read tool on GBrain's vault", "read", { path: gbrain + "/credentials.json" }],
+    ["read tool on the vault in GBrain's config dir", "read", { path: gbrain + "/.gbrain/credentials.json" }],
+    ["cat of the vault through GBRAIN_HOME's config dir", "exec", { command: "cat $GBRAIN_HOME/.gbrain/credentials.json" }],
+    ["a talk to the broker socket in the config dir", "exec", { command: "socat - UNIX-CONNECT:" + gbrain + "/.gbrain/run/google.sock" }],
+    ["a glob in the config dir's run folder", "exec", { command: "nc -U " + gbrain + "/.gbrain/run/g*" }],
     ["cat of GBrain's vault", "exec", { command: "cat " + gbrain + "/credentials.json" }],
     ["cat of the vault through GBRAIN_HOME", "exec", { command: "cat $GBRAIN_HOME/credentials.json" }],
     ["cat of the vault through ~/.gbrain", "exec", { command: "cat ~/.gbrain/credentials.json" }],
-    ["a talk to the broker socket", "exec", { command: "socat - UNIX-CONNECT:" + gbrain + "/run/google-mint.sock" }],
-    ["a curl to the broker socket by name", "exec", { command: "curl --unix-socket /somewhere/google-mint.sock http://x/" }],
+    ["a talk to the broker socket", "exec", { command: "socat - UNIX-CONNECT:" + gbrain + "/run/google.sock" }],
+    ["a curl to the broker socket by name", "exec", { command: "curl --unix-socket /somewhere/google.sock http://x/" }],
     ["a glob in the broker folder", "exec", { command: "nc -U " + gbrain + "/run/*" }],
     ["cd into GBrain's home, then cat", "exec", { command: "cd " + gbrain + " && cat credentials.json" }],
-    ["a workdir in GBrain's run folder", "exec", { command: "nc -U google-mint.sock", workdir: gbrain + "/run" }],
+    ["a workdir in GBrain's run folder", "exec", { command: "nc -U google.sock", workdir: gbrain + "/run" }],
     ["read tool on the Google Workspace audit", "read", { path: google + "/audit.jsonl" }],
     ["cat of the Google Workspace audit", "exec", { command: "cat " + google + "/audit.jsonl" }],
     ["cd ../../google-workspace from the workspace", "exec", { command: "cd ../../google-workspace && cat audit.jsonl" }],
@@ -96,7 +104,7 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     ["rm of the -wal file", "exec", { command: "rm " + state + "/openclaw.sqlite-wal" }],
     ["a sqlite update of the OAuth stores", "exec", { command: "cd " + state + " && sqlite3 openclaw.sqlite 'delete from mcp_oauth_stores'" }],
     ["overwrite GBrain's vault", "exec", { command: "echo {} > " + gbrain + "/credentials.json" }],
-    ["rm of the broker socket", "exec", { command: "rm " + gbrain + "/run/google-mint.sock" }],
+    ["rm of the broker socket", "exec", { command: "rm " + gbrain + "/run/google.sock" }],
     ["a write tool on the Google Workspace audit", "write", { path: google + "/audit.jsonl", content: "" }],
   ];
   const ordinary = ({ gbrain, google }) => [
