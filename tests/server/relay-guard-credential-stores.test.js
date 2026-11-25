@@ -45,12 +45,20 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     else delete process.env.OPENCLAW_STATE_DIR;
     fs.mkdirSync(state, { recursive: true });
     for (const suffix of ["", "-wal", "-shm"]) fs.writeFileSync(path.join(state, "openclaw.sqlite" + suffix), "x");
+    const agentDb = path.join(path.dirname(state), "agents", "ops", "agent");
+    fs.mkdirSync(agentDb, { recursive: true });
+    for (const suffix of ["", "-wal"]) fs.writeFileSync(path.join(agentDb, "openclaw-agent.sqlite" + suffix), "x");
     const google = path.join(ctx.rootDir, "google-workspace");
     fs.mkdirSync(google, { recursive: true });
     fs.writeFileSync(path.join(google, "audit.jsonl"), "x");
-    return { gbrain, state, google };
+    return { gbrain, state, google, agentDb };
   };
-  const reads = ({ gbrain, state, google }) => [
+  const reads = ({ gbrain, state, google, agentDb }) => [
+    ["read tool on an agent's own database", "read", { path: agentDb + "/openclaw-agent.sqlite" }],
+    ["read tool on an agent database's -wal file", "read", { path: agentDb + "/openclaw-agent.sqlite-wal" }],
+    ["read tool on an agent database kept elsewhere", "read", { path: "/srv/agents/ops/openclaw-agent.sqlite" }],
+    ["sqlite dump of an agent's auth profiles", "exec", { command: "sqlite3 " + agentDb + "/openclaw-agent.sqlite .dump" }],
+    ["a glob over every agent's database", "exec", { command: "strings " + path.dirname(path.dirname(agentDb)) + "/*/agent/*.sqlite" }],
     ["read tool on the state database", "read", { path: state + "/openclaw.sqlite" }],
     ["read tool on the state database's -wal file", "read", { path: state + "/openclaw.sqlite-wal" }],
     ["read tool on the state database's -shm file", "read", { path: state + "/openclaw.sqlite-shm" }],
@@ -107,7 +115,7 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     ["rm of the broker socket", "exec", { command: "rm " + gbrain + "/run/google.sock" }],
     ["a write tool on the Google Workspace audit", "write", { path: google + "/audit.jsonl", content: "" }],
   ];
-  const ordinary = ({ gbrain, google }) => [
+  const ordinary = ({ gbrain, google, state }) => [
     ["ls of GBrain's run folder", "exec", { command: "ls " + gbrain + "/run" }],
     ["ls of the Google Workspace folder", "exec", { command: "ls -la " + google }],
     ["a credentials.json of another app", "exec", { command: "cat /tmp/app/credentials.json" }],
@@ -116,6 +124,7 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     ["a note about Google Workspace", "exec", { command: "cat memory/google-workspace-notes.md" }],
     ["a glob in the workspace", "exec", { command: "cat memory/*.md" }],
     ["a process's status", "exec", { command: "cat /proc/1/status" }],
+    ["ls of an agent's folder", "exec", { command: "ls " + path.dirname(path.dirname(state)) + "/.openclaw/agents/ops/agent" }],
   ];
 
   it("refuses an unattested delegate's reads of the credential stores outright, with no row and no notice", async () => {
@@ -140,6 +149,8 @@ describe("relay guard keeps relay sessions away from the box's credential stores
     for (const [label, tool, params] of [...reads(dirs), ...symlinked(ctx, dirs), ...writes(dirs)]) expectRefusedOutright(await ctx.call(run, tool, params), label);
     const db = await ctx.call(run, "read", { path: dirs.state + "/openclaw.sqlite-wal" });
     expect(db.blockReason).toContain("OpenClaw's state database holds tokens for the box's accounts");
+    const agentDb = await ctx.call(run, "read", { path: dirs.agentDb + "/openclaw-agent.sqlite" });
+    expect(agentDb.blockReason).toContain("OpenClaw's state database holds tokens for the box's accounts");
     const vault = await ctx.call(run, "read", { path: dirs.gbrain + "/credentials.json" });
     expect(vault.blockReason).toContain("GBrain's credential store holds tokens for the box's accounts");
     const google = await ctx.call(run, "read", { path: dirs.google + "/audit.jsonl" });
