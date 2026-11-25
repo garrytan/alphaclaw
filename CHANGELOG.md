@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.342] - 2026-11-25
+
+A webhook can now check that a delivery really came from AgentPhone, so texts and call events sent to a phone number on AgentPhone can reach the agent through AlphaClaw's `/hooks` without the shared webhook token.
+
+### Added
+- **AgentPhone** sender verification: open Webhooks, pick a hook and choose AgentPhone under Sender verification. Paste the secret AgentPhone returned when the webhook was created or last updated. A delivery passes only when `x-webhook-signature` is `sha256=<hex>` of HMAC-SHA256 over `<x-webhook-timestamp>.<exact body bytes>`, keyed by that whole secret string, and the timestamp is within 5 minutes. The gateway gets the exact bytes, the signature and the signed timestamp; AgentPhone's `x-webhook-id` and `x-webhook-event` are not signed, so they are not forwarded, and a repeat is recognized by a hash of the signed body, kept 24 hours, so a retry AgentPhone re-signs with a fresh timestamp (the last comes about 21 hours after the first try) does not run the hook again as long as its body is unchanged. A second signing key can be added like any other signed preset.
+
 ## [0.10.341] - 2026-11-25
 
 The relay guard's long-command speed test no longer fails on busy CI runners, and it now checks that the guard's time grows in line with the command's length instead of comparing one timing against a tight fixed limit.
