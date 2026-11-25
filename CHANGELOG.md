@@ -5,13 +5,20 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.342] - 2026-11-25
+## [0.10.343] - 2026-11-25
 
 Two tests that failed only when other tests ran beside them now pass under parallel load: the pinned OpenClaw package tests and the real-server check that unknown API routes answer 404.
 
 ### Fixed
 - Three launch tests in `openclaw-package-override.test.js` ran the real launch path in a child process, which looks through the whole machine's `/proc` for a running gateway. A process titled bare `openclaw-gateway` counts as a gateway running from every install, and two other test files (`gateway-memory-preload`, `gateway-memory-worker-pool-cap`) start such processes, so when they ran at the same time the launch was refused as `deferred` and the three tests failed. With one lookalike process running the file failed 3 of 58 every time. The launch child and the re-apply it starts now see only the gateways the test itself started, through a `--require` preload that filters the `/proc` listing; the test that keeps a gateway running from the tree still sees it and still refuses. 20 of 20 runs passed with a lookalike running, two copies at once and both sibling files beside them.
 - `api-route-miss.guard.test.js` picked its server port by listening on port 0 and closing it, then started the server on that number. The port went back to the kernel's ephemeral pool, so another worker's `listen(0)` or outgoing connection could take it first; the server then logged "Port N in use" and the test never saw it become healthy. With other processes holding ephemeral ports, 7 of 20 runs failed. The test now picks ports below the ephemeral range (20000 to 32767), which `listen(0)` and outgoing connections never hand out, waits for the server's own "listening" line before calling it, and starts again on a fresh port if another process got there first. 20 of 20 runs passed under the same load.
+
+## [0.10.342] - 2026-11-25
+
+A webhook can now check that a delivery really came from AgentPhone, so texts and call events sent to a phone number on AgentPhone can reach the agent through AlphaClaw's `/hooks` without the shared webhook token.
+
+### Added
+- **AgentPhone** sender verification: open Webhooks, pick a hook and choose AgentPhone under Sender verification. Paste the secret AgentPhone returned when the webhook was created or last updated. A delivery passes only when `x-webhook-signature` is `sha256=<hex>` of HMAC-SHA256 over `<x-webhook-timestamp>.<exact body bytes>`, keyed by that whole secret string, and the timestamp is within 5 minutes. The gateway gets the exact bytes, the signature and the signed timestamp; AgentPhone's `x-webhook-id` and `x-webhook-event` are not signed, so they are not forwarded, and a repeat is recognized by a hash of the signed body, kept 24 hours, so a retry AgentPhone re-signs with a fresh timestamp (the last comes about 21 hours after the first try) does not run the hook again as long as its body is unchanged. A second signing key can be added like any other signed preset.
 
 ## [0.10.341] - 2026-11-25
 
