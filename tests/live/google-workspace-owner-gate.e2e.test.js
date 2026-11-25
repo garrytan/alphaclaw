@@ -58,7 +58,7 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
   let telegram;
   let broker;
   let port;
-  let started = false;
+  let launched = new Set();
   const brokerRequests = [];
   const probeStage = new Map();
   const toolResults = new Map();
@@ -150,7 +150,13 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
     const telegramPort = await telegram.listen();
 
     const { OPENCLAW_DIR, kOnboardingMarkerPath } = require("../../lib/server/constants");
-    port = 19600 + Math.floor(Math.random() * 90);
+    const { findPortListenerPids } = require("../../lib/server/gateway-identity");
+    for (let tries = 0; tries < 20; tries += 1) {
+      port = 19600 + Math.floor(Math.random() * 90);
+      if (!(findPortListenerPids?.(port) || []).length) break;
+      port = null;
+    }
+    if (!port) throw new Error("no free port for the gateway");
     const token = "live-gw-gate-token-0000000000000000000";
     const workspace = path.join(OPENCLAW_DIR, "workspace");
     fs.mkdirSync(workspace, { recursive: true });
@@ -188,7 +194,8 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
     process.env.OPENCLAW_GATEWAY_TOKEN = token;
     gateway = require("../../lib/server/gateway");
     await gateway.startGateway();
-    started = true;
+    await waitFor(async () => (findPortListenerPids?.(port) || []).length > 0, 60_000, "the gateway listening on its port");
+    launched = new Set(findPortListenerPids?.(port) || []);
     await waitFor(readyzOk, 180_000, "gateway /readyz 200");
     await waitFor(async () => telegram.polls() > 1, 120_000, "telegram polling the fake Bot API");
   }, 6 * 60 * 1000);
@@ -197,7 +204,8 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
     try {
       await gateway?.stopGatewayForShutdown?.({ budgetMs: 8000 });
     } catch {}
-    for (const pid of started ? require("../../lib/server/gateway-identity").findPortListenerPids?.(port) || [] : []) {
+    for (const pid of require("../../lib/server/gateway-identity").findPortListenerPids?.(port) || []) {
+      if (!launched.has(pid)) continue;
       try {
         process.kill(pid, "SIGKILL");
       } catch {}
