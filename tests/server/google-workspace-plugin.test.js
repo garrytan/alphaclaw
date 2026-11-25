@@ -5,7 +5,7 @@ const path = require("path");
 
 const { createGoogleWorkspacePlugin, dispatchedToolOf } = require("../../lib/plugin/google-workspace");
 const catalog = require("../../lib/plugin/google-workspace/catalog");
-const { resolveSocketPath } = require("../../lib/plugin/google-workspace/broker");
+const { resolveSocketPath, createBrokerClient } = require("../../lib/plugin/google-workspace/broker");
 const { createAudit } = require("../../lib/plugin/google-workspace/audit");
 const { createCaller } = require("../../lib/plugin/google-workspace/call");
 const { kErrors, kBrokerCodes } = require("../../lib/plugin/google-workspace/errors");
@@ -538,10 +538,84 @@ describe("google-workspace plugin (GST-3848)", () => {
         expect(Object.values(left).filter((held) => held.kind === "unknown")).toHaveLength(499);
         expect(Object.values(left).some((held) => held.key === "k-999")).toBe(false);
       });
+
+      it("walks an owner pause through each answer: settled by success or a definite refusal, kept through another refusal, unknown when lost", async () => {
+        const clock = { at: Date.now() };
+        const pause = { reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-p" } };
+        const heldNow = () => Object.values(JSON.parse(fs.readFileSync(holdsFile(), "utf8")));
+        const broker2 = fakeBroker([
+          pause, { reply: okReply() }, { reply: okReply() },
+          pause, { reply: { v: 4, ok: false, code: "tool_error", reason: "tool_failed", message_md: "Invalid" } }, { reply: okReply() },
+          pause, { reply: { v: 4, ok: false, code: "not_connected" } }, { transport: "lost" },
+        ]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        const keys = () => broker2.sent.map((sent) => sent.idempotency_key);
+        expect((await call(caller)).details.code).toBe("gw_owner_confirm");
+        expect(heldNow()).toMatchObject([{ kind: "confirm", until: clock.at + 10 * 60 * 1000 }]);
+        expect((await call(caller)).details.status).toBe("ok");
+        expect(heldNow()).toEqual([]);
+        await call(caller);
+        expect(keys()[1]).toBe(keys()[0]);
+        expect(keys()[2]).not.toBe(keys()[0]);
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.code).toBe("gw_owner_confirm");
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.code).toBe("gw_tool_failed");
+        expect(heldNow()).toEqual([]);
+        await call(caller, { args: { to: "b@example.com" } });
+        expect(keys()[4]).toBe(keys()[3]);
+        expect(keys()[5]).not.toBe(keys()[3]);
+        expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_owner_confirm");
+        expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_not_connected");
+        expect(heldNow()).toMatchObject([{ kind: "confirm", key: keys()[6] }]);
+        expect((await call(caller, { args: { to: "c@example.com" } })).details.code).toBe("gw_outcome_unknown");
+        expect(keys()[8]).toBe(keys()[6]);
+        expect(heldNow()).toMatchObject([{ kind: "unknown", key: keys()[6], until: clock.at + 24 * 60 * 60 * 1000 }]);
+      });
+
+      it("lets an owner pause go after 10 minutes and an unknown outcome after 24 hours", async () => {
+        const clock = { at: Date.now() };
+        const broker2 = fakeBroker([
+          { reply: { v: 4, ok: false, code: "owner_confirm_required", request_id: "req-p" } }, { reply: okReply() },
+          { transport: "lost" }, { transport: "lost" }, { reply: okReply() },
+        ]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile(), now: () => clock.at });
+        const keys = () => broker2.sent.map((sent) => sent.idempotency_key);
+        await call(caller);
+        clock.at += 10 * 60 * 1000 + 1;
+        expect((await call(caller)).details.status).toBe("ok");
+        expect(keys()[1]).not.toBe(keys()[0]);
+        await call(caller, { args: { to: "b@example.com" } });
+        clock.at += 24 * 60 * 60 * 1000 - 1;
+        await call(caller, { args: { to: "b@example.com" } });
+        expect(keys()[3]).toBe(keys()[2]);
+        clock.at += 24 * 60 * 60 * 1000 + 1;
+        expect((await call(caller, { args: { to: "b@example.com" } })).details.status).toBe("ok");
+        expect(keys()[4]).not.toBe(keys()[2]);
+        expect(JSON.parse(fs.readFileSync(holdsFile(), "utf8"))).toEqual({});
+      });
+
+      it("lets an intent go once one identical call succeeded, whatever the other one still in flight gets back", async () => {
+        let finishFirst;
+        let finishSecond;
+        const broker2 = fakeBroker([() => new Promise((resolve) => (finishFirst = resolve)), () => new Promise((resolve) => (finishSecond = resolve)), { reply: okReply() }]);
+        const caller = createCaller({ broker: broker2, holdsFile: holdsFile() });
+        const first = call(caller);
+        const second = call(caller);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(broker2.sent[1].idempotency_key).toBe(broker2.sent[0].idempotency_key);
+        finishFirst({ reply: okReply() });
+        expect((await first).details.status).toBe("ok");
+        finishSecond({ reply: { v: 4, ok: false, code: "rate_limited" } });
+        expect((await second).details.code).toBe("gw_rate_limited");
+        expect(JSON.parse(fs.readFileSync(holdsFile(), "utf8"))).toEqual({});
+        await call(caller);
+        expect(broker2.sent[2].idempotency_key).not.toBe(broker2.sent[0].idempotency_key);
+      });
     });
 
-    it("reads a large reply in many pieces whole", async () => {
-      const text = "x".repeat(4 * 1024 * 1024) + " é";
+    it("reads a large reply in many pieces whole, in linear time", async () => {
+      // 24 MB in 4 KB writes: the old string buffer, searched whole on every
+      // read, took about 3.9 s here; the byte buffer takes about 0.2 s.
+      const text = "x".repeat(24 * 1024 * 1024) + " \u00e9";
       const dir = tempDir("gw-large-");
       const socketPath = path.join(dir, "google.sock");
       const server = net.createServer((conn) => {
@@ -552,10 +626,12 @@ describe("google-workspace plugin (GST-3848)", () => {
       });
       await new Promise((resolve) => server.listen(socketPath, resolve));
       try {
-        const { invoke } = register({ socketPath, rootDir });
+        const client = createBrokerClient({ socketPath });
         const started = Date.now();
-        expect(textOf(await invoke({ toolName: "gw_calendar_list_events", params: {} }))).toBe(text);
-        expect(Date.now() - started).toBeLessThan(5000);
+        const answer = await client.request({ op: "call" });
+        const took = Date.now() - started;
+        expect(answer.reply.result.content[0].text === text).toBe(true);
+        expect(took).toBeLessThan(1500);
       } finally {
         await new Promise((resolve) => server.close(resolve));
         fs.rmSync(dir, { recursive: true, force: true });
