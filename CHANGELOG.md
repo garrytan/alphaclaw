@@ -11,7 +11,7 @@ The Google Workspace plugin is now safe to switch on: a write can no longer be s
 
 ### Fixed
 - A write is not sent when the plugin cannot save its request id (a full or read-only disk); it fails with `gw_journal_failed` and sends nothing. Reads are never saved or replayed: a read that times out fails with `gw_read_unanswered` and the next read gets a fresh id, instead of being pinned to the old one for 24 hours.
-- Two identical writes at once share one request id, and a failed connection on one no longer clears it while the other is still in flight.
+- Two identical writes at once share one request id: a failed connection on one no longer clears it while the other is still in flight, and once one of them succeeds the id is let go when both are done, so a later identical write is sent as new.
 - A broker reply the plugin cannot read as a definite answer (no `ok`, or a code it does not know) now leaves a write's outcome unknown and keeps its request id, instead of reporting a failure the agent would retry under a new id.
 - A replayed write is let go once the broker refuses it for good (a Google tool error, refused arguments or a tool the broker does not allow), so the owner can retry it. Making room for a new saved write never drops one whose outcome is unknown: expired entries go first, then the oldest owner pause, and with no room the new write is not sent.
 - Broker replies are read in linear time, kept as bytes and decoded once, so a large Drive or Docs read no longer blocks the gateway's event loop.
