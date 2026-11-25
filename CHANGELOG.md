@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.344] - 2026-11-25
+## [0.10.345] - 2026-11-25
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.
 
@@ -29,6 +29,14 @@ AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data 
 - The model check knows the new built-in provider `requesty`, so a `requesty` entry without a base URL is reported as not checked instead of as missing its URL.
 - A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
 - Doctor's recovery-copy manifest is still read when OpenClaw 2026.11.5 and later print it; a default run logs it at debug level only, so the copy's size goes unmeasured there.
+
+## [0.10.344] - 2026-11-25
+
+The pinned OpenClaw package tests and the real-server check that unknown API routes answer 404 used to fail only when other tests ran beside them, and now pass under parallel load.
+
+### Fixed
+- Three launch tests in `openclaw-package-override.test.js` ran the real launch path in a child process, which looks through the whole machine's `/proc` for a running gateway. A process titled bare `openclaw-gateway` counts as a gateway running from every install, and two other test files (`gateway-memory-preload`, `gateway-memory-worker-pool-cap`) start such processes, so when they ran at the same time the launch was refused as `deferred` and the three tests failed. With one lookalike process running the file failed 3 of 58 every time. The launch child and the re-apply it starts now see only the gateways the test itself started, through a `--require` preload that filters the `/proc` listing; the test that keeps a gateway running from the tree still sees it and still refuses. 20 of 20 runs passed with a lookalike running, two copies at once and both sibling files beside them.
+- `api-route-miss.guard.test.js` picked its server port by listening on port 0 and closing it, then started the server on that number. The port went back to the kernel's ephemeral pool, so another worker's `listen(0)` or outgoing connection could take it first; the server then logged "Port N in use" and the test never saw it become healthy. With other processes holding ephemeral ports, 7 of 20 runs failed. The test now picks ports below the ephemeral range (20000 to 32767), which `listen(0)` and outgoing connections never hand out, waits for the server's own "listening" line before calling it, and starts again on a fresh port if another process got there first. 20 of 20 runs passed under the same load.
 
 ## [0.10.343] - 2026-11-25
 
