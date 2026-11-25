@@ -7,7 +7,7 @@ Versions follow this repository's `package.json` release counter.
 
 ## [0.10.343] - 2026-11-25
 
-Two tests that failed only when other tests ran beside them now pass under parallel load: the pinned OpenClaw package tests and the real-server check that unknown API routes answer 404.
+The pinned OpenClaw package tests and the real-server check that unknown API routes answer 404 used to fail only when other tests ran beside them, and now pass under parallel load.
 
 ### Fixed
 - Three launch tests in `openclaw-package-override.test.js` ran the real launch path in a child process, which looks through the whole machine's `/proc` for a running gateway. A process titled bare `openclaw-gateway` counts as a gateway running from every install, and two other test files (`gateway-memory-preload`, `gateway-memory-worker-pool-cap`) start such processes, so when they ran at the same time the launch was refused as `deferred` and the three tests failed. With one lookalike process running the file failed 3 of 58 every time. The launch child and the re-apply it starts now see only the gateways the test itself started, through a `--require` preload that filters the `/proc` listing; the test that keeps a gateway running from the tree still sees it and still refuses. 20 of 20 runs passed with a lookalike running, two copies at once and both sibling files beside them.
