@@ -852,9 +852,15 @@ describe("relay guard and link names with a space in them (GST-3439)", () => {
 
 // GST-3439: reading words with real quote state must not make the guard slow
 // on a long command (a 10 KB $'...' word took 1.8 s in review). Each shape
-// below runs through the plugin's hook for the owner's pinned thread; the
-// best of five warm runs finishes under 50 ms (the best, so a parallel test
-// file or a GC pause on a busy CI runner does not decide it).
+// below runs through the plugin's hook for the owner's pinned thread at 10 KB
+// and 100 KB, the two sizes taking turns so a busy runner slows both alike,
+// and the best of seven warm runs of each size counts. The check is linear:
+// ten times the text took 4.3 to 6.9 times as long in 161 measured checks,
+// alone and beside the whole suite, while the best 100 KB time swung from
+// 16 ms to 53 ms (GST-3897, after a 50 ms bound failed on shared CI runners).
+// So the ratio must stay under 15, which a quadratic slip that only
+// quadruples the 100 KB time already breaks (13 to 18 measured), and 100 KB
+// stays under 150 ms.
 describe("relay guard on long commands (GST-3439)", () => {
   let ctx;
   afterEach(() => {
@@ -870,22 +876,28 @@ describe("relay guard on long commands (GST-3439)", () => {
     ["a path of many folders and ..", "cat " + "q/".repeat(size / 4) + "../a/".repeat(size / 10)],
     ["words full of braces and commas", "cat " + "k{x,y}/{z ".repeat(size / 10)],
   ];
-  it("checks a 10 KB and a 100 KB command in the hook in under 50 ms", async () => {
+  it("checks a 10 KB and a 100 KB command in the hook in linear time, under 150 ms", async () => {
     ctx = setup({ env: { ALPHACLAW_RELAY_TRUSTED_BINDINGS: kPinned } });
     const run = await ctx.deliver(ctx.oauthDelegate(kPinned).agent);
-    for (const size of [10000, 100000]) {
-      for (const [label, command] of shapes(size)) {
-        expect(command.length, label).toBeGreaterThanOrEqual(size);
-        let best = Infinity;
-        for (let i = 0; i < 6; i += 1) {
+    const small = shapes(10000);
+    const large = shapes(100000);
+    for (const [index, [label, smallCommand]] of small.entries()) {
+      const largeCommand = large[index][1];
+      expect(smallCommand.length, label).toBeGreaterThanOrEqual(10000);
+      expect(largeCommand.length, label).toBeGreaterThanOrEqual(100000);
+      const best = { small: Infinity, large: Infinity };
+      for (let i = 0; i < 8; i += 1) {
+        for (const [size, command] of [["small", smallCommand], ["large", largeCommand]]) {
           const started = process.hrtime.bigint();
           const result = await ctx.call(run, "exec", { command: command + " " + i });
           const took = Number(process.hrtime.bigint() - started) / 1e6;
-          expect(result, label).toEqual({});
-          if (i > 0) best = Math.min(best, took);
+          expect(result, size + ", " + label).toEqual({});
+          if (i > 0) best[size] = Math.min(best[size], took);
         }
-        expect(best, size + " bytes, " + label).toBeLessThan(50);
       }
+      const timing = label + ": " + best.small.toFixed(1) + " ms at 10 KB, " + best.large.toFixed(1) + " ms at 100 KB";
+      expect(best.large / best.small, timing).toBeLessThan(15);
+      expect(best.large, timing).toBeLessThan(150);
     }
   });
 
