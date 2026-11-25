@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.345] - 2026-11-25
+## [0.10.346] - 2026-11-25
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.
 
@@ -29,6 +29,21 @@ AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data 
 - The model check knows the new built-in provider `requesty`, so a `requesty` entry without a base URL is reported as not checked instead of as missing its URL.
 - A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
 - Doctor's recovery-copy manifest is still read when OpenClaw 2026.11.5 and later print it; a default run logs it at debug level only, so the copy's size goes unmeasured there.
+
+## [0.10.345] - 2026-11-25
+
+The agent can use your Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides and Tasks) on your own turns, through GBrain's Google broker, which holds the account's tokens and makes every Google call. Nobody else who talks to the agent, in a group or a relay session, can reach your account. A scheduled or command-line turn counts as yours when OpenClaw marks it as the owner's, which it does by default for a turn started on the box. It is off until the deployment names the account.
+
+### Added
+- **Google Workspace plugin** (`lib/plugin/google-workspace`): set `ALPHACLAW_GOOGLE_WORKSPACE_ACCOUNTS` (the Google address, deployment env only) and AlphaClaw adds the plugin to `openclaw.json` at the next start. It talks to GBrain's broker socket (`$GBRAIN_HOME/.gbrain/run/google.sock` with `GBRAIN_HOME` read from the deployment environment only, never from AlphaClaw's `.env`, else `~/.gbrain/run/google.sock`, or `ALPHACLAW_GOOGLE_WORKSPACE_SOCKET`), one connection per call so a slow call never holds up another, and text that arrives in pieces is decoded whole, using GBrain's v4 broker protocol, and keeps no Google token or Google client of its own. By default it registers 16 everyday tools (`gw_<product>_<tool>`, for example `gw_calendar_update_event`) plus `gw_describe`, `gw_call` (any of the 62 tools Google's servers offer) and `gw_check_outcome`; `ALPHACLAW_GOOGLE_WORKSPACE_TOOLS=all` registers all 62 for Tool Search. Inputs and descriptions come from Google's live tool list, held in memory for an hour.
+- Only the owner's own turns can call it: OpenClaw's `senderIsOwner`, or in a relay session only the owner's own thread by the relay guard's verdict. A tool call from anyone else, made directly or through OpenClaw's `dispatch_action` or `tool_call` by bare name or catalog id, is refused with `gw_not_owner` before anything reaches the socket, and a call that skipped that check is refused as well. Tested against the real OpenClaw 2026.11.4 gateway: a group member's turn sent nothing to the broker.
+- When Google asks for approval on your own turn, the plugin answers once with "allow once", so normal writes need no extra tap. GBrain's safety pauses (a second invite or share to an outside address, or more than 10 trashes, in one turn) come back as `gw_owner_confirm`: you confirm with `gbrain google approvals` or GBrain's confirm link, and the next call with the same arguments carries on under the same request. The plugin never picks any other choice.
+- Every failure is a tool error with a fixed code, the fix and the next step, never the arguments or a token. After a call whose outcome is unknown, the plugin never resends it on its own: calling again with the same arguments replays the same request, even after a gateway restart (held in `<root>/google-workspace/held.json`, owner-only, without arguments or the address), and `gw_check_outcome` asks GBrain what happened. At 1,200 calls to a product in a day the agent is told to let you know, and at 1,500 that product stops until midnight UTC, both counted from GBrain's own tally.
+- Each call writes one line to `<root>/google-workspace/audit-<day>.jsonl` (time, product, tool, the choices Google offered and the one given, and the outcome, with no arguments, content or account address). Files older than 30 days are deleted at start and daily.
+
+### Security
+- The relay guard opens the Google tools to the owner's own relay thread only, by exact name, and puts them on the never list so `ALPHACLAW_RELAY_DELEGATE_TOOLS` cannot give them to other relay agents. The three `ALPHACLAW_GOOGLE_WORKSPACE_*` settings are deployment env only and count as relay trust settings, so no agent can switch the plugin on or point it at another socket.
+- The AgentRun reporter never sends the text of a turn that used a Google Workspace tool, even for a cron job listed in `ALPHACLAW_AGENTRUN_CONTENT_CRON`.
 
 ## [0.10.344] - 2026-11-25
 

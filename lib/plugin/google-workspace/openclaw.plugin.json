@@ -1,0 +1,111 @@
+{
+  "id": "google-workspace",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "gw_gmail_search_threads",
+      "gw_gmail_get_thread",
+      "gw_gmail_get_message",
+      "gw_gmail_list_drafts",
+      "gw_gmail_get_draft",
+      "gw_gmail_list_labels",
+      "gw_gmail_create_draft",
+      "gw_gmail_create_label",
+      "gw_gmail_label_thread",
+      "gw_gmail_unlabel_thread",
+      "gw_gmail_label_message",
+      "gw_gmail_unlabel_message",
+      "gw_gmail_update_message_labels",
+      "gw_gmail_apply_sensitive_thread_label",
+      "gw_gmail_apply_sensitive_message_label",
+      "gw_gmail_trash_thread",
+      "gw_gmail_untrash_thread",
+      "gw_gmail_trash_message",
+      "gw_gmail_untrash_message",
+      "gw_gmail_mark_thread_spam",
+      "gw_gmail_unmark_thread_spam",
+      "gw_gmail_mark_message_spam",
+      "gw_gmail_unmark_message_spam",
+      "gw_calendar_list_calendars",
+      "gw_calendar_list_events",
+      "gw_calendar_search_events",
+      "gw_calendar_get_event",
+      "gw_calendar_suggest_time",
+      "gw_calendar_create_event",
+      "gw_calendar_update_event",
+      "gw_calendar_delete_event",
+      "gw_calendar_respond_to_event",
+      "gw_drive_search_files",
+      "gw_drive_list_recent_files",
+      "gw_drive_get_file_metadata",
+      "gw_drive_get_file_permissions",
+      "gw_drive_read_file_content",
+      "gw_drive_download_file_content",
+      "gw_drive_copy_file",
+      "gw_drive_create_file",
+      "gw_drive_upload_file_revision",
+      "gw_docs_read_doc",
+      "gw_docs_update_doc",
+      "gw_sheets_get_spreadsheet",
+      "gw_sheets_get_values",
+      "gw_sheets_update_values",
+      "gw_sheets_update_formulas",
+      "gw_sheets_insert_dimension",
+      "gw_sheets_update_spreadsheet",
+      "gw_slides_read_presentation",
+      "gw_slides_read_slide_page",
+      "gw_slides_read_slide_page_thumbnail",
+      "gw_slides_update_presentation",
+      "gw_tasks_list_task_lists",
+      "gw_tasks_list_tasks",
+      "gw_tasks_get_task",
+      "gw_tasks_create_task",
+      "gw_tasks_update_task",
+      "gw_tasks_complete_task",
+      "gw_tasks_uncomplete_task",
+      "gw_tasks_delete_task",
+      "gw_tasks_undelete_task",
+      "gw_describe",
+      "gw_call",
+      "gw_check_outcome"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "_alphaclawManaged": {
+        "type": "string"
+      },
+      "rootDir": {
+        "type": "string"
+      },
+      "accounts": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "toolSurface": {
+        "type": "string",
+        "enum": [
+          "core",
+          "all"
+        ]
+      },
+      "socketPath": {
+        "type": "string"
+      },
+      "dailyNoticeAt": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "dailyStopAt": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  }
+}
