@@ -3,7 +3,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { buildDeterministicCards } = require("../../lib/server/doctor/deterministic-checks");
+const {
+  buildDeterministicCards,
+  isSkillResolverEnabled,
+} = require("../../lib/server/doctor/deterministic-checks");
 const { analyzeBootstrapContext } = require("../../lib/server/doctor/bootstrap-context");
 const {
   kCurrentContextProfile,
@@ -507,6 +510,45 @@ describe("server/doctor/deterministic-checks", () => {
         "det:skills-bloat:over",
       ),
     ).toMatchObject({ priority: "P1" });
+  });
+
+  it("treats a skills limit of 0 as the listing switched off, not as bloat", () => {
+    for (let index = 0; index < 40; index += 1) {
+      write(
+        workspaceRoot,
+        `skills/many-${index}/SKILL.md`,
+        `---\nname: many-${index}\ndescription: ${"d".repeat(400)}\n---\nbody`,
+      );
+    }
+    expect(findSkillsBloatCard(build({ skillsLimits: { maxSkillsPromptChars: 3000 } }))).toBeTruthy();
+
+    for (const skillsLimits of [{ maxSkillsInPrompt: 0 }, { maxSkillsPromptChars: 0 }]) {
+      const withResolver = build({ skillsLimits, skillResolverEnabled: true });
+      expect(findSkillsBloatCard(withResolver)).toBeUndefined();
+      expect(findCard(withResolver, "det:skills-listing-off")).toBeUndefined();
+
+      const withoutResolver = build({ skillsLimits });
+      expect(findSkillsBloatCard(withoutResolver)).toBeUndefined();
+      const card = findCard(withoutResolver, "det:skills-listing-off");
+      expect(card).toMatchObject({ priority: "P2", category: "skills", targetPaths: [] });
+      expect(card.evidence[0].text).toBe(`${Object.keys(skillsLimits)[0]}: 0`);
+    }
+
+    expect(findCard(build({}), "det:skills-listing-off")).toBeUndefined();
+    expect(findCard(build({ skillsLimits: { maxSkillsInPrompt: null } }), "det:skills-listing-off")).toBeUndefined();
+  });
+
+  it("counts gbrain-skill-resolver as enabled only when OpenClaw would load it", () => {
+    const id = "gbrain-skill-resolver";
+    expect(isSkillResolverEnabled({})).toBe(false);
+    expect(isSkillResolverEnabled({ plugins: { entries: {} } })).toBe(false);
+    expect(isSkillResolverEnabled({ plugins: { entries: { [id]: {} } } })).toBe(true);
+    expect(isSkillResolverEnabled({ plugins: { entries: { [id]: { enabled: true } } } })).toBe(true);
+    expect(isSkillResolverEnabled({ plugins: { entries: { [id]: { enabled: false } } } })).toBe(false);
+    expect(isSkillResolverEnabled({ plugins: { enabled: false, entries: { [id]: {} } } })).toBe(false);
+    expect(isSkillResolverEnabled({ plugins: { deny: [id], entries: { [id]: {} } } })).toBe(false);
+    expect(isSkillResolverEnabled({ plugins: { allow: ["other"], entries: { [id]: {} } } })).toBe(false);
+    expect(isSkillResolverEnabled({ plugins: { allow: [id], entries: { [id]: {} } } })).toBe(true);
   });
 
   it("counts YAML block-scalar skill descriptions toward the prompt estimate", () => {
