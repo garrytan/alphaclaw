@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.342] - 2026-11-25
+## [0.10.343] - 2026-11-25
 
 Agent Relay sessions can no longer read or change these files on the box that hold account tokens: OpenClaw's state database (where it keeps MCP OAuth tokens) and each agent's own database (its model auth profiles), GBrain's credential store and its broker socket folder, and AlphaClaw's Google Workspace folder. Reading a process's command line from /proc is now refused the same way as its environment.
 
@@ -13,6 +13,13 @@ Agent Relay sessions can no longer read or change these files on the box that ho
 - The relay guard refuses a read, a shell command or input typed into a running process that reaches OpenClaw's state database (`state/openclaw.sqlite` under `$OPENCLAW_STATE_DIR`, else `<root>/.openclaw`) or its `-wal`, `-shm` and `-journal` files, an agent's `agents/<id>/agent/openclaw-agent.sqlite` (and a file of either name wherever it lies), GBrain's `credentials.json` or `run/` folder, where its broker socket lives (in GBrain's config dir `$GBRAIN_HOME/.gbrain`, else `~/.gbrain`, and in `$GBRAIN_HOME` itself), or `<root>/google-workspace/`. It follows paths the way the guest notes broker's check does: by name, `cd`, symlinks, globs and an exec's `workdir`. This holds for every relay agent, the owner's own thread included, and asks nobody. The refusal names the store and says it holds tokens for the box's accounts. A plain listing and a note that only mentions a name still run.
 - A change to any of those files, or to the `google-workspace` plugin's entry in `openclaw.json` (`openclaw config set plugins.entries.google-workspace...`, `openclaw plugins enable|disable google-workspace`, the plugins tool, or a write of the file), is a change to what decides relay trust, so it is refused outright for the owner's own thread and held for every other relay agent.
 - `/proc/<pid>/cmdline` and `/proc/<pid>/task/<tid>/cmdline` are refused like `environ`, because a tool that takes a token as a flag shows it there. A program that prints command lines, such as `ps`, is not caught; only the owner's own thread can run programs.
+
+## [0.10.342] - 2026-11-25
+
+A webhook can now check that a delivery really came from AgentPhone, so texts and call events sent to a phone number on AgentPhone can reach the agent through AlphaClaw's `/hooks` without the shared webhook token.
+
+### Added
+- **AgentPhone** sender verification: open Webhooks, pick a hook and choose AgentPhone under Sender verification. Paste the secret AgentPhone returned when the webhook was created or last updated. A delivery passes only when `x-webhook-signature` is `sha256=<hex>` of HMAC-SHA256 over `<x-webhook-timestamp>.<exact body bytes>`, keyed by that whole secret string, and the timestamp is within 5 minutes. The gateway gets the exact bytes, the signature and the signed timestamp; AgentPhone's `x-webhook-id` and `x-webhook-event` are not signed, so they are not forwarded, and a repeat is recognized by a hash of the signed body, kept 24 hours, so a retry AgentPhone re-signs with a fresh timestamp (the last comes about 21 hours after the first try) does not run the hook again as long as its body is unchanged. A second signing key can be added like any other signed preset.
 
 ## [0.10.341] - 2026-11-25
 
