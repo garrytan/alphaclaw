@@ -12,6 +12,17 @@ The relay guard's long-command speed test no longer fails on busy CI runners, an
 ### Fixed
 - The test that runs 10 KB and 100 KB commands through the relay guard required the best of five runs to finish under 50 ms. The guard's work is linear and unchanged since the test was added (about 33 ms for the slowest shape at 100 KB on an idle machine), but with the rest of the suite running beside it on a shared CI runner it measured 50 to 60 ms and failed pull requests that never touched the guard. The test now runs the two sizes in turn, keeps the best of seven warm runs of each, and requires the 100 KB command to take under 15 times as long as the 10 KB one (measured 4.3 to 6.9 times; quadratic work comes out near 100 times) and under 150 ms. A slowdown that only quadruples the 100 KB time still fails it.
 
+## [0.10.340] - 2026-11-25
+
+The Doctor no longer warns about skills bloat when a skills limit is set to 0, which switches OpenClaw's skills list off, and it now says so when that list is off and gbrain's skill resolver isn't enabled to suggest skills instead.
+
+### Changed
+- The Doctor reads the main agent's effective skills limits the way OpenClaw 2026.11.4 does: the agent's own `skillsLimits.maxSkillsPromptChars` wins over `skills.limits`, and an explicit 0 is kept. Before, it read `skills.limits` only and treated 0 as "use the default".
+- With `maxSkillsInPrompt` or `maxSkillsPromptChars` at 0, the Doctor skips the skills-bloat estimate, because no skills are listed and there is nothing to trim.
+
+### Added
+- A P2 card, "OpenClaw's skills list is switched off and nothing suggests skills instead", for a skills limit of 0 while the `gbrain-skill-resolver` plugin is not enabled. The plugin counts as enabled when OpenClaw would load it, which means its `plugins.entries` row or `plugins.allow` entry exists, it is not disabled or denied, plugins are on, and a non-empty allow list names it. The card changes no files. It suggests turning the resolver on or removing the 0.
+
 ## [0.10.339] - 2026-11-24
 
 When the owner's own Capy thread asks the box for an image over Agent Relay, the relay now answers with the agent's reply once the image is finished (its caption and the image's path on the box) instead of the "started" note, and video and music generation stay closed to every relay agent.
