@@ -83,6 +83,31 @@ describe("server/doctor-fix-runner", () => {
     expect(fs.statSync(openclawDir).mode & 0o7777).toBe(0o700);
   });
 
+  it("sets the sticky bit on a group-writable parent of the state dir before doctor runs (OpenClaw 2026.11.10 on a 2775 /data)", async () => {
+    const parent = mkOpenclawDir();
+    const openclawDir = path.join(parent, ".openclaw");
+    fs.mkdirSync(openclawDir, { mode: 0o700 });
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(parent, 0o2775);
+    let modesAtRunTime = null;
+    const runStream = {
+      runStreamed: vi.fn(async () => {
+        modesAtRunTime = [fs.statSync(parent).mode & 0o7777, fs.statSync(openclawDir).mode & 0o7777];
+        return { ok: true, tail: "Doctor complete\n" };
+      }),
+    };
+    const { run, logger } = createRunner(openclawDir, { runStream });
+    await run();
+    expect(modesAtRunTime).toEqual([0o3775, 0o700]);
+    const stickyLines = () => logger.log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("set the sticky bit on"));
+    expect(stickyLines()).toEqual([expect.stringContaining(`set the sticky bit on ${fs.realpathSync(parent)}`)]);
+    await run();
+    expect(stickyLines()).toHaveLength(1);
+    fs.chmodSync(parent, 0o755);
+    await run();
+    expect(fs.statSync(parent).mode & 0o7777).toBe(0o755);
+  });
+
   it("writes the rolling pre-doctor backup, then runs doctor inside the guard", async () => {
     const openclawDir = mkOpenclawDir();
     writeJson(openclawDir, "openclaw.json", { keep: 1 });
