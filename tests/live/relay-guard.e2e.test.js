@@ -355,6 +355,7 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
         ["message", { action: "send", channel: "telegram", targets: ["@live-target"], to: "@stranger", message: "hi" }, "[relay-guard] an approved send takes one target and no targets, to field"],
         ["gateway", { action: "config.get" }, withheld("gateway")],
         ["sessions_send", { sessionKey: "agent:main:main", message: "hi" }, withheld("sessions_send")],
+        ["sessions_list", { messageLimit: 20 }, withheld("sessions_list")],
       ]) {
         const answer = await delegateCall(toolName, args);
         console.log("[live] delegate " + toolName + ": " + answer.slice(0, 200));
@@ -427,6 +428,18 @@ describeLive("LIVE relay guard plugin against the " + (kCandidateBinDir ? "candi
       console.log("[live] owner-thread " + wrapperName + " read of relay secrets: " + wrappedKeyRead.slice(0, 240));
       expect(wrappedKeyRead).toContain("[relay-guard]");
       expect(wrappedKeyRead).not.toContain("rk_live_dummy_value");
+
+      // The owner's own thread lists sessions, directly and through the
+      // dispatcher (GST-4062 withholds it from every other delegate).
+      for (const [label, answer] of [
+        ["direct", await runTurn(relay, "sessions_list", { messageLimit: 20 })],
+        [wrapperName, await runTurn(relay, wrapperName, { id: "sessions_list", args: { messageLimit: 20 } })],
+      ]) {
+        console.log("[live] owner-thread " + label + " sessions_list: " + answer.slice(0, 240));
+        if (label === "direct" && answer.startsWith("NOT-OFFERED")) continue;
+        expect(answer.startsWith("NOT-OFFERED"), label).toBe(false);
+        expect(answer, label).not.toContain("[relay-guard]");
+      }
 
       // The owner's own thread keeps exec (GST-2661 changes other delegates only).
       const ownerExecMarker = path.join(kRootDir, "owner-thread-exec.marker");

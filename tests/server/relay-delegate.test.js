@@ -165,7 +165,7 @@ describe("relay delegates: the guard's tiers", () => {
     box = makeBox();
     box.message();
     register();
-    for (const toolName of ["read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "sessions_list", "tool_search", "dispatch_action", "tool_call"]) {
+    for (const toolName of ["read", "write", "edit", "ls", "apply_patch", "web_search", "web_fetch", "memory_search", "memory_get", "view_image", "pdf", "tool_search", "dispatch_action", "tool_call"]) {
       expect(call(toolName, { command: "gbrain put x" }), toolName).toEqual({});
     }
     // Programs run only for the owner's own thread (GST-2661); this one is
@@ -212,6 +212,36 @@ describe("relay delegates: the guard's tiers", () => {
         expect(result.blockReason).toContain("[relay-guard] " + toolName);
       }
     }
+  });
+
+  // GST-4062: sessions_list lists every session the agent can see (the
+  // owner's chats included, with sender, status and token counts) and, with
+  // messageLimit, up to 20 of each session's latest messages. A delegate
+  // that is not the owner's own thread reads its own relay sessions only,
+  // so it never lists, whatever the operator's tool list says, directly or
+  // through the dispatcher (whose inner call reaches this hook under its own
+  // name).
+  it("a delegate that is not the owner's own thread never lists sessions, even when the operator's list names sessions_list", () => {
+    box = makeBox();
+    box.message();
+    const kListCalls = [{}, { messageLimit: 20 }, { messageLimit: 1, includeLastMessage: true, includeDerivedTitles: true }, { agentId: "main", limit: 200 }, { search: "deploy" }];
+    for (const delegateTools of [[], ["sessions_list"], ["SESSIONS_LIST"], ["s*"], ["sessions__*"]]) {
+      register({ delegateTools });
+      for (const toolName of ["sessions_list", "SESSIONS_LIST"]) {
+        for (const params of kListCalls) {
+          const result = call(toolName, params);
+          expect(blocked(result), toolName + " " + JSON.stringify(params) + " " + JSON.stringify(delegateTools)).toBe(true);
+          expect(result.blockReason).toContain("[relay-guard] sessions_list is not available to a delegate relay session");
+        }
+      }
+      for (const wrapper of ["dispatch_action", "tool_call"]) {
+        expect(call(wrapper, { id: "openclaw:core:sessions_list", args: { messageLimit: 20 } }), wrapper).toEqual({});
+        expect(blocked(call("sessions_list", { messageLimit: 20 })), wrapper + " inner call").toBe(true);
+      }
+    }
+    expect(policy.kDelegateNeverTools).toContain("sessions_list");
+    expect(policy.kDelegateAllowedTools).not.toContain("sessions_list");
+    expect(policy.kDelegateCoreTools).not.toContain("sessions_list");
   });
 
   it("the operator's ALPHACLAW_RELAY_DELEGATE_TOOLS adds exact names and server prefixes", () => {

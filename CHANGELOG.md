@@ -5,7 +5,7 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
-## [0.10.348] - 2026-11-25
+## [0.10.349] - 2026-11-27
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.
 
@@ -32,6 +32,13 @@ AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data 
 - A Doctor scan that a restart cuts short is stopped again when OpenClaw resumes it. 2026.11.5+ marks its restart resume differently (`sourceTool: "restart"`, no session key, and no run id anywhere AlphaClaw can read), so the stop now recognizes that message and aborts the Doctor session's running turn by session. Before, a resumed Doctor scan kept running with nobody waiting on it.
 - Doctor's recovery-copy manifest is still read when OpenClaw 2026.11.5 and later print it; a default run logs it at debug level only, so the copy's size goes unmeasured there.
 - The owner's Google Workspace calls go through again on 2026.11.10. When the agent reaches a Google tool through OpenClaw's tool dispatcher, 2026.11.10 names the chat's own session in the safety check before the call but the session's shared key when the tool runs, so the plugin never found the check's go-ahead and refused every owner call as not the owner's. The go-ahead is now matched by the turn's run id, which both sides share; a call still runs only after its own check passed, and the owner rule is unchanged.
+
+## [0.10.348] - 2026-11-27
+
+Closes a gap where a delegate Capy thread that is not the owner's own could list the owner's other chats over Agent Relay.
+
+### Security
+- A delegate relay session that is not the owner's own thread can no longer call `sessions_list`. On OpenClaw 2026.11.4 it returns every session the agent can see, with each session's key, sender, status and token counts, and with `messageLimit` up to 20 of its latest messages, which reached chats the delegate's own-session rule keeps it out of. It is now withheld by name, so `ALPHACLAW_RELAY_DELEGATE_TOOLS` cannot open it, directly or through the tool dispatcher. The owner's own thread (attested or a pinned binding) still lists sessions, and peers were already refused.
 
 ## [0.10.347] - 2026-11-25
 
