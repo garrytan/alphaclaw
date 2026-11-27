@@ -5,6 +5,13 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.348] - 2026-11-27
+
+Closes a gap where a delegate Capy thread that is not the owner's own could list the owner's other chats over Agent Relay.
+
+### Security
+- A delegate relay session that is not the owner's own thread can no longer call `sessions_list`. On OpenClaw 2026.11.4 it returns every session the agent can see, with each session's key, sender, status and token counts, and with `messageLimit` up to 20 of its latest messages, which reached chats the delegate's own-session rule keeps it out of. It is now withheld by name, so `ALPHACLAW_RELAY_DELEGATE_TOOLS` cannot open it, directly or through the tool dispatcher. The owner's own thread (attested or a pinned binding) still lists sessions, and peers were already refused.
+
 ## [0.10.347] - 2026-11-25
 
 Closes the last narrow gaps the final review of the Google Workspace hardening found, before the plugin is switched on.

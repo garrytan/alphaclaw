@@ -121,7 +121,12 @@ describe("relay guard plugin (ALPH-71 H-1)", () => {
     expect(blocked(call("session_status", { sessionKey: "agent:main:relay-other" }))).toBe(true);
     expect(blocked(call("session_status", { sessionKey: 7 }))).toBe(true);
     expect(blocked(call("session_status", { sessionKey: "agent:main:main" }, { runId: "relay-1" }))).toBe(true);
-    expect(blocked(call("sessions_list", { messageLimit: 20 }))).toBe(true);
+    for (const params of [{}, { messageLimit: 20 }, { messageLimit: 1, includeLastMessage: true }]) {
+      const result = call("sessions_list", params);
+      expect(blocked(result), JSON.stringify(params)).toBe(true);
+      expect(result.blockReason).toContain("[relay-guard] sessions_list is not available in a relay session");
+    }
+    for (const wrapper of ["dispatch_action", "tool_call"]) expect(blocked(call(wrapper, { id: "openclaw:core:sessions_list", args: { messageLimit: 20 } })), wrapper).toBe(true);
     expect(call("session_status", { model: "x", sessionKey: "agent:main:telegram-1" }, kMainSession)).toEqual({});
   });
 
