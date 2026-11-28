@@ -820,8 +820,8 @@ the image has not installed yet it says which checks it could not run
   published layout lists `dist/**` in `files` and names
   `./dist/index.js` in `openclaw.runtimeExtensions`.
 - `codex_after_doctor`: the `@openclaw/codex` file verified at start, but
-  OpenClaw's Doctor has not finished migrating its data for this version, and
-  OpenClaw 2026.11.10 refuses a plugin install before that ("Client
+  OpenClaw would not install it because its Doctor has not finished migrating
+  its data for this version (2026.11.10 over 2026.11.4 data says "Client
   credentials require backed-up migration custody"). After an upgrade the
   start's Doctor runs first and the launch then installs the plugin by
   itself, so you see this only when Doctor did not complete: fix what stopped
