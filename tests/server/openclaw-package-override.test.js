@@ -643,10 +643,47 @@ describe("a pinned @openclaw/codex next to the pinned OpenClaw", () => {
         return result;
       });
     const runPluginInstall = registryCopy();
-    expect(apply(install, env, { runPluginInstall, readInstalledCodex: () => ({ ok: true, version: null }) })).toMatchObject({ status: "applied", codex: { installed: true, files: 3 } });
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    expect(apply(install, env, { runPluginInstall, readInstalledCodex: () => ({ ok: true, version: null }), logger })).toMatchObject({ status: "applied", codex: { installed: true, files: 3, bundledReplaced: ["acorn"] } });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("replaced the copy of acorn that openclaw-codex-patched.tgz bundles"));
     expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
     expect(apply(install, env, { runPluginInstall })).toMatchObject({ status: "applied", codex: { installed: false } });
     expect(runPluginInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for Doctor before installing over data it has not migrated, and still refuses an unbuilt package up front", () => {
+    const install = makeInstall();
+    const env = codexSetting(makePackage(), makeCodex());
+    const runPluginInstall = fakeInstaller();
+    const readInstalledCodex = vi.fn(() => ({ ok: true, version: "2026.11.3" }));
+    const waiting = apply(install, env, { runPluginInstall, readInstalledCodex, codexWaitsForDoctor: () => true });
+    expect(waiting).toMatchObject({ status: "applied", codex: { name: "@openclaw/codex", installed: false, pending: "doctor" } });
+    expect(runPluginInstall).not.toHaveBeenCalled();
+    expect(readInstalledCodex).not.toHaveBeenCalled();
+    expect(() => launchCheck(install, env)).toThrow(expect.objectContaining({ reason: "codex_after_doctor" }));
+    expect(apply(install, env, { runPluginInstall, readInstalledCodex, codexWaitsForDoctor: () => false })).toMatchObject({ status: "applied", codex: { installed: true } });
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied" });
+    expect(apply(install, env, { runPluginInstall, codexWaitsForDoctor: () => true })).toMatchObject({ status: "applied", codex: { installed: false } });
+    expect(runPluginInstall).toHaveBeenCalledTimes(1);
+
+    const install2 = makeInstall();
+    const sourceOnly = codexSetting(makePackage(), makeCodex({ openclaw: { extensions: ["./index.ts"] }, entryFile: "index.ts" }));
+    expect(apply(install2, sourceOnly, { runPluginInstall: fakeInstaller(), codexWaitsForDoctor: () => true })).toMatchObject({ status: "refused", reason: "plugin_not_built" });
+  });
+
+  it("waits only while openclaw.json exists and the last completed Doctor was for another version", () => {
+    const env = codexSetting(makePackage(), makeCodex());
+    const waits = (setup) => {
+      const install = makeInstall();
+      setup(install);
+      return apply(install, env, { runPluginInstall: fakeInstaller(), readInstalledCodex: () => ({ ok: true, version: null }) }).codex;
+    };
+    const config = (install) => write(path.join(install.openclawDir, "openclaw.json"), "{}\n");
+    const doctorFor = (version) => (install) => writeJson(path.join(install.managedDir, "openclaw-boot-migration.json"), { completedForVersion: version });
+    expect(waits(() => {})).toMatchObject({ installed: true });
+    expect(waits(config)).toMatchObject({ pending: "doctor" });
+    expect(waits((install) => (config(install), doctorFor("2026.11.3")(install)))).toMatchObject({ pending: "doctor" });
+    expect(waits((install) => (config(install), doctorFor(kVersion)(install)))).toMatchObject({ installed: true });
   });
 
   it("names OpenClaw's error line when its plugin install fails, not its progress lines", () => {
@@ -1016,6 +1053,35 @@ describe("a launch after something edited the applied files (GST-3061)", () => {
     expect(launchCheck(install, env)).toMatchObject({ status: "applied", sha256: pkg.sha256, editedFiles: ["dist/index.js (modified)"], editedCount: 1 });
     expect(fs.existsSync(path.join(install.stock, "node_modules", "nested-dep", "package.json"))).toBe(true);
     expect(fs.readdirSync(path.join(install.installDir, "node_modules")).filter((name) => name.startsWith(".openclaw-next-"))).toEqual([]);
+  });
+
+  it("installs a pinned @openclaw/codex that waited for Doctor at the launch, with no edited-files notice", () => {
+    const install = makeInstall();
+    const cli = [
+      'import fs from "node:fs";',
+      'import { execFileSync } from "node:child_process";',
+      'if (process.argv[3] === "list") console.log(JSON.stringify({ plugins: [] }));',
+      'if (process.argv[3] === "install") { const dir = process.env.OPENCLAW_STATE_DIR + "/extensions/codex"; fs.mkdirSync(dir, { recursive: true }); execFileSync("tar", ["-xzf", process.argv[4], "-C", dir, "--strip-components=1"]); }',
+    ].join("\n");
+    const pkg = makePackage({ files: { "openclaw.mjs": cli } });
+    const src = tmp("codex-src-");
+    writeJson(path.join(src, "package", "package.json"), { name: "@openclaw/codex", version: kVersion, openclaw: { extensions: ["./dist/index.js"] } });
+    write(path.join(src, "package", "dist", "index.js"), "export {};\n");
+    const codexFile = path.join(tmp("codex-out-"), "openclaw-codex.tgz");
+    tar.c({ gzip: true, file: codexFile, cwd: src, sync: true, portable: true }, ["package"]);
+    fs.chmodSync(codexFile, 0o600);
+    const codexSha = crypto.createHash("sha256").update(fs.readFileSync(codexFile)).digest("hex");
+    const env = { ALPHACLAW_OPENCLAW_PACKAGES: `${settingOf(pkg)}\n@openclaw/codex@${kVersion}:${codexFile}:${codexSha}` };
+    write(path.join(install.openclawDir, "openclaw.json"), "{}\n");
+    expect(apply(install, env)).toMatchObject({ status: "applied", codex: { pending: "doctor" } });
+    writeJson(path.join(install.managedDir, "openclaw-boot-migration.json"), { completedForVersion: kVersion });
+    const { result, error, outcomes } = prepareLaunch(install, env, { site: "managed launch" });
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ hookRan: false, reapplyOpenclawPackageAfterStop: false });
+    expect(outcomes).toEqual([expect.objectContaining({ step: "openclaw_package", status: "ran", packageSha256: pkg.sha256 })]);
+    expect(outcomes[0].reappliedFiles).toBeUndefined();
+    expect(launchCheck(install, env)).toMatchObject({ status: "applied", codex: { installed: true } });
+    expect(fs.readFileSync(path.join(install.openclawDir, "extensions", "codex", "dist", "index.js"), "utf8")).toBe("export {};\n");
   });
 
   it("refuses the launch when applying again fails, and leaves the stock build in place", () => {

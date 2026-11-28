@@ -819,6 +819,13 @@ the image has not installed yet it says which checks it could not run
   `./dist/index.js`). Build the plugin, then pack the built package: the
   published layout lists `dist/**` in `files` and names
   `./dist/index.js` in `openclaw.runtimeExtensions`.
+- `codex_after_doctor`: the `@openclaw/codex` file verified at start, but
+  OpenClaw's Doctor has not finished migrating its data for this version, and
+  OpenClaw 2026.11.10 refuses a plugin install before that ("Client
+  credentials require backed-up migration custody"). After an upgrade the
+  start's Doctor runs first and the launch then installs the plugin by
+  itself, so you see this only when Doctor did not complete: fix what stopped
+  Doctor (its report names it) and the next launch installs the plugin.
 - `plugin_install_failed`, `plugin_mismatch`: the `@openclaw/codex` entry
   could not be installed (the detail carries the last lines OpenClaw printed
   to stderr, where it writes the error, or its stdout when stderr is empty;

@@ -8,6 +8,7 @@ const { kLiveEnabled, mkTemp, scrubTestRunnerEnv, waitFor } = require("./live-he
 const override = require("../../lib/server/openclaw-package-override");
 const { describeExecutingBuild } = require("../../lib/server/openclaw-build");
 const { withOpenclawStartupEnv } = require("../../lib/server/openclaw-runtime-env");
+const { recordDoctorCompletedForPin } = require("../../lib/server/openclaw-boot-migration");
 
 // LIVE tier: the pinned OpenClaw booted from a sha-pinned stand-in package
 // (ALPHACLAW_OPENCLAW_PACKAGES). The stand-in is the installed pin repacked
@@ -250,7 +251,25 @@ describeLive("live: the gateway boots from a sha-pinned OpenClaw package", () =>
 
       const built = makeCodexStandIn({ rootDir, version: core.version });
       expect(override.checkOpenclawPackageSetting({ installDir, openclawDir, env: settingWith(built) })).toMatchObject({ ok: true, plugin: { name: "@openclaw/codex" } });
-      const verdict = override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: bootEnv(settingWith(built)) });
+      // The start applies the package before Doctor has run for this version,
+      // so the plugin install waits for the launch.
+      expect(override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: bootEnv(settingWith(built)) })).toMatchObject({ status: "applied", codex: { installed: false, pending: "doctor" } });
+      let waiting = null;
+      try {
+        override.checkOpenclawPackageBeforeLaunch({ installDir, managedDir, env: settingWith(built) });
+      } catch (error) {
+        waiting = error;
+      }
+      expect(waiting).toMatchObject({ reason: "codex_after_doctor" });
+      const doctor = require("child_process").spawnSync(
+        process.execPath,
+        [path.join(installDir, "node_modules", "openclaw", "openclaw.mjs"), "doctor", "--fix", "--non-interactive", "--yes"],
+        { env: scrubTestRunnerEnv({ PATH: process.env.PATH, HOME: rootDir, OPENCLAW_STATE_DIR: openclawDir, OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_NO_AUTO_UPDATE: "1" }), encoding: "utf8", timeout: 600000 },
+      );
+      expect(doctor.status).toBe(0);
+      recordDoctorCompletedForPin({ managedDir, version: core.version });
+      const reapplied = await override.reapplyOpenclawPackageForLaunch({ installDir, managedDir, openclawDir, refusal: waiting, env: bootEnv(settingWith(built)) });
+      const verdict = reapplied.verdict;
       expect(verdict).toMatchObject({ status: "applied", version: core.version, codex: { name: "@openclaw/codex", installed: true } });
       expect(fs.existsSync(path.join(openclawDir, "extensions", "codex", "dist", "index.js"))).toBe(true);
       const config = fs.readFileSync(configPath, "utf8");
