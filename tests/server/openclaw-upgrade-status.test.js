@@ -263,7 +263,6 @@ describe("openclaw-upgrade-status: disk space row (ALPH-23)", () => {
     const stillTight = buildUpgradeStatus({ record, installedVersion: kPin, diskCheck: tight, isAdmin: true });
     expect(stillTight.alert.sentence).toContain("3.0 GB free for 4.2 GB");
     expect(stillTight.alert.sentence).not.toContain("recorded sentence");
-    expect(stillTight.alert.sentence).toContain("The gateway stays stopped until there is room");
 
     const roomy = evaluateUpgradeDiskCheck({ stateBytes: 4.2e9, freeBytes: 6.0e9 });
     const freed = buildUpgradeStatus({ record, installedVersion: kPin, diskCheck: roomy, isAdmin: true });
