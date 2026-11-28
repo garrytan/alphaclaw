@@ -72,9 +72,30 @@ const makeStandIn = ({ rootDir, probeFile }) => {
   return { file, sha256, version: stockPkg.version, extra };
 };
 
-const bootGateway = async ({ rootDir, installDir, openclawDir }) => {
+// A stand-in @openclaw/codex shaped like the published package: a TypeScript
+// entry with its built JavaScript named in openclaw.runtimeExtensions. With
+// built: false it is the same package packed from source without a build.
+const makeCodexStandIn = ({ rootDir, version, built = true }) => {
+  const src = path.join(rootDir, `codex-src-${built ? "built" : "source"}`);
+  const pkgRoot = path.join(src, "package");
+  fs.mkdirSync(path.join(pkgRoot, "dist"), { recursive: true });
+  const openclaw = { extensions: ["./index.ts"], ...(built ? { runtimeExtensions: ["./dist/index.js"] } : {}) };
+  fs.writeFileSync(path.join(pkgRoot, "package.json"), JSON.stringify({ name: "@openclaw/codex", version, type: "module", openclaw }, null, 2));
+  fs.writeFileSync(path.join(pkgRoot, "openclaw.plugin.json"), JSON.stringify({ id: "codex", name: "Codex stand-in", configSchema: { type: "object", additionalProperties: false, properties: {} } }));
+  fs.writeFileSync(path.join(pkgRoot, "index.ts"), "export {};\n");
+  if (built) fs.writeFileSync(path.join(pkgRoot, "dist", "index.js"), 'export default { id: "codex", name: "Codex stand-in", register() {} };\n');
+  const file = path.join(rootDir, "openclaw-packages", `openclaw-codex-${version}-${built ? "built" : "source"}.tgz`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  tar.c({ gzip: true, file, cwd: src, sync: true, portable: true }, ["package"]);
+  fs.chmodSync(file, 0o600);
+  fs.rmSync(src, { recursive: true, force: true });
+  return { file, sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") };
+};
+
+const bootGateway = async ({ rootDir, installDir, openclawDir, extraEnv = {} }) => {
   const env = withOpenclawStartupEnv({
     ...scrubTestRunnerEnv(),
+    ...extraEnv,
     HOME: rootDir,
     OPENCLAW_HOME: rootDir,
     OPENCLAW_CONFIG_PATH: path.join(openclawDir, "openclaw.json"),
@@ -189,6 +210,64 @@ describeLive("live: the gateway boots from a sha-pinned OpenClaw package", () =>
       const restored = override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: { PATH: process.env.PATH, HOME: rootDir } });
       expect(restored).toMatchObject({ status: "stock", restored: true });
       expect(describeExecutingBuild({ installDir }).build).not.toBe("pinned_package");
+    },
+    kTestTimeoutMs,
+  );
+
+  it(
+    "installs a pinned @openclaw/codex under a config with ${VAR} references the install's env lacks, and refuses a source-only one up front",
+    async () => {
+      const rootDir = mkTemp("alphaclaw-live-pinned-codex-");
+      const openclawDir = path.join(rootDir, ".openclaw");
+      const managedDir = path.join(openclawDir, ".alphaclaw");
+      fs.mkdirSync(managedDir, { recursive: true });
+      const configPath = path.join(openclawDir, "openclaw.json");
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          gateway: { mode: "local", bind: "loopback", port: kPort, auth: { mode: "token", token: "${ALPHACLAW_LIVE_GATEWAY_TOKEN}" } },
+          channels: { telegram: { enabled: false, botToken: "${ALPHACLAW_LIVE_TELEGRAM_TOKEN}" } },
+          plugins: { entries: { browser: { enabled: true }, github: { enabled: false } } },
+        }),
+      );
+      const installDir = makeInstallCopy(rootDir);
+      const core = makeStandIn({ rootDir, probeFile: path.join(rootDir, "standin-ran.jsonl") });
+      const coreEntry = `${core.version}:${core.file}:${core.sha256}`;
+      const settingWith = (codex) => ({ ALPHACLAW_OPENCLAW_PACKAGES: `${coreEntry}\n@openclaw/codex@${core.version}:${codex.file}:${codex.sha256}` });
+      const bootEnv = (setting) => ({ ...setting, PATH: process.env.PATH, HOME: rootDir });
+
+      const sourceOnly = makeCodexStandIn({ rootDir, version: core.version, built: false });
+      expect(override.checkOpenclawPackageSetting({ installDir, openclawDir, env: settingWith(sourceOnly) })).toMatchObject({ ok: false, reason: "plugin_not_built", detail: "./index.ts: expected ./dist/index.js, ./dist/index.mjs, ./dist/index.cjs" });
+      expect(override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: bootEnv(settingWith(sourceOnly)) })).toMatchObject({ status: "refused", reason: "plugin_not_built" });
+      // The rule the check mirrors: the pinned OpenClaw itself refuses that package.
+      const refusedByOpenclaw = require("child_process").spawnSync(
+        process.execPath,
+        [path.join(installDir, "node_modules", "openclaw", "openclaw.mjs"), "plugins", "install", sourceOnly.file, "--force", "--accept-capabilities"],
+        { env: scrubTestRunnerEnv({ PATH: process.env.PATH, HOME: rootDir, OPENCLAW_STATE_DIR: openclawDir, OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_NO_AUTO_UPDATE: "1" }), encoding: "utf8", timeout: 300000 },
+      );
+      expect(refusedByOpenclaw.status).toBe(1);
+      expect(refusedByOpenclaw.stderr).toContain("requires compiled runtime output for TypeScript entry ./index.ts");
+
+      const built = makeCodexStandIn({ rootDir, version: core.version });
+      expect(override.checkOpenclawPackageSetting({ installDir, openclawDir, env: settingWith(built) })).toMatchObject({ ok: true, plugin: { name: "@openclaw/codex" } });
+      // Fresh state with no Doctor run for this version yet: OpenClaw accepts
+      // the install, so the start installs it instead of waiting for Doctor.
+      const verdict = override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: bootEnv(settingWith(built)) });
+      expect(verdict).toMatchObject({ status: "applied", version: core.version, codex: { name: "@openclaw/codex", installed: true } });
+      expect(verdict.codex.pending).toBeUndefined();
+      expect(fs.existsSync(path.join(openclawDir, "extensions", "codex", "dist", "index.js"))).toBe(true);
+      const config = fs.readFileSync(configPath, "utf8");
+      expect(config).toContain("${ALPHACLAW_LIVE_GATEWAY_TOKEN}");
+      expect(config).toContain("${ALPHACLAW_LIVE_TELEGRAM_TOKEN}");
+      expect(override.checkOpenclawPackageBeforeLaunch({ installDir, managedDir, env: settingWith(built) })).toMatchObject({ status: "applied" });
+
+      const boot = await bootGateway({ rootDir, installDir, openclawDir, extraEnv: { ALPHACLAW_LIVE_GATEWAY_TOKEN: "live-e2e-token-000000000000000000000000" } });
+      try {
+        expect(boot.build).toMatchObject({ build: "pinned_package", packageSha256: core.sha256 });
+      } finally {
+        await boot.stop();
+      }
+      expect(override.applyOpenclawPackageAtBoot({ installDir, managedDir, openclawDir, env: bootEnv(settingWith(built)) })).toMatchObject({ status: "applied", codex: { installed: false } });
     },
     kTestTimeoutMs,
   );

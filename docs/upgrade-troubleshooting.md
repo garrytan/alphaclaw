@@ -747,8 +747,9 @@ package's own postinstall and swaps it into `node_modules/openclaw`. Where
 the filesystem cannot rename the image's directories (Docker's overlayfs),
 the swap copies them instead, which adds a few seconds. On a restart in the
 same container it re-checks the file and reuses the tree. With an
-`@openclaw/codex` entry it then checks that every file that package ships is
-byte-identical in `<state dir>/extensions/codex`. The state directory is on
+`@openclaw/codex` entry it then checks that every file that package ships,
+other than its `node_modules` (OpenClaw's installer installs the plugin's
+dependencies itself), is byte-identical in `<state dir>/extensions/codex`. The state directory is on
 the data disk, so after a redeploy this is only a check; when the plugin is
 missing or different, AlphaClaw runs `openclaw plugins install <file> --force
 --accept-capabilities` (which fetches the plugin's own dependencies from npm)
@@ -809,10 +810,27 @@ the image has not installed yet it says which checks it could not run
   the same OpenClaw version.
 - `postinstall_failed`, `lifecycle_pending`: the package's own postinstall
   failed. Its output is in the AlphaClaw process log.
+- `plugin_not_built`: the `@openclaw/codex` file has no built JavaScript
+  for an entry its `package.json` names, so it was packed from the source
+  folder without running the build first. OpenClaw refuses to install such a
+  package ("requires compiled runtime output"), so AlphaClaw refuses it before
+  asking, and `alphaclaw openclaw-package check` fails on it too. The detail
+  names the entry and the files OpenClaw looks for (for `./index.ts`,
+  `./dist/index.js`). Build the plugin, then pack the built package: the
+  published layout lists `dist/**` in `files` and names
+  `./dist/index.js` in `openclaw.runtimeExtensions`.
+- `codex_after_doctor`: the `@openclaw/codex` file verified at start, but
+  OpenClaw would not install it because its Doctor has not finished migrating
+  its data for this version (2026.11.10 over 2026.11.4 data says "Client
+  credentials require backed-up migration custody"). After an upgrade the
+  start's Doctor runs first and the launch then installs the plugin by
+  itself, so you see this only when Doctor did not complete: fix what stopped
+  Doctor (its report names it) and the next launch installs the plugin.
 - `plugin_install_failed`, `plugin_mismatch`: the `@openclaw/codex` entry
-  could not be installed (its output tail is in the detail; the install needs
-  npm to reach the registry), or its file is not `@openclaw/codex` at that
-  version. Each start retries, which also re-applies the OpenClaw package and
+  could not be installed (the detail carries the last lines OpenClaw printed
+  to stderr, where it writes the error, or its stdout when stderr is empty;
+  the install needs npm to reach the registry), or its file is not
+  `@openclaw/codex` at that version. Each start retries, which also re-applies the OpenClaw package and
   then swaps it back out, a few seconds of work, until the plugin installs.
 - `tree_changed`: something changed a file the package shipped after it
   was applied, and a gateway was still running from the tree, so the launch
