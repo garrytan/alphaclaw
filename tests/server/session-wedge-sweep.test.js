@@ -82,6 +82,41 @@ describe("post-relaunch lost-turn check (OpenClaw 2026.11.5+)", () => {
     const { lost, unstarted } = classifySessions({ rows, launchAtMs: kLaunchAt, sinceMs: kLaunchAt - 6 * 60 * 60 * 1000 });
     expect(lost.map(({ row }) => row.key)).toEqual(["killed-by-launch"]);
     expect(unstarted).toEqual([]);
+    // A gateway AlphaClaw adopted, not spawned: the launch time is only when
+    // it noticed it, so a turn a user stopped after that is no restart loss.
+    expect(classifySessions({ rows, launchAtMs: kLaunchAt, sinceMs: kLaunchAt - 6 * 60 * 60 * 1000, spawned: false }).lost).toEqual([]);
+  });
+
+  it("an adopted gateway's check does not name a turn ended as killed after it was noticed", async () => {
+    const killed = lostRow("agent:main:stopped-by-user", { status: "killed", endedAt: kLaunchAt + 4_000 });
+    const gateway = createGateway({ "sessions.list": () => ({ body: { sessions: [killed] } }) });
+    const { sweep, notify } = createSweep(gateway);
+    expect(await sweep.onGatewayLaunch({ generation: null, startedAt: kLaunchAt, supervision: "adopted" })).toEqual({ alerted: [] });
+    expect(notify).not.toHaveBeenCalled();
+    const managed = createSweep(createGateway({ "sessions.list": () => ({ body: { sessions: [killed] } }) }));
+    expect(await managed.sweep.onGatewayLaunch({ generation: 3, startedAt: kLaunchAt, supervision: "managed" })).toEqual({ alerted: ["agent:main:stopped-by-user"] });
+  });
+
+  it("a spawned gateway's launch is its spawn: a turn killed between the spawn and the listening line is named", async () => {
+    const killed = lostRow("agent:main:killed-before-listening", { status: "killed", endedAt: kLaunchAt + 2_000 });
+    const gateway = createGateway({ "sessions.list": () => ({ body: { sessions: [killed] } }) });
+    const { sweep } = createSweep(gateway);
+    expect(await sweep.onGatewayLaunch({ generation: 40, launchedAt: kLaunchAt, startedAt: kLaunchAt + 5_000 })).toEqual({ alerted: ["agent:main:killed-before-listening"] });
+  });
+
+  it("in a relaunch loop, a turn the first launch killed is still named by the next launch's check after the first check was superseded", async () => {
+    // 2026.11.10 writes killed once, at the launch whose resume pass found the
+    // run; the next launch leaves the row alone.
+    const killed = lostRow("agent:main:killed-at-first", { status: "killed", endedAt: kLaunchAt + 4_000 });
+    const stoppedBetween = lostRow("agent:main:stopped-between", { status: "killed", startedAt: kLaunchAt + 10_000, endedAt: kLaunchAt + 20_000 });
+    const gateway = createGateway({ "sessions.list": () => ({ body: { sessions: [killed, stoppedBetween] } }) });
+    const { sweep, notify } = createSweep(gateway);
+    const first = sweep.onGatewayLaunch({ generation: 30, startedAt: kLaunchAt });
+    const second = sweep.onGatewayLaunch({ generation: 31, startedAt: kLaunchAt + 60_000 });
+    expect(await first).toEqual({ skipped: "superseded" });
+    expect(await second).toEqual({ alerted: ["agent:main:killed-at-first"] });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(classifySessions({ rows: [killed], launchAtMs: kLaunchAt + 60_000, sinceMs: kLaunchAt - 6 * 60 * 60 * 1000 }).lost).toEqual([]);
   });
 
   it("after a crash relaunch: waits for ready + 90 s, then tells the owner once which turn was lost, through sessions.list alone", async () => {

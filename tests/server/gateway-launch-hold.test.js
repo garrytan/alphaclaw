@@ -25,7 +25,7 @@ const prepareLaunches = (rootDir, holds) => {
     "(async () => {",
     "  const results = [];",
     "  for (; index < holds.length; index += 1) {",
-    "    try { results.push({ result: await gateway.prepareGatewayLaunch({ site: 'watchdog relaunch' }) }); }",
+    "    try { results.push({ result: await gateway.prepareGatewayLaunch({ site: 'watchdog relaunch', skipUpgradeDiskHold: Boolean(holds[index] && holds[index].skip) }) }); }",
     "    catch (error) { results.push({ error: { name: error.name, step: error.step, code: error.code, message: error.message, isPrelaunch: error instanceof gateway.GatewayPrelaunchHookError } }); }",
     "  }",
     "  process.stdout.write('\\nRESULT ' + JSON.stringify({ results, outcomes }) + '\\n');",
@@ -130,6 +130,14 @@ describe("server/gateway prepareGatewayLaunch (v0.10.350)", () => {
       { step: "upgrade_disk", status: "ran", code: null, site: "watchdog relaunch" },
     ]);
     expect(stderr).toContain(`[alphaclaw] gateway watchdog relaunch held: OpenClaw's data upgrade is waiting for disk space: ${sentence}`);
+  });
+
+  it("Retry upgrade's restart skips the hold before its stop (its own Doctor measures the disk again)", () => {
+    const rootDir = mkRoot();
+    fs.mkdirSync(path.join(rootDir, ".openclaw"), { mode: 0o700 });
+    const { results, outcomes } = prepareLaunches(rootDir, [{ sentence: "no room", skip: true }]);
+    expect(results).toEqual([{ result: { hookRan: false, reapplyOpenclawPackageAfterStop: false } }]);
+    expect(outcomes).toEqual([]);
   });
 
   it("fixes the state dir's modes on every launch: a 0775 state dir under a 2775 parent loses group write, the parent gets the sticky bit", () => {

@@ -162,7 +162,11 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
           expect(insertEvent).not.toHaveBeenCalled();
           expect(lines.find((line) => line.startsWith("[alphaclaw] wedge-sweep done generation=2 "))).toMatch(/ checked=[1-9]\d* lost=0$/);
         } else {
-          expect(classifySessions({ rows: [row], launchAtMs: launchAt, sinceMs: launchAt - 60 * 60 * 1000 }).lost.map((entry) => entry.row.key)).toEqual([sessionKey]);
+          // 2026.11.10's killed row is lost from its fields alone; a row the
+          // kill caught before it recorded the run is only a candidate that
+          // the sweep confirms from chat.history.
+          const classified = classifySessions({ rows: [row], launchAtMs: launchAt, sinceMs: launchAt - 60 * 60 * 1000 });
+          expect([...classified.lost, ...classified.unstarted].map((entry) => entry.row.key)).toEqual([sessionKey]);
           expect(result).toEqual({ alerted: [sessionKey] });
           expect(notify).toHaveBeenCalledTimes(1);
           expect(notify.mock.calls[0][0]).toContain("so a turn it was running was lost:");
@@ -188,7 +192,7 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
   );
 
   it("the pin's own restart-end patch for a run nothing resumed (status killed, ended after the launch) counts as lost; one ended before the launch does not", async () => {
-    const distDir = path.dirname(require.resolve("openclaw"));
+    const distDir = path.dirname(require.resolve("openclaw", kCandidateBinDir ? { paths: [path.dirname(kCandidateBinDir)] } : undefined));
     const candidates = fs.readdirSync(distDir).filter((name) => /^session-entry-patch-operation-.*\.mjs$/.test(name));
     let derive = null;
     for (const name of candidates) {
@@ -203,6 +207,8 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
     // dead process left open and it did not resume.
     const endedBy = (ts) => {
       const entry = { key: "agent:main:killed", sessionId: "s1", lifecycleRunId: "run-1", startedAt: launchAt - 60_000, updatedAt: launchAt - 59_000, abortedLastRun: false, hasActiveRun: false };
+      // The pin's own patch; classifySessions reads only status, startedAt,
+      // endedAt and hasActiveRun from it.
       return { ...entry, ...derive({ entry, currentLifecycleGeneration: 1, event: { runId: "run-1", ts, data: { phase: "end", aborted: true, stopReason: "restart" } } }) };
     };
     const killed = endedBy(launchAt + 3_000);

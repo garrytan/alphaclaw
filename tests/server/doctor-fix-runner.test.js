@@ -170,6 +170,22 @@ describe("server/doctor-fix-runner", () => {
     );
   });
 
+  it("never follows a <state>/tmp symlink: its target keeps its mode, and the walk starts at the state dir", async () => {
+    const root = fs.realpathSync(mkOpenclawDir());
+    const openclawDir = path.join(root, ".openclaw");
+    fs.mkdirSync(openclawDir, { mode: 0o700 });
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    const shared = path.join(root, "shared-tmp");
+    fs.mkdirSync(shared);
+    fs.chmodSync(shared, 0o775);
+    fs.symlinkSync(shared, path.join(openclawDir, "tmp"));
+    fs.chmodSync(openclawDir, 0o775);
+    const { run } = createRunner(openclawDir);
+    await run();
+    expect(fs.statSync(shared).mode & 0o7777).toBe(0o775);
+    expect(fs.statSync(openclawDir).mode & 0o7777).toBe(0o755);
+  });
+
   it("covers the state dir and its tmp folder: a 0775 state dir under a 2775 parent leaves no group-writable, non-sticky folder above OpenClaw's private temp root", async () => {
     const parent = fs.realpathSync(mkOpenclawDir());
     const openclawDir = path.join(parent, ".openclaw");

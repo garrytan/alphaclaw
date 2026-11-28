@@ -477,6 +477,21 @@ describe("server/startup", () => {
     expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
   });
 
+  it("a disk refusal no longer standing (space freed, or the databases already upgraded) starts the gateway", async () => {
+    const migration = { status: "failed", ran: true, reason: "insufficient_disk", class: "transient", detail: "no room" };
+    const deps = createBootDeps({
+      runBootMigration: vi.fn(async () => migration),
+      readGatewayLaunchHold: vi.fn(async () => null),
+      finalizeBootReport: vi.fn(),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.readGatewayLaunchHold).toHaveBeenCalledTimes(1);
+    expect(deps.startGateway).toHaveBeenCalledTimes(1);
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith({ migration, gatewayHeld: false });
+  });
+
   it("a throwing doctor migration is logged, recorded as an error, and never holds the gateway", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({

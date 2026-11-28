@@ -726,23 +726,40 @@ describe("server/openclaw-boot-migration", () => {
     expect(readMigrationRecord(box).failed).toBeUndefined();
   });
 
-  it("holds gateway launches while AlphaClaw's disk refusal is the last outcome and the pin's upgrade is pending, re-measuring the disk every time", () => {
+  it("holds gateway launches while the pin's upgrade is pending and the volume lacks room, re-measuring the disk every time", async () => {
     const box = newBox();
     const writeRecord = (record) => fs.writeFileSync(box.recordPath, JSON.stringify(record));
     const refusal = { status: "failed", reason: "insufficient_disk", detail: "recorded sentence" };
-    const refuse = { verdict: "refuse", sentences: ["3.0 GB free for 4.2 GB"] };
-    const hold = (checkUpgradeDisk) => readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: "2026.11.10", checkUpgradeDisk });
+    const refuse = { verdict: "refuse", freeBytes: 3.0e9, sentences: ["3.0 GB free for 4.2 GB"] };
+    const unmeasured = { verdict: "ok", freeBytes: null, sentences: [] };
+    const hold = (checkUpgradeDisk, readDatabaseSchema = null) =>
+      readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: "2026.11.10", checkUpgradeDisk, readDatabaseSchema });
 
     writeRecord({ completedForVersion: "2026.11.4", lastOutcome: refusal });
-    expect(hold(() => refuse)).toEqual({ sentence: "3.0 GB free for 4.2 GB" });
-    expect(hold(() => { throw new Error("statfs failed"); })).toEqual({ sentence: "recorded sentence" });
-    expect(hold(() => ({ verdict: "warn", sentences: ["tight"] }))).toBeNull();
-    expect(hold(() => ({ verdict: "ok", sentences: [] }))).toBeNull();
+    await expect(hold(() => refuse)).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    // An unreadable or unmeasured volume keeps a recorded refusal.
+    await expect(hold(() => { throw new Error("statfs failed"); })).resolves.toEqual({ sentence: "recorded sentence" });
+    await expect(hold(() => unmeasured)).resolves.toEqual({ sentence: "recorded sentence" });
+    await expect(hold(() => ({ verdict: "warn", freeBytes: 6e9, sentences: ["tight"] }))).resolves.toBeNull();
+    await expect(hold(() => ({ verdict: "ok", freeBytes: 20e9, sentences: [] }))).resolves.toBeNull();
 
+    // The refusal never reached the record (a full disk): a measured refusal still holds;
+    // an unmeasured volume does not, as the Doctor runner treats it.
     writeRecord({ completedForVersion: "2026.11.4", lastOutcome: { status: "failed", reason: "timed_out" } });
-    expect(hold(() => refuse)).toBeNull();
+    await expect(hold(() => refuse)).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    await expect(hold(() => unmeasured)).resolves.toBeNull();
+
+    // The gateway already upgraded every database to the pin's schema by itself: no hold.
+    const schema = (state, agents) => async () => ({
+      supportedSchema: { state: 40, agent: 42 },
+      stateDb: [{ kind: "state", userVersion: state }, ...agents.map((userVersion) => ({ kind: "agent", userVersion }))],
+    });
+    await expect(hold(() => refuse, schema(40, [42, 42]))).resolves.toBeNull();
+    await expect(hold(() => refuse, schema(40, [42, 27]))).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    await expect(hold(() => refuse, async () => { throw new Error("busy"); })).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+
     writeRecord({ completedForVersion: "2026.11.10", lastOutcome: refusal });
-    expect(hold(() => refuse)).toBeNull();
-    expect(readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: null, checkUpgradeDisk: () => refuse })).toBeNull();
+    await expect(hold(() => refuse)).resolves.toBeNull();
+    await expect(readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: null, checkUpgradeDisk: () => refuse })).resolves.toBeNull();
   });
 });
