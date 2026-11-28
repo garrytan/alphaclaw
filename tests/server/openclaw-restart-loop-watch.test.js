@@ -103,6 +103,6 @@ describe("lib/server.js wires the restart-loop watch", () => {
     expect(serverSource).toMatch(/createRestartLoopWatch\(\{\s+notify: \(message, opts\) => upgradeNotifier\.notify\(message, opts\),\s+insertEvent: insertWatchdogEvent,/);
     expect(serverSource).toMatch(/setGatewayRestartRequestedHandler\(\(payload\) => \{\s+restartLoopWatch\.onRestartRequested\(\);/);
     expect(serverSource).toMatch(/restartRequiredLaunchClear\.onGatewayLaunch\(payload\);\s+restartLoopWatch\.onGatewayLaunch\(\);/);
-    expect(serverSource).toMatch(/sessionWedgeSweep\.observeGatewayOutput\(text\);\s+restartLoopWatch\.observeGatewayOutput\(text\);/);
+    expect(serverSource).toMatch(/noteGatewayOutput\(text\);\s+restartLoopWatch\.observeGatewayOutput\(text\);/);
   });
 });

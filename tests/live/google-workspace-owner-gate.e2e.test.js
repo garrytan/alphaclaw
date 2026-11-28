@@ -165,7 +165,7 @@ describeLive("LIVE Google Workspace owner gate against the " + readDeclaredPin()
     const { applyGoogleWorkspaceEntry, resolveDesiredGoogleWorkspaceEntry } = require("../../lib/server/google-workspace-entry");
     const { config } = ensureManagedOpenclawExecDefaults({
       gateway: { mode: "local", bind: "loopback", port, auth: { mode: "token", token } },
-      agents: { defaults: { workspace, model: { primary: "fixture/fixture" }, heartbeat: { target: "none" } } },
+      agents: { defaults: { workspace, model: { primary: "fixture/fixture" } } },
       models: { providers: { fixture: {
         baseUrl: "http://127.0.0.1:" + model.address().port + "/v1",
         api: "openai-completions",

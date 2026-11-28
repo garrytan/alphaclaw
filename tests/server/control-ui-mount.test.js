@@ -293,6 +293,44 @@ describe("control-ui-mount: auth response classifier", () => {
     ["GET", "/openclaw/", { "sec-fetch-dest": "iframe" }, "redirect"],
     ["GET", "/openclaw/dashboards", { "sec-fetch-dest": "empty" }, "unauthorized"],
     ["GET", "/openclaw/dashboards", { "sec-fetch-dest": "style" }, "unauthorized"],
+    // 2026.11.6's worker re-fetching a navigation: the whole shape redirects,
+    // a page's own fetch() or an asset never does.
+    [
+      "GET",
+      "/openclaw/chat",
+      { "sec-fetch-mode": "same-origin", "sec-fetch-dest": "empty", "sec-fetch-site": "same-origin", "upgrade-insecure-requests": "1", accept: "text/html,application/xhtml+xml,*/*;q=0.8" },
+      "redirect",
+    ],
+    [
+      "GET",
+      "/openclaw/chat",
+      { "sec-fetch-mode": "same-origin", "sec-fetch-dest": "empty", "sec-fetch-site": "same-origin", accept: "text/html,application/xhtml+xml,*/*;q=0.8" },
+      "unauthorized",
+    ],
+    [
+      "GET",
+      "/openclaw/chat",
+      { "sec-fetch-mode": "same-origin", "sec-fetch-dest": "empty", "sec-fetch-site": "same-origin", "upgrade-insecure-requests": "1", accept: "*/*" },
+      "unauthorized",
+    ],
+    [
+      "GET",
+      "/openclaw/chat",
+      { "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", "sec-fetch-site": "same-origin", "upgrade-insecure-requests": "1", accept: "text/html" },
+      "unauthorized",
+    ],
+    [
+      "GET",
+      "/openclaw/chat",
+      { "sec-fetch-mode": "same-origin", "sec-fetch-dest": "empty", "sec-fetch-site": "cross-site", "upgrade-insecure-requests": "1", accept: "text/html" },
+      "unauthorized",
+    ],
+    [
+      "GET",
+      "/openclaw/assets/index.js",
+      { "sec-fetch-mode": "same-origin", "sec-fetch-dest": "empty", "sec-fetch-site": "same-origin", "upgrade-insecure-requests": "1", accept: "text/html" },
+      "unauthorized",
+    ],
     // No metadata → Accept sniff, defaulting to the redirect.
     ["GET", "/openclaw/dashboards", {}, "redirect"],
     ["GET", "/openclaw/dashboards", { accept: "*/*" }, "redirect"],

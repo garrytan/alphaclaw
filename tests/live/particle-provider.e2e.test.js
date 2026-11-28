@@ -155,7 +155,17 @@ describeLive(`LIVE Particle provider against the ${readDeclaredPin()} pin`, () =
   const sessionKey = "agent:main:explicit:particle-live";
   let sent = 0;
   const send = (message) => call("chat.send", { sessionKey, message, idempotencyKey: `particle-live-${(sent += 1)}` });
-  const history = () => call("chat.history", { sessionKey, limit: 50 }).messages || [];
+  // 2026.11.6 refuses a read that races the session's first write with
+  // UNAVAILABLE "Session access facts are unavailable" (retryable:false); the
+  // waits below poll again.
+  const history = () => {
+    try {
+      return call("chat.history", { sessionKey, limit: 50 }).messages || [];
+    } catch (error) {
+      if (/Session access facts are unavailable/.test(String(error?.message || ""))) return [];
+      throw error;
+    }
+  };
   const countIn = (needle) => (JSON.stringify(history()).split(needle).length - 1);
   const waitForCount = (needle, count, label) => waitFor(async () => countIn(needle) >= count, 120_000, label);
   const chatRequests = () => stub.requests.filter((request) => request.method === "POST" && request.url.endsWith("/chat/completions"));

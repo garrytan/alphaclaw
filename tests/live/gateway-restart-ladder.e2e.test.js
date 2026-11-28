@@ -127,6 +127,12 @@ describeLive(`LIVE restart ladder against the ${readDeclaredPin()} pin`, () => {
           channels: {},
         }),
       );
+      // 2026.11.10 hot-reloads gateway.auth.token, so the running gateway
+      // refuses the old token a moment after this write and the new one a
+      // moment before; ask for the restart once it takes the new token.
+      const { clawCmd } = require("../../lib/server/commands").createCommands({ gatewayEnv: gateway.gatewayEnv });
+      const { callGateway } = require("../../lib/server/gateway-call");
+      await waitFor(async () => (await callGateway(clawCmd, "health", {}, { timeoutMs: 10_000 })).ok, 60_000, "the running gateway takes the rotated token");
       const steps = [];
       const startedAt = Date.now();
       const result = await gateway.restartGateway(() => {}, { onStep: (step) => steps.push(step) });

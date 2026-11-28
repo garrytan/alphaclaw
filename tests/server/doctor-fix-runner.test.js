@@ -63,6 +63,51 @@ const heartbeatLines = (logger) =>
     .filter((line) => line.startsWith("[alphaclaw] doctor heartbeat "));
 
 describe("server/doctor-fix-runner", () => {
+  it("clears only the setgid bit on the state dir before doctor runs (OpenClaw 2026.11.5 on a 2775 /data)", async () => {
+    const openclawDir = mkOpenclawDir();
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(openclawDir, 0o2755);
+    let modeAtRunTime = null;
+    const runStream = {
+      runStreamed: vi.fn(async () => {
+        modeAtRunTime = fs.statSync(openclawDir).mode & 0o7777;
+        return { ok: true, tail: "Doctor complete\n" };
+      }),
+    };
+    const { run, logger } = createRunner(openclawDir, { runStream });
+    await run();
+    expect(modeAtRunTime).toBe(0o755);
+    expect(logger.log.mock.calls.map(([line]) => String(line))).toContainEqual(expect.stringContaining("cleared the setgid bit on the OpenClaw state dir"));
+    fs.chmodSync(openclawDir, 0o700);
+    await run();
+    expect(fs.statSync(openclawDir).mode & 0o7777).toBe(0o700);
+  });
+
+  it("sets the sticky bit on a group-writable parent of the state dir before doctor runs (OpenClaw 2026.11.10 on a 2775 /data)", async () => {
+    const parent = mkOpenclawDir();
+    const openclawDir = path.join(parent, ".openclaw");
+    fs.mkdirSync(openclawDir, { mode: 0o700 });
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(parent, 0o2775);
+    let modesAtRunTime = null;
+    const runStream = {
+      runStreamed: vi.fn(async () => {
+        modesAtRunTime = [fs.statSync(parent).mode & 0o7777, fs.statSync(openclawDir).mode & 0o7777];
+        return { ok: true, tail: "Doctor complete\n" };
+      }),
+    };
+    const { run, logger } = createRunner(openclawDir, { runStream });
+    await run();
+    expect(modesAtRunTime).toEqual([0o3775, 0o700]);
+    const stickyLines = () => logger.log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("set the sticky bit on"));
+    expect(stickyLines()).toEqual([expect.stringContaining(`set the sticky bit on ${fs.realpathSync(parent)}`)]);
+    await run();
+    expect(stickyLines()).toHaveLength(1);
+    fs.chmodSync(parent, 0o755);
+    await run();
+    expect(fs.statSync(parent).mode & 0o7777).toBe(0o755);
+  });
+
   it("writes the rolling pre-doctor backup, then runs doctor inside the guard", async () => {
     const openclawDir = mkOpenclawDir();
     writeJson(openclawDir, "openclaw.json", { keep: 1 });
@@ -536,6 +581,16 @@ describe("server/doctor-fix-runner heartbeat", () => {
       ]);
     });
 
+    it("reads OpenClaw 2026.11.5's renamed recovery-copy line as an unavailable capture", async () => {
+      const managedDir = mkOpenclawDir();
+      const line =
+        "- Pre-repair recovery copy was unavailable: SQLite staging ancestor must not allow another user to replace its child: /data.\n";
+      const run = makeRunner({ managedDir, exit: 0, version: "2026.11.5", chunks: [[line, "stdout"]] });
+      await run({ source: "boot" });
+      expect(readRecord(managedDir).lastOutcome).toMatchObject({ status: "ok", captureState: "unavailable" });
+      expect(readRecord(managedDir).lastOutcome.captureCause).toContain("/data");
+    });
+
     it("latches capture and failure lines split across chunks on stderr, even after more than 64 KiB of later output", async () => {
       const managedDir = mkOpenclawDir();
       const later = `${"│  migrated row\n".repeat(6000)}`;
@@ -592,6 +647,17 @@ describe("server/doctor-fix-runner heartbeat", () => {
       expect(record.completedForVersion).toBe("2026.10.4");
       expect(record.failed).toBeUndefined();
       expect(record.lastOutcome).toMatchObject({ status: "ok", class: null, captureState: "available", source: "repair" });
+    });
+
+    it("reads the recovery copy's manifest from 2026.11.5's debug wording when it is printed", async () => {
+      const managedDir = mkOpenclawDir();
+      const run = makeRunner({
+        managedDir,
+        exit: 0,
+        chunks: [["Recovery copy saved before repair. No action needed. For manual recovery: /data/x.update-captures/doctor-2/manifest.json.\nDoctor complete\n", "stdout"]],
+      });
+      await run();
+      expect(readRecord(managedDir).lastOutcome).toMatchObject({ status: "ok", captureState: "available" });
     });
 
     it("an unknown capture stays unknown, and a failed run never marks the pin completed", async () => {

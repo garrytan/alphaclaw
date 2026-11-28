@@ -391,58 +391,44 @@ View logs for the `stop_failed survivors=` line — a survivor with
 `verdict=unknown` means `/proc` could not be read for that pid, a
 `verdict=alive` survivor after SIGKILL is a kernel-stuck process.
 
-## A session may be stuck after the gateway restarted
+## A turn was lost when the gateway stopped without a clean shutdown
 
-**What it means:** after a gateway relaunch (an AlphaClaw restart, a crash or
-OOM relaunch, a boot) the watchdog sent "⚠️ A session may be stuck after the
-gateway restarted" and the Health page has a `session_wedge` event with
-status `alerted` (v0.10.58). The log line is
-`[alphaclaw] wedge-sweep alerted session=<key> reason=not_resumed|recovery_gave_up`.
+**What it means:** after a gateway relaunch the watchdog sent "⚠️ The gateway
+stopped without a clean shutdown, so a turn it was running was lost:" with the
+session names, and the Health page has a `session_wedge` event with status
+`alerted` and reason `lost` (v0.10.348). The log line is
+`[alphaclaw] wedge-sweep alerted session=<key> reason=lost generation=<n>`.
 
-**Why it happens:** a turn that was running when the gateway stopped is marked
-interrupted, and OpenClaw's recovery owner normally resumes it after the
-relaunch (2026.10.5+; on 10.4 a killed turn could leave the session refusing
-every new message, the Oct 18 and Oct 22 incidents). One case is still open
-upstream: a channel session whose interrupted turn is never resumed keeps
-refusing new messages ("This conversation changed before your message could
-start"). After every launch, once the new gateway is ready + 90 s (AlphaClaw
-waits up to 30 minutes for ready, v0.10.289), AlphaClaw checks the sessions that were running when the restart was requested (or,
-after a crash, sessions active in the 15 minutes before the launch) through
-OpenClaw's own `sessions.list`:
+**Why it happens:** OpenClaw 2026.11.5 and later resume running turns
+themselves after a clean restart: a graceful stop marks every session with live
+work, and the next gateway sends each one "The Gateway restarted while you were
+working" (when a background command was running, 2026.11.6 adds "Background
+exec processes were stopped; rerun them if still needed" and 2026.11.10 sends
+an exec completion saying it "was stopped when the Gateway shut down"). A crash, a SIGKILL (the
+watchdog's kill step, the kernel's out-of-memory kill) or a container that dies
+writes no marker. OpenClaw 2026.11.5 and 2026.11.6 accept that loss by design:
+nothing resumes the turn. OpenClaw 2026.11.10 resumes it too, when the boot
+record it keeps names the dead process's lifetime, so on that pin this notice
+means OpenClaw could not resume the turn (for example a resume it deferred
+because the agent database was unavailable). After every launch, once the new gateway is ready + 90 s (AlphaClaw waits
+up to 30 minutes for ready), AlphaClaw reads OpenClaw's `sessions.list` and
+names each session whose last turn started before the launch, never ended and
+has no live run. 2026.11.10 can lose a turn killed moments after it started
+before the session row records the run; such a row has no start or end time, so
+AlphaClaw also reads the last few messages of a session whose last message came
+before the launch and names it when nothing came after that message. It looks back to the launch of its previous check (6 hours on
+an AlphaClaw boot), so one loss is reported once, in at most one notice per
+launch. A Doctor session whose restarted Doctor turn AlphaClaw stopped is
+skipped.
 
-| what it sees | what it does |
-| --- | --- |
-| live work on the session | nothing |
-| a Doctor session (`agent:main:doctor:<n>`) whose restarted Doctor turn AlphaClaw stopped, and that has not changed since (v0.10.233; v0.10.238 remembers the stop across later launches and AlphaClaw restarts through its `resumed_turn_stopped` event) | nothing: no `sessions.recover`, no alert, so the Doctor run is not started again |
-| idle, not marked interrupted, was running before the restart | `sessions.recover` — OpenClaw decides whether the session holds an orphaned claim; if it does, it resumes the turn in the same session (`session_wedge` `recovered`), otherwise it answers "nothing to recover" and nothing is logged |
-| still marked interrupted (`abortedLastRun`) | alert: `not_resumed` |
-| restart recovery gave up (`restartRecoveryStatus: tombstoned`) | alert: `recovery_gave_up` |
+AlphaClaw never resets or resumes a session, never reads OpenClaw's SQLite files
+and never posts into the session's own chat; the notice goes to the watchdog's
+admin targets.
 
-AlphaClaw never resets a session (that drops its context), never reads
-OpenClaw's SQLite files and never posts into the session's own chat; the alert
-goes to the watchdog's admin targets. Each session is alerted once per state.
-
-OpenClaw 2026.11.3 and 2026.11.4 resume interrupted sessions one at a time:
-each resumed turn has to finish before the next session starts, so on a busy
-box the last one can start many minutes after the gateway is ready, and a
-message sent to it in the meantime is dropped (GST-2884). When the gateway
-logs that it is resuming sessions (`marked N startup-orphaned main
-session(s)`, `started interrupted main session`, or the old gateway's
-`marked N interrupted main session(s)` while draining), the check waits for
-OpenClaw to finish (up to 30 minutes, log `wedge-sweep waiting …
-for=openclaw_recovery`) so a session still in that queue is not reported as
-stuck. Finished means a `main-session restart recovery startup complete` line
-with `failed=0`, the third such line (OpenClaw retries a pass with failures
-twice), or `main-session restart recovery gave up`. A `restart-loop breaker
-tripped` line is only a pause: OpenClaw runs the same pass again when it
-ends, so the check keeps waiting, up to its 30-minute limit.
-
-**What to do:** open the session in the Control UI and send a message (on
-2026.10.5+ a Control UI send reconciles an orphaned claim first). If it still
-refuses, start over in that chat with `/new`, which drops the conversation's
-context. For a `recovery_gave_up` session,
-`openclaw gateway call sessions.recover --params '{"key":"<key>"}' --json`
-continues it in a new session.
+**What to do:** open the session and send a message (for example "continue")
+to pick the work up again. If SIGKILLs are frequent, look at why the gateway
+did not stop cleanly: an out-of-memory kill (see Pre-OOM auto-restart) or a
+restart's drain that ran past its kill step.
 
 ## Restart failed: the old gateway stopped, but OpenClaw didn't start / wasn't ready
 

@@ -95,6 +95,35 @@ describe("control-ui-attach: the redirect decision", () => {
     expect(isControlUiDocumentNavigation({ method: "GET", headers: { upgrade: "websocket" } })).toBe(false);
   });
 
+  it("detours 2026.11.6's service-worker re-fetch of a navigation, and nothing short of its whole shape", () => {
+    const d = decide();
+    const kWorkerRefetch = {
+      "sec-fetch-mode": "same-origin",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-site": "same-origin",
+      "upgrade-insecure-requests": "1",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      cookie: sessionCookie(),
+    };
+    expect(d(navReq({ headers: kWorkerRefetch }))).toBe("/gateway/attach?to=%2Fopenclaw%2Fchat%2Fmain%3Fdraft%3D1");
+    const marker = `${kControlUiAttachCookie}=${computeAttachMarker(kSession)}`;
+    expect(d(navReq({ headers: { ...kWorkerRefetch, cookie: sessionCookie(marker) } }))).toBeNull();
+    for (const [name, value] of [
+      ["upgrade-insecure-requests", undefined],
+      ["accept", "*/*"],
+      ["accept", "text/css,*/*;q=0.1"],
+      ["sec-fetch-mode", "cors"],
+      ["sec-fetch-mode", "no-cors"],
+      ["sec-fetch-dest", "script"],
+      ["sec-fetch-site", "cross-site"],
+      ["sec-fetch-site", undefined],
+    ]) {
+      expect(d(navReq({ headers: { ...kWorkerRefetch, [name]: value } })), `${name}=${value}`).toBeNull();
+    }
+    expect(d(navReq({ method: "HEAD", headers: kWorkerRefetch }))).toBeNull();
+    expect(d(navReq({ originalUrl: "/openclaw/__openclaw__/session-entry?path=%2Fopenclaw%2Fchat", headers: kWorkerRefetch }))).toBeNull();
+  });
+
   it("detours a plain-HTTP navigation, which carries no Fetch Metadata", () => {
     const d = decide();
     const kPlainHttpNavigate = {
