@@ -21,7 +21,7 @@ const prepareLaunches = (rootDir, holds) => {
     "gateway.setGatewayPrelaunchHookHandler((outcome) => outcomes.push(outcome));",
     `const holds = ${JSON.stringify(holds)};`,
     "let index = 0;",
-    "gateway.setGatewayLaunchHoldCheck(() => holds[index]);",
+    "gateway.setGatewayLaunchHoldCheck(() => { if (holds[index] && holds[index].throw) throw new Error('boom'); return holds[index]; });",
     "(async () => {",
     "  const results = [];",
     "  for (; index < holds.length; index += 1) {",
@@ -130,6 +130,16 @@ describe("server/gateway prepareGatewayLaunch (v0.10.350)", () => {
       { step: "upgrade_disk", status: "ran", code: null, site: "watchdog relaunch" },
     ]);
     expect(stderr).toContain(`[alphaclaw] gateway watchdog relaunch held: OpenClaw's data upgrade is waiting for disk space: ${sentence}`);
+  });
+
+  it("a hold check that throws keeps the hold the last launch reported, and lets a launch through when none stood", () => {
+    const rootDir = mkRoot();
+    fs.mkdirSync(path.join(rootDir, ".openclaw"), { mode: 0o700 });
+    const held = prepareLaunches(rootDir, [{ sentence: "no room" }, { throw: true }]);
+    expect(held.results.map((entry) => entry.error?.code)).toEqual(["upgrade_disk_held", "upgrade_disk_held"]);
+    expect(held.results[1].error.message).toBe("OpenClaw's data upgrade is waiting for disk space: no room");
+    const free = prepareLaunches(rootDir, [{ throw: true }]);
+    expect(free.results).toEqual([{ result: { hookRan: false, reapplyOpenclawPackageAfterStop: false } }]);
   });
 
   it("Retry upgrade's restart skips the hold before its stop (its own Doctor measures the disk again)", () => {

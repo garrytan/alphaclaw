@@ -477,6 +477,20 @@ describe("server/startup", () => {
     expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
   });
 
+  it("a launch hold standing after a Doctor that did not refuse (skipped on a remembered failure) still holds the boot", async () => {
+    const migration = { status: "skipped", ran: false, reason: "remembered_failure" };
+    const deps = createBootDeps({
+      runBootMigration: vi.fn(async () => migration),
+      readGatewayLaunchHold: vi.fn(async () => ({ sentence: "no room" })),
+      finalizeBootReport: vi.fn(),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith({ migration, gatewayHeld: true });
+  });
+
   it("a disk refusal no longer standing (space freed, or the databases already upgraded) starts the gateway", async () => {
     const migration = { status: "failed", ran: true, reason: "insufficient_disk", class: "transient", detail: "no room" };
     const deps = createBootDeps({

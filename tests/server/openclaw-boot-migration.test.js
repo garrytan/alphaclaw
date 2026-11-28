@@ -743,23 +743,53 @@ describe("server/openclaw-boot-migration", () => {
     await expect(hold(() => ({ verdict: "warn", freeBytes: 6e9, sentences: ["tight"] }))).resolves.toBeNull();
     await expect(hold(() => ({ verdict: "ok", freeBytes: 20e9, sentences: [] }))).resolves.toBeNull();
 
-    // The refusal never reached the record (a full disk): a measured refusal still holds;
-    // an unmeasured volume does not, as the Doctor runner treats it.
+    // Only AlphaClaw's own disk refusal holds: after another Doctor failure a
+    // short volume does not (the boot hold and the owner's notices follow
+    // that refusal alone).
     writeRecord({ completedForVersion: "2026.11.4", lastOutcome: { status: "failed", reason: "timed_out" } });
-    await expect(hold(() => refuse)).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    await expect(hold(() => refuse)).resolves.toBeNull();
     await expect(hold(() => unmeasured)).resolves.toBeNull();
 
-    // The gateway already upgraded every database to the pin's schema by itself: no hold.
-    const schema = (state, agents) => async () => ({
+    // The gateway already upgraded every database it upgrades by itself: no hold.
+    writeRecord({ completedForVersion: "2026.11.4", lastOutcome: refusal });
+    const schema = (state, agents, root = null) => async () => ({
       supportedSchema: { state: 40, agent: 42 },
-      stateDb: [{ kind: "state", userVersion: state }, ...agents.map((userVersion) => ({ kind: "agent", userVersion }))],
+      stateDb: [
+        { kind: "state", userVersion: state, ...(root ? { path: path.join(root, "state", "openclaw.sqlite") } : {}) },
+        ...agents.map(([agentId, userVersion]) => ({ kind: "agent", agentId, userVersion })),
+      ],
     });
-    await expect(hold(() => refuse, schema(40, [42, 42]))).resolves.toBeNull();
-    await expect(hold(() => refuse, schema(40, [42, 27]))).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    await expect(hold(() => refuse, schema(40, [["main", 42], ["ops", 42]]))).resolves.toBeNull();
+    await expect(hold(() => refuse, schema(40, [["main", 42], ["ops", 27]]))).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    // A new database (version 0) is not upgraded; a state database at 0 means nothing is.
+    await expect(hold(() => refuse, schema(40, [["main", 42], ["ops", 0]]))).resolves.toBeNull();
+    await expect(hold(() => refuse, schema(0, [["main", 27]]))).resolves.toBeNull();
     await expect(hold(() => refuse, async () => { throw new Error("busy"); })).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    // An agent the config no longer lists keeps its old database (OpenClaw retains it unupgraded).
+    const retained = (readConfiguredAgentIds) =>
+      readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: "2026.11.10", checkUpgradeDisk: () => refuse, readDatabaseSchema: schema(40, [["main", 42], ["gone", 27]]), readConfiguredAgentIds });
+    await expect(retained(() => ["main"])).resolves.toBeNull();
+    await expect(retained(() => null)).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    // A leftover .upgrade- work folder means the gateway's upgrade is still under way.
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "alphaclaw-state-"));
+    fs.mkdirSync(path.join(stateRoot, ".upgrade-1234"));
+    await expect(hold(() => refuse, schema(40, [["main", 42]], stateRoot))).resolves.toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    fs.rmSync(stateRoot, { recursive: true, force: true });
 
     writeRecord({ completedForVersion: "2026.11.10", lastOutcome: refusal });
     await expect(hold(() => refuse)).resolves.toBeNull();
     await expect(readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: null, checkUpgradeDisk: () => refuse })).resolves.toBeNull();
+  });
+
+  it("a refusal the full volume kept from being saved still holds, and an outcome that could not be saved still clears it", async () => {
+    const box = newBox();
+    fs.writeFileSync(box.recordPath, JSON.stringify({ completedForVersion: "2026.11.4", lastOutcome: { status: "failed", reason: "timed_out" } }));
+    const full = { ...fs, writeFileSync: () => { throw Object.assign(new Error("no space"), { code: "ENOSPC" }); }, openSync: () => { throw Object.assign(new Error("no space"), { code: "ENOSPC" }); } };
+    const unmeasured = { verdict: "ok", freeBytes: null, sentences: [] };
+    const hold = () => readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: "2026.11.10", checkUpgradeDisk: () => unmeasured });
+    expect(() => recordDoctorOutcome({ managedDir: box.managedDir, fsModule: full, outcome: { status: "failed", reason: "insufficient_disk", detail: "no room", openclawVersion: "2026.11.10" } })).toThrow();
+    await expect(hold()).resolves.toEqual({ sentence: "no room" });
+    expect(() => recordDoctorOutcome({ managedDir: box.managedDir, fsModule: full, outcome: { status: "ok", openclawVersion: "2026.11.10" } })).toThrow();
+    await expect(hold()).resolves.toBeNull();
   });
 });
