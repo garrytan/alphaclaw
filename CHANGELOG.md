@@ -5,6 +5,15 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.350] - 2026-11-28
+
+Fixes for OpenClaw 2026.11.10, so a box with unusual folder permissions starts, and a turn lost to a crashed gateway is named.
+
+### Fixed
+- The permission fixes OpenClaw needs (clearing setgid on the state directory, and the sticky bit on a group-writable `/data`) now change each folder through an opened handle that is checked to still be the folder AlphaClaw looked at, instead of by path, so a folder swapped for a symlink in between is never the one changed.
+- The temp-folder check now also covers the state directory and its `tmp` folder, which 2026.11.10 checks too: a group-writable one loses group and world write. It runs before every gateway launch as well as before Doctor, so a remount or a manual chmod since the last Doctor no longer stops the gateway.
+- The lost-turn notice after a crash or SIGKILL works on 2026.11.10. At start, 2026.11.10 marks a turn the dead gateway left running as ended and killed (`status: "killed"`, ended after the relaunch) even when it does not resume it, and the check skipped every ended row, so those turns were never named. A killed row that started before a launch AlphaClaw spawned and ended after it now counts as lost, including a launch whose own check a quick relaunch superseded; a turn the user stopped before the crash, or one stopped while AlphaClaw only adopted a running gateway, stays quiet.
+
 ## [0.10.349] - 2026-11-27
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.

@@ -53,6 +53,7 @@ const createRunner = (openclawDir, overrides = {}) => {
     logger,
     ...(overrides.nowFn ? { nowFn: overrides.nowFn } : {}),
     ...(overrides.readProgress ? { readProgress: overrides.readProgress } : {}),
+    ...(overrides.fsModule ? { fsModule: overrides.fsModule } : {}),
   });
   return { run, runStream, notifier, doctorGuard, logger };
 };
@@ -106,6 +107,107 @@ describe("server/doctor-fix-runner", () => {
     fs.chmodSync(parent, 0o755);
     await run();
     expect(fs.statSync(parent).mode & 0o7777).toBe(0o755);
+  });
+
+  // A test fs that runs swap() once, right after the first stat of target
+  // (lstat or stat, whichever the runner uses to check it).
+  const fsSwappingAfterStat = (target, swap) => {
+    let done = false;
+    const after = (result, dir) => {
+      if (!done && dir === target) {
+        done = true;
+        swap();
+      }
+      return result;
+    };
+    return {
+      ...fs,
+      lstatSync: (dir, ...rest) => after(fs.lstatSync(dir, ...rest), dir),
+      statSync: (dir, ...rest) => after(fs.statSync(dir, ...rest), dir),
+    };
+  };
+
+  it("never changes the folder a symlink points at when a parent is swapped for one between the check and the change", async () => {
+    const root = fs.realpathSync(mkOpenclawDir());
+    const parent = path.join(root, "data");
+    const openclawDir = path.join(parent, ".openclaw");
+    fs.mkdirSync(openclawDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(openclawDir, 0o700);
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(parent, 0o2775);
+    const target = path.join(root, "elsewhere");
+    fs.mkdirSync(target);
+    fs.chmodSync(target, 0o755);
+    const fsModule = fsSwappingAfterStat(parent, () => {
+      fs.renameSync(parent, path.join(root, "data-moved"));
+      fs.symlinkSync(target, parent);
+    });
+    const { run } = createRunner(openclawDir, { fsModule });
+    await run();
+    expect(fs.statSync(target).mode & 0o7777).toBe(0o755);
+    expect(fs.statSync(path.join(root, "data-moved")).mode & 0o7777).toBe(0o2775);
+  });
+
+  it("leaves a folder alone and says so when the opened handle is not the folder that was checked", async () => {
+    const parent = fs.realpathSync(mkOpenclawDir());
+    const openclawDir = path.join(parent, ".openclaw");
+    fs.mkdirSync(openclawDir, { mode: 0o700 });
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(parent, 0o2775);
+    const parentIno = fs.statSync(parent).ino;
+    const fsModule = {
+      ...fs,
+      fstatSync: (fd, ...rest) => {
+        const stat = fs.fstatSync(fd, ...rest);
+        return stat.ino === parentIno ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: stat.ino + 1 }) : stat;
+      },
+    };
+    const { run, logger } = createRunner(openclawDir, { fsModule });
+    await run();
+    expect(fs.statSync(parent).mode & 0o7777).toBe(0o2775);
+    expect(logger.warn.mock.calls.map(([line]) => String(line))).toContainEqual(
+      expect.stringContaining(`left ${parent} alone: it changed between the check and the change`),
+    );
+  });
+
+  it("never follows a <state>/tmp symlink: its target keeps its mode, and the walk starts at the state dir", async () => {
+    const root = fs.realpathSync(mkOpenclawDir());
+    const openclawDir = path.join(root, ".openclaw");
+    fs.mkdirSync(openclawDir, { mode: 0o700 });
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    const shared = path.join(root, "shared-tmp");
+    fs.mkdirSync(shared);
+    fs.chmodSync(shared, 0o775);
+    fs.symlinkSync(shared, path.join(openclawDir, "tmp"));
+    fs.chmodSync(openclawDir, 0o775);
+    const { run } = createRunner(openclawDir);
+    await run();
+    expect(fs.statSync(shared).mode & 0o7777).toBe(0o775);
+    expect(fs.statSync(openclawDir).mode & 0o7777).toBe(0o755);
+  });
+
+  it("covers the state dir and its tmp folder: a 0775 state dir under a 2775 parent leaves no group-writable, non-sticky folder above OpenClaw's private temp root", async () => {
+    const parent = fs.realpathSync(mkOpenclawDir());
+    const openclawDir = path.join(parent, ".openclaw");
+    fs.mkdirSync(path.join(openclawDir, "tmp"), { recursive: true });
+    writeJson(openclawDir, "openclaw.json", { keep: 1 });
+    fs.chmodSync(path.join(openclawDir, "tmp"), 0o775);
+    fs.chmodSync(openclawDir, 0o775);
+    fs.chmodSync(parent, 0o2775);
+    const { run, logger } = createRunner(openclawDir);
+    await run();
+    expect(fs.statSync(path.join(openclawDir, "tmp")).mode & 0o7777).toBe(0o755);
+    expect(fs.statSync(openclawDir).mode & 0o7777).toBe(0o755);
+    expect(fs.statSync(parent).mode & 0o7777).toBe(0o3775);
+    const tempRoot = path.join(openclawDir, "tmp", `openclaw-${process.getuid()}`);
+    for (let dir = path.dirname(tempRoot); ; dir = path.dirname(dir)) {
+      const mode = fs.statSync(dir).mode;
+      expect({ dir, unsafe: (mode & 0o022) !== 0 && (mode & 0o1000) === 0 }).toEqual({ dir, unsafe: false });
+      if (path.dirname(dir) === dir) break;
+    }
+    expect(logger.log.mock.calls.map(([line]) => String(line))).toContainEqual(
+      expect.stringContaining(`removed group and world write from ${openclawDir} (0775 → 0755)`),
+    );
   });
 
   it("writes the rolling pre-doctor backup, then runs doctor inside the guard", async () => {
