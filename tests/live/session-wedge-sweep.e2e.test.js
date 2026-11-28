@@ -3,10 +3,13 @@
 // read after a relaunch, with a real agent turn in flight (a local streaming
 // model fixture holds it open). The gateway is SIGKILLed mid-turn and
 // relaunched. OpenClaw 2026.11.10 resumes a turn the killed gateway left open
-// (its boot record names the crashed process's lifetime), except one killed
-// before its row recorded the run, which is lost. The check must stay silent
-// after a resume and name the session to the owner exactly once after a
-// loss; a later check stays silent either way.
+// when its boot record covers the turn; one it does not resume is lost, and
+// its start-up pass ends that row as killed. Which happens is OpenClaw's
+// choice, so the check is asserted against the row OpenClaw actually wrote:
+// silent when the row shows a run started after the launch, one notice naming
+// the session otherwise, and a later check stays silent either way. The
+// killed row itself is built by the pin's own lifecycle code and classified
+// here, so the 2026.11.10 shape is checked on every run whatever the kill did.
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
@@ -110,7 +113,7 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
     await waitFor(async () => modelRequests > before, 120_000, "turn reached the model");
   };
   it(
-    "the lost-turn check against the real pin: after a SIGKILL mid-turn it stays silent when OpenClaw resumed the turn and names the session once when it was lost, and a later check stays silent",
+    "the lost-turn check against the real pin: after a SIGKILL mid-turn it matches the row OpenClaw wrote (silent after a resume, one notice after a loss), and a later check stays silent",
     async () => {
       const lines = [];
       const originalLog = console.log;
@@ -122,7 +125,8 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
         const { clawCmd } = require("../../lib/server/commands").createCommands({ gatewayEnv: gateway.gatewayEnv });
         const insertEvent = vi.fn();
         const notify = vi.fn(async () => ({ ok: true }));
-        const { createSessionWedgeSweep } = require("../../lib/server/session-wedge-sweep");
+        const { createSessionWedgeSweep, classifySessions } = require("../../lib/server/session-wedge-sweep");
+        const { callGateway } = require("../../lib/server/gateway-call");
         const sweep = createSessionWedgeSweep({
           clawCmd,
           notify,
@@ -136,24 +140,29 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
         expect(boot).toEqual({ alerted: [] });
 
         // 1. A turn in flight, then SIGKILL (the OOM shape) and a relaunch.
-        // 2026.11.10 usually resumes the turn; one killed before its row
-        // recorded the run is lost. The check must match what happened:
-        // silent after a resume, one notice naming the session after a loss.
         const sessionKey = "agent:main:sweep-live-1";
         await startTurn(clawCmd, sessionKey);
-        const killedAt = modelRequests;
         gateway.killManagedGatewayChildNow();
         await new Promise((resolve) => setTimeout(resolve, 2000));
+        const launchAt = Date.now();
         await gateway.startGateway();
-        const result = await sweep.onGatewayLaunch({ generation: 2, startedAt: Date.now() });
-        const resumed = modelRequests > killedAt;
-        originalLog(`[live] after SIGKILL: ${JSON.stringify({ result, resumed })}`);
+        const result = await sweep.onGatewayLaunch({ generation: 2, startedAt: launchAt });
+        const listed = await callGateway(clawCmd, "sessions.list", { activeMinutes: 60, limit: 200, rowMode: "compact" });
+        const row = (listed.body?.sessions || []).find((entry) => entry.key === sessionKey);
+        const fields = row && { status: row.status ?? null, startedAt: row.startedAt ?? null, endedAt: row.endedAt ?? null, hasActiveRun: row.hasActiveRun === true };
+        originalLog(`[live] after SIGKILL: ${JSON.stringify({ result, launchAt, fields })}`);
+        expect(row, "the killed turn's session row").toBeTruthy();
+        // A resume shows as a run that started after the launch; anything
+        // else is a turn nothing resumed (2026.11.10: status "killed" ended by
+        // its start-up pass; older pins: never ended).
+        const resumed = row.hasActiveRun === true || Number(row.startedAt) >= launchAt;
         if (resumed) {
           expect(result).toEqual({ alerted: [] });
           expect(notify).not.toHaveBeenCalled();
           expect(insertEvent).not.toHaveBeenCalled();
           expect(lines.find((line) => line.startsWith("[alphaclaw] wedge-sweep done generation=2 "))).toMatch(/ checked=[1-9]\d* lost=0$/);
         } else {
+          expect(classifySessions({ rows: [row], launchAtMs: launchAt, sinceMs: launchAt - 60 * 60 * 1000 }).lost.map((entry) => entry.row.key)).toEqual([sessionKey]);
           expect(result).toEqual({ alerted: [sessionKey] });
           expect(notify).toHaveBeenCalledTimes(1);
           expect(notify.mock.calls[0][0]).toContain("so a turn it was running was lost:");
@@ -177,4 +186,29 @@ describeLive(`LIVE wedge sweep against the ${kCandidateBinDir ? "candidate" : re
     },
     kTestTimeoutMs,
   );
+
+  it("the pin's own restart-end patch for a run nothing resumed (status killed, ended after the launch) counts as lost; one ended before the launch does not", async () => {
+    const distDir = path.dirname(require.resolve("openclaw"));
+    const candidates = fs.readdirSync(distDir).filter((name) => /^session-entry-patch-operation-.*\.mjs$/.test(name));
+    let derive = null;
+    for (const name of candidates) {
+      const text = fs.readFileSync(path.join(distDir, name), "utf8");
+      const alias = /derivePersistedSessionLifecyclePatch as ([\w$]+)/.exec(text)?.[1];
+      if (alias) derive = (await import(path.join(distDir, name)))[alias];
+    }
+    expect(typeof derive, "the pin's derivePersistedSessionLifecyclePatch").toBe("function");
+    const launchAt = Date.now();
+    const { classifySessions } = require("../../lib/server/session-wedge-sweep");
+    // What 2026.11.10's session-restart-resume writes at start for a run the
+    // dead process left open and it did not resume.
+    const endedBy = (ts) => {
+      const entry = { key: "agent:main:killed", sessionId: "s1", lifecycleRunId: "run-1", startedAt: launchAt - 60_000, updatedAt: launchAt - 59_000, abortedLastRun: false, hasActiveRun: false };
+      return { ...entry, ...derive({ entry, currentLifecycleGeneration: 1, event: { runId: "run-1", ts, data: { phase: "end", aborted: true, stopReason: "restart" } } }) };
+    };
+    const killed = endedBy(launchAt + 3_000);
+    expect(killed).toMatchObject({ status: "killed", endedAt: launchAt + 3_000, startedAt: launchAt - 60_000, lifecycleRunId: undefined, lastRunId: "run-1" });
+    const classify = (row) => classifySessions({ rows: [row], launchAtMs: launchAt, sinceMs: launchAt - 60 * 60 * 1000 }).lost.length;
+    expect(classify(killed)).toBe(1);
+    expect(classify(endedBy(launchAt - 10_000))).toBe(0);
+  });
 });

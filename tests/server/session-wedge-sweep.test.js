@@ -64,6 +64,26 @@ describe("post-relaunch lost-turn check (OpenClaw 2026.11.5+)", () => {
     expect(lost.map(({ row, reason }) => [row.key, reason])).toEqual([["lost", kWedgeReasons.LOST]]);
   });
 
+  it("on OpenClaw 2026.11.10 counts a turn its start-up resume pass ended as killed after the launch, and leaves a turn killed before the launch alone", () => {
+    // 2026.11.10 (session-restart-resume) writes a lifecycle end event with
+    // aborted: true for every run the dead process left open, resumed or not:
+    // the row gets status "killed", an endedAt after the launch and no
+    // lifecycleRunId. A resumed turn has a new run started after the launch.
+    const killedRow = (key, extra = {}) => lostRow(key, { status: "killed", endedAt: kLaunchAt + 4_000, updatedAt: kLaunchAt + 4_000, lastRunId: `run-${key}`, ...extra });
+    const rows = [
+      killedRow("killed-by-launch"),
+      killedRow("killed-before-launch", { endedAt: kLaunchAt - 30_000, updatedAt: kLaunchAt - 30_000 }),
+      killedRow("resumed", { status: "running", startedAt: kLaunchAt + 5_000, endedAt: null, hasActiveRun: true }),
+      killedRow("resumed-and-done", { status: "done", startedAt: kLaunchAt + 5_000, endedAt: kLaunchAt + 50_000 }),
+      killedRow("killed-and-active", { hasActiveRun: true }),
+      killedRow("failed-after-launch", { status: "failed" }),
+      killedRow("killed-started-before-window", { startedAt: kLaunchAt - 10 * 60 * 60 * 1000 }),
+    ];
+    const { lost, unstarted } = classifySessions({ rows, launchAtMs: kLaunchAt, sinceMs: kLaunchAt - 6 * 60 * 60 * 1000 });
+    expect(lost.map(({ row }) => row.key)).toEqual(["killed-by-launch"]);
+    expect(unstarted).toEqual([]);
+  });
+
   it("after a crash relaunch: waits for ready + 90 s, then tells the owner once which turn was lost, through sessions.list alone", async () => {
     const gateway = createGateway({ "sessions.list": () => ({ body: { sessions: [lostRow("agent:main:telegram:direct:1", { displayName: "Garry DM" }), doneRow("agent:main:other")] } }) });
     const { sweep, notify, insertEvent, at } = createSweep(gateway);

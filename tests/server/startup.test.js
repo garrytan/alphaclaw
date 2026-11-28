@@ -460,6 +460,23 @@ describe("server/startup", () => {
     expect(getBootPhase()).toEqual({ phase: "ready", error: null });
   });
 
+  it("a doctor migration AlphaClaw refused for disk space holds the gateway: no start, the boot report says held (OpenClaw 2026.11.10 upgrades at start)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const migration = { status: "failed", ran: true, reason: "insufficient_disk", class: "transient", detail: "no room" };
+    const deps = createBootDeps({
+      runBootMigration: vi.fn(async () => migration),
+      finalizeBootReport: vi.fn(),
+    });
+
+    await runOnboardedBootSequence(deps);
+
+    expect(deps.startGateway).not.toHaveBeenCalled();
+    expect(deps.finalizeBootReport).toHaveBeenCalledWith({ migration, gatewayHeld: true });
+    expect(getBootPhase()).toEqual({ phase: "failed", error: expect.stringContaining("the gateway is held until there is room") });
+    expect(errorSpy).toHaveBeenCalledWith("[alphaclaw] Boot doctor migration refused for disk space; gateway held");
+    expect(deps.watchdog.start).toHaveBeenCalledTimes(1);
+  });
+
   it("a throwing doctor migration is logged, recorded as an error, and never holds the gateway", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const deps = createBootDeps({

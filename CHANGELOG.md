@@ -5,6 +5,16 @@ All notable changes to AlphaClaw are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow this repository's `package.json` release counter.
 
+## [0.10.350] - 2026-11-28
+
+Fixes for OpenClaw 2026.11.10, so a box with too little disk space, unusual folder permissions or a crashed gateway recovers safely.
+
+### Fixed
+- When the volume lacks room for OpenClaw's data upgrade, the gateway now stays stopped instead of starting on the old data. AlphaClaw already refused to start the upgrade's Doctor there, but 2026.11.10's gateway upgrades the databases by itself when it starts, with less free space than AlphaClaw requires. The boot now ends held, and every later launch (watchdog, medic, Restart) is held while the refusal stands and the volume is still short; the disk is measured again on each launch, so freeing space and pressing Retry upgrade brings the box back.
+- The permission fixes OpenClaw needs (clearing setgid on the state directory, and the sticky bit on a group-writable `/data`) now change each folder through an opened handle that is checked to still be the folder AlphaClaw looked at, instead of by path, so a folder swapped for a symlink in between is never the one changed.
+- The temp-folder check now also covers the state directory and its `tmp` folder, which 2026.11.10 checks too: a group-writable one loses group and world write. It runs before every gateway launch as well as before Doctor, so a remount or a manual chmod since the last Doctor no longer stops the gateway.
+- The lost-turn notice after a crash or SIGKILL works on 2026.11.10. At start, 2026.11.10 marks a turn the dead gateway left running as ended and killed (`status: "killed"`, ended after the relaunch) even when it does not resume it, and the check skipped every ended row, so those turns were never named. A killed row that started before the launch and ended after it now counts as lost; a turn the user stopped before the crash stays quiet.
+
 ## [0.10.349] - 2026-11-27
 
 AlphaClaw now runs OpenClaw 2026.11.10. Its first boot migrates OpenClaw's data one way (state schema 22 to 40, agent schema 27 to 42), and AlphaClaw handles what changed since 2026.11.4 so the box keeps starting by itself. Long conversations whose saved archives expand well past their compressed size can be read again.

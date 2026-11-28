@@ -10,6 +10,7 @@ const {
   kRememberedFailureRetryMs,
   readCompletedForVersion,
   readMigrationRecord,
+  readUpgradeDiskHold,
   recordDoctorCompletedForPin,
   recordDoctorOutcome,
   runBootMigration,
@@ -720,8 +721,28 @@ describe("server/openclaw-boot-migration", () => {
     expect(result).toMatchObject({ status: "failed", reason: "insufficient_disk", class: "transient", detail: sentence });
     expect(notify.mock.calls[0][0]).toBe(
       "⚠️ OpenClaw 2026.10.6: AlphaClaw did not start OpenClaw's data upgrade. " + sentence + " " +
-        "The gateway is starting on the old data, so agents whose databases were not migrated stay unavailable until the upgrade runs.",
+        "The gateway is held until there is room: OpenClaw would otherwise upgrade its databases by itself when it starts, with less free space than the upgrade needs. Free the space, then use Retry upgrade.",
     );
     expect(readMigrationRecord(box).failed).toBeUndefined();
+  });
+
+  it("holds gateway launches while AlphaClaw's disk refusal is the last outcome and the pin's upgrade is pending, re-measuring the disk every time", () => {
+    const box = newBox();
+    const writeRecord = (record) => fs.writeFileSync(box.recordPath, JSON.stringify(record));
+    const refusal = { status: "failed", reason: "insufficient_disk", detail: "recorded sentence" };
+    const refuse = { verdict: "refuse", sentences: ["3.0 GB free for 4.2 GB"] };
+    const hold = (checkUpgradeDisk) => readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: "2026.11.10", checkUpgradeDisk });
+
+    writeRecord({ completedForVersion: "2026.11.4", lastOutcome: refusal });
+    expect(hold(() => refuse)).toEqual({ sentence: "3.0 GB free for 4.2 GB" });
+    expect(hold(() => { throw new Error("statfs failed"); })).toEqual({ sentence: "recorded sentence" });
+    expect(hold(() => ({ verdict: "warn", sentences: ["tight"] }))).toBeNull();
+    expect(hold(() => ({ verdict: "ok", sentences: [] }))).toBeNull();
+
+    writeRecord({ completedForVersion: "2026.11.4", lastOutcome: { status: "failed", reason: "timed_out" } });
+    expect(hold(() => refuse)).toBeNull();
+    writeRecord({ completedForVersion: "2026.11.10", lastOutcome: refusal });
+    expect(hold(() => refuse)).toBeNull();
+    expect(readUpgradeDiskHold({ managedDir: box.managedDir, installedVersion: null, checkUpgradeDisk: () => refuse })).toBeNull();
   });
 });
